@@ -86,8 +86,20 @@ namespace EasyRed2HumanAI
         private static readonly Dictionary<IntPtr, float> _bipodStandUntil = new Dictionary<IntPtr, float>(128);
         private static readonly Dictionary<IntPtr, float> _nextWallSideCheckTime = new Dictionary<IntPtr, float>(256);
         private static readonly Dictionary<IntPtr, float> _nextTankDisciplineCountTime = new Dictionary<IntPtr, float>(256);
+        private static readonly Dictionary<IntPtr, float> _poseLockUntil = new Dictionary<IntPtr, float>(256);
         private static readonly Dictionary<IntPtr, float> _repairTaskStartTime = new Dictionary<IntPtr, float>(64);
         private static readonly HashSet<IntPtr> _countedRepairTasks = new HashSet<IntPtr>();
+
+        private struct VehicleAimCache
+        {
+            public IntPtr VehiclePtr;
+            public float ExpireTime;
+            public bool CanEngage;
+            public bool HasCustomAimPoint;
+            public Vector3 CustomAimPoint;
+        }
+
+        private static readonly Dictionary<IntPtr, VehicleAimCache> _vehicleAimCache = new Dictionary<IntPtr, VehicleAimCache>(128);
 
         internal struct DamageAttribution
         {
@@ -808,6 +820,8 @@ namespace EasyRed2HumanAI
             PruneDict(_bipodStandUntil, alivePtrs);
             PruneDict(_nextWallSideCheckTime, alivePtrs);
             PruneDict(_nextTankDisciplineCountTime, alivePtrs);
+            PruneDict(_poseLockUntil, alivePtrs);
+            PruneDict(_vehicleAimCache, alivePtrs);
             PruneDict(_lastDamageByVictim, alivePtrs);
 
             if (_repairTaskStartTime.Count > 0)
@@ -849,22 +863,29 @@ namespace EasyRed2HumanAI
             if (distToTarget <= 3.2f)
                 return false;
 
+            // Never judge muzzle obstruction while the gun bone is dipped/animated during a stance transition or reload
+            if (shooter.isInBodyAnimation || shooter.isInHandsAnimation || shooter.IsReloading)
+                return false;
+
+            // Only evaluate wall obstruction once the soldier has rotated to face toward the target
+            if (shooter.AngleToDirection(targetPos - shooter.transform.position) > 28f)
+                return false;
+
             // Check native TPS/FPS wall proximity flag first
             if (shooter.IsTowardWall())
                 return true;
 
             Vector3 gunPos = shooter.GunPosition();
-            Vector3 fireDir = shooter.GetFireDir();
-            if (fireDir.sqrMagnitude < 0.01f)
-                fireDir = (targetPos - gunPos).normalized;
+            Vector3 toTarget = targetPos - gunPos;
+            Vector3 aimDir = toTarget.sqrMagnitude > 0.01f ? toTarget.normalized : shooter.GetFireDir();
 
             float maxCheck = Mathf.Min(VisionConfig.MuzzleObstructionCheckDist.Value, distToTarget - 1.2f);
             if (maxCheck <= 0.35f)
                 return false;
 
-            // Start 0.28m forward of GunPosition so we clear the shooter's own torso/arms
-            Vector3 origin = gunPos + fireDir * 0.28f;
-            if (Physics.Raycast(origin, fireDir, out RaycastHit hit, maxCheck))
+            // Start 0.28m forward of GunPosition along the steady aim line toward targetPos (avoids false positives from idle barrel sway/dip)
+            Vector3 origin = gunPos + aimDir * 0.28f;
+            if (Physics.Raycast(origin, aimDir, out RaycastHit hit, maxCheck))
             {
                 Collider col = hit.collider;
                 if (col != null && !col.isTrigger)
@@ -996,18 +1017,21 @@ namespace EasyRed2HumanAI
         private static bool TryGetAntiStackPush(Soldier shooter, out Vector3 pushDir)
         {
             pushDir = Vector3.zero;
-            float minSpace = VisionConfig.MinFriendlySpacingMeters.Value;
-            if (minSpace <= 0.2f) return false;
+            float configuredSpace = VisionConfig.MinFriendlySpacingMeters.Value;
+            if (configuredSpace <= 0.2f) return false;
 
+            // Only trigger a physical reposition step when two stationary soldiers are genuinely overlapping (< 1.25m)
+            // so stationary squads hold their firing line calmly without constant shuffling.
+            float minSpace = Mathf.Min(configuredSpace, 1.25f);
             if (GetPersonality(shooter) == SoldierPersonality.Assaulter_Skirmisher)
-                minSpace *= 1.45f; // Skirmishers fan out wider laterally to flank instead of bunching up
+                minSpace = Mathf.Min(configuredSpace * 1.25f, 1.65f);
 
             float minSpaceSq = minSpace * minSpace;
             Vector3 myPos = shooter.transform.position;
             IntPtr myPtr = shooter.Pointer;
             string myFaction = shooter.faction;
 
-            // Check own squad first
+            // Check own squad first (only the higher-pointer soldier steps aside so both don't move at once)
             Squad mySquad = shooter.joinedSquad;
             if (mySquad != null && mySquad.units != null)
             {
@@ -1017,6 +1041,8 @@ namespace EasyRed2HumanAI
                 {
                     Soldier f = units[i];
                     if (f == null || !f.IsAlive || f.Pointer == myPtr || f.IsOnVehicle()) continue;
+                    if (myPtr.ToInt64() < f.Pointer.ToInt64()) continue;
+
                     Vector3 diff = myPos - f.transform.position;
                     diff.y = 0f;
                     float dSq = diff.sqrMagnitude;
@@ -1031,7 +1057,7 @@ namespace EasyRed2HumanAI
                 }
             }
 
-            // Check human player if nearby
+            // Check human player if nearby (AI always yields personal space to the human player)
             Soldier player = Soldier.CurrentControlledSoldierOrNull();
             if (player != null && player.IsAlive && player.Pointer != myPtr && player.faction == myFaction && !player.IsOnVehicle())
             {
@@ -1051,7 +1077,7 @@ namespace EasyRed2HumanAI
         // =====================================================================
         // Helper: Synchronized Bot Stance, Cover Seeking & Gunner Bipod Wall Mount
         // =====================================================================
-        private static void SetBotPose(SoldierAI ai, Soldier soldier, SoldierPose pose)
+        private static void SetBotPose(SoldierAI ai, Soldier soldier, SoldierPose pose, bool forceImmediate = false)
         {
             if (ai == null || soldier == null)
                 return;
@@ -1074,12 +1100,13 @@ namespace EasyRed2HumanAI
                 return;
             }
 
+            IntPtr ptr = soldier.Pointer;
+
             if (pose >= SoldierPose.Crouch && (ai.HasEnemyAndCanFireAtHim || soldier.GetSuppressionValue() >= 8f))
             {
-                IntPtr ptr = soldier.Pointer;
                 if (ptr != IntPtr.Zero)
                 {
-                    float lockUntil = Time.time + 3.2f;
+                    float lockUntil = Time.time + 3.5f;
                     if (!_combatCrouchLockUntil.TryGetValue(ptr, out float cur) || lockUntil > cur)
                     {
                         _combatCrouchLockUntil[ptr] = lockUntil;
@@ -1087,13 +1114,41 @@ namespace EasyRed2HumanAI
                 }
             }
 
+            // If already in the requested stance, simply keep ai.actualPose synchronized so MovementRoutine's
+            // per-frame StopMove(ai.actualPose) / MoveOptimized(ai.actualPose) never fights soldier.m_pose!
+            if (soldier.m_pose == pose)
+            {
+                ai.actualPose = pose;
+                return;
+            }
+
+            // Prevent rapid stance oscillation (Stand <-> Crouch <-> Prone jitter) by enforcing a minimum
+            // stance dwell lock (_poseLockUntil) and waiting for any active 1.2s body transition animation
+            // to finish, except for urgent transitions (lifting a Prone mover or dropping from Standing under fire).
+            bool isUrgentTransition = forceImmediate ||
+                                      (soldier.m_pose == SoldierPose.Prone && ai.IsMoving()) ||
+                                      (soldier.m_pose == SoldierPose.Idle && pose >= SoldierPose.Crouch && !ai.IsMoving() &&
+                                       (ai.HasEnemyAndCanFireAtHim || soldier.GetSuppressionValue() >= 15f));
+
+            if (!isUrgentTransition && ptr != IntPtr.Zero)
+            {
+                if (soldier.isInBodyAnimation ||
+                    (_poseLockUntil.TryGetValue(ptr, out float poseLock) && Time.time < poseLock))
+                {
+                    ai.actualPose = soldier.m_pose;
+                    return;
+                }
+            }
+
+            if (ptr != IntPtr.Zero)
+            {
+                _poseLockUntil[ptr] = Time.time + 2.8f;
+            }
+
             // MovementRoutine calls StopMove(ai.actualPose) every frame when stationary
             // and MoveOptimized(ai.actualPose) when moving, so BOTH must be updated!
             ai.actualPose = pose;
-            if (soldier.m_pose != pose)
-            {
-                soldier.SetPose(pose, true, false, 0.2f);
-            }
+            soldier.SetPose(pose, true, false, 0.2f);
         }
 
         private static bool IsMachineGunnerOrHasBipod(Soldier soldier, out AttachmentBipod bipod)
@@ -1523,10 +1578,10 @@ namespace EasyRed2HumanAI
             if (_nextBipodDeployCheckTime.TryGetValue(ptr, out float nextCheck) && Time.time < nextCheck)
                 return;
 
-            _nextBipodDeployCheckTime[ptr] = Time.time + 0.35f;
+            _nextBipodDeployCheckTime[ptr] = Time.time + 1.25f;
 
-            // Must be roughly facing the target before locking into a bipod mount
-            if (soldier.AngleToDirection(targetPos - soldier.transform.position) > 35f)
+            // Must be roughly facing the target and not mid-transition before locking into a bipod mount
+            if (soldier.isInBodyAnimation || soldier.AngleToDirection(targetPos - soldier.transform.position) > 28f)
                 return;
 
             if (!soldier.CanStartBipodDeploy())
@@ -1541,7 +1596,7 @@ namespace EasyRed2HumanAI
                     SetBotPose(ai, soldier, soldier.m_pose);
                     if (soldier.m_pose == SoldierPose.Idle)
                     {
-                        _bipodStandUntil[ptr] = Time.time + 4.0f;
+                        _bipodStandUntil[ptr] = Time.time + 4.5f;
                     }
                     soldier.OperateBipod(bip, curAnchor, curSupport, true, false);
                     BipodsDeployed++;
@@ -1564,9 +1619,9 @@ namespace EasyRed2HumanAI
                     crouchSupport != null &&
                     crouchAnchor.y > feetY + 0.45f)
                 {
-                    SetBotPose(ai, soldier, SoldierPose.Crouch);
-                    _bipodStandUntil[ptr] = Time.time + 2.5f;
-                    _noProneUntil[ptr] = Time.time + 8.0f;
+                    SetBotPose(ai, soldier, SoldierPose.Crouch, true);
+                    _bipodStandUntil[ptr] = Time.time + 3.0f;
+                    _noProneUntil[ptr] = Time.time + 10.0f;
                     soldier.OperateBipod(bip, crouchAnchor, crouchSupport, true, false);
                     BipodsDeployed++;
                     return;
@@ -1580,35 +1635,40 @@ namespace EasyRed2HumanAI
                     standSupport != null &&
                     standAnchor.y > feetY + 0.92f)
                 {
-                    SetBotPose(ai, soldier, SoldierPose.Idle);
-                    _bipodStandUntil[ptr] = Time.time + 3.5f;
-                    _nextStanceDropAllowed[ptr] = Time.time + 3.5f;
-                    _noProneUntil[ptr] = Time.time + 8.0f;
+                    SetBotPose(ai, soldier, SoldierPose.Idle, true);
+                    _bipodStandUntil[ptr] = Time.time + 4.5f;
+                    _nextStanceDropAllowed[ptr] = Time.time + 4.5f;
+                    _noProneUntil[ptr] = Time.time + 10.0f;
                     soldier.StartCoroutine(soldier.RetryBipodDeployAfterStanding());
                     BipodsDeployed++;
                     return;
                 }
             }
 
-            // Try D: No wall/ledge surface in front — drop Prone and deploy ground bipod ONLY if ground LOF is clear
-            // and we haven't recently failed a ground bipod check (prevents Prone <-> Crouch oscillation!)
+            // Try D: No wall/ledge surface in front — deploy ground bipod when Prone if ground LOF is clear.
+            // Never flip Prone -> BipodCheck -> Crouch in the same tick!
             bool canTryProneBipod = (!_noProneUntil.TryGetValue(ptr, out float noProne) || Time.time >= noProne) &&
                                     !soldier.IsOnCover() &&
                                     !soldier.IsTowardWall();
 
             if (dist > 8.5f && canTryProneBipod && HasClearLineOfFireFromProne(soldier, targetPos, dist))
             {
-                SetBotPose(ai, soldier, SoldierPose.Prone);
-                soldier.BipodCheck(true);
-                if (soldier.UsingBipod())
+                if (soldier.m_pose == SoldierPose.Prone)
                 {
-                    BipodsDeployed++;
+                    soldier.BipodCheck(true);
+                    if (soldier.UsingBipod())
+                    {
+                        BipodsDeployed++;
+                    }
+                    else
+                    {
+                        // Ground slope/uneven terrain rejected bipod deploy — don't retry ground bipod for 12s
+                        _noProneUntil[ptr] = Time.time + 12.0f;
+                    }
                 }
                 else
                 {
-                    // Ground slope/uneven terrain rejected bipod deploy — stay Crouched and don't retry Prone for 8s
-                    _noProneUntil[ptr] = Time.time + 8.0f;
-                    SetBotPose(ai, soldier, SoldierPose.Crouch);
+                    SetBotPose(ai, soldier, SoldierPose.Prone);
                 }
             }
         }
@@ -2321,14 +2381,16 @@ namespace EasyRed2HumanAI
                     else
                     {
                         // Stationary soldier stance redirection
-                        if (__instance.HasEnemyAndCanFireAtHim && !soldier.IsCharging())
+                        if (isPeeking || isHighBipodStanding)
+                        {
+                            // Preserve active auto-peek or high-wall bipod stance against vanilla SequentialUpdate overwrites
+                            __instance.actualPose = soldier.m_pose;
+                        }
+                        else if (__instance.HasEnemyAndCanFireAtHim && !soldier.IsCharging())
                         {
                             // Engaging a visible enemy while stationary: NEVER shoot from standing in the open
                             // (unless crouching is blocked by a low wall/hill crest directly in front!)
-                            if (VisionConfig.NeverShootStandingInOpen.Value &&
-                                !isPeeking &&
-                                !isHighBipodStanding &&
-                                dist > 4.5f)
+                            if (VisionConfig.NeverShootStandingInOpen.Value && dist > 4.5f)
                             {
                                 Vector3 targetPos = __instance.visibleTarget != null
                                     ? __instance.visibleTarget.GetCenterOfUnit()
@@ -2349,8 +2411,14 @@ namespace EasyRed2HumanAI
                                                       !soldier.IsOnCover() &&
                                                       !soldier.IsTowardWall();
 
+                                    // Hysteresis: if already Prone, stay Prone down to 45% of proneSuppThreshold so stance never
+                                    // bounces between Prone and Crouch as suppression decays slightly.
+                                    bool shouldBeProne = suppression >= proneSuppThreshold ||
+                                                         isGunner ||
+                                                         (soldier.m_pose == SoldierPose.Prone && suppression >= proneSuppThreshold * 0.45f);
+
                                     SoldierPose combatPose = SoldierPose.Crouch;
-                                    if ((suppression >= proneSuppThreshold || isGunner) &&
+                                    if (shouldBeProne &&
                                         canGoProne &&
                                         HasClearLineOfFireFromProne(soldier, targetPos, dist))
                                     {
@@ -2368,6 +2436,10 @@ namespace EasyRed2HumanAI
                                         }
                                     }
                                 }
+                            }
+                            else
+                            {
+                                __instance.actualPose = soldier.m_pose;
                             }
                         }
                         else if (VisionConfig.EnforceStandingWhenOutOfCombat.Value)
@@ -2406,6 +2478,13 @@ namespace EasyRed2HumanAI
                             if ((!holdDefensiveCrouch || coverRequiresStanding) && !inCombatHold && suppression < 8f && !stealthCrouch && !hasMortar)
                             {
                                 SetBotPose(__instance, soldier, SoldierPose.Idle);
+                            }
+                            else if (soldier.m_pose == SoldierPose.Prone &&
+                                     (inCombatHold || isGunner || suppression >= proneSuppThreshold * 0.45f) &&
+                                     (!_noProneUntil.TryGetValue(ptr, out float noProneHold) || Time.time >= noProneHold))
+                            {
+                                // Keep Prone soldiers and gunners Prone during combat hold so brief LOS flickers never bounce them to Crouch!
+                                __instance.actualPose = SoldierPose.Prone;
                             }
                             else if (suppression < 35f && !stealthCrouch && !hasMortar)
                             {
@@ -2689,18 +2768,36 @@ namespace EasyRed2HumanAI
                         Vehicle targetVeh = __instance.visibleTarget.TryCast<Vehicle>();
                         if (targetVeh != null)
                         {
-                            if (TryEvaluateVehicleTarget(
-                                soldier,
-                                targetVeh,
-                                dist,
-                                out _,
-                                out Vector3 customAimPoint,
-                                out bool hasCustomAimPoint))
+                            IntPtr vehPtr = targetVeh.Pointer;
+                            if (!_vehicleAimCache.TryGetValue(ptr, out VehicleAimCache aimCache) ||
+                                aimCache.VehiclePtr != vehPtr ||
+                                Time.time >= aimCache.ExpireTime)
                             {
-                                if (hasCustomAimPoint)
+                                bool canEngage = TryEvaluateVehicleTarget(
+                                    soldier,
+                                    targetVeh,
+                                    dist,
+                                    out _,
+                                    out Vector3 evalAimPoint,
+                                    out bool evalHasCustomAim);
+
+                                aimCache = new VehicleAimCache
+                                {
+                                    VehiclePtr = vehPtr,
+                                    ExpireTime = Time.time + 0.40f,
+                                    CanEngage = canEngage,
+                                    HasCustomAimPoint = evalHasCustomAim,
+                                    CustomAimPoint = evalAimPoint
+                                };
+                                _vehicleAimCache[ptr] = aimCache;
+                            }
+
+                            if (aimCache.CanEngage)
+                            {
+                                if (aimCache.HasCustomAimPoint)
                                 {
                                     // Aim directly at the exposed crewman, un-flattened rubber tire, or penetrable armor plate/track!
-                                    __0 = customAimPoint;
+                                    __0 = aimCache.CustomAimPoint;
                                     dist = Vector3.Distance(soldier.transform.position, __0);
                                 }
                             }
@@ -2726,10 +2823,11 @@ namespace EasyRed2HumanAI
                     bool isHighBipodStanding = _bipodStandUntil.TryGetValue(ptr, out float standUntil) && Time.time < standUntil;
                     bool isGunner = IsMachineGunnerOrHasBipod(soldier, out AttachmentBipod bipod);
 
-                    // 0. Gunner Bipod Wall / Ground Mounting (only when stationary!)
-                    if (!isMoving && isGunner && !soldier.IsOnVehicle() && !soldier.IsCharging())
+                    // Keep actualPose synchronized with m_pose while stationary so MovementRoutine's StopMove(actualPose)
+                    // never fights the soldier's current stance between SequentialUpdate ticks.
+                    if (!isMoving && !soldier.IsOnVehicle())
                     {
-                        HandleGunnerBipodAndWallMounting(__instance, soldier, bipod, __0, dist);
+                        __instance.actualPose = soldier.m_pose;
                     }
 
                     // 1. Priority 1: Never Shoot Standing in the Open — Crouch (or Prone for Gunners) BEFORE Shooting
@@ -2789,18 +2887,18 @@ namespace EasyRed2HumanAI
                     {
                         if (!_nextWallCheckTime.TryGetValue(ptr, out float nextWall) || Time.time >= nextWall)
                         {
-                            _nextWallCheckTime[ptr] = Time.time + 0.12f;
+                            _nextWallCheckTime[ptr] = Time.time + 0.20f;
                             if (IsMuzzleBlockedByWall(soldier, __0, dist))
                             {
-                                _wallBlockedUntil[ptr] = Time.time + 0.20f;
+                                _wallBlockedUntil[ptr] = Time.time + 0.26f;
                                 WallsBlocked++;
 
                                 // Auto-Peek up one stance if crouched/prone behind a low wall/sandbag/windowsill:
-                                // - Respect _nextPeekAllowedTime cooldown after ducking so bots don't bounce up and down
-                                // - Never peek while reloading / in hands animation (native SetPose forces Crouch during hands anim!)
-                                // - Use < 25f suppression threshold (with > 30f duck threshold in SequentialUpdate for hysteresis)
-                                // - Verify the higher stance actually has a clear line of fire over the obstacle
-                                bool canPeekNow = !_nextPeekAllowedTime.TryGetValue(ptr, out float nextPeek) || Time.time >= nextPeek;
+                                // - Respect _nextPeekAllowedTime cooldown and _poseLockUntil dwell time so bots never bounce
+                                // - Require soldier to already be facing the target (<= 22 deg) and not in any animation
+                                // - Verify current stance LOF is genuinely blocked AND the higher stance has clear LOF
+                                bool canPeekNow = (!_nextPeekAllowedTime.TryGetValue(ptr, out float nextPeek) || Time.time >= nextPeek) &&
+                                                  (!_poseLockUntil.TryGetValue(ptr, out float poseLock) || Time.time >= poseLock);
                                 GetEffectivePeekParameters(soldier, vet01, out float maxPeekSupp, out _, out _);
                                 if (!isMoving &&
                                     canPeekNow &&
@@ -2809,34 +2907,35 @@ namespace EasyRed2HumanAI
                                     !soldier.IsReloading &&
                                     !soldier.isInHandsAnimation &&
                                     !soldier.isInBodyAnimation &&
-                                    !soldier.UsingBipod())
+                                    !soldier.UsingBipod() &&
+                                    soldier.AngleToDirection(__0 - soldier.transform.position) <= 22f)
                                 {
-                                    if (soldier.m_pose == SoldierPose.Prone && HasClearLineOfFireFromCrouch(soldier, __0, dist))
+                                    if (soldier.m_pose == SoldierPose.Prone &&
+                                        !HasClearLineOfFireFromProne(soldier, __0, dist) &&
+                                        HasClearLineOfFireFromCrouch(soldier, __0, dist))
                                     {
-                                        SetBotPose(__instance, soldier, SoldierPose.Crouch);
+                                        SetBotPose(__instance, soldier, SoldierPose.Crouch, true);
+                                        _noProneUntil[ptr] = Time.time + 10.0f;
+                                        _combatStanceHoldUntil[ptr] = Time.time + 6.0f;
+                                        _peekRestoreTime[ptr] = Time.time + 5.0f;
+                                        _nextStanceDropAllowed[ptr] = Time.time + 5.0f;
+                                        AutoPeeksTriggered++;
+                                    }
+                                    else if (soldier.m_pose == SoldierPose.Crouch &&
+                                             !HasClearLineOfFireFromCrouch(soldier, __0, dist) &&
+                                             HasClearLineOfFireFromStanding(soldier, __0, dist))
+                                    {
+                                        SetBotPose(__instance, soldier, SoldierPose.Idle, true);
                                         _noProneUntil[ptr] = Time.time + 10.0f;
                                         _combatStanceHoldUntil[ptr] = Time.time + 6.0f;
                                         _peekRestoreTime[ptr] = Time.time + 4.5f;
                                         _nextStanceDropAllowed[ptr] = Time.time + 4.5f;
-                                        AutoPeeksTriggered++;
-                                    }
-                                    else if (soldier.m_pose == SoldierPose.Crouch &&
-                                             (soldier.CanAutoCoverStand() || isGunner || HasClearLineOfFireFromStanding(soldier, __0, dist)))
-                                    {
-                                        if (HasClearLineOfFireFromStanding(soldier, __0, dist))
+                                        if (isGunner && bipod != null)
                                         {
-                                            SetBotPose(__instance, soldier, SoldierPose.Idle);
-                                            _noProneUntil[ptr] = Time.time + 10.0f;
-                                            _combatStanceHoldUntil[ptr] = Time.time + 6.0f;
-                                            _peekRestoreTime[ptr] = Time.time + 4.0f;
-                                            _nextStanceDropAllowed[ptr] = Time.time + 4.0f;
-                                            if (isGunner && bipod != null)
-                                            {
-                                                _bipodStandUntil[ptr] = Time.time + 4.0f;
-                                                soldier.StartCoroutine(soldier.RetryBipodDeployAfterStanding());
-                                            }
-                                            AutoPeeksTriggered++;
+                                            _bipodStandUntil[ptr] = Time.time + 4.5f;
+                                            soldier.StartCoroutine(soldier.RetryBipodDeployAfterStanding());
                                         }
+                                        AutoPeeksTriggered++;
                                     }
                                 }
                             }
@@ -2849,22 +2948,16 @@ namespace EasyRed2HumanAI
                     }
 
                     // 3. Priority 3B: Friendly Fire Avoidance (5-deg Cone + 0.65m Corridor)
+                    // Hold fire cleanly without calling MoveFPS against StopMove (which caused upper-body aim/spine snapping!)
                     if (VisionConfig.EnableFriendlyFireAvoidance.Value)
                     {
                         if (!_nextFFCheckTime.TryGetValue(ptr, out float nextFF) || Time.time >= nextFF)
                         {
-                            _nextFFCheckTime[ptr] = Time.time + 0.10f;
-                            if (IsFriendlyInLineOfFire(soldier, __0, dist, vet01, out Vector3 sidestepDir))
+                            _nextFFCheckTime[ptr] = Time.time + 0.12f;
+                            if (IsFriendlyInLineOfFire(soldier, __0, dist, vet01, out _))
                             {
-                                _ffBlockedUntil[ptr] = Time.time + 0.22f;
+                                _ffBlockedUntil[ptr] = Time.time + 0.25f;
                                 FriendlyFirePrevented++;
-
-                                // Nudge laterally to clear the friendly line of fire if on foot and not locked in cover
-                                if (!soldier.IsOnVehicle() && !soldier.IsOnCover() && !soldier.IsTowardWall() && !soldier.UsingBipod() && sidestepDir.sqrMagnitude > 0.01f)
-                                {
-                                    SoldierPose nudgePose = __instance.actualPose == SoldierPose.Prone ? SoldierPose.Crouch : __instance.actualPose;
-                                    soldier.MoveFPS(sidestepDir, nudgePose, false, __1);
-                                }
                             }
                         }
 
@@ -2874,22 +2967,31 @@ namespace EasyRed2HumanAI
                         }
                     }
 
-                    // 4. Priority 3C: Anti-Stacking Personal Space (~2.4m Firing Line Separation)
+                    // 4. Priority 3C: Anti-Stacking Personal Space (Smooth Step Aside When Overlapping)
+                    // Never call MoveFPS on a stationary soldier (fighting MovementRoutine's StopMove caused severe jitter).
+                    // Instead, if two non-prone, non-cover soldiers are genuinely overlapping (< 1.25m), issue a single
+                    // natural MoveDirectlyToward step on a 6.0s cooldown.
                     if (VisionConfig.EnableAntiStacking.Value &&
+                        !isMoving &&
+                        soldier.m_pose != SoldierPose.Prone &&
                         !soldier.IsOnVehicle() &&
                         !soldier.IsOnCover() &&
                         !soldier.IsTowardWall() &&
                         !soldier.UsingBipod() &&
-                        !__instance.IsMoving())
+                        !soldier.isInBodyAnimation)
                     {
                         if (!_nextAntiStackTime.TryGetValue(ptr, out float nextAS) || Time.time >= nextAS)
                         {
-                            _nextAntiStackTime[ptr] = Time.time + 0.08f;
+                            _nextAntiStackTime[ptr] = Time.time + 2.5f;
                             if (TryGetAntiStackPush(soldier, out Vector3 pushDir))
                             {
-                                SoldierPose pushPose = __instance.actualPose == SoldierPose.Prone ? SoldierPose.Crouch : __instance.actualPose;
-                                soldier.MoveFPS(pushDir, pushPose, false, __1);
-                                AntiStackNudges++;
+                                Vector3 curPos = soldier.transform.position;
+                                if (!IsDirectionBlockedByEnvironment(curPos + Vector3.up * 0.75f, pushDir, 1.50f, soldier.transform.root))
+                                {
+                                    __instance.MoveDirectlyToward(curPos + pushDir * 1.40f, 0.45f);
+                                    _nextAntiStackTime[ptr] = Time.time + 6.0f;
+                                    AntiStackNudges++;
+                                }
                             }
                         }
                     }
