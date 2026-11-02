@@ -63,6 +63,14 @@ namespace EasyRed2HumanAI
         public static ConfigEntry<bool> EnableSmartWallSideCover;
         public static ConfigEntry<bool> PreventSmallArmsFireAtTanks;
 
+        // 7. Phase 3: Role-Based AI Personalities (3 Archetypes per Infantry & Vehicle Role)
+        public static ConfigEntry<bool> EnableRolePersonalities;
+        public static ConfigEntry<bool> EnableInfantryPersonalities;
+        public static ConfigEntry<bool> EnableVehicleAndPilotPersonalities;
+        public static ConfigEntry<bool> VeterancyCuresSkittishness;
+        public static ConfigEntry<bool> ShowPersonalityInSquadRoster;
+        public static ConfigEntry<bool> ShowPersonalityOnDeathScreen;
+
         public static void Init(ConfigFile config)
         {
             EnableMod = config.Bind(
@@ -346,6 +354,43 @@ namespace EasyRed2HumanAI
                 "PreventSmallArmsFireAtTanks",
                 true,
                 "Stop infantry from uselessly firing small arms (rifles, SMGs, MGs, pistols) at armored tanks/vehicles unless their weapon can actually penetrate a vehicle part/wheel/track or they can shoot a visible exposed crew member.");
+
+            // 7. AI Role Personalities (3 Archetypes per Infantry & Vehicle Role)
+            EnableRolePersonalities = config.Bind(
+                "7. AI Role Personalities",
+                "EnableRolePersonalities",
+                true,
+                "Master toggle for the 3-per-role AI Personality system across all infantry, vehicle, and aircraft roles.");
+
+            EnableInfantryPersonalities = config.Bind(
+                "7. AI Role Personalities",
+                "EnableInfantryPersonalities",
+                true,
+                "Enable role-weighted personalities for Squad Leaders, Assaulters, Riflemen, Machine Gunners, Marksmen, Anti-Tank/Sappers, and Medics.");
+
+            EnableVehicleAndPilotPersonalities = config.Bind(
+                "7. AI Role Personalities",
+                "EnableVehicleAndPilotPersonalities",
+                true,
+                "Enable role-weighted personalities for Armored Tank Crews, Light/Wheeled Vehicle Crews, and Aircraft Pilots.");
+
+            VeterancyCuresSkittishness = config.Bind(
+                "7. AI Role Personalities",
+                "VeterancyCuresSkittishness",
+                true,
+                "Cautious/Skittish rookies gradually shed their panic suppression penalties as they survive and gain Veterancy while retaining their smart cover habits.");
+
+            ShowPersonalityInSquadRoster = config.Bind(
+                "7. AI Role Personalities",
+                "ShowPersonalityInSquadRoster",
+                true,
+                "Display each squadmate's personality trait (e.g. [Shock], [Anchor], [Deadeye]) in the bottom-left Squad Roster UI.");
+
+            ShowPersonalityOnDeathScreen = config.Bind(
+                "7. AI Role Personalities",
+                "ShowPersonalityOnDeathScreen",
+                true,
+                "Include the attacker's personality archetype on the Death Screen obituary banner.");
         }
     }
 }

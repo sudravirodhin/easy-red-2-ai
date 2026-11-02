@@ -1,10 +1,10 @@
-# Easy Red 2 — Humanized AI & Veteran Tactics (`v0.2.8`)
+# Easy Red 2 — Humanized AI & Veteran Tactics (`v0.3.0`)
 
 > [!IMPORTANT]
 > **Disclosure — Vibecoded Project:**
 > This mod was **vibecoded** (designed, reverse-engineered, and written collaboratively with an AI coding agent). If you are averse to AI-assisted or AI-generated software/mods, please be aware of this upfront before downloading or using this repository.
 
-A comprehensive **BepInEx 6 (IL2CPP)** AI and fairness overhaul for **Easy Red 2** designed to reduce frustrating *"how did they see me?"* and *"what just killed me?"* moments. It replaces vanilla's robotic X-ray spotting, erratic stance oscillation, suicidal open-field bandaging/repairs, standing in front of walls, and wasteful small-arms fire against tanks with human-like perception, self-preservation, cover intelligence, a 15-minute linear Veteran progression system, and full Death Screen Kill Attribution.
+A comprehensive **BepInEx 6 (IL2CPP)** AI and fairness overhaul for **Easy Red 2** designed to reduce frustrating *"how did they see me?"* and *"what just killed me?"* moments. It replaces vanilla's robotic X-ray spotting, erratic stance oscillation, suicidal open-field bandaging/repairs, standing in front of walls, and wasteful small-arms fire against tanks with human-like perception, self-preservation, cover intelligence, a 15-minute linear Veteran progression system, **30 Role-Based AI Personalities (3 per Infantry, Vehicle & Aircraft role)**, an **in-game `F7` Feature Toggle Menu**, and full Death Screen Kill Attribution.
 
 ---
 
@@ -23,15 +23,15 @@ A comprehensive **BepInEx 6 (IL2CPP)** AI and fairness overhaul for **Easy Red 2
 
 Download your preferred package from the **[Releases](https://github.com/sudravirodhin/easy-red-2-ai/releases)** page:
 
-### Option A: With BepInEx Included (`EasyRed2HumanAI-v0.2.8-with-BepInEx.zip`) — *Recommended for Fresh Installs*
+### Option A: With BepInEx Included (`EasyRed2HumanAI-v0.3.0-with-BepInEx.zip`) — *Recommended for Fresh Installs*
 Includes **[BepInEx 6.0.0-be.791 (Unity.IL2CPP-win-x64)](https://builds.bepinex.dev/projects/bepinex_be)**, the `.NET 6` runtime, Unity `2022.3.62` base libraries, pre-generated IL2CPP `interop` assemblies for Easy Red 2 Build `921`, and `EasyRed2HumanAI.dll` (with no other third-party mods).
 1. Open your **Easy Red 2** installation folder (e.g. `Steam\steamapps\common\Easy Red 2`, where `Easy Red 2.exe` is located).
-2. Extract all contents of `EasyRed2HumanAI-v0.2.8-with-BepInEx.zip` directly into the `Easy Red 2` folder.
+2. Extract all contents of `EasyRed2HumanAI-v0.3.0-with-BepInEx.zip` directly into the `Easy Red 2` folder.
 3. Launch the game!
 
-### Option B: Without BepInEx / Plugin Only (`EasyRed2HumanAI-v0.2.8-PluginOnly.zip` or `EasyRed2HumanAI.dll`)
+### Option B: Without BepInEx / Plugin Only (`EasyRed2HumanAI-v0.3.0-PluginOnly.zip` or `EasyRed2HumanAI.dll`)
 For users who already have **[BepInEx 6 Bleeding Edge (`BepInEx-Unity.IL2CPP-win-x64`)](https://builds.bepinex.dev/projects/bepinex_be)** installed:
-1. Download `EasyRed2HumanAI-v0.2.8-PluginOnly.zip` (or `EasyRed2HumanAI.dll` directly).
+1. Download `EasyRed2HumanAI-v0.3.0-PluginOnly.zip` (or `EasyRed2HumanAI.dll` directly).
 2. Place `EasyRed2HumanAI.dll` into:
    ```text
    Easy Red 2\BepInEx\plugins\EasyRed2HumanAI.dll
@@ -43,7 +43,7 @@ For users who already have **[BepInEx 6 Bleeding Edge (`BepInEx-Unity.IL2CPP-win
 
 ### 1. Humanized Vision, Stance Stealth & FOV Cones ([`VisionPatches.cs`](src/EasyRed2AI/VisionPatches.cs))
 
-| Feature | Vanilla Behavior | Humanized AI (`v0.2.8`) |
+| Feature | Vanilla Behavior | Humanized AI (`v0.3.0`) |
 | :--- | :--- | :--- |
 | **Stance Sight Ranges** | `220m` Standing, `50m` Crouching, `37m` Prone when unspotted — but jumps **all stances to a flat `300m`** the instant `IsEnemyAwareOfThisSquad` is true. | **150m Standing**, **80m Crouching**, **40m Prone**. Squad combat awareness applies only a **1.20x multiplier** (`48m` prone, `96m` crouched) so taking cover in grass/craters actually conceals you during firefights. |
 | **Individual Firing Reveal** | One soldier firing alerts the enemy to the entire squad's crouched/prone members out to `300m`. | Only the **specific soldier who fired** gets a temporary **+85m visibility penalty for 4.0 seconds** (muzzle flash, smoke, and gunshot sound). Silent squadmates stay hidden. |
@@ -66,72 +66,80 @@ For users who already have **[BepInEx 6 Bleeding Edge (`BepInEx-Unity.IL2CPP-win
 
 ---
 
-### 3. Self-Preservation, Cover Intelligence & Stance Discipline ([`VeteranAndTacticsPatches.cs`](src/EasyRed2AI/VeteranAndTacticsPatches.cs))
+### 3. Role-Based AI Personalities — 3 Archetypes Per Role (`EnableRolePersonalities`)
+
+Instead of every bot using identical suppression thresholds, peeking rhythms, and engagement habits, each soldier and vehicle crewman is assigned one of **3 role-matched personalities** across **10 Infantry, Vehicle & Aircraft roles (30 personalities total)**:
+
+| Role | Personality 1 | Personality 2 | Personality 3 |
+| :--- | :--- | :--- | :--- |
+| **1. Squad Leader** | **`[Spearhead]`**: Grants nearby squadmates (`< 22m`) `+12` suppression grit and leads aggressive pushes. | **`[Tactician]`**: Faster artillery/radio support checks (`next_requestingSupport`) and tight cover discipline. | **`[Old Guard]`**: Defensive anchor; prioritizes squad survival behind walls and rescues pinned comrades. |
+| **2. Assaulter / SMG** | **`[Shock]`**: Resists dropping `Prone` until extreme suppression (`>= 68`) and bounds cover-to-cover aggressively. | **`[Breacher]`**: Rapid `2.0s` peek cooldown (`<= 38` suppression) and eagerly tosses frag grenades at close range. | **`[Skirmisher]`**: Expands lateral spacing by `1.45x` (`3.5m`) to flank wide and fires on the move (`moveLookingTarget`). |
+| **3. Rifleman** | **`[Regular]`**: Balanced baseline fire-and-maneuver (`35` suppression threshold). | **`[Cautious]`**: Drops `Prone` at light suppression (`>= 18`), stays ducked longer (`6.2s`), and sheds nerve jitter as Veterancy rises (`[Composed]`). | **`[Grenadier]`**: Prioritizes rifle-grenades (`hasGrenadeLauncher`) and hand grenades within throwing range. |
+| **4. Machine Gunner** | **`[Anchor]`**: Prioritizes wall/sandbag bipod mounting and holds mounted positions under heavy fire (`>= 60` suppression). | **`[Assault MG]`**: Advances with the rifle squad and rapidly deploys ground bipods in `Crouch`/`Prone`. | **`[Overwatch]`**: Holds medium-long range (`50m–160m`) overwatch cover to suppress enemies engaging squadmates. |
+| **5. Marksman / Sniper** | **`[Deadeye]`**: **12% tighter accuracy** (`ProcessAiAccuracy`) when firing from `Crouch` or `Prone`. | **`[Stalker]`**: **35% shorter firing-reveal duration** when shooting from concealed crouch/prone cover. | **`[Spotter]`**: **+5° wider scoped FOV cone** for counter-sniping distant enemies. |
+| **6. Anti-Tank / Sapper** | **`[Tank Hunter]`**: Stalks armor in crouch stealth and targets tracks/weak spots. | **`[Ambusher]`**: Patiently holds fire behind cover until armor closes within kill range (`< 68m`). | **`[Demo]`**: High suppression grit (`>= 60`) when closing in to hurl AT and frag grenades. |
+| **7. Field Medic** | **`[Heroic]`**: Braver under fire (`<= 52` suppression) and searches `1.5x` wider (`45m`) to liberate/rescue comrades. | **`[Combat Medic]`**: Balanced combat-first medic (`35` suppression threshold); clears threats before rescuing. | **`[Triage]`**: High self-preservation (`20` suppression threshold, `4.5s` cover-seek window when bleeding) so the squad's medic survives. |
+| **8. Tank / Armor Crew** | **`[Brawler Crew]`**: **20% faster turret target switching** (`TurretAI.RefreshTargets`) for close-quarters brawling. | **`[Sniper Crew]`**: **+5° wider long-range turret optic cone** for long-range armor duels. | **`[Support Crew]`**: Prioritizes infantry support (`supportedSquad`) and faster response to friendly radio requests. |
+| **9. Light Vehicle / AA** | **`[Outrider]`**: Fast-reacting mobile gunner/driver (`20%` faster turret target refresh). | **`[Escort]`**: Cautious stand-off support and higher self-preservation when repairing. | **`[Flak Watch]`**: **+12° wider scan sector** in `TurretAI.CanSee` for tracking aircraft and elevated threats. |
+| **10. Aircraft Pilot** | **`[Ace]`**: Extended dogfight pursuit leash (`fighterDogfightExtraLeash = 450m`) when chasing enemy planes. | **`[Daredevil]`**: Commits closer on CAS dive-bombing runs (`0.90x diveAlignDistance`). | **`[Disciplined]`**: Pulls out of dives earlier (`1.08x diveAlignDistance`) for safer high-altitude bomb releases. |
+
+---
+
+### 4. Self-Preservation, Cover Intelligence & Stance Discipline ([`VeteranAndTacticsPatches.cs`](src/EasyRed2AI/VeteranAndTacticsPatches.cs))
 
 * **Stance Redirection & Anti-Bobbing**:
-  * Vanilla assigns every bot a random `"favourite fighting pose"` at spawn (`66%` Crouch/Prone), causing bots to crawl across open fields out of combat or shoot while standing upright in the open (`33%`), and oscillates `IsMoveTime` on a 7.0s square wave (`2.5s` move / `4.5s` stop), causing bots to bob `Stand <-> Crouch` when lower eye height loses line-of-sight.
   * **Out of Combat / Moving**: Bots move at full standing speed (`Idle`) unless stealth-following a crouched squad leader or locked in combat crouch.
-  * **Engaging Enemies**: Bots never fire standing in the open—they drop to **Crouch** (or **Prone** for Machine Gunners / heavy suppression `>= 35`) *only* after verifying a clear line-of-fire from that lower stance, and maintain a combat crouch lock so brief LOS flickers behind ridges or bushes never cause `Stand <-> Crouch` bobbing.
+  * **Engaging Enemies**: Bots never fire standing in the open—they drop to **Crouch** (or **Prone** for Machine Gunners / suppression above their personality threshold) *only* after verifying a clear line-of-fire from that lower stance, and maintain a combat crouch lock so brief LOS flickers behind ridges or bushes never cause `Stand <-> Crouch` bobbing.
   * **Stationary Defenders**: Soldiers occupying `CombatCover`, holding inside an objective capture zone (`PositionIsInsideValidConquerZone`), sheltered behind front walls, or in alerted squads stay **Crouched** rather than standing tall or randomly lying prone in tall grass (`DestinationWithoutCover` 50% prone override fixed).
 * **Stand BEHIND Walls, Never IN FRONT (`EnableSmartWallSideCover`)**:
-  * Vanilla `CombatCover.IsCoverAvailable` only checks node look-angle wideness (often 180°–360°), and vanilla `Squad.HoldArea` often leaves `formationDirection` pointing along the squad's travel vector rather than toward the enemy—causing defenders to stand on the **exposed front side** of walls with the wall at their back facing incoming fire.
   * Computes the true enemy threat direction (visible enemies → squad targets → attacker/defender objective frontline) and raycasts both in front (`+threatDir`) and behind (`-threatDir`) candidate positions.
   * Rejects cover nodes with a wall at the soldier's back and open air toward the enemy, and automatically repositions exposed defenders (`TryFindShelteredSideOfWall`) to the **sheltered leeward side** of the wall.
 * **Seek Cover First When Bleeding (`BandageOnlyAfterFindingCover`)**:
-  * Instead of freezing upright in the middle of an open road to bandage the instant they start bleeding, wounded soldiers sprint to nearby cover first (up to a `3.5s` safety window) and drop to `Crouch`/`Prone` before bandaging.
+  * Wounded soldiers sprint to nearby cover first and drop to `Crouch`/`Prone` before bandaging.
 * **Sheltered Tank & Vehicle Crew Repairs (`EnableSmartTankCrewRepair`)**:
-  * Vanilla `VehicleRepairTask` targets the center of the tank and considers the repair point reached anywhere within `5.5m`—meaning tank crewmen pop out of the hatch on the exposed front/side hull and immediately start welding in the enemy firing line.
-  * Routes repairing crewmen around the hull to the **sheltered leeward/rear side** opposite the enemy threat vector and keeps them **Crouched** behind the tank's armor while repairing (with a close-range self-defense override if flanked within `35m` under heavy suppression).
+  * Routes repairing crewmen around the hull to the **sheltered leeward/rear side** opposite the enemy threat vector and keeps them **Crouched** behind the tank's armor while repairing.
 
 ---
 
-### 4. Muzzle Discipline, Bipods, Anti-Armor & Mobility ([`VeteranAndTacticsPatches.cs`](src/EasyRed2AI/VeteranAndTacticsPatches.cs))
+### 5. Muzzle Discipline, Bipods, Anti-Armor & Mobility ([`VeteranAndTacticsPatches.cs`](src/EasyRed2AI/VeteranAndTacticsPatches.cs))
 
 * **Smart Anti-Armor Target & Fire Discipline (`PreventSmallArmsFireAtTanks`)**:
-  * **Fixes Vanilla's Small-Arms Tank Plinking**: In vanilla, riflemen set `CurrentVisibleTarget` to enemy tanks whenever no foot soldier is visible, mark `targetInWeaponRange = true` based solely on rifle range (`300m`), and fire 15% random bursts into tank hulls (`RotateAndFireToward`), giving away their position for zero damage.
-  * **Targets Exposed Crew (`Seats.showUnitSet`)**: If an enemy vehicle has a visible exposed crew member or passenger (open-topped tank destroyers like Marder/Wolverine/SU-76, halftracks, jeeps, pintle MG gunners), infantry redirect `visibleTarget` and aim directly at the **exposed crewman's chest/head** instead of the steel hull.
-  * **Targets Vulnerable Weak Spots (Tires, Tracks & Light Armor)**: Evaluates actual projectile penetration at distance (`BulletData.CalculateMmPenetrationWithFallof`). Within `60m`, small arms aim directly at **un-flattened rubber tires** (`VehicleDamageableWheelPart`) on wheeled vehicles until flattened; AT rifles (`25–35mm` pen) aim directly at penetrable armor plates or **unbroken tank tracks** (`VehicleDamageableTrackPart`).
-  * **Throws Normal & AT Grenades at Close Range**: Vanilla only checks `VirtualATGrenade` against vehicles. Infantry within throwing range (`7.5m` to `GetGrenadeThrowRange`) will now throw **both normal grenades (`VirtualGrenade`) and anti-tank grenades (`VirtualATGrenade`)** at enemy tanks and vehicles.
-  * **Holds Useless Small-Arms Fire & Re-Targets Foot Soldiers**: If a soldier's weapon cannot harm the tank and no exposed crewman is visible, they hold fire, stay crouched in cover, and (if flagged `isAtUnit` after expending rockets) automatically re-query `GetBestVisibleEnemy` to engage enemy foot soldiers with their rifle/sidearm.
+  * **Targets Exposed Crew (`Seats.showUnitSet`)**: Redirects small-arms fire directly at visible exposed crew members or passengers (open-topped TDs, halftracks, jeeps, pintle MG gunners) instead of the steel hull.
+  * **Targets Vulnerable Weak Spots (Tires, Tracks & Light Armor)**: Aims small arms at **un-flattened rubber tires** (`VehicleDamageableWheelPart`) within `60m` and aims AT rifles at penetrable armor plates or **unbroken tank tracks** (`VehicleDamageableTrackPart`).
+  * **Throws Normal & AT Grenades at Close Range**: Infantry within throwing range (`7.5m` to `GetGrenadeThrowRange`) throw **both normal grenades (`VirtualGrenade`) and anti-tank grenades (`VirtualATGrenade`)** at enemy tanks and vehicles.
+  * **Holds Useless Small-Arms Fire & Re-Targets Foot Soldiers**: If a soldier's weapon cannot harm the tank and no exposed crewman is visible, they hold fire, stay crouched in cover, and re-target enemy foot soldiers.
 * **Wall-Shooting Prevention & Auto-Peek (`EnableWallShootingPrevention` & `EnableAutoPeekOverCover`)**:
-  * Raycasts `2.2m` ahead of the weapon muzzle before pulling the trigger so bots stop dumping ammo into windowsills, sandbags, or hill crests right in front of their gun barrel.
-  * When blocked by low cover, bots automatically step up one stance (`Prone → Crouch` or `Crouch → Stand`) to **peek over the obstacle** if the higher stance has a clear line of fire, then duck back down when reloading, suppressed (`> 30`), or after `4.0s`.
+  * Raycasts `2.2m` ahead of the weapon muzzle before pulling the trigger and steps up one stance (`Prone → Crouch` or `Crouch → Stand`) to peek over low obstacles when clear.
 * **Machine Gunner Bipod Wall & Ground Mounting (`EnableGunnerBipodWallMounting`)**:
-  * Gunners (`MG34`, `MG42`, `BAR`, `Bren`, `DP-27`, etc.) actively seek nearby walls, sandbags, and windowsills and deploy their bipods (`BipodCheck(true)`) on wall ledges or prone on the ground.
-* **Friendly Fire Avoidance & Anti-Stacking (`EnableFriendlyFireAvoidance` & `EnableAntiStacking`)**:
-  * Holds fire when a friendly soldier is within a **5.0°–6.5° cone** or **0.65m close-range corridor** of the muzzle and sidesteps laterally to clear the line of fire.
-  * Maintains **2.4m personal spacing** along the firing line so bots don't stack inside each other on cover points.
-* **Wall & Fence Vaulting (`EnableWallVaulting`)**:
-  * Advancing AI soldiers automatically detect and vault over low walls, fences, and sandbags (`CanVault` → `Vault`).
-* **Comrade Liberation (`EnableComradeLiberation`)**:
-  * Unpinned friendly bots within **30m** move toward surrendered comrades and free them (`UnSurrenderSynched`).
+  * Gunners actively seek nearby walls, sandbags, and windowsills and deploy their bipods (`BipodCheck(true)`).
+* **Friendly Fire Avoidance, Anti-Stacking, Wall Vaulting & Comrade Liberation**:
+  * Holds fire and sidesteps when a friendly is within a `5.0°–6.5°` cone or `0.65m` corridor, maintains `2.4m+` spacing, vaults low walls/fences (`CanVault` → `Vault`), and frees surrendered comrades (`UnSurrenderSynched`).
 
 ---
 
-### 5. Death Screen Kill Attribution (`EnableDeathScreenAttribution`)
+### 6. Death Screen Kill Attribution (`EnableDeathScreenAttribution`)
 
-Eliminates *"what killed me?"* guesswork when you go down by displaying a detailed obituary on both the native `DeathPanel` and a centered HUD banner (compatible with `ragdoll_overhaul`'s fade-to-black death screen):
-
-* **Who Killed You**: Attacker's rank (`Pvt.`, `Cpl.`, `Sgt.`, `1st Sgt.`, `Lt.`), full name, and any `[Vet I / II / III ★]` badge.
-* **Friendly Fire & Self-Inflicted Tags**: Clearly highlights `[FRIENDLY FIRE]` in coral red if killed by an allied soldier/vehicle/artillery, or `[SELF-INFLICTED]` in amber if killed by your own explosive.
-* **What Was Used**: Localized weapon name (e.g., `Karabiner 98k`, `M1 Garand`, `MG 42`), thrown grenade (`Stielhandgranate 24`, `Mk 2 Grenade`), vehicle/tank (`Pz.Kpfw. IV Ausf. H`), or `Artillery / Mortar Barrage`.
-* **Hit Location, Bleed-Out & Distance**: Shows the exact impact zone (`Headshot`, `Headshot (Helmet)`, `Torso`, `Arm`, `Leg`, `Shrapnel`, `Explosion`), distinguishes instant kills (`Killed by...`) from delayed bleed-out deaths (`Bled out from wounds by...`), and reports the exact distance in meters (`[Headshot • 114m]`).
+Displays a detailed obituary on both the native `DeathPanel` and a centered HUD banner (compatible with `ragdoll_overhaul`'s fade-to-black death screen):
+* **Who Killed You**: Attacker's rank (`Pvt.`, `Cpl.`, `Sgt.`, `1st Sgt.`, `Lt.`), full name, and `[Vet I–III ★ • Personality]` badge.
+* **Friendly Fire & Self-Inflicted Tags**: Highlights `[FRIENDLY FIRE]` in coral red or `[SELF-INFLICTED]` in amber.
+* **What Was Used, Hit Location & Distance**: Shows the exact weapon, grenade, vehicle, or artillery barrage, hit zone (`Headshot`, `Headshot (Helmet)`, `Torso`, `Arm`, `Leg`, `Shrapnel`, `Explosion`), instant kill vs. bleed-out (`Killed by...` vs. `Bled out from wounds by...`), and distance in meters.
 
 ---
 
-## In-Game Hotkeys & Configuration
+## In-Game Feature Toggle Menu (`F7`), Hotkeys & `.cfg` File
 
-Configuration file (auto-generated on first launch): `BepInEx\config\com.antigravity.easyred2.humanai.cfg`
+Every feature in this mod can be toggled individually either via the **in-game `F7` GUI menu** or by editing `BepInEx\config\com.antigravity.easyred2.humanai.cfg`:
 
-* **`F8`**: Toggle Mod **ENABLED / DISABLED** live in-game.
-* **`F9`**: **Hot-Reload** `com.antigravity.easyred2.humanai.cfg` live in-game without restarting.
+* **`F7`**: Open/Close the **Interactive Feature Toggle Menu** (click any feature to toggle it ON/OFF live in-game and save directly to `.cfg`).
+* **`F8`**: Master Toggle Mod **ENABLED / DISABLED** live in-game.
+* **`F9`**: **Hot-Reload** `com.antigravity.easyred2.humanai.cfg` from disk without restarting.
 * **`F10`**: Display **Live Tactical Telemetry Toast** (Active Veterans, Field Promotions, Survival Drops, Bipods Deployed, Wall Blocks/Peeks, Wall-Side Repositions, Useless Tank Fire Blocked / Exposed Crew Targeted, Friendly Fire Saved, and Sheltered Vehicle Repairs).
 
 ---
 
 ## Building From Source
 
-Run [`build.ps1`](build.ps1) from PowerShell (automatically checks that `Easy Red 2.exe` is not running before deploying):
+Run [`build.ps1`](build.ps1) from PowerShell (auto-discovers your Steam `Easy Red 2` installation and `.NET SDK` Roslyn compiler, and checks that `Easy Red 2.exe` is not running before deploying):
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\build.ps1 -Deploy

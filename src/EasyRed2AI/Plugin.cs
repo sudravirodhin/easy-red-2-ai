@@ -11,7 +11,7 @@ namespace EasyRed2HumanAI
     {
         public const string PluginGuid = "com.antigravity.easyred2.humanai";
         public const string PluginName = "Easy Red 2 - Humanized AI & Veteran Tactics";
-        public const string PluginVersion = "0.2.8";
+        public const string PluginVersion = "0.3.0";
 
         internal static Plugin Instance;
         internal static new ManualLogSource Log;
@@ -63,8 +63,10 @@ namespace EasyRed2HumanAI
             SafePatch(typeof(VeteranAndTacticsPatches.Explosion_CreateExplosion_Patch));
             SafePatch(typeof(VeteranAndTacticsPatches.Bullet_BulletDamage_Patch));
             SafePatch(typeof(VeteranAndTacticsPatches.DeathPanel_ShowDeath_Patch));
+            SafePatch(typeof(VeteranAndTacticsPatches.TurretAI_RefreshTargets_Patch));
+            SafePatch(typeof(VeteranAndTacticsPatches.AIPlane_Update_Patch));
 
-            Log.LogInfo($"{PluginName} v{PluginVersion} loaded! (Hotkeys: F8 Toggle ON/OFF, F9 Reload Config, F10 Show Live Stats)");
+            Log.LogInfo($"{PluginName} v{PluginVersion} loaded! (Hotkeys: F7 Config Menu, F8 Toggle ON/OFF, F9 Reload Config, F10 Show Live Stats)");
             Log.LogInfo($"Sight Ranges -> Standing: {VisionConfig.StandingSightRange.Value}m | Crouching: {VisionConfig.CrouchingSightRange.Value}m | Prone: {VisionConfig.ProneSightRange.Value}m | MaxOpticZoom: {VisionConfig.MaxOpticZoomMultiplier.Value}x");
             Log.LogInfo($"Phase 2 -> VeteranCurve: {VisionConfig.VeteranFullMaturitySeconds.Value}s | FFCone: {VisionConfig.FriendlyFireConeDegrees.Value} deg | AntiWall: {VisionConfig.EnableWallShootingPrevention.Value} | Vaulting: {VisionConfig.EnableWallVaulting.Value}");
         }

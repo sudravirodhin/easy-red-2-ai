@@ -24,9 +24,10 @@ namespace EasyRed2HumanAI
         public static int BoostedByScope;
         public static int BlockedPlaneSpot;
 
-        // On-screen status toast
+        // On-screen status toast & F7 Interactive Configuration Menu
         private static string _toastMessage = "";
         private static float _toastExpireTime;
+        private static bool _showConfigMenu;
 
         public static void ShowToast(string msg, float duration = 4.0f)
         {
@@ -51,6 +52,13 @@ namespace EasyRed2HumanAI
             if (s == null || s.Pointer == IntPtr.Zero) return 0f;
             float duration = VisionConfig.FiringRevealDuration.Value;
             if (duration <= 0f) return 0f;
+
+            // Stalker Marksmen have a 35% shorter firing reveal window when shooting from crouch/prone cover
+            if (s.m_pose >= SoldierPose.Crouch &&
+                VeteranAndTacticsPatches.GetPersonality(s) == VeteranAndTacticsPatches.SoldierPersonality.Marksman_Stalker)
+            {
+                duration *= 0.65f;
+            }
 
             // Also catch sustained full-auto fire if trigger is currently depressed
             if (s.pressTriggerRequest)
@@ -234,7 +242,13 @@ namespace EasyRed2HumanAI
                     }
 
                     // Apply scope magnification only if target is within the narrower optic cone
-                    if (opticZoom > 1.0f && angle <= VisionConfig.OpticLongRangeHalfFOV.Value)
+                    float allowedOpticHalfFOV = VisionConfig.OpticLongRangeHalfFOV.Value;
+                    if (VeteranAndTacticsPatches.GetPersonality(observer) == VeteranAndTacticsPatches.SoldierPersonality.Marksman_Spotter)
+                    {
+                        allowedOpticHalfFOV += 5.0f; // Counter-Sniper / Spotter has a wider scoped scan cone
+                    }
+
+                    if (opticZoom > 1.0f && angle <= allowedOpticHalfFOV)
                     {
                         _currentObserverOpticMultiplier = opticZoom;
                         BoostedByScope++;
@@ -296,6 +310,10 @@ namespace EasyRed2HumanAI
 
                     bool isInfantryTarget = !__0.IsWheeledVehicleOrTank() && !__0.IsAirVehicle();
                     float turretAimFov = turret.GetAimingFOV();
+                    Vehicle turretVeh = turret.GetComponentInParent<Vehicle>();
+                    VeteranAndTacticsPatches.SoldierPersonality crewPers = turretVeh != null
+                        ? VeteranAndTacticsPatches.GetVehicleCrewPersonality(turretVeh)
+                        : VeteranAndTacticsPatches.SoldierPersonality.None;
 
                     // Against infantry on foot, enforce realistic turret FOV cones
                     if (isInfantryTarget && VisionConfig.EnforceHumanFOVWhenAlerted.Value)
@@ -305,6 +323,9 @@ namespace EasyRed2HumanAI
                             float allowedHalfFOV = dist <= VisionConfig.MidRangeMaxDistance.Value
                                 ? VisionConfig.MidRangeHalfFOV.Value
                                 : VisionConfig.LongRangeHalfFOV.Value;
+
+                            if (crewPers == VeteranAndTacticsPatches.SoldierPersonality.LightCrew_FlakWatch)
+                                allowedHalfFOV += 12.0f; // Flak Watch crew scans a wider sector
 
                             if (angle > allowedHalfFOV)
                             {
@@ -325,7 +346,11 @@ namespace EasyRed2HumanAI
                     // Scale sight range by turret optics when looking within the optic's forward cone
                     if (VisionConfig.EnableScopeVisionScaling.Value && turretAimFov > 1f && turretAimFov < 45f)
                     {
-                        if (angle <= VisionConfig.OpticLongRangeHalfFOV.Value)
+                        float opticCone = VisionConfig.OpticLongRangeHalfFOV.Value;
+                        if (crewPers == VeteranAndTacticsPatches.SoldierPersonality.TankCrew_Sniper)
+                            opticCone += 5.0f; // Sniper Crew has a wider long-range turret optic scan cone
+
+                        if (angle <= opticCone)
                         {
                             _currentObserverOpticMultiplier = Mathf.Clamp(50f / turretAimFov, 1.0f, VisionConfig.MaxOpticZoomMultiplier.Value);
                             BoostedByScope++;
@@ -437,18 +462,28 @@ namespace EasyRed2HumanAI
                     var input = UnityInput.Current;
                     if (input != null)
                     {
-                        if (input.GetKeyDown(KeyCode.F8))
+                        if (input.GetKeyDown(KeyCode.F7))
+                        {
+                            _showConfigMenu = !_showConfigMenu;
+                            if (_showConfigMenu)
+                            {
+                                Cursor.visible = true;
+                                Cursor.lockState = CursorLockMode.None;
+                            }
+                        }
+                        else if (input.GetKeyDown(KeyCode.F8))
                         {
                             VisionConfig.EnableMod.Value = !VisionConfig.EnableMod.Value;
+                            Plugin.Instance.Config.Save();
                             string state = VisionConfig.EnableMod.Value
                                 ? $"ENABLED (Stand:{VisionConfig.StandingSightRange.Value}m, Crouch:{VisionConfig.CrouchingSightRange.Value}m, Prone:{VisionConfig.ProneSightRange.Value}m)"
                                 : "DISABLED (Vanilla AI)";
-                            ShowToast($"[HumanAI v0.2.8] Mod {state}");
+                            ShowToast($"[HumanAI v0.3.0] Mod {state}");
                         }
                         else if (input.GetKeyDown(KeyCode.F9))
                         {
                             Plugin.Instance.Config.Reload();
-                            ShowToast($"[HumanAI v0.2.8] Reloaded Config! Stand:{VisionConfig.StandingSightRange.Value}m | Crouch:{VisionConfig.CrouchingSightRange.Value}m | Prone:{VisionConfig.ProneSightRange.Value}m | VetTime:{VisionConfig.VeteranFullMaturitySeconds.Value}s");
+                            ShowToast($"[HumanAI v0.3.0] Reloaded Config! Stand:{VisionConfig.StandingSightRange.Value}m | Crouch:{VisionConfig.CrouchingSightRange.Value}m | Prone:{VisionConfig.ProneSightRange.Value}m | Personalities:{VisionConfig.EnableRolePersonalities.Value}");
                         }
                         else if (input.GetKeyDown(KeyCode.F10))
                         {
@@ -519,8 +554,135 @@ namespace EasyRed2HumanAI
                             GUI.color = Color.white;
                         }
                     }
+
+                    // Render F7 Interactive Feature Toggle Menu
+                    if (_showConfigMenu)
+                    {
+                        Cursor.visible = true;
+                        Cursor.lockState = CursorLockMode.None;
+                        DrawConfigMenu();
+                    }
                 }
                 catch { }
+            }
+
+            private static void DrawConfigMenu()
+            {
+                float panelW = 760f;
+                float panelH = 540f;
+                float panelX = (Screen.width - panelW) * 0.5f;
+                float panelY = (Screen.height - panelH) * 0.5f;
+
+                GUI.color = new Color(0.06f, 0.07f, 0.09f, 0.94f);
+                GUI.Box(new Rect(panelX, panelY, panelW, panelH), "");
+
+                GUI.color = new Color(1.0f, 0.88f, 0.35f, 1.0f);
+                GUI.Label(new Rect(panelX + 20f, panelY + 14f, panelW - 40f, 24f),
+                    "Easy Red 2 — Humanized AI & Veteran Tactics v0.3.0  |  Feature Toggles (F7 to Close)");
+
+                GUI.color = new Color(0.75f, 0.78f, 0.82f, 1.0f);
+                GUI.Label(new Rect(panelX + 20f, panelY + 36f, panelW - 40f, 20f),
+                    "Click any feature below to toggle it ON/OFF live in-game (automatically saves to com.antigravity.easyred2.humanai.cfg):");
+
+                float colLeftX = panelX + 20f;
+                float colRightX = panelX + 390f;
+                float colW = 350f;
+                float rowH = 26f;
+                float startY = panelY + 66f;
+
+                // Left Column: Vision, Veteran Progression & Role Personalities
+                float yL = startY;
+                DrawSectionHeader(colLeftX, ref yL, "Vision, Stealth & FOV");
+                DrawToggleButton(colLeftX, ref yL, colW, rowH, "Master Mod Toggle (F8)", VisionConfig.EnableMod);
+                DrawToggleButton(colLeftX, ref yL, colW, rowH, "Preserve Stance Stealth in Combat", VisionConfig.PreserveStanceStealthInCombat);
+                DrawToggleButton(colLeftX, ref yL, colW, rowH, "Enforce Human FOV Cones", VisionConfig.EnforceHumanFOVWhenAlerted);
+                DrawToggleButton(colLeftX, ref yL, colW, rowH, "Scope & Turret Optic Scaling", VisionConfig.EnableScopeVisionScaling);
+                DrawToggleButton(colLeftX, ref yL, colW, rowH, "Limit Aircraft Infantry Spotting", VisionConfig.LimitAircraftInfantrySpotting);
+
+                yL += 6f;
+                DrawSectionHeader(colLeftX, ref yL, "15-Min Veteran System");
+                DrawToggleButton(colLeftX, ref yL, colW, rowH, "15-Minute Veteran Progression", VisionConfig.EnableVeteranSystem);
+                DrawToggleButton(colLeftX, ref yL, colW, rowH, "Field Rank Promotions & Decals", VisionConfig.PromoteVeteranRanks);
+                DrawToggleButton(colLeftX, ref yL, colW, rowH, "3D Overhead Veteran Icons", VisionConfig.ShowVeteran3DIcons);
+                DrawToggleButton(colLeftX, ref yL, colW, rowH, "Squad Roster Veteran Tags", VisionConfig.ShowVeteranSquadRosterTags);
+
+                yL += 6f;
+                DrawSectionHeader(colLeftX, ref yL, "AI Role Personalities (3 Per Role)");
+                DrawToggleButton(colLeftX, ref yL, colW, rowH, "Enable AI Role Personalities (Master)", VisionConfig.EnableRolePersonalities);
+                DrawToggleButton(colLeftX, ref yL, colW, rowH, "Infantry Role Personalities (21 Types)", VisionConfig.EnableInfantryPersonalities);
+                DrawToggleButton(colLeftX, ref yL, colW, rowH, "Vehicle & Pilot Personalities (9 Types)", VisionConfig.EnableVehicleAndPilotPersonalities);
+                DrawToggleButton(colLeftX, ref yL, colW, rowH, "Veterancy Cures Skittishness", VisionConfig.VeterancyCuresSkittishness);
+                DrawToggleButton(colLeftX, ref yL, colW, rowH, "Show Personalities in Squad Roster", VisionConfig.ShowPersonalityInSquadRoster);
+
+                // Right Column: Self-Preservation, Cover, Anti-Armor & Death Screen
+                float yR = startY;
+                DrawSectionHeader(colRightX, ref yR, "Self-Preservation & Cover");
+                DrawToggleButton(colRightX, ref yR, colW, rowH, "Self-Preservation Stances", VisionConfig.EnableSelfPreservationStance);
+                DrawToggleButton(colRightX, ref yR, colW, rowH, "Enforce Standing Out of Combat", VisionConfig.EnforceStandingWhenOutOfCombat);
+                DrawToggleButton(colRightX, ref yR, colW, rowH, "Never Shoot Standing in Open", VisionConfig.NeverShootStandingInOpen);
+                DrawToggleButton(colRightX, ref yR, colW, rowH, "Seek Cover Before Bandaging", VisionConfig.BandageOnlyAfterFindingCover);
+                DrawToggleButton(colRightX, ref yR, colW, rowH, "Stand BEHIND Walls (Smart Wall Cover)", VisionConfig.EnableSmartWallSideCover);
+                DrawToggleButton(colRightX, ref yR, colW, rowH, "Sheltered Tank Crew Repairs", VisionConfig.EnableSmartTankCrewRepair);
+
+                yR += 6f;
+                DrawSectionHeader(colRightX, ref yR, "Muzzle Discipline, Anti-Armor & HUD");
+                DrawToggleButton(colRightX, ref yR, colW, rowH, "Stop Small-Arms Fire at Tanks / Aim Crew", VisionConfig.PreventSmallArmsFireAtTanks);
+                DrawToggleButton(colRightX, ref yR, colW, rowH, "Gunner Bipod Wall & Ground Mounting", VisionConfig.EnableGunnerBipodWallMounting);
+                DrawToggleButton(colRightX, ref yR, colW, rowH, "Wall-Shooting Prevention", VisionConfig.EnableWallShootingPrevention);
+                DrawToggleButton(colRightX, ref yR, colW, rowH, "Auto-Peek Over Low Cover", VisionConfig.EnableAutoPeekOverCover);
+                DrawToggleButton(colRightX, ref yR, colW, rowH, "Friendly Fire Avoidance", VisionConfig.EnableFriendlyFireAvoidance);
+                DrawToggleButton(colRightX, ref yR, colW, rowH, "Anti-Stacking Personal Spacing", VisionConfig.EnableAntiStacking);
+                DrawToggleButton(colRightX, ref yR, colW, rowH, "Wall & Fence Vaulting", VisionConfig.EnableWallVaulting);
+                DrawToggleButton(colRightX, ref yR, colW, rowH, "Surrendered Comrade Liberation", VisionConfig.EnableComradeLiberation);
+                DrawToggleButton(colRightX, ref yR, colW, rowH, "Death Screen Kill Attribution", VisionConfig.EnableDeathScreenAttribution);
+
+                // Bottom Action Buttons
+                float bottomY = panelY + panelH - 38f;
+                GUI.color = new Color(0.75f, 0.90f, 1.0f, 1.0f);
+                if (GUI.Button(new Rect(panelX + 20f, bottomY, 220f, 26f), "Reload .cfg from Disk (F9)"))
+                {
+                    Plugin.Instance.Config.Reload();
+                    ShowToast("[HumanAI v0.3.0] Reloaded configuration from disk!");
+                }
+
+                GUI.color = new Color(0.85f, 1.0f, 0.85f, 1.0f);
+                if (GUI.Button(new Rect(panelX + 260f, bottomY, 220f, 26f), "Save to .cfg File"))
+                {
+                    Plugin.Instance.Config.Save();
+                    ShowToast("[HumanAI v0.3.0] Saved configuration to com.antigravity.easyred2.humanai.cfg!");
+                }
+
+                GUI.color = new Color(1.0f, 0.80f, 0.80f, 1.0f);
+                if (GUI.Button(new Rect(panelX + 520f, bottomY, 220f, 26f), "Close Menu (F7)"))
+                {
+                    _showConfigMenu = false;
+                }
+
+                GUI.color = Color.white;
+            }
+
+            private static void DrawSectionHeader(float x, ref float y, string title)
+            {
+                GUI.color = new Color(0.55f, 0.82f, 1.0f, 1.0f);
+                GUI.Label(new Rect(x, y, 350f, 20f), $"=== {title} ===");
+                y += 20f;
+            }
+
+            private static void DrawToggleButton(float x, ref float y, float width, float height, string label, BepInEx.Configuration.ConfigEntry<bool> entry)
+            {
+                if (entry == null) return;
+                bool val = entry.Value;
+                GUI.color = val
+                    ? new Color(0.45f, 0.95f, 0.52f, 1.0f)
+                    : new Color(0.95f, 0.45f, 0.45f, 1.0f);
+
+                string status = val ? "[ON]  " : "[OFF] ";
+                if (GUI.Button(new Rect(x, y, width, height - 2f), status + label))
+                {
+                    entry.Value = !val;
+                    Plugin.Instance.Config.Save();
+                }
+                y += height;
             }
         }
     }

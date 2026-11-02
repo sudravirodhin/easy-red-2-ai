@@ -8,6 +8,51 @@ namespace EasyRed2HumanAI
 {
     public static class VeteranAndTacticsPatches
     {
+        public enum SoldierPersonality : byte
+        {
+            None = 0,
+            // 1. Squad Leader / Officer
+            Leader_Spearhead = 1,
+            Leader_Tactician = 2,
+            Leader_OldGuard = 3,
+            // 2. Assaulter / Pointman (SMG, Assault Rifle, Shotgun, Flamethrower)
+            Assaulter_Shock = 4,
+            Assaulter_Breacher = 5,
+            Assaulter_Skirmisher = 6,
+            // 3. Standard Rifleman
+            Rifleman_Regular = 7,
+            Rifleman_Cautious = 8,
+            Rifleman_Grenadier = 9,
+            // 4. Machine Gunner
+            Gunner_Anchor = 10,
+            Gunner_AssaultMG = 11,
+            Gunner_Overwatch = 12,
+            // 5. Marksman / Sniper
+            Marksman_Deadeye = 13,
+            Marksman_Stalker = 14,
+            Marksman_Spotter = 15,
+            // 6. Anti-Tank / Sapper
+            AT_TankHunter = 16,
+            AT_Ambusher = 17,
+            AT_Demolitionist = 18,
+            // 7. Field Medic
+            Medic_Heroic = 19,
+            Medic_Combat = 20,
+            Medic_Triage = 21,
+            // 8. Tank & Armored Vehicle Crew
+            TankCrew_Brawler = 22,
+            TankCrew_Sniper = 23,
+            TankCrew_Support = 24,
+            // 9. Light Vehicle / Transport / Halftrack / AA Crew
+            LightCrew_Outrider = 25,
+            LightCrew_Escort = 26,
+            LightCrew_FlakWatch = 27,
+            // 10. Aircraft Pilot
+            Pilot_Ace = 28,
+            Pilot_Daredevil = 29,
+            Pilot_Disciplined = 30
+        }
+
         private struct SoldierRecord
         {
             public float SpawnTime;
@@ -15,6 +60,8 @@ namespace EasyRed2HumanAI
             public int PromotedTier;
             public Rank BaseRank;
             public string BaseName;
+            public SoldierPersonality Personality;
+            public byte RoleCategory;
         }
 
         // Per-soldier state keyed by IL2CPP IntPtr
@@ -89,28 +136,367 @@ namespace EasyRed2HumanAI
         public static int ExposedCrewTargeted;
 
         // =====================================================================
-        // Veteran Progression Math (15-Minute Linear Scale with Realism Caps)
+        // Veteran Progression & Role Personality System (3 Archetypes per Role)
         // =====================================================================
-        public static float GetVeterancy01(Soldier s)
+        private static int GetDeterministicHash(IntPtr ptr, int seed)
         {
-            if (s == null || s.Pointer == IntPtr.Zero || !VisionConfig.EnableVeteranSystem.Value)
-                return 0f;
+            unchecked
+            {
+                long val = ptr.ToInt64();
+                int h = (int)(val ^ (val >> 32)) ^ (seed * 397);
+                h ^= (h >> 16);
+                h *= 0x7feb352d;
+                h ^= (h >> 15);
+                return h & 0x7FFFFFFF;
+            }
+        }
 
+        private static byte DetermineRoleCategory(Soldier s)
+        {
+            if (s == null)
+                return 0;
+
+            if (s.IsOnVehicle())
+            {
+                Vehicle v = s.GetCurrentVehicle();
+                if (v != null)
+                {
+                    if (v.TryCast<VehiclePlane>() != null)
+                        return 10; // Aircraft Pilot / Aircrew
+                    if (v.TryCast<VehicleTank>() != null)
+                        return 8;  // Armored Tank / Tracked Vehicle Crew
+                }
+                return 9;          // Light / Wheeled / Halftrack / AA Crew
+            }
+
+            if (s.joinedSquad != null && s.joinedSquad.Leader != null && s.joinedSquad.Leader.Pointer == s.Pointer)
+                return 1; // Squad Leader / Officer
+
+            if (s.hasSyringe)
+                return 7; // Field Medic
+
+            if (s.isAtUnit || s.isSapper)
+                return 6; // Anti-Tank / Sapper
+
+            if (s.isMarksMan)
+                return 5; // Marksman / Sniper
+
+            if (s.hasMg)
+                return 4; // Machine Gunner
+
+            GenericGun gun = s.GetHeldGun();
+            if (gun != null)
+            {
+                float dmgRange = gun.DamageRange();
+                if (!s.hasMg && dmgRange > 1f && dmgRange < 185f)
+                    return 2; // Assaulter / Pointman (SMG, Assault Rifle, Shotgun, Flamethrower)
+            }
+
+            return 3; // Standard Rifleman
+        }
+
+        private static SoldierPersonality RollPersonalityForRole(Soldier s, byte roleCategory)
+        {
+            int h = GetDeterministicHash(s.Pointer, s._randomSeed_k__BackingField);
+            int roll100 = h % 100;
+
+            switch (roleCategory)
+            {
+                case 1: // Squad Leader
+                    if (roll100 < 35) return SoldierPersonality.Leader_Spearhead;
+                    if (roll100 < 75) return SoldierPersonality.Leader_Tactician;
+                    return SoldierPersonality.Leader_OldGuard;
+
+                case 2: // Assaulter / Pointman
+                    if (roll100 < 40) return SoldierPersonality.Assaulter_Shock;
+                    if (roll100 < 75) return SoldierPersonality.Assaulter_Breacher;
+                    return SoldierPersonality.Assaulter_Skirmisher;
+
+                case 3: // Standard Rifleman
+                    if (s.hasGrenadeLauncher && roll100 < 65)
+                        return SoldierPersonality.Rifleman_Grenadier;
+                    if (roll100 < 40) return SoldierPersonality.Rifleman_Regular;
+                    if (roll100 < 75) return SoldierPersonality.Rifleman_Cautious;
+                    return SoldierPersonality.Rifleman_Grenadier;
+
+                case 4: // Machine Gunner
+                    if (roll100 < 45) return SoldierPersonality.Gunner_Anchor;
+                    if (roll100 < 75) return SoldierPersonality.Gunner_AssaultMG;
+                    return SoldierPersonality.Gunner_Overwatch;
+
+                case 5: // Marksman / Sniper
+                    if (roll100 < 40) return SoldierPersonality.Marksman_Deadeye;
+                    if (roll100 < 75) return SoldierPersonality.Marksman_Stalker;
+                    return SoldierPersonality.Marksman_Spotter;
+
+                case 6: // Anti-Tank / Sapper
+                    if (roll100 < 40) return SoldierPersonality.AT_TankHunter;
+                    if (roll100 < 75) return SoldierPersonality.AT_Ambusher;
+                    return SoldierPersonality.AT_Demolitionist;
+
+                case 7: // Field Medic
+                    if (roll100 < 35) return SoldierPersonality.Medic_Heroic;
+                    if (roll100 < 75) return SoldierPersonality.Medic_Combat;
+                    return SoldierPersonality.Medic_Triage;
+
+                case 8: // Tank & Armored Vehicle Crew
+                    if (roll100 < 35) return SoldierPersonality.TankCrew_Brawler;
+                    if (roll100 < 70) return SoldierPersonality.TankCrew_Sniper;
+                    return SoldierPersonality.TankCrew_Support;
+
+                case 9: // Light Vehicle / Halftrack / AA Crew
+                    if (roll100 < 35) return SoldierPersonality.LightCrew_Outrider;
+                    if (roll100 < 75) return SoldierPersonality.LightCrew_Escort;
+                    return SoldierPersonality.LightCrew_FlakWatch;
+
+                case 10: // Aircraft Pilot
+                    if (roll100 < 35) return SoldierPersonality.Pilot_Ace;
+                    if (roll100 < 70) return SoldierPersonality.Pilot_Daredevil;
+                    return SoldierPersonality.Pilot_Disciplined;
+
+                default:
+                    return SoldierPersonality.Rifleman_Regular;
+            }
+        }
+
+        private static SoldierRecord GetOrCreateRecord(Soldier s)
+        {
             IntPtr ptr = s.Pointer;
             if (!_records.TryGetValue(ptr, out SoldierRecord rec))
             {
+                string rawName = s.name_surname ?? "";
+                int bracketIdx = rawName.IndexOf(" [", StringComparison.Ordinal);
+                if (bracketIdx >= 0)
+                    rawName = rawName.Substring(0, bracketIdx);
+
+                byte roleCat = DetermineRoleCategory(s);
                 rec = new SoldierRecord
                 {
                     SpawnTime = Time.time,
                     BonusSeconds = 0f,
                     PromotedTier = 0,
                     BaseRank = s.rank,
-                    BaseName = s.name_surname ?? ""
+                    BaseName = rawName,
+                    RoleCategory = roleCat,
+                    Personality = RollPersonalityForRole(s, roleCat)
                 };
                 _records[ptr] = rec;
-                return 0f;
+            }
+            else
+            {
+                byte currentRoleCat = DetermineRoleCategory(s);
+                if (currentRoleCat != rec.RoleCategory)
+                {
+                    rec.RoleCategory = currentRoleCat;
+                    rec.Personality = RollPersonalityForRole(s, currentRoleCat);
+                    _records[ptr] = rec;
+                }
+            }
+            return rec;
+        }
+
+        public static SoldierPersonality GetPersonality(Soldier s)
+        {
+            if (s == null || s.Pointer == IntPtr.Zero || !VisionConfig.EnableMod.Value || !VisionConfig.EnableRolePersonalities.Value)
+                return SoldierPersonality.None;
+
+            SoldierRecord rec = GetOrCreateRecord(s);
+            bool isVehOrAir = rec.RoleCategory >= 8;
+            if (isVehOrAir && !VisionConfig.EnableVehicleAndPilotPersonalities.Value)
+                return SoldierPersonality.None;
+            if (!isVehOrAir && !VisionConfig.EnableInfantryPersonalities.Value)
+                return SoldierPersonality.None;
+
+            return rec.Personality;
+        }
+
+        public static SoldierPersonality GetVehicleCrewPersonality(Vehicle v)
+        {
+            if (v == null || v.Pointer == IntPtr.Zero || !VisionConfig.EnableMod.Value || !VisionConfig.EnableRolePersonalities.Value || !VisionConfig.EnableVehicleAndPilotPersonalities.Value)
+                return SoldierPersonality.None;
+
+            var seats = v.seats;
+            if (seats != null)
+            {
+                int len = seats.Length;
+                for (int i = 0; i < len; i++)
+                {
+                    Seats seat = seats[i];
+                    if (seat != null && seat.unitSet != null)
+                    {
+                        Soldier crew = seat.unitSet.TryCast<Soldier>();
+                        if (crew != null && crew.IsAlive)
+                            return GetPersonality(crew);
+                    }
+                }
             }
 
+            int roll100 = GetDeterministicHash(v.Pointer, 73) % 100;
+            if (v.TryCast<VehiclePlane>() != null)
+            {
+                if (roll100 < 35) return SoldierPersonality.Pilot_Ace;
+                if (roll100 < 70) return SoldierPersonality.Pilot_Daredevil;
+                return SoldierPersonality.Pilot_Disciplined;
+            }
+            if (v.TryCast<VehicleTank>() != null)
+            {
+                if (roll100 < 35) return SoldierPersonality.TankCrew_Brawler;
+                if (roll100 < 70) return SoldierPersonality.TankCrew_Sniper;
+                return SoldierPersonality.TankCrew_Support;
+            }
+            if (roll100 < 35) return SoldierPersonality.LightCrew_Outrider;
+            if (roll100 < 75) return SoldierPersonality.LightCrew_Escort;
+            return SoldierPersonality.LightCrew_FlakWatch;
+        }
+
+        public static string GetPersonalityTag(SoldierPersonality p)
+        {
+            switch (p)
+            {
+                case SoldierPersonality.Leader_Spearhead: return "Spearhead";
+                case SoldierPersonality.Leader_Tactician: return "Tactician";
+                case SoldierPersonality.Leader_OldGuard: return "Old Guard";
+                case SoldierPersonality.Assaulter_Shock: return "Shock";
+                case SoldierPersonality.Assaulter_Breacher: return "Breacher";
+                case SoldierPersonality.Assaulter_Skirmisher: return "Skirmisher";
+                case SoldierPersonality.Rifleman_Regular: return "Regular";
+                case SoldierPersonality.Rifleman_Cautious: return "Cautious";
+                case SoldierPersonality.Rifleman_Grenadier: return "Grenadier";
+                case SoldierPersonality.Gunner_Anchor: return "Anchor";
+                case SoldierPersonality.Gunner_AssaultMG: return "Assault MG";
+                case SoldierPersonality.Gunner_Overwatch: return "Overwatch";
+                case SoldierPersonality.Marksman_Deadeye: return "Deadeye";
+                case SoldierPersonality.Marksman_Stalker: return "Stalker";
+                case SoldierPersonality.Marksman_Spotter: return "Spotter";
+                case SoldierPersonality.AT_TankHunter: return "Tank Hunter";
+                case SoldierPersonality.AT_Ambusher: return "Ambusher";
+                case SoldierPersonality.AT_Demolitionist: return "Demo";
+                case SoldierPersonality.Medic_Heroic: return "Heroic";
+                case SoldierPersonality.Medic_Combat: return "Combat Medic";
+                case SoldierPersonality.Medic_Triage: return "Triage";
+                case SoldierPersonality.TankCrew_Brawler: return "Brawler Crew";
+                case SoldierPersonality.TankCrew_Sniper: return "Sniper Crew";
+                case SoldierPersonality.TankCrew_Support: return "Support Crew";
+                case SoldierPersonality.LightCrew_Outrider: return "Outrider";
+                case SoldierPersonality.LightCrew_Escort: return "Escort";
+                case SoldierPersonality.LightCrew_FlakWatch: return "Flak Watch";
+                case SoldierPersonality.Pilot_Ace: return "Ace";
+                case SoldierPersonality.Pilot_Daredevil: return "Daredevil";
+                case SoldierPersonality.Pilot_Disciplined: return "Disciplined";
+                default: return "";
+            }
+        }
+
+        public static string BuildSoldierBracketTag(Soldier s, bool includeVet, bool includePersonality, bool includeStarUnicode)
+        {
+            if (s == null) return "";
+            int vetTier = includeVet ? GetVeteranTier(s) : 0;
+            string vetStr = "";
+            if (vetTier == 1) vetStr = "Vet I";
+            else if (vetTier == 2) vetStr = "Vet II";
+            else if (vetTier >= 3) vetStr = includeStarUnicode ? "Vet III \u2605" : "Vet III";
+
+            string persStr = "";
+            if (includePersonality && VisionConfig.EnableRolePersonalities.Value)
+            {
+                SoldierPersonality p = GetPersonality(s);
+                if (p == SoldierPersonality.Rifleman_Cautious && VisionConfig.VeterancyCuresSkittishness.Value && vetTier >= 2)
+                    persStr = "Composed";
+                else
+                    persStr = GetPersonalityTag(p);
+            }
+
+            if (!string.IsNullOrEmpty(vetStr) && !string.IsNullOrEmpty(persStr))
+                return $" [{vetStr} \u2022 {persStr}]";
+            if (!string.IsNullOrEmpty(vetStr))
+                return $" [{vetStr}]";
+            if (!string.IsNullOrEmpty(persStr))
+                return $" [{persStr}]";
+            return "";
+        }
+
+        private static float GetEffectiveProneSuppressionThreshold(Soldier s, float vet01)
+        {
+            float threshold = 35f;
+            SoldierPersonality p = GetPersonality(s);
+            switch (p)
+            {
+                case SoldierPersonality.Assaulter_Shock:
+                    threshold = 68f;
+                    break;
+                case SoldierPersonality.AT_Demolitionist:
+                case SoldierPersonality.Gunner_Anchor:
+                    threshold = 60f;
+                    break;
+                case SoldierPersonality.Assaulter_Breacher:
+                case SoldierPersonality.Medic_Heroic:
+                case SoldierPersonality.Leader_Spearhead:
+                    threshold = 50f;
+                    break;
+                case SoldierPersonality.Assaulter_Skirmisher:
+                case SoldierPersonality.Gunner_AssaultMG:
+                    threshold = 45f;
+                    break;
+                case SoldierPersonality.Medic_Triage:
+                    threshold = 20f;
+                    break;
+                case SoldierPersonality.Rifleman_Cautious:
+                    threshold = VisionConfig.VeterancyCuresSkittishness.Value
+                        ? Mathf.Lerp(18f, 36f, vet01)
+                        : 18f;
+                    break;
+            }
+
+            // Squad Leader Spearhead Aura (+12 suppression grit when leader is alive within 22m)
+            if (s != null && s.joinedSquad != null && s.joinedSquad.Leader != null &&
+                s.joinedSquad.Leader.IsAlive && s.joinedSquad.Leader.Pointer != s.Pointer)
+            {
+                Soldier leader = s.joinedSquad.Leader;
+                if (GetPersonality(leader) == SoldierPersonality.Leader_Spearhead &&
+                    (leader.transform.position - s.transform.position).sqrMagnitude <= 22f * 22f)
+                {
+                    threshold += 12f;
+                }
+            }
+
+            return threshold;
+        }
+
+        private static void GetEffectivePeekParameters(Soldier s, float vet01, out float maxPeekSuppression, out float duckBackSuppression, out float peekCooldown)
+        {
+            maxPeekSuppression = 25f;
+            duckBackSuppression = 30f;
+            peekCooldown = 3.0f;
+
+            SoldierPersonality p = GetPersonality(s);
+            switch (p)
+            {
+                case SoldierPersonality.Assaulter_Breacher:
+                case SoldierPersonality.Assaulter_Shock:
+                case SoldierPersonality.Leader_Spearhead:
+                    maxPeekSuppression = 38f;
+                    duckBackSuppression = 45f;
+                    peekCooldown = 2.0f;
+                    break;
+                case SoldierPersonality.Rifleman_Cautious:
+                case SoldierPersonality.Medic_Triage:
+                    float cure = VisionConfig.VeterancyCuresSkittishness.Value ? vet01 : 0f;
+                    maxPeekSuppression = Mathf.Lerp(15f, 25f, cure);
+                    duckBackSuppression = Mathf.Lerp(19f, 30f, cure);
+                    peekCooldown = Mathf.Lerp(6.2f, 3.2f, cure);
+                    break;
+                case SoldierPersonality.Marksman_Stalker:
+                    peekCooldown = 4.2f;
+                    break;
+            }
+        }
+
+        public static float GetVeterancy01(Soldier s)
+        {
+            if (s == null || s.Pointer == IntPtr.Zero || !VisionConfig.EnableVeteranSystem.Value)
+                return 0f;
+
+            SoldierRecord rec = GetOrCreateRecord(s);
             float fullSeconds = Mathf.Max(60f, VisionConfig.VeteranFullMaturitySeconds.Value);
             float effectiveAlive = Mathf.Max(0f, Time.time - rec.SpawnTime) + rec.BonusSeconds;
             return Mathf.Clamp01(effectiveAlive / fullSeconds);
@@ -142,30 +528,19 @@ namespace EasyRed2HumanAI
 
         private static void CheckAndApplyFieldPromotion(Soldier s)
         {
-            if (s == null || s.Pointer == IntPtr.Zero || !VisionConfig.EnableVeteranSystem.Value)
+            if (s == null || s.Pointer == IntPtr.Zero)
                 return;
 
+            SoldierRecord rec = GetOrCreateRecord(s);
             IntPtr ptr = s.Pointer;
-            if (!_records.TryGetValue(ptr, out SoldierRecord rec))
-            {
-                rec = new SoldierRecord
-                {
-                    SpawnTime = Time.time,
-                    BonusSeconds = 0f,
-                    PromotedTier = 0,
-                    BaseRank = s.rank,
-                    BaseName = s.name_surname ?? ""
-                };
-                _records[ptr] = rec;
-            }
+            int tier = VisionConfig.EnableVeteranSystem.Value ? GetVeteranTier(s) : 0;
 
-            int tier = GetVeteranTier(s);
             if (tier > rec.PromotedTier)
             {
                 rec.PromotedTier = tier;
                 _records[ptr] = rec;
 
-                if (VisionConfig.PromoteVeteranRanks.Value)
+                if (VisionConfig.EnableVeteranSystem.Value && VisionConfig.PromoteVeteranRanks.Value)
                 {
                     Rank targetRank = s.rank;
                     if (tier == 1 && targetRank < Rank.corporal)
@@ -182,19 +557,20 @@ namespace EasyRed2HumanAI
                         FieldPromotionsCount++;
                     }
                 }
+            }
 
-                // Append Veteran tier tag to the soldier's name_surname so it naturally appears ONLY
-                // when the game displays their name (3D crosshair hover in PlayerController.OnGUI or Squad Roster)
-                if (VisionConfig.ShowVeteranSquadRosterTags.Value || VisionConfig.ShowVeteran3DIcons.Value)
-                {
-                    string baseName = string.IsNullOrEmpty(rec.BaseName) ? (s.name_surname ?? "") : rec.BaseName;
-                    int bracketIdx = baseName.IndexOf(" [Vet", StringComparison.Ordinal);
-                    if (bracketIdx >= 0)
-                        baseName = baseName.Substring(0, bracketIdx);
+            // Keep soldier's name_surname synced with their Veteran and/or Personality tag for 3D hover / UI
+            bool showVetTag = VisionConfig.EnableVeteranSystem.Value && (VisionConfig.ShowVeteranSquadRosterTags.Value || VisionConfig.ShowVeteran3DIcons.Value);
+            bool showPersTag = VisionConfig.EnableRolePersonalities.Value && VisionConfig.ShowPersonalityInSquadRoster.Value;
+            string baseName = string.IsNullOrEmpty(rec.BaseName) ? (s.name_surname ?? "") : rec.BaseName;
+            int bracketIdx = baseName.IndexOf(" [", StringComparison.Ordinal);
+            if (bracketIdx >= 0)
+                baseName = baseName.Substring(0, bracketIdx);
 
-                    string vetTag = tier == 1 ? " [Vet I]" : (tier == 2 ? " [Vet II]" : " [Vet III]");
-                    s.name_surname = baseName + vetTag;
-                }
+            string desiredName = baseName + BuildSoldierBracketTag(s, showVetTag, showPersTag, false);
+            if (s.name_surname != desiredName)
+            {
+                s.name_surname = desiredName;
             }
         }
 
@@ -622,6 +998,9 @@ namespace EasyRed2HumanAI
             pushDir = Vector3.zero;
             float minSpace = VisionConfig.MinFriendlySpacingMeters.Value;
             if (minSpace <= 0.2f) return false;
+
+            if (GetPersonality(shooter) == SoldierPersonality.Assaulter_Skirmisher)
+                minSpace *= 1.45f; // Skirmishers fan out wider laterally to flank instead of bunching up
 
             float minSpaceSq = minSpace * minSpace;
             Vector3 myPos = shooter.transform.position;
@@ -1503,7 +1882,11 @@ namespace EasyRed2HumanAI
                         IntPtr ptr = soldier.Pointer;
                         if (!_bleedCoverDeadline.TryGetValue(ptr, out float deadline))
                         {
-                            deadline = Time.time + 3.5f;
+                            SoldierPersonality bleedPers = GetPersonality(soldier);
+                            float seekWindow = (bleedPers == SoldierPersonality.Rifleman_Cautious || bleedPers == SoldierPersonality.Medic_Triage)
+                                ? 4.5f
+                                : (bleedPers == SoldierPersonality.Assaulter_Shock ? 2.2f : 3.5f);
+                            deadline = Time.time + seekWindow;
                             _bleedCoverDeadline[ptr] = deadline;
                         }
 
@@ -1562,7 +1945,11 @@ namespace EasyRed2HumanAI
 
                         if (!_bleedCoverDeadline.TryGetValue(ptr, out float deadline))
                         {
-                            deadline = Time.time + 3.5f;
+                            SoldierPersonality bleedPers = GetPersonality(soldier);
+                            float seekWindow = (bleedPers == SoldierPersonality.Rifleman_Cautious || bleedPers == SoldierPersonality.Medic_Triage)
+                                ? 4.5f
+                                : (bleedPers == SoldierPersonality.Assaulter_Shock ? 2.2f : 3.5f);
+                            deadline = Time.time + seekWindow;
                             _bleedCoverDeadline[ptr] = deadline;
                         }
 
@@ -1593,17 +1980,21 @@ namespace EasyRed2HumanAI
                     }
 
                     // 3. Auto-Peek Recovery: Duck back down after peeking if reloading, suppressed, or target lost
+                    float vet01 = GetVeterancy01(soldier);
+                    SoldierPersonality personality = GetPersonality(soldier);
+                    GetEffectivePeekParameters(soldier, vet01, out _, out float duckBackSupp, out float peekCooldown);
+
                     bool isPeeking = false;
                     if (_peekRestoreTime.TryGetValue(ptr, out float restoreAt))
                     {
                         bool shouldDuck = Time.time > restoreAt ||
                                           soldier.IsReloading ||
-                                          soldier.GetSuppressionValue() > 30f ||
+                                          soldier.GetSuppressionValue() > duckBackSupp ||
                                           !__instance.HasEnemyAndCanFireAtHim;
                         if (shouldDuck)
                         {
                             _peekRestoreTime.Remove(ptr);
-                            _nextPeekAllowedTime[ptr] = Time.time + 3.0f;
+                            _nextPeekAllowedTime[ptr] = Time.time + peekCooldown;
                             if (!__instance.IsMoving() && soldier.m_pose == SoldierPose.Idle)
                             {
                                 SetBotPose(__instance, soldier, SoldierPose.Crouch);
@@ -1614,6 +2005,40 @@ namespace EasyRed2HumanAI
                         else
                         {
                             isPeeking = true;
+                        }
+                    }
+
+                    // 3A. Role Personality Active Combat Hooks (Tactician Support, Skirmisher Strafe, Breacher/Grenadier Grenades, Ambusher AT)
+                    if (personality != SoldierPersonality.None)
+                    {
+                        if (personality == SoldierPersonality.Leader_Tactician &&
+                            SoldierAI.next_requestingSupport > Time.time + 6.0f)
+                        {
+                            SoldierAI.next_requestingSupport = Time.time + 6.0f;
+                        }
+                        else if (personality == SoldierPersonality.Assaulter_Skirmisher &&
+                                 __instance.HasEnemyAndCanFireAtHim &&
+                                 __instance.distFromTarget < 55f)
+                        {
+                            __instance.moveLookingTarget = true;
+                        }
+                        else if ((personality == SoldierPersonality.Assaulter_Breacher ||
+                                  personality == SoldierPersonality.Rifleman_Grenadier ||
+                                  personality == SoldierPersonality.AT_Demolitionist) &&
+                                 __instance.visibleTarget != null &&
+                                 !__instance.visibleTarget.IsWheeledVehicleOrTank() &&
+                                 __instance.distFromTarget >= 9.0f &&
+                                 __instance.distFromTarget <= 34.0f &&
+                                 !soldier.isInHandsAnimation &&
+                                 !soldier.IsReloading &&
+                                 soldier.inventory != null &&
+                                 Time.time > soldier.throw_end_time + 5.0f)
+                        {
+                            VirtualItem fragItem = soldier.inventory.FindItemOfType<VirtualGrenade>();
+                            if (fragItem != null && __instance.distFromTarget <= soldier.GetGrenadeThrowRange(fragItem) && UnityEngine.Random.Range(0, 100) > 60)
+                            {
+                                soldier.Throw(fragItem, __instance.visibleTarget);
+                            }
                         }
                     }
 
@@ -1798,6 +2223,8 @@ namespace EasyRed2HumanAI
                         }
                     }
 
+                    float proneSuppThreshold = GetEffectiveProneSuppressionThreshold(soldier, vet01);
+
                     if (VisionConfig.EnforceStandingWhenOutOfCombat.Value && !soldier.IsStealth)
                     {
                         // Clear any sticky default crouch/prone pose field unless stealth-following
@@ -1808,7 +2235,7 @@ namespace EasyRed2HumanAI
                         if (soldier.targetDestination != null)
                         {
                             DestinationWithoutCover noCoverDest = soldier.targetDestination.TryCast<DestinationWithoutCover>();
-                            if (noCoverDest != null && noCoverDest.pose == SoldierPose.Prone && suppression < 35f)
+                            if (noCoverDest != null && noCoverDest.pose == SoldierPose.Prone && suppression < proneSuppThreshold)
                             {
                                 noCoverDest.pose = SoldierPose.Crouch;
                             }
@@ -1923,7 +2350,7 @@ namespace EasyRed2HumanAI
                                                       !soldier.IsTowardWall();
 
                                     SoldierPose combatPose = SoldierPose.Crouch;
-                                    if ((suppression >= 35f || isGunner) &&
+                                    if ((suppression >= proneSuppThreshold || isGunner) &&
                                         canGoProne &&
                                         HasClearLineOfFireFromProne(soldier, targetPos, dist))
                                     {
@@ -2001,29 +2428,39 @@ namespace EasyRed2HumanAI
                     }
 
                     // 5. Priority 4 (Rescue & Liberate): Free nearby surrendered friendly comrades
+                    float maxLiberateSupp = (personality == SoldierPersonality.Medic_Heroic || personality == SoldierPersonality.Leader_OldGuard)
+                        ? 52f
+                        : ((personality == SoldierPersonality.Rifleman_Cautious || personality == SoldierPersonality.Medic_Triage) ? 16f : 35f);
+
                     if (VisionConfig.EnableComradeLiberation.Value &&
-                        suppression < 35f &&
+                        suppression < maxLiberateSupp &&
                         !soldier.UsingBipod() &&
-                        (!__instance.HasEnemyAndCanFireAtHim || dist > 28f))
+                        (!__instance.HasEnemyAndCanFireAtHim || dist > 28f || personality == SoldierPersonality.Medic_Heroic))
                     {
                         if (!_nextLiberateCheckTime.TryGetValue(ptr, out float nextLib) || Time.time >= nextLib)
                         {
                             _nextLiberateCheckTime[ptr] = Time.time + 1.5f;
-                            TryLiberateNearbyComrade(__instance, soldier);
+                            TryLiberateNearbyComrade(__instance, soldier, personality);
                         }
                     }
                 }
                 catch { }
             }
 
-            private static void TryLiberateNearbyComrade(SoldierAI ai, Soldier rescuer)
+            private static void TryLiberateNearbyComrade(SoldierAI ai, Soldier rescuer, SoldierPersonality personality)
             {
                 var allSquads = Squad.AllSquads;
                 if (allSquads == null) return;
 
                 string myFaction = rescuer.faction;
                 Vector3 myPos = rescuer.transform.position;
-                float bestDistSq = VisionConfig.LiberateSearchRadius.Value * VisionConfig.LiberateSearchRadius.Value;
+                float searchRadius = VisionConfig.LiberateSearchRadius.Value;
+                if (personality == SoldierPersonality.Medic_Heroic || personality == SoldierPersonality.Leader_OldGuard)
+                    searchRadius *= 1.50f;
+                else if (personality == SoldierPersonality.Rifleman_Cautious || personality == SoldierPersonality.Medic_Triage)
+                    searchRadius *= 0.60f;
+
+                float bestDistSq = searchRadius * searchRadius;
                 Soldier bestSurrendered = null;
 
                 foreach (var kvp in allSquads)
@@ -2076,14 +2513,29 @@ namespace EasyRed2HumanAI
             {
                 try
                 {
-                    if (!VisionConfig.EnableMod.Value || !VisionConfig.EnableVeteranSystem.Value || __0 == null || __result <= 0f)
+                    if (!VisionConfig.EnableMod.Value || __0 == null || __result <= 0f)
                         return;
 
                     float vet01 = GetVeterancy01(__0);
-                    if (vet01 <= 0.02f) return;
+                    float spreadMult = 1.0f;
 
-                    float maxReduction = Mathf.Clamp(VisionConfig.VeteranMaxSpreadReduction.Value, 0f, 0.40f);
-                    float spreadMult = 1.0f - (vet01 * maxReduction);
+                    if (VisionConfig.EnableVeteranSystem.Value && vet01 > 0.02f)
+                    {
+                        float maxReduction = Mathf.Clamp(VisionConfig.VeteranMaxSpreadReduction.Value, 0f, 0.40f);
+                        spreadMult *= (1.0f - (vet01 * maxReduction));
+                    }
+
+                    SoldierPersonality pers = GetPersonality(__0);
+                    if (pers == SoldierPersonality.Marksman_Deadeye && __0.m_pose >= SoldierPose.Crouch)
+                    {
+                        spreadMult *= 0.88f; // Deadeye marksman 12% tighter crouch/prone precision
+                    }
+                    else if (pers == SoldierPersonality.Rifleman_Cautious && __0.GetSuppressionValue() > 28f)
+                    {
+                        float cure = VisionConfig.VeterancyCuresSkittishness.Value ? vet01 : 0f;
+                        spreadMult *= Mathf.Lerp(1.12f, 1.00f, cure); // Rookie nerve jitter under heavy suppression, cured by Veterancy
+                    }
+
                     __result *= spreadMult;
                 }
                 catch { }
@@ -2134,7 +2586,8 @@ namespace EasyRed2HumanAI
                                               !soldier.IsOnCover() &&
                                               !soldier.IsTowardWall();
 
-                            SoldierPose targetPose = (soldier.GetSuppressionValue() >= 35f && canGoProne)
+                            float proneThresh = GetEffectiveProneSuppressionThreshold(soldier, vet01);
+                            SoldierPose targetPose = (soldier.GetSuppressionValue() >= proneThresh && canGoProne)
                                 ? SoldierPose.Prone
                                 : SoldierPose.Crouch;
 
@@ -2300,7 +2753,8 @@ namespace EasyRed2HumanAI
                                                   !soldier.IsTowardWall();
 
                                 SoldierPose fightPose = SoldierPose.Crouch;
-                                if ((curSupp >= 35f || isGunner) &&
+                                float proneThresh = GetEffectiveProneSuppressionThreshold(soldier, vet01);
+                                if ((curSupp >= proneThresh || isGunner) &&
                                     canGoProne &&
                                     HasClearLineOfFireFromProne(soldier, __0, dist))
                                 {
@@ -2347,10 +2801,11 @@ namespace EasyRed2HumanAI
                                 // - Use < 25f suppression threshold (with > 30f duck threshold in SequentialUpdate for hysteresis)
                                 // - Verify the higher stance actually has a clear line of fire over the obstacle
                                 bool canPeekNow = !_nextPeekAllowedTime.TryGetValue(ptr, out float nextPeek) || Time.time >= nextPeek;
+                                GetEffectivePeekParameters(soldier, vet01, out float maxPeekSupp, out _, out _);
                                 if (!isMoving &&
                                     canPeekNow &&
                                     VisionConfig.EnableAutoPeekOverCover.Value &&
-                                    soldier.GetSuppressionValue() < 25f &&
+                                    soldier.GetSuppressionValue() < maxPeekSupp &&
                                     !soldier.IsReloading &&
                                     !soldier.isInHandsAnimation &&
                                     !soldier.isInBodyAnimation &&
@@ -2476,35 +2931,32 @@ namespace EasyRed2HumanAI
             {
                 try
                 {
-                    if (!VisionConfig.EnableMod.Value ||
-                        !VisionConfig.EnableVeteranSystem.Value ||
-                        !VisionConfig.ShowVeteranSquadRosterTags.Value ||
-                        __instance == null)
-                    {
+                    if (!VisionConfig.EnableMod.Value || __instance == null)
                         return;
-                    }
+
+                    bool showVet = VisionConfig.EnableVeteranSystem.Value && VisionConfig.ShowVeteranSquadRosterTags.Value;
+                    bool showPers = VisionConfig.EnableRolePersonalities.Value && VisionConfig.ShowPersonalityInSquadRoster.Value;
+                    if (!showVet && !showPers)
+                        return;
 
                     Soldier s = __instance.assignedSoldier;
                     Text nameLabel = __instance.name_surname;
                     if (s == null || nameLabel == null)
                         return;
 
-                    int tier = GetVeteranTier(s);
-                    if (tier <= 0)
-                        return;
-
-                    string tag = tier == 1 ? " [Vet I]" : (tier == 2 ? " [Vet II]" : " [Vet III \u2605]");
                     string curText = nameLabel.text ?? "";
-                    if (!curText.Contains("[Vet"))
-                    {
-                        nameLabel.text = curText + tag;
-                    }
+                    int bracketIdx = curText.IndexOf(" [", StringComparison.Ordinal);
+                    string baseText = bracketIdx >= 0 ? curText.Substring(0, bracketIdx) : curText;
 
+                    string tag = BuildSoldierBracketTag(s, showVet, showPers, true);
+                    nameLabel.text = baseText + tag;
+
+                    int tier = showVet ? GetVeteranTier(s) : 0;
                     if (tier == 1)
                         nameLabel.color = new Color(0.95f, 0.82f, 0.55f, 1f); // Warm Bronze
                     else if (tier == 2)
                         nameLabel.color = new Color(0.85f, 0.95f, 1.00f, 1f); // Crisp Silver
-                    else
+                    else if (tier >= 3)
                         nameLabel.color = new Color(1.00f, 0.86f, 0.22f, 1f); // Veteran Gold
                 }
                 catch { }
@@ -2806,12 +3258,13 @@ namespace EasyRed2HumanAI
                 rankPrefix = "Pvt. ";
 
             string name = string.IsNullOrWhiteSpace(s.name_surname) ? "Unknown Soldier" : s.name_surname.Trim();
-            int vetTier = GetVeteranTier(s);
-            if (vetTier > 0 && !name.Contains("[Vet"))
-            {
-                string vetTag = vetTier == 1 ? " [Vet I]" : (vetTier == 2 ? " [Vet II]" : " [Vet III \u2605]");
-                name += vetTag;
-            }
+            int bracketIdx = name.IndexOf(" [", StringComparison.Ordinal);
+            if (bracketIdx >= 0)
+                name = name.Substring(0, bracketIdx);
+
+            bool showVet = VisionConfig.EnableVeteranSystem.Value;
+            bool showPers = VisionConfig.EnableRolePersonalities.Value && VisionConfig.ShowPersonalityOnDeathScreen.Value;
+            name += BuildSoldierBracketTag(s, showVet, showPers, true);
             return rankPrefix + name;
         }
 
@@ -3134,6 +3587,93 @@ namespace EasyRed2HumanAI
                     ActiveDeathAttributionStartTime = Time.unscaledTime;
                     ActiveDeathAttributionExpireTime = Time.unscaledTime + 8.5f;
                     ActiveDeathAttributionVictimPtr = __0.Pointer;
+                }
+                catch { }
+            }
+        }
+
+        // =====================================================================
+        // PATCH 15 & 16: Vehicle & Aircraft Role Personalities (TurretAI & AIPlane)
+        // =====================================================================
+        [HarmonyPatch(typeof(TurretAI), nameof(TurretAI.RefreshTargets))]
+        public static class TurretAI_RefreshTargets_Patch
+        {
+            public static void Postfix(TurretAI __instance)
+            {
+                try
+                {
+                    if (!VisionConfig.EnableMod.Value ||
+                        !VisionConfig.EnableRolePersonalities.Value ||
+                        !VisionConfig.EnableVehicleAndPilotPersonalities.Value ||
+                        __instance == null ||
+                        __instance.turret == null)
+                    {
+                        return;
+                    }
+
+                    Vehicle veh = __instance.turret.GetComponentInParent<Vehicle>();
+                    if (veh == null) return;
+
+                    SoldierPersonality crewPers = GetVehicleCrewPersonality(veh);
+                    if (crewPers == SoldierPersonality.TankCrew_Brawler || crewPers == SoldierPersonality.LightCrew_Outrider)
+                    {
+                        // Brawler / Outrider crews acquire and switch targets 20% faster at close-mid range
+                        float remaining = __instance.nextRefreshTime - Time.time;
+                        if (remaining > 0.25f)
+                        {
+                            __instance.nextRefreshTime = Time.time + remaining * 0.80f;
+                        }
+                    }
+                    else if (crewPers == SoldierPersonality.TankCrew_Support && __instance.HasRadioSupportRequest)
+                    {
+                        // Infantry Support crews respond more rapidly to friendly squad radio requests
+                        float remaining = __instance.nextRefreshTime - Time.time;
+                        if (remaining > 0.20f)
+                        {
+                            __instance.nextRefreshTime = Time.time + remaining * 0.75f;
+                        }
+                    }
+                }
+                catch { }
+            }
+        }
+
+        [HarmonyPatch(typeof(AIPlane), nameof(AIPlane.Update))]
+        public static class AIPlane_Update_Patch
+        {
+            public static void Prefix(AIPlane __instance)
+            {
+                try
+                {
+                    if (!VisionConfig.EnableMod.Value ||
+                        !VisionConfig.EnableRolePersonalities.Value ||
+                        !VisionConfig.EnableVehicleAndPilotPersonalities.Value ||
+                        __instance == null ||
+                        __instance.veh == null)
+                    {
+                        return;
+                    }
+
+                    SoldierPersonality pilotPers = GetVehicleCrewPersonality(__instance.veh);
+                    if (pilotPers == SoldierPersonality.Pilot_Ace)
+                    {
+                        // Ace Dogfighter: faster target re-evaluation when hunting enemy aircraft
+                        float rem = __instance.nextUpdateCheck - Time.time;
+                        if (rem > 0.20f)
+                            __instance.nextUpdateCheck = Time.time + rem * 0.78f;
+                    }
+                    else if (pilotPers == SoldierPersonality.Pilot_Daredevil)
+                    {
+                        // Daredevil CAS: commits slightly longer on dive bombing runs before pulling up
+                        if (__instance.exitDiveEndTime > Time.time && __instance.exitDiveEndTime < Time.time + 1.2f)
+                            __instance.exitDiveEndTime += 0.15f;
+                    }
+                    else if (pilotPers == SoldierPersonality.Pilot_Disciplined)
+                    {
+                        // Disciplined Bomber: pulls out of dives slightly earlier for safer high-altitude release
+                        if (__instance.exitDiveEndTime > Time.time + 0.5f)
+                            __instance.exitDiveEndTime -= 0.12f;
+                    }
                 }
                 catch { }
             }
