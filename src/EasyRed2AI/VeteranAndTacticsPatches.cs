@@ -2752,7 +2752,7 @@ namespace EasyRed2HumanAI
         [HarmonyPatch(typeof(Squad), nameof(Squad.GetCoveredPositionInArea))]
         public static class Squad_GetCoveredPositionInArea_Patch
         {
-            public static void Prefix(Squad __instance, Vector3 __0)
+            public static void Prefix(Squad __instance)
             {
                 try
                 {
@@ -2763,7 +2763,10 @@ namespace EasyRed2HumanAI
                         return;
                     }
 
-                    Vector3 threatDir = GetEffectiveThreatDirection(__instance.Leader, __instance, __0, __instance.formationDirection);
+                    Vector3 refPos = (__instance.Leader != null && __instance.Leader.transform != null)
+                        ? __instance.Leader.transform.position
+                        : Vector3.zero;
+                    Vector3 threatDir = GetEffectiveThreatDirection(__instance.Leader, __instance, refPos, __instance.formationDirection);
                     if (threatDir.sqrMagnitude > 0.01f)
                     {
                         __instance.formationDirection = threatDir;

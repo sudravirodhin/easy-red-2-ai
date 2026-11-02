@@ -8,6 +8,37 @@ A comprehensive **BepInEx 6 (IL2CPP)** AI and fairness overhaul for **Easy Red 2
 
 ---
 
+## Compatibility & Tested Version
+
+| Property | Details |
+| :--- | :--- |
+| **Target Branch** | Steam `public` (Default Branch) |
+| **Confirmed Game Version** | **Easy Red 2 — Game Build `921`** (Steam Build ID `26375879`, Unity `2022.3.62f3` IL2CPP x64) |
+| **Mod Loader** | **[BepInEx 6 Bleeding Edge (`BepInEx-Unity.IL2CPP-win-x64`, build `#791`+)](https://builds.bepinex.dev/projects/bepinex_be)** |
+| **Last Confirmed Test Date** | **November 2, 2026** (`2026-11-02`) |
+
+---
+
+## Installation (Two Release Options)
+
+Download your preferred package from the **[Releases](https://github.com/sudravirodhin/easy-red-2-ai/releases)** page:
+
+### Option A: With BepInEx Included (`EasyRed2HumanAI-v0.2.8-with-BepInEx.zip`) — *Recommended for Fresh Installs*
+Includes **[BepInEx 6.0.0-be.791 (Unity.IL2CPP-win-x64)](https://builds.bepinex.dev/projects/bepinex_be)**, the `.NET 6` runtime, Unity `2022.3.62` base libraries, pre-generated IL2CPP `interop` assemblies for Easy Red 2 Build `921`, and `EasyRed2HumanAI.dll` (with no other third-party mods).
+1. Open your **Easy Red 2** installation folder (e.g. `Steam\steamapps\common\Easy Red 2`, where `Easy Red 2.exe` is located).
+2. Extract all contents of `EasyRed2HumanAI-v0.2.8-with-BepInEx.zip` directly into the `Easy Red 2` folder.
+3. Launch the game!
+
+### Option B: Without BepInEx / Plugin Only (`EasyRed2HumanAI-v0.2.8-PluginOnly.zip` or `EasyRed2HumanAI.dll`)
+For users who already have **[BepInEx 6 Bleeding Edge (`BepInEx-Unity.IL2CPP-win-x64`)](https://builds.bepinex.dev/projects/bepinex_be)** installed:
+1. Download `EasyRed2HumanAI-v0.2.8-PluginOnly.zip` (or `EasyRed2HumanAI.dll` directly).
+2. Place `EasyRed2HumanAI.dll` into:
+   ```text
+   Easy Red 2\BepInEx\plugins\EasyRed2HumanAI.dll
+   ```
+
+---
+
 ## Key Improvements Over Vanilla
 
 ### 1. Humanized Vision, Stance Stealth & FOV Cones ([`VisionPatches.cs`](src/EasyRed2AI/VisionPatches.cs))
@@ -85,16 +116,6 @@ Eliminates *"what killed me?"* guesswork when you go down by displaying a detail
 * **Friendly Fire & Self-Inflicted Tags**: Clearly highlights `[FRIENDLY FIRE]` in coral red if killed by an allied soldier/vehicle/artillery, or `[SELF-INFLICTED]` in amber if killed by your own explosive.
 * **What Was Used**: Localized weapon name (e.g., `Karabiner 98k`, `M1 Garand`, `MG 42`), thrown grenade (`Stielhandgranate 24`, `Mk 2 Grenade`), vehicle/tank (`Pz.Kpfw. IV Ausf. H`), or `Artillery / Mortar Barrage`.
 * **Hit Location, Bleed-Out & Distance**: Shows the exact impact zone (`Headshot`, `Headshot (Helmet)`, `Torso`, `Arm`, `Leg`, `Shrapnel`, `Explosion`), distinguishes instant kills (`Killed by...`) from delayed bleed-out deaths (`Bled out from wounds by...`), and reports the exact distance in meters (`[Headshot • 114m]`).
-
----
-
-## Installation
-
-1. Install **[BepInEx 6 Bleeding Edge (Unity IL2CPP win-x64)](https://builds.bepinex.dev/projects/bepinex_be)** into your `Easy Red 2` game directory and launch the game once so BepInEx generates its `interop` assemblies.
-2. Download `EasyRed2HumanAI.dll` from the **[Releases](../../releases)** page (or build it from source) and place it in:
-   ```text
-   Easy Red 2\BepInEx\plugins\EasyRed2HumanAI.dll
-   ```
 
 ---
 
