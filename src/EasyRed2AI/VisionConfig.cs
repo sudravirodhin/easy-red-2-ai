@@ -61,6 +61,7 @@ namespace EasyRed2HumanAI
         public static ConfigEntry<float> LiberateSearchRadius;
         public static ConfigEntry<bool> EnableSmartTankCrewRepair;
         public static ConfigEntry<bool> EnableSmartWallSideCover;
+        public static ConfigEntry<bool> EnableThreatSectorConcentration;
         public static ConfigEntry<bool> PreventSmallArmsFireAtTanks;
 
         // 7. Phase 3: Role-Based AI Personalities (3 Archetypes per Infantry & Vehicle Role)
@@ -348,6 +349,12 @@ namespace EasyRed2HumanAI
                 "EnableSmartWallSideCover",
                 true,
                 "Ensure defenders and squads stand BEHIND walls/cover (with the wall between the soldier and incoming fire) rather than standing on the exposed front side with the wall at their back, and keep stationary cover/objective defenders crouched.");
+
+            EnableThreatSectorConcentration = config.Bind(
+                "6. Tactical Self-Preservation & Muzzle Discipline",
+                "EnableThreatSectorConcentration",
+                true,
+                "Stationary defenders and overwatch troops orient their gaze toward known enemy contact sectors (spotted/loud/aware squads) and spot targets along their watched sector faster, while leaving quiet unspotted flanks open to flanking maneuvers.");
 
             PreventSmallArmsFireAtTanks = config.Bind(
                 "6. Tactical Self-Preservation & Muzzle Discipline",

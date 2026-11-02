@@ -47,6 +47,25 @@ namespace EasyRed2HumanAI
             _lastFiredTime[s.Pointer] = Time.time;
         }
 
+        public static bool HasFiredRecently(Soldier s, float windowSeconds = 4.5f)
+        {
+            if (s == null || s.Pointer == IntPtr.Zero)
+                return false;
+
+            if (s.pressTriggerRequest)
+            {
+                _lastFiredTime[s.Pointer] = Time.time;
+                return true;
+            }
+
+            if (_lastFiredTime.TryGetValue(s.Pointer, out float firedAt))
+            {
+                float elapsed = Time.time - firedAt;
+                return elapsed >= 0f && elapsed <= windowSeconds;
+            }
+            return false;
+        }
+
         public static float GetFiringVisibilityBonus(Soldier s)
         {
             if (s == null || s.Pointer == IntPtr.Zero) return 0f;
@@ -227,11 +246,30 @@ namespace EasyRed2HumanAI
                     }
 
                     // Enforce Human FOV Cones (even when alerted or suppressed)
+                    bool isStationaryOverwatch = VisionConfig.EnableThreatSectorConcentration.Value &&
+                                                 !observer.IsPlayer() &&
+                                                 !observer.IsOnVehicle() &&
+                                                 observer.aiController != null &&
+                                                 !observer.aiController.IsMoving();
+                    bool hasActiveThreatSector = isStationaryOverwatch &&
+                                                 VeteranAndTacticsPatches.HasActiveThreatSectorContact(observer);
+                    Soldier targetSoldier = __0.TryCast<Soldier>();
+                    bool isQuietFlanker = targetSoldier != null &&
+                                          !targetSoldier.IsSpotted &&
+                                          !HasFiredRecently(targetSoldier, 4.0f);
+
                     if (VisionConfig.EnforceHumanFOVWhenAlerted.Value && dist > VisionConfig.CloseOmnidirectionalRange.Value)
                     {
                         float allowedHalfFOV = dist <= VisionConfig.MidRangeMaxDistance.Value
                             ? VisionConfig.MidRangeHalfFOV.Value
                             : VisionConfig.LongRangeHalfFOV.Value;
+
+                        // When a stationary defender is actively concentrated on a known threat sector,
+                        // their peripheral FOV narrows against quiet, unspotted flankers!
+                        if (hasActiveThreatSector && isQuietFlanker)
+                        {
+                            allowedHalfFOV = Mathf.Min(allowedHalfFOV, 60f);
+                        }
 
                         if (angle > allowedHalfFOV)
                         {
@@ -243,7 +281,8 @@ namespace EasyRed2HumanAI
 
                     // Apply scope magnification only if target is within the narrower optic cone
                     float allowedOpticHalfFOV = VisionConfig.OpticLongRangeHalfFOV.Value;
-                    if (VeteranAndTacticsPatches.GetPersonality(observer) == VeteranAndTacticsPatches.SoldierPersonality.Marksman_Spotter)
+                    VeteranAndTacticsPatches.SoldierPersonality observerPers = VeteranAndTacticsPatches.GetPersonality(observer);
+                    if (observerPers == VeteranAndTacticsPatches.SoldierPersonality.Marksman_Spotter)
                     {
                         allowedOpticHalfFOV += 5.0f; // Counter-Sniper / Spotter has a wider scoped scan cone
                     }
@@ -252,6 +291,25 @@ namespace EasyRed2HumanAI
                     {
                         _currentObserverOpticMultiplier = opticZoom;
                         BoostedByScope++;
+                    }
+
+                    // Stationary Threat-Sector Overwatch:
+                    // - 1.20x (or 1.28x for Overwatch MG / Spotter) spotting range bonus within central 28-deg watched sector
+                    // - 0.72x peripheral spotting range against quiet flankers outside 38-deg cone when focused on an active threat
+                    if (isStationaryOverwatch)
+                    {
+                        if (angle <= 28f)
+                        {
+                            float focusMult = (observerPers == VeteranAndTacticsPatches.SoldierPersonality.Gunner_Overwatch ||
+                                               observerPers == VeteranAndTacticsPatches.SoldierPersonality.Marksman_Spotter)
+                                ? 1.28f
+                                : 1.20f;
+                            _currentObserverOpticMultiplier = Mathf.Max(_currentObserverOpticMultiplier, focusMult);
+                        }
+                        else if (hasActiveThreatSector && isQuietFlanker && angle > 38f)
+                        {
+                            _currentObserverOpticMultiplier *= 0.72f;
+                        }
                     }
 
                     // If target is a land vehicle/tank, respect VehicleCamoDistance scaled by optic zoom
@@ -605,7 +663,7 @@ namespace EasyRed2HumanAI
             private static void DrawConfigMenu()
             {
                 float panelW = 760f;
-                float panelH = 540f;
+                float panelH = 566f;
                 float panelX = (Screen.width - panelW) * 0.5f;
                 float panelY = (Screen.height - panelH) * 0.5f;
 
@@ -632,6 +690,7 @@ namespace EasyRed2HumanAI
                 DrawToggleButton(colLeftX, ref yL, colW, rowH, "Master Mod Toggle (F8)", VisionConfig.EnableMod);
                 DrawToggleButton(colLeftX, ref yL, colW, rowH, "Preserve Stance Stealth in Combat", VisionConfig.PreserveStanceStealthInCombat);
                 DrawToggleButton(colLeftX, ref yL, colW, rowH, "Enforce Human FOV Cones", VisionConfig.EnforceHumanFOVWhenAlerted);
+                DrawToggleButton(colLeftX, ref yL, colW, rowH, "Threat-Sector Gaze & Flanking", VisionConfig.EnableThreatSectorConcentration);
                 DrawToggleButton(colLeftX, ref yL, colW, rowH, "Scope & Turret Optic Scaling", VisionConfig.EnableScopeVisionScaling);
                 DrawToggleButton(colLeftX, ref yL, colW, rowH, "Limit Aircraft Infantry Spotting", VisionConfig.LimitAircraftInfantrySpotting);
 

@@ -101,6 +101,16 @@ namespace EasyRed2HumanAI
 
         private static readonly Dictionary<IntPtr, VehicleAimCache> _vehicleAimCache = new Dictionary<IntPtr, VehicleAimCache>(128);
 
+        private struct ThreatSectorCache
+        {
+            public float ExpireTime;
+            public Vector3 WatchDir;
+            public bool HasActiveContact;
+        }
+
+        private static readonly Dictionary<IntPtr, ThreatSectorCache> _threatSectorCache = new Dictionary<IntPtr, ThreatSectorCache>(256);
+        private static readonly HashSet<IntPtr> _isTurningToWatchSector = new HashSet<IntPtr>();
+
         internal struct DamageAttribution
         {
             public string AttackerName;
@@ -144,6 +154,7 @@ namespace EasyRed2HumanAI
         public static int ComradesLiberated;
         public static int ShelteredRepairsCount;
         public static int WallSideRepositionsCount;
+        public static int ThreatSectorOrientationsCount;
         public static int UselessTankFirePrevented;
         public static int ExposedCrewTargeted;
 
@@ -822,7 +833,22 @@ namespace EasyRed2HumanAI
             PruneDict(_nextTankDisciplineCountTime, alivePtrs);
             PruneDict(_poseLockUntil, alivePtrs);
             PruneDict(_vehicleAimCache, alivePtrs);
+            PruneDict(_threatSectorCache, alivePtrs);
             PruneDict(_lastDamageByVictim, alivePtrs);
+
+            if (_isTurningToWatchSector.Count > 0)
+            {
+                var deadTurns = new List<IntPtr>();
+                foreach (var k in _isTurningToWatchSector)
+                {
+                    if (!alivePtrs.Contains(k))
+                        deadTurns.Add(k);
+                }
+                for (int i = 0; i < deadTurns.Count; i++)
+                {
+                    _isTurningToWatchSector.Remove(deadTurns[i]);
+                }
+            }
 
             if (_repairTaskStartTime.Count > 0)
             {
@@ -1372,6 +1398,320 @@ namespace EasyRed2HumanAI
         }
 
         // =====================================================================
+        // Helper: Threat-Sector Gaze Concentration & Flanking Blind-Spots
+        // - Stationary defenders concentrate on directions of KNOWN enemy squads
+        //   (squadmate targets, IsEnemyAwareOfThisSquad, spotted/marked, or firing within 4.5s)
+        // - Unspotted, non-firing flanking squads are ignored so flanking maneuvers are rewarded!
+        // =====================================================================
+        public static bool HasActiveThreatSectorContact(Soldier soldier)
+        {
+            if (soldier == null || soldier.Pointer == IntPtr.Zero)
+                return false;
+
+            if (_threatSectorCache.TryGetValue(soldier.Pointer, out ThreatSectorCache cached) && Time.time < cached.ExpireTime)
+                return cached.HasActiveContact;
+
+            TryGetKnownThreatSectorDirection(soldier, out _, out bool hasActive);
+            return hasActive;
+        }
+
+        private static Vector3 PickClearWatchDirection(Soldier soldier, Vector3 myPos, Vector3 baseDir, float maxFanDeg)
+        {
+            baseDir.y = 0f;
+            if (baseDir.sqrMagnitude < 0.001f)
+                return Vector3.zero;
+            baseDir.Normalize();
+
+            int h = GetDeterministicHash(soldier.Pointer, 97);
+            float t = ((h % 1001) / 500.0f) - 1.0f; // -1.0 .. +1.0
+            float fanAngle = t * maxFanDeg;
+            Vector3 fannedDir = Quaternion.Euler(0f, fanAngle, 0f) * baseDir;
+
+            Transform root = soldier.transform.root;
+            Vector3 eyeCheckOrigin = myPos + Vector3.up * 1.15f;
+
+            // If the fanned direction doesn't stare directly into a nearby wall/doorframe within 1.55m, use it
+            if (!IsDirectionBlockedByEnvironment(eyeCheckOrigin, fannedDir, 1.55f, root))
+                return fannedDir;
+
+            // Otherwise try un-fanned baseDir, then +24 deg / -24 deg corner-peek offsets
+            if (!IsDirectionBlockedByEnvironment(eyeCheckOrigin, baseDir, 1.55f, root))
+                return baseDir;
+
+            Vector3 leftPeek = Quaternion.Euler(0f, -24f, 0f) * baseDir;
+            if (!IsDirectionBlockedByEnvironment(eyeCheckOrigin, leftPeek, 1.55f, root))
+                return leftPeek;
+
+            Vector3 rightPeek = Quaternion.Euler(0f, 24f, 0f) * baseDir;
+            if (!IsDirectionBlockedByEnvironment(eyeCheckOrigin, rightPeek, 1.55f, root))
+                return rightPeek;
+
+            return fannedDir;
+        }
+
+        private static void InsertClosestContact(
+            Vector3 dir,
+            float distSq,
+            ref int count,
+            ref Vector3 c0, ref float d0,
+            ref Vector3 c1, ref float d1,
+            ref Vector3 c2, ref float d2,
+            ref Vector3 c3, ref float d3)
+        {
+            dir.y = 0f;
+            if (dir.sqrMagnitude < 0.25f)
+                return;
+            Vector3 norm = dir.normalized;
+
+            // Deduplicate contacts within ~18 degrees of an existing closer contact
+            if (count > 0 && Vector3.Dot(norm, c0) > 0.95f)
+            {
+                if (distSq < d0) { c0 = norm; d0 = distSq; }
+                return;
+            }
+            if (count > 1 && Vector3.Dot(norm, c1) > 0.95f)
+            {
+                if (distSq < d1) { c1 = norm; d1 = distSq; }
+                return;
+            }
+            if (count > 2 && Vector3.Dot(norm, c2) > 0.95f)
+            {
+                if (distSq < d2) { c2 = norm; d2 = distSq; }
+                return;
+            }
+            if (count > 3 && Vector3.Dot(norm, c3) > 0.95f)
+            {
+                if (distSq < d3) { c3 = norm; d3 = distSq; }
+                return;
+            }
+
+            if (count == 0 || distSq < d0)
+            {
+                c3 = c2; d3 = d2;
+                c2 = c1; d2 = d1;
+                c1 = c0; d1 = d0;
+                c0 = norm; d0 = distSq;
+                if (count < 4) count++;
+            }
+            else if (count == 1 || distSq < d1)
+            {
+                c3 = c2; d3 = d2;
+                c2 = c1; d2 = d1;
+                c1 = norm; d1 = distSq;
+                if (count < 4) count++;
+            }
+            else if (count == 2 || distSq < d2)
+            {
+                c3 = c2; d3 = d2;
+                c2 = norm; d2 = distSq;
+                if (count < 4) count++;
+            }
+            else if (count == 3 || distSq < d3)
+            {
+                c3 = norm; d3 = distSq;
+                if (count < 4) count++;
+            }
+        }
+
+        private static bool TryGetKnownThreatSectorDirection(Soldier soldier, out Vector3 watchDir, out bool hasActiveContact)
+        {
+            watchDir = Vector3.zero;
+            hasActiveContact = false;
+            if (soldier == null || soldier.Pointer == IntPtr.Zero || soldier.transform == null)
+                return false;
+
+            IntPtr ptr = soldier.Pointer;
+            if (_threatSectorCache.TryGetValue(ptr, out ThreatSectorCache cached) && Time.time < cached.ExpireTime)
+            {
+                watchDir = cached.WatchDir;
+                hasActiveContact = cached.HasActiveContact;
+                return watchDir.sqrMagnitude > 0.01f;
+            }
+
+            Vector3 myPos = soldier.transform.position;
+            string myFaction = soldier.faction;
+            Squad mySquad = soldier.joinedSquad;
+            MissionObjective myObj = (mySquad != null && mySquad.currentTask != null)
+                ? mySquad.currentTask.TryCast<MissionObjective>()
+                : null;
+
+            int contactCount = 0;
+            Vector3 c0 = Vector3.zero, c1 = Vector3.zero, c2 = Vector3.zero, c3 = Vector3.zero;
+            float d0 = float.MaxValue, d1 = float.MaxValue, d2 = float.MaxValue, d3 = float.MaxValue;
+
+            // 1. Highest priority: Enemies currently seen by any member of our own squad
+            if (mySquad != null && mySquad.units != null)
+            {
+                var units = mySquad.units;
+                int uCount = units.Count;
+                for (int i = 0; i < uCount; i++)
+                {
+                    Soldier mate = units[i];
+                    if (mate == null || !mate.IsAlive || mate.aiController == null) continue;
+                    Spottable mateTarget = mate.aiController.visibleTarget;
+                    if (mateTarget == null || mateTarget.IsAirVehicle()) continue;
+
+                    Vector3 toEnemy = mateTarget.GetCenterOfUnit() - myPos;
+                    toEnemy.y = 0f;
+                    float dSq = toEnemy.sqrMagnitude;
+                    if (dSq > 0.25f)
+                    {
+                        // Weight active squadmate targets slightly closer so our squad prioritizes its immediate fight
+                        InsertClosestContact(toEnemy, dSq * 0.55f, ref contactCount, ref c0, ref d0, ref c1, ref d1, ref c2, ref d2, ref c3, ref d3);
+                    }
+                }
+            }
+
+            // 2. Known / Spotted / Recently-Firing Enemy Squads within 175m
+            //    CRITICAL FLANKING RULE: Quiet, unspotted enemy squads (!IsEnemyAwareOfThisSquad, !isMarked, !HasFiredRecently)
+            //    are completely ignored so defenders concentrate on known contacts and leave quiet flanks open!
+            var allSquads = Squad.AllSquads;
+            if (allSquads != null)
+            {
+                foreach (var kvp in allSquads)
+                {
+                    Squad sq = kvp.Value;
+                    if (sq == null || sq == mySquad || sq.units == null) continue;
+
+                    Soldier enemyRef = sq.Leader;
+                    if (enemyRef == null || !enemyRef.IsAlive)
+                    {
+                        var units = sq.units;
+                        int uCount = units.Count;
+                        for (int i = 0; i < uCount; i++)
+                        {
+                            Soldier u = units[i];
+                            if (u != null && u.IsAlive)
+                            {
+                                enemyRef = u;
+                                break;
+                            }
+                        }
+                    }
+
+                    if (enemyRef == null || enemyRef.faction == myFaction)
+                        continue;
+
+                    if (enemyRef.IsOnVehicle())
+                    {
+                        Vehicle v = enemyRef.GetCurrentVehicle();
+                        if (v != null && v.TryCast<VehiclePlane>() != null)
+                            continue;
+                    }
+
+                    Vector3 toSquad = enemyRef.transform.position - myPos;
+                    toSquad.y = 0f;
+                    float dSq = toSquad.sqrMagnitude;
+                    if (dSq > 175f * 175f || dSq < 0.25f)
+                        continue;
+
+                    bool isKnownContact = sq.IsEnemyAwareOfThisSquad ||
+                                          sq.isMarked ||
+                                          sq.isHalfMarked ||
+                                          sq.isMarkedPinPoint ||
+                                          enemyRef.IsSpotted;
+
+                    Vector3 contactVector = toSquad;
+
+                    if (!isKnownContact && dSq <= 150f * 150f)
+                    {
+                        var units = sq.units;
+                        int uCount = units.Count;
+                        for (int i = 0; i < uCount; i++)
+                        {
+                            Soldier u = units[i];
+                            if (u == null || !u.IsAlive) continue;
+                            if (u.IsSpotted || VisionPatches.HasFiredRecently(u, 4.5f))
+                            {
+                                isKnownContact = true;
+                                contactVector = u.transform.position - myPos;
+                                contactVector.y = 0f;
+                                dSq = contactVector.sqrMagnitude;
+                                break;
+                            }
+                        }
+                    }
+
+                    if (!isKnownContact && myObj != null && dSq <= 55f * 55f)
+                    {
+                        if (enemyRef.PositionIsInsideValidConquerZone(enemyRef.transform.position, myObj))
+                        {
+                            isKnownContact = true;
+                        }
+                    }
+
+                    if (isKnownContact)
+                    {
+                        InsertClosestContact(contactVector, dSq, ref contactCount, ref c0, ref d0, ref c1, ref d1, ref c2, ref d2, ref c3, ref d3);
+                    }
+                }
+            }
+
+            // 3. Check the Human Player if on the enemy team and within 175m (ONLY if spotted, firing recently, or in a known squad!)
+            Soldier player = Soldier.CurrentControlledSoldierOrNull();
+            if (player != null && player.IsAlive && player.faction != myFaction)
+            {
+                Vector3 toPlayer = player.transform.position - myPos;
+                toPlayer.y = 0f;
+                float pDistSq = toPlayer.sqrMagnitude;
+                if (pDistSq <= 175f * 175f && pDistSq > 0.25f)
+                {
+                    bool playerIsKnown = player.IsSpotted ||
+                                         VisionPatches.HasFiredRecently(player, 4.5f) ||
+                                         (player.joinedSquad != null &&
+                                          (player.joinedSquad.IsEnemyAwareOfThisSquad ||
+                                           player.joinedSquad.isMarked ||
+                                           player.joinedSquad.isHalfMarked ||
+                                           player.joinedSquad.isMarkedPinPoint));
+
+                    if (playerIsKnown)
+                    {
+                        InsertClosestContact(toPlayer, pDistSq, ref contactCount, ref c0, ref d0, ref c1, ref d1, ref c2, ref d2, ref c3, ref d3);
+                    }
+                }
+            }
+
+            if (contactCount > 0)
+            {
+                hasActiveContact = true;
+
+                // Deterministically assign each squad member to one of the active known contacts
+                // so a squad divides its attention across multiple known threats without averaging
+                // two separate directions into empty space between them!
+                int pickIdx = GetDeterministicHash(ptr, 41) % contactCount;
+                Vector3 chosenBase = pickIdx == 0 ? c0 : (pickIdx == 1 ? c1 : (pickIdx == 2 ? c2 : c3));
+                float maxFan = (soldier.hasMg || soldier.isMarksMan) ? 8f : 14f;
+                watchDir = PickClearWatchDirection(soldier, myPos, chosenBase, maxFan);
+            }
+            else
+            {
+                // Pre-contact fallback: no enemy squads are currently spotted/aware/loud nearby,
+                // so orient toward the general enemy approach vector with a wider 24-deg overwatch fan
+                hasActiveContact = false;
+                BattleManager bm = BattleManager.instance;
+                BattlePhase phase = bm != null ? bm.currentPhase : null;
+                if (phase != null && !string.IsNullOrEmpty(myFaction) && phase.EnemyFactionHasSpawn(myFaction))
+                {
+                    Vector3 toEnemySpawn = phase.GetOppositeFactionTerritoryPosition(myFaction) - myPos;
+                    toEnemySpawn.y = 0f;
+                    if (toEnemySpawn.sqrMagnitude > 1.0f)
+                    {
+                        watchDir = PickClearWatchDirection(soldier, myPos, toEnemySpawn, 24f);
+                    }
+                }
+            }
+
+            _threatSectorCache[ptr] = new ThreatSectorCache
+            {
+                ExpireTime = Time.time + 0.60f,
+                WatchDir = watchDir,
+                HasActiveContact = hasActiveContact
+            };
+
+            return watchDir.sqrMagnitude > 0.01f;
+        }
+
+        // =====================================================================
         // Helper: Smart Wall-Side Cover & Threat Direction (Stand BEHIND Walls)
         // =====================================================================
         private static Vector3 GetEffectiveThreatDirection(Soldier soldier, Squad squad, Vector3 referencePos, Vector3 fallbackDir)
@@ -1413,6 +1753,16 @@ namespace EasyRed2HumanAI
 
                 if (bestToEnemy.sqrMagnitude > 0.25f)
                     return bestToEnemy.normalized;
+            }
+
+            // 2B. Known threat sector (aware/spotted/loud enemy squads within 175m, ignoring quiet flankers)
+            if (VisionConfig.EnableThreatSectorConcentration.Value &&
+                soldier != null &&
+                TryGetKnownThreatSectorDirection(soldier, out Vector3 sectorDir, out bool hasActiveContact) &&
+                hasActiveContact &&
+                sectorDir.sqrMagnitude > 0.01f)
+            {
+                return sectorDir;
             }
 
             // 3. Opposite faction territory / spawn direction from BattleManager.instance.currentPhase
@@ -1928,16 +2278,42 @@ namespace EasyRed2HumanAI
                 __state = false;
                 try
                 {
-                    if (!VisionConfig.EnableMod.Value || !VisionConfig.BandageOnlyAfterFindingCover.Value || __instance == null)
+                    if (!VisionConfig.EnableMod.Value || __instance == null)
                         return;
 
                     Soldier soldier = __instance.character;
                     if (soldier == null || !soldier.IsAlive || soldier.IsPlayer() || soldier.IsOnVehicle())
                         return;
 
-                    // If bleeding and actively moving toward a destination/cover, give up to 3.5s to reach cover
-                    // before stopping to bandage, without overwriting the squad's destination!
-                    if (soldier.isBleeding || soldier.GetBleedValue() > 0.01f)
+                    // 1. Threat-Sector Alert Propagation & Faster Target Lock-On:
+                    //    In vanilla Soldier.GetBestVisibleEnemy (0x18074B4A8 - 0x18074B4C6), spotting an enemy > 30m
+                    //    calls SetAlertedFor(20f) and then forces a full 2.5-second freeze (Time.time - alertStartTime <= 2.5f)
+                    //    before GetBestVisibleEnemy will return any target!
+                    //    When a soldier's squad is aware of an attacking squad (hasActiveContact) or already in combat,
+                    //    pre-alert the soldier and shorten that 2.5s reaction freeze to 0.55s (Rookie) -> 0.15s (Veteran)!
+                    if (VisionConfig.EnableThreatSectorConcentration.Value)
+                    {
+                        TryGetKnownThreatSectorDirection(soldier, out _, out bool hasActiveContact);
+                        bool isSquadAware = soldier.joinedSquad != null && soldier.joinedSquad.IsEnemyAwareOfThisSquad;
+                        if (hasActiveContact || isSquadAware || soldier.isAlerted || soldier.GetSuppressionValue() >= 3f)
+                        {
+                            soldier.SetAlertedFor(20f);
+                            float vet01 = GetVeterancy01(soldier);
+                            float minAlertElapsed = (!__instance.IsMoving() && hasActiveContact)
+                                ? Mathf.Lerp(1.95f, 2.35f, vet01)  // 0.55s -> 0.15s lock-on delay for stationary overwatch
+                                : Mathf.Lerp(1.65f, 2.15f, vet01); // 0.85s -> 0.35s lock-on delay when moving/alerted
+                            float maxStartTime = Time.time - minAlertElapsed;
+                            if (soldier.alertStartTime > maxStartTime)
+                            {
+                                soldier.alertStartTime = maxStartTime;
+                            }
+                        }
+                    }
+
+                    // 2. If bleeding and actively moving toward a destination/cover, give up to 3.5s to reach cover
+                    //    before stopping to bandage, without overwriting the squad's destination!
+                    if (VisionConfig.BandageOnlyAfterFindingCover.Value &&
+                        (soldier.isBleeding || soldier.GetBleedValue() > 0.01f))
                     {
                         IntPtr ptr = soldier.Pointer;
                         if (!_bleedCoverDeadline.TryGetValue(ptr, out float deadline))
@@ -3017,6 +3393,80 @@ namespace EasyRed2HumanAI
 
                     // Restore original allowFireAtEnemy state for next tick
                     __instance.allowFireAtEnemy = __state;
+                }
+                catch { }
+            }
+        }
+
+        // =====================================================================
+        // PATCH 5B: SoldierAI.MovementRoutine (shared=1, len=930)
+        // - In vanilla MovementRoutine (0x18055D486 - 0x18055D706), when a soldier is stationary
+        //   and not actively firing at a visible target, vanilla calls StopMove() and LookForward(),
+        //   which NEVER rotates soldier.transform.forward! As a result, stationary defenders keep
+        //   staring in whatever random direction their last path step pointed (often sideways or
+        //   at an empty edge of the map).
+        // - Smoothly turns stationary, un-engaged soldiers to face their Known Threat Sector
+        //   (using 18 deg -> 5 deg angular hysteresis so they hold a rock-steady overwatch posture
+        //   once aligned, while leaving quiet unspotted flanks unwatched).
+        // =====================================================================
+        [HarmonyPatch(typeof(SoldierAI), nameof(SoldierAI.MovementRoutine))]
+        public static class SoldierAI_MovementRoutine_Patch
+        {
+            public static void Postfix(SoldierAI __instance, float __0)
+            {
+                try
+                {
+                    if (!VisionConfig.EnableMod.Value ||
+                        !VisionConfig.EnableThreatSectorConcentration.Value ||
+                        __instance == null)
+                    {
+                        return;
+                    }
+
+                    Soldier soldier = __instance.character;
+                    if (soldier == null || !soldier.IsAlive || soldier.IsPlayer())
+                        return;
+
+                    IntPtr ptr = soldier.Pointer;
+
+                    if (__instance.IsMoving() ||
+                        __instance.HasEnemyAndCanFireAtHim ||
+                        __instance.HeldMortar != null ||
+                        soldier.IsOnVehicle() ||
+                        soldier.UsingBipod() ||
+                        soldier.IsBipodTransitioning() ||
+                        soldier.isInBodyAnimation ||
+                        soldier.isInHandsAnimation ||
+                        soldier.HasSurrended() ||
+                        soldier.IsCarried() ||
+                        soldier.IsCarryingBody())
+                    {
+                        _isTurningToWatchSector.Remove(ptr);
+                        return;
+                    }
+
+                    if (TryGetKnownThreatSectorDirection(soldier, out Vector3 watchDir, out _) &&
+                        watchDir.sqrMagnitude > 0.01f)
+                    {
+                        float angle = soldier.AngleToDirection(watchDir);
+                        if (_isTurningToWatchSector.Contains(ptr))
+                        {
+                            if (angle <= 5.0f)
+                            {
+                                _isTurningToWatchSector.Remove(ptr);
+                            }
+                            else
+                            {
+                                soldier.RotateToward(watchDir, __0);
+                            }
+                        }
+                        else if (angle > 18.0f)
+                        {
+                            _isTurningToWatchSector.Add(ptr);
+                            ThreatSectorOrientationsCount++;
+                            soldier.RotateToward(watchDir, __0);
+                        }
+                    }
                 }
                 catch { }
             }
