@@ -1,0 +1,3139 @@
+using System;
+using System.Collections.Generic;
+using HarmonyLib;
+using UnityEngine;
+using UnityEngine.UI;
+
+namespace EasyRed2HumanAI
+{
+    public static class VeteranAndTacticsPatches
+    {
+        private struct SoldierRecord
+        {
+            public float SpawnTime;
+            public float BonusSeconds;
+            public int PromotedTier;
+            public Rank BaseRank;
+            public string BaseName;
+        }
+
+        // Per-soldier state keyed by IL2CPP IntPtr
+        private static readonly Dictionary<IntPtr, SoldierRecord> _records = new Dictionary<IntPtr, SoldierRecord>(512);
+        private static readonly Dictionary<IntPtr, float> _stanceDropHoldFireUntil = new Dictionary<IntPtr, float>(256);
+        private static readonly Dictionary<IntPtr, float> _nextStanceDropAllowed = new Dictionary<IntPtr, float>(256);
+        private static readonly Dictionary<IntPtr, float> _combatStanceHoldUntil = new Dictionary<IntPtr, float>(256);
+        private static readonly Dictionary<IntPtr, float> _combatCrouchLockUntil = new Dictionary<IntPtr, float>(256);
+        private static readonly Dictionary<IntPtr, float> _noProneUntil = new Dictionary<IntPtr, float>(256);
+        private static readonly Dictionary<IntPtr, float> _nextWallCheckTime = new Dictionary<IntPtr, float>(256);
+        private static readonly Dictionary<IntPtr, float> _wallBlockedUntil = new Dictionary<IntPtr, float>(256);
+        private static readonly Dictionary<IntPtr, float> _peekRestoreTime = new Dictionary<IntPtr, float>(256);
+        private static readonly Dictionary<IntPtr, float> _nextPeekAllowedTime = new Dictionary<IntPtr, float>(256);
+        private static readonly Dictionary<IntPtr, float> _nextFFCheckTime = new Dictionary<IntPtr, float>(256);
+        private static readonly Dictionary<IntPtr, float> _ffBlockedUntil = new Dictionary<IntPtr, float>(256);
+        private static readonly Dictionary<IntPtr, float> _nextAntiStackTime = new Dictionary<IntPtr, float>(256);
+        private static readonly Dictionary<IntPtr, float> _nextVaultCheckTime = new Dictionary<IntPtr, float>(256);
+        private static readonly Dictionary<IntPtr, float> _nextLiberateCheckTime = new Dictionary<IntPtr, float>(256);
+        private static readonly Dictionary<IntPtr, float> _bleedCoverDeadline = new Dictionary<IntPtr, float>(128);
+        private static readonly Dictionary<IntPtr, float> _nextBipodSeekTime = new Dictionary<IntPtr, float>(128);
+        private static readonly Dictionary<IntPtr, float> _nextBipodDeployCheckTime = new Dictionary<IntPtr, float>(128);
+        private static readonly Dictionary<IntPtr, float> _bipodStandUntil = new Dictionary<IntPtr, float>(128);
+        private static readonly Dictionary<IntPtr, float> _nextWallSideCheckTime = new Dictionary<IntPtr, float>(256);
+        private static readonly Dictionary<IntPtr, float> _nextTankDisciplineCountTime = new Dictionary<IntPtr, float>(256);
+        private static readonly Dictionary<IntPtr, float> _repairTaskStartTime = new Dictionary<IntPtr, float>(64);
+        private static readonly HashSet<IntPtr> _countedRepairTasks = new HashSet<IntPtr>();
+
+        internal struct DamageAttribution
+        {
+            public string AttackerName;
+            public bool IsFriendlyFire;
+            public bool IsSelfInflicted;
+            public string WeaponOrSource;
+            public string HitDetail;
+            public int DistanceMeters;
+            public float Timestamp;
+        }
+
+        private static readonly Dictionary<IntPtr, DamageAttribution> _lastDamageByVictim = new Dictionary<IntPtr, DamageAttribution>(32);
+        private static string _activeExplosionWeaponName;
+        private static bool _activeExplosionIsArtillery;
+
+        // Active Death Screen Obituary Banner state (rendered on both DeathPanel and OnGUI overlay)
+        public static string ActiveDeathAttributionText;
+        public static bool ActiveDeathAttributionIsFF;
+        public static bool ActiveDeathAttributionIsSelf;
+        public static float ActiveDeathAttributionStartTime;
+        public static float ActiveDeathAttributionExpireTime;
+        public static IntPtr ActiveDeathAttributionVictimPtr;
+
+        private static float _nextStateCleanupTime;
+
+        // Procedural 32x32 chevron textures for Tier 1 (^), Tier 2 (^^), Tier 3 (^^^ ★)
+        private static Texture2D _texVet1;
+        private static Texture2D _texVet2;
+        private static Texture2D _texVet3;
+
+        // Telemetry counters for debug / toast feedback
+        public static int ActiveVeteransCount;
+        public static int FieldPromotionsCount;
+        public static int SelfPreservationDrops;
+        public static int BipodsDeployed;
+        public static int WallsBlocked;
+        public static int AutoPeeksTriggered;
+        public static int FriendlyFirePrevented;
+        public static int AntiStackNudges;
+        public static int WallsVaulted;
+        public static int ComradesLiberated;
+        public static int ShelteredRepairsCount;
+        public static int WallSideRepositionsCount;
+        public static int UselessTankFirePrevented;
+        public static int ExposedCrewTargeted;
+
+        // =====================================================================
+        // Veteran Progression Math (15-Minute Linear Scale with Realism Caps)
+        // =====================================================================
+        public static float GetVeterancy01(Soldier s)
+        {
+            if (s == null || s.Pointer == IntPtr.Zero || !VisionConfig.EnableVeteranSystem.Value)
+                return 0f;
+
+            IntPtr ptr = s.Pointer;
+            if (!_records.TryGetValue(ptr, out SoldierRecord rec))
+            {
+                rec = new SoldierRecord
+                {
+                    SpawnTime = Time.time,
+                    BonusSeconds = 0f,
+                    PromotedTier = 0,
+                    BaseRank = s.rank,
+                    BaseName = s.name_surname ?? ""
+                };
+                _records[ptr] = rec;
+                return 0f;
+            }
+
+            float fullSeconds = Mathf.Max(60f, VisionConfig.VeteranFullMaturitySeconds.Value);
+            float effectiveAlive = Mathf.Max(0f, Time.time - rec.SpawnTime) + rec.BonusSeconds;
+            return Mathf.Clamp01(effectiveAlive / fullSeconds);
+        }
+
+        public static int GetVeteranTier(Soldier s)
+        {
+            float v = GetVeterancy01(s);
+            if (v >= 0.80f) return 3; // 12+ mins (Vet III ★)
+            if (v >= 0.50f) return 2; // 7.5+ mins (Vet II)
+            if (v >= 0.20f) return 1; // 3.0+ mins (Vet I)
+            return 0;
+        }
+
+        public static void AddCombatExperienceBonus(Soldier s, float bonusSeconds)
+        {
+            if (s == null || s.Pointer == IntPtr.Zero || !VisionConfig.EnableVeteranSystem.Value)
+                return;
+
+            IntPtr ptr = s.Pointer;
+            if (_records.TryGetValue(ptr, out SoldierRecord rec))
+            {
+                // Cap combat bonus at 25% of full maturity so time survived remains the primary driver
+                float maxBonus = Mathf.Max(60f, VisionConfig.VeteranFullMaturitySeconds.Value) * 0.25f;
+                rec.BonusSeconds = Mathf.Min(maxBonus, rec.BonusSeconds + bonusSeconds);
+                _records[ptr] = rec;
+            }
+        }
+
+        private static void CheckAndApplyFieldPromotion(Soldier s)
+        {
+            if (s == null || s.Pointer == IntPtr.Zero || !VisionConfig.EnableVeteranSystem.Value)
+                return;
+
+            IntPtr ptr = s.Pointer;
+            if (!_records.TryGetValue(ptr, out SoldierRecord rec))
+            {
+                rec = new SoldierRecord
+                {
+                    SpawnTime = Time.time,
+                    BonusSeconds = 0f,
+                    PromotedTier = 0,
+                    BaseRank = s.rank,
+                    BaseName = s.name_surname ?? ""
+                };
+                _records[ptr] = rec;
+            }
+
+            int tier = GetVeteranTier(s);
+            if (tier > rec.PromotedTier)
+            {
+                rec.PromotedTier = tier;
+                _records[ptr] = rec;
+
+                if (VisionConfig.PromoteVeteranRanks.Value)
+                {
+                    Rank targetRank = s.rank;
+                    if (tier == 1 && targetRank < Rank.corporal)
+                        targetRank = Rank.corporal;
+                    else if (tier == 2 && targetRank < Rank.seargent)
+                        targetRank = Rank.seargent;
+                    else if (tier >= 3 && targetRank < Rank.first_seargent)
+                        targetRank = Rank.first_seargent;
+
+                    if (targetRank != s.rank)
+                    {
+                        s.SetRank(targetRank);
+                        s.UpdateRanksDecal();
+                        FieldPromotionsCount++;
+                    }
+                }
+
+                // Append Veteran tier tag to the soldier's name_surname so it naturally appears ONLY
+                // when the game displays their name (3D crosshair hover in PlayerController.OnGUI or Squad Roster)
+                if (VisionConfig.ShowVeteranSquadRosterTags.Value || VisionConfig.ShowVeteran3DIcons.Value)
+                {
+                    string baseName = string.IsNullOrEmpty(rec.BaseName) ? (s.name_surname ?? "") : rec.BaseName;
+                    int bracketIdx = baseName.IndexOf(" [Vet", StringComparison.Ordinal);
+                    if (bracketIdx >= 0)
+                        baseName = baseName.Substring(0, bracketIdx);
+
+                    string vetTag = tier == 1 ? " [Vet I]" : (tier == 2 ? " [Vet II]" : " [Vet III]");
+                    s.name_surname = baseName + vetTag;
+                }
+            }
+        }
+
+        // =====================================================================
+        // Procedural Veteran Chevron Badge Textures (32x32 RGBA)
+        // =====================================================================
+        private static void EnsureBadgeTextures()
+        {
+            if (_texVet1 != null && _texVet2 != null && _texVet3 != null)
+                return;
+
+            _texVet1 = CreateChevronTexture(1, new Color(0.90f, 0.72f, 0.38f, 0.95f), false); // Bronze / Corporal
+            _texVet2 = CreateChevronTexture(2, new Color(0.88f, 0.93f, 1.00f, 0.95f), false); // Silver / Sergeant
+            _texVet3 = CreateChevronTexture(3, new Color(1.00f, 0.84f, 0.15f, 1.00f), true);  // Gold + Star / First Sgt
+        }
+
+        private static Texture2D CreateChevronTexture(int chevrons, Color mainColor, bool drawStar)
+        {
+            const int size = 32;
+            Texture2D tex = new Texture2D(size, size, TextureFormat.RGBA32, false);
+            tex.hideFlags = HideFlags.HideAndDontSave;
+            tex.wrapMode = TextureWrapMode.Clamp;
+            tex.filterMode = FilterMode.Bilinear;
+
+            Color clear = new Color(0f, 0f, 0f, 0f);
+            Color outline = new Color(0.08f, 0.08f, 0.08f, 0.88f);
+
+            for (int y = 0; y < size; y++)
+            {
+                for (int x = 0; x < size; x++)
+                {
+                    tex.SetPixel(x, y, clear);
+                }
+            }
+
+            // Draw chevrons (^ shapes pointing up in Unity texture space where y=31 is top)
+            for (int c = 0; c < chevrons; c++)
+            {
+                int apexY = 26 - (c * 7);
+                for (int dx = -10; dx <= 10; dx++)
+                {
+                    int x = 16 + dx;
+                    int yCenter = apexY - (Mathf.Abs(dx) * 6) / 10;
+
+                    for (int dy = -2; dy <= 2; dy++)
+                    {
+                        int y = yCenter + dy;
+                        if (x >= 1 && x < size - 1 && y >= 1 && y < size - 1)
+                        {
+                            if (Mathf.Abs(dy) == 2 || Mathf.Abs(dx) == 10)
+                            {
+                                if (tex.GetPixel(x, y).a < 0.5f)
+                                    tex.SetPixel(x, y, outline);
+                            }
+                            else
+                            {
+                                tex.SetPixel(x, y, mainColor);
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Draw a small diamond/star pip at the bottom center for Tier 3
+            if (drawStar)
+            {
+                int cx = 16;
+                int cy = 5;
+                for (int dy = -3; dy <= 3; dy++)
+                {
+                    for (int dx = -3; dx <= 3; dx++)
+                    {
+                        int manhattan = Mathf.Abs(dx) + Mathf.Abs(dy);
+                        if (manhattan <= 2)
+                            tex.SetPixel(cx + dx, cy + dy, mainColor);
+                        else if (manhattan == 3)
+                            tex.SetPixel(cx + dx, cy + dy, outline);
+                    }
+                }
+            }
+
+            tex.Apply();
+            return tex;
+        }
+
+        public static void RenderVeteran3DMarkersAndCleanup()
+        {
+            if (!VisionConfig.EnableMod.Value)
+                return;
+
+            // Periodic dictionary cleanup & active veteran count every 3 seconds
+            if (Time.time > _nextStateCleanupTime)
+            {
+                _nextStateCleanupTime = Time.time + 3f;
+                CleanupDictionaries();
+            }
+
+            if (!VisionConfig.EnableVeteranSystem.Value || !VisionConfig.ShowVeteran3DIcons.Value)
+                return;
+
+            // Honor the exact native PlayerController.OnGUI (0x1807c7d95 - 0x1807c8c68) name display rules:
+            // 1. Must have an alive human-controlled soldier
+            PlayerController pc = PlayerController.currentController;
+            if (pc == null) return;
+            Soldier player = pc.ControlledCharacter;
+            if (player == null || !player.IsAlive)
+                return;
+
+            // 2. Must have GUI enabled and 3D markers enabled (hidden in Realistic / No-HUD mode)
+            if (SavableData.Settings == null ||
+                SavableData.Settings.system == null ||
+                !SavableData.Settings.system.enableGUI ||
+                SavableData.Settings.system.disable3DMarkers)
+            {
+                return;
+            }
+
+            // 3. Native PlayerController.OnGUI hides friendly names when aiming in FPS (unless limited aiming)
+            if (pc.IsAiming && !pc.IsLimitedAiming)
+                return;
+
+            // 4. Only show the 3D veteran icon for the single unoccluded friendly soldier currently hovered
+            //    by the player's crosshair in pc.cursorSoldiers (matching the exact name fade calculation)
+            var cursorSoldiers = pc.cursorSoldiers;
+            if (cursorSoldiers == null || cursorSoldiers.Count == 0)
+                return;
+
+            Camera cam = ResourcesManager.mainCamera;
+            if (cam == null) return;
+
+            Vector2 screenCenter = pc.screenCenter;
+            float maxHoverRadius = Screen.height * 0.20f;
+            if (maxHoverRadius <= 1f) return;
+
+            Soldier bestHoveredFriendly = null;
+            float bestAlpha = 0f;
+
+            int count = cursorSoldiers.Count;
+            for (int i = 0; i < count; i++)
+            {
+                CursorSoldierData csd = cursorSoldiers[i];
+                if (csd == null) continue;
+                Soldier s = csd.soldier;
+                if (s == null || !s.IsAlive || s.Pointer == player.Pointer) continue;
+
+                // Never show on enemies
+                if (s.faction != player.faction)
+                    continue;
+
+                // Skip soldiers inside a vehicle when player is also in a vehicle
+                if (s.IsOnVehicle() && player.IsOnVehicle())
+                    continue;
+
+                Vector3 uiPos = s.UINamePos();
+                if (Marker3DGUI.IsOccluded(s, 2, uiPos))
+                    continue;
+
+                Vector3 screenPos3 = cam.WorldToScreenPoint(uiPos);
+                if (screenPos3.z <= 0f)
+                    continue;
+
+                Vector2 screenPos2 = new Vector2(screenPos3.x, screenPos3.y);
+                float distToCursor = Vector2.Distance(screenPos2, screenCenter);
+                float alpha = (1.0f - (distToCursor / maxHoverRadius)) * 2.0f;
+                if (alpha > bestAlpha)
+                {
+                    bestAlpha = alpha;
+                    bestHoveredFriendly = s;
+                }
+            }
+
+            if (bestHoveredFriendly != null && bestAlpha > 0.05f)
+            {
+                int tier = GetVeteranTier(bestHoveredFriendly);
+                if (tier > 0)
+                {
+                    EnsureBadgeTextures();
+                    Texture2D tex = tier == 1 ? _texVet1 : (tier == 2 ? _texVet2 : _texVet3);
+                    if (tex != null)
+                    {
+                        Vector3 badgeWorldPos = bestHoveredFriendly.UINamePos() + new Vector3(0f, 0.26f, 0f);
+                        float clampedAlpha = Mathf.Clamp01(bestAlpha) * 0.92f;
+                        float iconSize = tier == 3 ? 18f : 15f;
+                        Marker3DGUI.Draw(bestHoveredFriendly, 77, tex, badgeWorldPos, iconSize, clampedAlpha);
+                    }
+                }
+            }
+        }
+
+        public static void CleanupDictionaries()
+        {
+            var alivePtrs = new HashSet<IntPtr>();
+            int vetCount = 0;
+            var allSquads = Squad.AllSquads;
+            if (allSquads != null)
+            {
+                foreach (var kvp in allSquads)
+                {
+                    Squad sq = kvp.Value;
+                    if (sq == null || sq.units == null) continue;
+                    var units = sq.units;
+                    int c = units.Count;
+                    for (int i = 0; i < c; i++)
+                    {
+                        Soldier s = units[i];
+                        if (s != null && s.IsAlive && s.Pointer != IntPtr.Zero)
+                        {
+                            alivePtrs.Add(s.Pointer);
+                            if (!s.IsPlayer() && GetVeteranTier(s) > 0)
+                                vetCount++;
+                        }
+                    }
+                }
+            }
+            ActiveVeteransCount = vetCount;
+
+            PruneDict(_records, alivePtrs);
+            PruneDict(_stanceDropHoldFireUntil, alivePtrs);
+            PruneDict(_nextStanceDropAllowed, alivePtrs);
+            PruneDict(_combatStanceHoldUntil, alivePtrs);
+            PruneDict(_combatCrouchLockUntil, alivePtrs);
+            PruneDict(_noProneUntil, alivePtrs);
+            PruneDict(_nextWallCheckTime, alivePtrs);
+            PruneDict(_wallBlockedUntil, alivePtrs);
+            PruneDict(_peekRestoreTime, alivePtrs);
+            PruneDict(_nextPeekAllowedTime, alivePtrs);
+            PruneDict(_nextFFCheckTime, alivePtrs);
+            PruneDict(_ffBlockedUntil, alivePtrs);
+            PruneDict(_nextAntiStackTime, alivePtrs);
+            PruneDict(_nextVaultCheckTime, alivePtrs);
+            PruneDict(_nextLiberateCheckTime, alivePtrs);
+            PruneDict(_bleedCoverDeadline, alivePtrs);
+            PruneDict(_nextBipodSeekTime, alivePtrs);
+            PruneDict(_nextBipodDeployCheckTime, alivePtrs);
+            PruneDict(_bipodStandUntil, alivePtrs);
+            PruneDict(_nextWallSideCheckTime, alivePtrs);
+            PruneDict(_nextTankDisciplineCountTime, alivePtrs);
+            PruneDict(_lastDamageByVictim, alivePtrs);
+
+            if (_repairTaskStartTime.Count > 0)
+            {
+                float now = Time.time;
+                var expiredTasks = new List<IntPtr>();
+                foreach (var kvp in _repairTaskStartTime)
+                {
+                    if (now - kvp.Value > 60f)
+                        expiredTasks.Add(kvp.Key);
+                }
+                for (int i = 0; i < expiredTasks.Count; i++)
+                {
+                    _repairTaskStartTime.Remove(expiredTasks[i]);
+                    _countedRepairTasks.Remove(expiredTasks[i]);
+                }
+            }
+        }
+
+        private static void PruneDict<T>(Dictionary<IntPtr, T> dict, HashSet<IntPtr> alive)
+        {
+            if (dict.Count == 0) return;
+            var remove = new List<IntPtr>();
+            foreach (var k in dict.Keys)
+            {
+                if (!alive.Contains(k)) remove.Add(k);
+            }
+            for (int i = 0; i < remove.Count; i++)
+            {
+                dict.Remove(remove[i]);
+            }
+        }
+
+        // =====================================================================
+        // Helper: Muzzle Obstruction, Friendly Fire Cone & Anti-Stacking
+        // =====================================================================
+        private static bool IsMuzzleBlockedByWall(Soldier shooter, Vector3 targetPos, float distToTarget)
+        {
+            if (distToTarget <= 3.2f)
+                return false;
+
+            // Check native TPS/FPS wall proximity flag first
+            if (shooter.IsTowardWall())
+                return true;
+
+            Vector3 gunPos = shooter.GunPosition();
+            Vector3 fireDir = shooter.GetFireDir();
+            if (fireDir.sqrMagnitude < 0.01f)
+                fireDir = (targetPos - gunPos).normalized;
+
+            float maxCheck = Mathf.Min(VisionConfig.MuzzleObstructionCheckDist.Value, distToTarget - 1.2f);
+            if (maxCheck <= 0.35f)
+                return false;
+
+            // Start 0.28m forward of GunPosition so we clear the shooter's own torso/arms
+            Vector3 origin = gunPos + fireDir * 0.28f;
+            if (Physics.Raycast(origin, fireDir, out RaycastHit hit, maxCheck))
+            {
+                Collider col = hit.collider;
+                if (col != null && !col.isTrigger)
+                {
+                    Transform hitRoot = col.transform.root;
+                    Transform myRoot = shooter.transform.root;
+                    if (hitRoot != myRoot)
+                    {
+                        // Ignore if we hit a Creature (another soldier) since FriendlyFire handles friendlies
+                        // and hitting an enemy at point blank is fine
+                        Creature hitCreature = col.GetComponentInParent<Creature>();
+                        if (hitCreature == null)
+                        {
+                            return true;
+                        }
+                    }
+                }
+            }
+            return false;
+        }
+
+        private static bool IsFriendlyInLineOfFire(Soldier shooter, Vector3 targetPos, float distToTarget, float vet01, out Vector3 sidestepDir)
+        {
+            sidestepDir = Vector3.zero;
+            if (distToTarget <= 1.8f)
+                return false;
+
+            Vector3 gunPos = shooter.GunPosition();
+            Vector3 toTarget = targetPos - gunPos;
+            Vector3 fireDir = toTarget.sqrMagnitude > 0.001f ? toTarget.normalized : shooter.GetFireDir();
+
+            float maxCheckDist = Mathf.Min(distToTarget - 0.5f, Mathf.Lerp(40f, 60f, vet01));
+            if (maxCheckDist <= 0.5f)
+                return false;
+
+            float allowedConeDeg = VisionConfig.FriendlyFireConeDegrees.Value + (vet01 * 1.5f);
+            float corridorWidth = VisionConfig.FriendlyFireCorridorWidth.Value;
+            string myFaction = shooter.faction;
+            IntPtr myPtr = shooter.Pointer;
+
+            // 1. Always check the human player first if on the same faction
+            Soldier player = Soldier.CurrentControlledSoldierOrNull();
+            if (player != null && player.IsAlive && player.Pointer != myPtr && player.faction == myFaction)
+            {
+                if (CheckSingleFriendlyInCone(gunPos, fireDir, maxCheckDist, allowedConeDeg, corridorWidth, shooter, player, out sidestepDir))
+                    return true;
+            }
+
+            // 2. Check shooter's own squadmates (most likely to be right in front of the muzzle)
+            Squad mySquad = shooter.joinedSquad;
+            if (mySquad != null && mySquad.units != null)
+            {
+                var units = mySquad.units;
+                int c = units.Count;
+                for (int i = 0; i < c; i++)
+                {
+                    Soldier f = units[i];
+                    if (f == null || !f.IsAlive || f.Pointer == myPtr) continue;
+                    if (CheckSingleFriendlyInCone(gunPos, fireDir, maxCheckDist, allowedConeDeg, corridorWidth, shooter, f, out sidestepDir))
+                        return true;
+                }
+            }
+
+            // 3. Check other nearby friendly squads
+            var allSquads = Squad.AllSquads;
+            if (allSquads != null)
+            {
+                foreach (var kvp in allSquads)
+                {
+                    Squad sq = kvp.Value;
+                    if (sq == null || sq == mySquad || sq.units == null) continue;
+                    Soldier leader = sq.Leader;
+                    if (leader == null || leader.faction != myFaction) continue;
+
+                    // Quick squad distance cull (skip squads > 75m away from shooter)
+                    if ((leader.transform.position - gunPos).sqrMagnitude > 75f * 75f)
+                        continue;
+
+                    var units = sq.units;
+                    int c = units.Count;
+                    for (int i = 0; i < c; i++)
+                    {
+                        Soldier f = units[i];
+                        if (f == null || !f.IsAlive || f.Pointer == myPtr) continue;
+                        if (CheckSingleFriendlyInCone(gunPos, fireDir, maxCheckDist, allowedConeDeg, corridorWidth, shooter, f, out sidestepDir))
+                            return true;
+                    }
+                }
+            }
+
+            return false;
+        }
+
+        private static bool CheckSingleFriendlyInCone(
+            Vector3 gunPos,
+            Vector3 fireDir,
+            float maxCheckDist,
+            float allowedConeDeg,
+            float corridorWidth,
+            Soldier shooter,
+            Soldier friend,
+            out Vector3 sidestepDir)
+        {
+            sidestepDir = Vector3.zero;
+            Vector3 friendPos = friend.GetCenterOfUnit();
+            Vector3 toFriend = friendPos - gunPos;
+            float distSq = toFriend.sqrMagnitude;
+            if (distSq > maxCheckDist * maxCheckDist || distSq < 0.04f)
+                return false;
+
+            float forwardDist = Vector3.Dot(toFriend, fireDir);
+            if (forwardDist <= 0.1f || forwardDist >= maxCheckDist)
+                return false;
+
+            float angle = Vector3.Angle(toFriend, fireDir);
+            float lateralDist = Vector3.Cross(fireDir, toFriend).magnitude;
+
+            // Block shot if friendly is within the 5-degree cone OR within the close-range (8m x 0.65m) torso corridor
+            if (angle <= allowedConeDeg || (forwardDist <= 8.0f && lateralDist <= corridorWidth))
+            {
+                Vector3 right = shooter.transform.right;
+                float side = Vector3.Dot(toFriend, right);
+                sidestepDir = side >= 0f ? -right : right;
+                return true;
+            }
+            return false;
+        }
+
+        private static bool TryGetAntiStackPush(Soldier shooter, out Vector3 pushDir)
+        {
+            pushDir = Vector3.zero;
+            float minSpace = VisionConfig.MinFriendlySpacingMeters.Value;
+            if (minSpace <= 0.2f) return false;
+
+            float minSpaceSq = minSpace * minSpace;
+            Vector3 myPos = shooter.transform.position;
+            IntPtr myPtr = shooter.Pointer;
+            string myFaction = shooter.faction;
+
+            // Check own squad first
+            Squad mySquad = shooter.joinedSquad;
+            if (mySquad != null && mySquad.units != null)
+            {
+                var units = mySquad.units;
+                int c = units.Count;
+                for (int i = 0; i < c; i++)
+                {
+                    Soldier f = units[i];
+                    if (f == null || !f.IsAlive || f.Pointer == myPtr || f.IsOnVehicle()) continue;
+                    Vector3 diff = myPos - f.transform.position;
+                    diff.y = 0f;
+                    float dSq = diff.sqrMagnitude;
+                    if (dSq < minSpaceSq)
+                    {
+                        if (dSq > 0.01f)
+                            pushDir = diff.normalized;
+                        else
+                            pushDir = (myPtr.ToInt64() & 1) == 0 ? shooter.transform.right : -shooter.transform.right;
+                        return true;
+                    }
+                }
+            }
+
+            // Check human player if nearby
+            Soldier player = Soldier.CurrentControlledSoldierOrNull();
+            if (player != null && player.IsAlive && player.Pointer != myPtr && player.faction == myFaction && !player.IsOnVehicle())
+            {
+                Vector3 diff = myPos - player.transform.position;
+                diff.y = 0f;
+                float dSq = diff.sqrMagnitude;
+                if (dSq < minSpaceSq)
+                {
+                    pushDir = dSq > 0.01f ? diff.normalized : shooter.transform.right;
+                    return true;
+                }
+            }
+
+            return false;
+        }
+
+        // =====================================================================
+        // Helper: Synchronized Bot Stance, Cover Seeking & Gunner Bipod Wall Mount
+        // =====================================================================
+        private static void SetBotPose(SoldierAI ai, Soldier soldier, SoldierPose pose)
+        {
+            if (ai == null || soldier == null)
+                return;
+
+            if (soldier.UsingBipod() || soldier.IsBipodTransitioning())
+            {
+                ai.actualPose = soldier.m_pose;
+                return;
+            }
+
+            // Native Soldier.SetPose (0x180767f81 - 0x180767fb2) forcibly rewrites Idle (0) -> Crouch (1)
+            // (or aborts if Prone) whenever Time.time <= stopHandsAnim_end (isInHandsAnimation / IsReloading).
+            // Setting ai.actualPose = Idle while m_pose != Idle during a hands animation causes Move/StopMove
+            // to call SetPose(Idle) and get snapped back to Crouch on every single frame!
+            if (pose == SoldierPose.Idle &&
+                soldier.m_pose != SoldierPose.Idle &&
+                (soldier.isInHandsAnimation || soldier.IsReloading || soldier.isInBodyAnimation))
+            {
+                ai.actualPose = soldier.m_pose;
+                return;
+            }
+
+            if (pose >= SoldierPose.Crouch && (ai.HasEnemyAndCanFireAtHim || soldier.GetSuppressionValue() >= 8f))
+            {
+                IntPtr ptr = soldier.Pointer;
+                if (ptr != IntPtr.Zero)
+                {
+                    float lockUntil = Time.time + 3.2f;
+                    if (!_combatCrouchLockUntil.TryGetValue(ptr, out float cur) || lockUntil > cur)
+                    {
+                        _combatCrouchLockUntil[ptr] = lockUntil;
+                    }
+                }
+            }
+
+            // MovementRoutine calls StopMove(ai.actualPose) every frame when stationary
+            // and MoveOptimized(ai.actualPose) when moving, so BOTH must be updated!
+            ai.actualPose = pose;
+            if (soldier.m_pose != pose)
+            {
+                soldier.SetPose(pose, true, false, 0.2f);
+            }
+        }
+
+        private static bool IsMachineGunnerOrHasBipod(Soldier soldier, out AttachmentBipod bipod)
+        {
+            bipod = null;
+            if (soldier == null)
+                return false;
+
+            bipod = soldier.GetHeldFunctionalBipod();
+            return bipod != null || soldier.hasMg || soldier.IsGunner();
+        }
+
+        private static bool TrySeekNearbyCover(SoldierAI ai, Soldier soldier)
+        {
+            if (ai == null || soldier == null || soldier.IsOnVehicle())
+                return false;
+
+            if (soldier.IsOnCover())
+                return true;
+
+            // IMPORTANT (Fix for Wall-Hugging Bug):
+            // Never call soldier.GetDestinationInPosition(soldier.transform.position, ...) + soldier.CoverPosition(cover),
+            // because CoverPosition overwrites soldier.targetDestination with a local wall cover node and erases the
+            // squad's objective/advance order! Instead, use native TryToGetToActualCover(), which upgrades an
+            // existing DestinationWithoutCover to a CombatCover strictly inside the squad's moveOrderPosition area.
+            if (soldier.HasDestinationAssigned)
+            {
+                soldier.TryToGetToActualCover();
+                return soldier.IsOnCover() || ai.IsMoving();
+            }
+
+            return false;
+        }
+
+        private static bool HasClearLineOfFireAtHeight(Soldier soldier, Vector3 targetPos, float dist, float heightOffset, float maxRayDist)
+        {
+            if (soldier == null || dist <= 2.5f)
+                return false;
+
+            Vector3 origin = soldier.transform.position + Vector3.up * heightOffset;
+            Vector3 toTarget = (targetPos + Vector3.up * 0.25f) - origin;
+            float len = toTarget.magnitude;
+            if (len <= 1.2f)
+                return true;
+
+            Vector3 dir = toTarget / len;
+            float checkDist = Mathf.Min(len - 0.8f, maxRayDist);
+            if (checkDist <= 0.5f)
+                return true;
+
+            if (Physics.Raycast(origin, dir, out RaycastHit hit, checkDist))
+            {
+                Collider col = hit.collider;
+                if (col != null && !col.isTrigger && col.transform != null)
+                {
+                    if (col.transform.root != soldier.transform.root)
+                    {
+                        Creature hitCreature = col.GetComponentInParent<Creature>();
+                        if (hitCreature == null)
+                        {
+                            return false;
+                        }
+                    }
+                }
+            }
+            return true;
+        }
+
+        private static bool HasClearLineOfFireFromProne(Soldier soldier, Vector3 targetPos, float dist)
+        {
+            return HasClearLineOfFireAtHeight(soldier, targetPos, dist, 0.38f, 15.0f);
+        }
+
+        private static bool HasClearLineOfFireFromCrouch(Soldier soldier, Vector3 targetPos, float dist)
+        {
+            return HasClearLineOfFireAtHeight(soldier, targetPos, dist, 0.92f, 18.0f);
+        }
+
+        private static bool HasClearLineOfFireFromStanding(Soldier soldier, Vector3 targetPos, float dist)
+        {
+            return HasClearLineOfFireAtHeight(soldier, targetPos, dist, 1.48f, 18.0f);
+        }
+
+        // =====================================================================
+        // Helper: Sheltered Tank / Vehicle Repair Position (Leeward Hull Cover)
+        // =====================================================================
+        private static Vector3 GetShelteredRepairPosition(Vehicle veh, Soldier mechanic, out Vector3 shelterDir)
+        {
+            shelterDir = Vector3.back;
+            if (veh == null || veh.transform == null)
+                return Vector3.zero;
+
+            Vector3 vehPos = veh.transform.position;
+            Vector3 vehFwd = veh.transform.forward;
+            vehFwd.y = 0f;
+            vehFwd = vehFwd.sqrMagnitude > 0.001f ? vehFwd.normalized : Vector3.forward;
+
+            Vector3 threatDir = Vector3.zero;
+
+            // 1. Check the mechanic's own visible target first
+            if (mechanic != null && mechanic.aiController != null && mechanic.aiController.visibleTarget != null)
+            {
+                Vector3 toEnemy = mechanic.aiController.visibleTarget.GetCenterOfUnit() - vehPos;
+                toEnemy.y = 0f;
+                if (toEnemy.sqrMagnitude > 0.25f)
+                    threatDir = toEnemy.normalized;
+            }
+
+            // 2. Check the vehicle's main turret target
+            Turret mainTurret = veh.GetMainTurret(false);
+            if (threatDir.sqrMagnitude < 0.01f && mainTurret != null && mainTurret.autoPilot != null)
+            {
+                Spottable turretTarget = mainTurret.autoPilot.CurrentVisibleTarget;
+                if (turretTarget != null)
+                {
+                    Vector3 toEnemy = turretTarget.GetCenterOfUnit() - vehPos;
+                    toEnemy.y = 0f;
+                    if (toEnemy.sqrMagnitude > 0.25f)
+                        threatDir = toEnemy.normalized;
+                }
+            }
+
+            // 3. Check secondary seat turrets or seated crew members' targets
+            if (threatDir.sqrMagnitude < 0.01f && veh.seats != null)
+            {
+                var seats = veh.seats;
+                int seatCount = seats.Length;
+                for (int i = 0; i < seatCount; i++)
+                {
+                    Seats seat = seats[i];
+                    if (seat == null) continue;
+
+                    if (seat.connectedTurret != null && seat.connectedTurret.autoPilot != null)
+                    {
+                        Spottable t = seat.connectedTurret.autoPilot.CurrentVisibleTarget;
+                        if (t != null)
+                        {
+                            Vector3 toEnemy = t.GetCenterOfUnit() - vehPos;
+                            toEnemy.y = 0f;
+                            if (toEnemy.sqrMagnitude > 0.25f)
+                            {
+                                threatDir = toEnemy.normalized;
+                                break;
+                            }
+                        }
+                    }
+
+                    if (seat.unitSet != null && seat.unitSet.aiController != null && seat.unitSet.aiController.visibleTarget != null)
+                    {
+                        Vector3 toEnemy = seat.unitSet.aiController.visibleTarget.GetCenterOfUnit() - vehPos;
+                        toEnemy.y = 0f;
+                        if (toEnemy.sqrMagnitude > 0.25f)
+                        {
+                            threatDir = toEnemy.normalized;
+                            break;
+                        }
+                    }
+                }
+            }
+
+            // 4. Use the main turret's aim / fire direction (points toward the last known threat sector)
+            if (threatDir.sqrMagnitude < 0.01f && mainTurret != null)
+            {
+                Vector3 fireDir = mainTurret.GetFireDir();
+                fireDir.y = 0f;
+                if (fireDir.sqrMagnitude > 0.01f)
+                    threatDir = fireDir.normalized;
+            }
+
+            // 5. Fallback to the tank hull's forward vector (enemies are typically ahead of the frontal glacis)
+            if (threatDir.sqrMagnitude < 0.01f)
+            {
+                threatDir = vehFwd;
+            }
+
+            // Sheltered side is directly opposite the threat so the tank hull acts as solid armor cover
+            shelterDir = -threatDir;
+
+            float absFwdDot = Mathf.Abs(Vector3.Dot(shelterDir, vehFwd));
+            float hullOffset = Mathf.Lerp(2.7f, 4.1f, absFwdDot);
+
+            // Check if the direct leeward spot is blocked by a solid wall/building right behind the tank
+            Transform vehRoot = veh.transform.root;
+            Vector3 rayOrigin = vehPos + Vector3.up * 1.1f;
+            if (IsDirectionBlockedByEnvironment(rayOrigin, shelterDir, hullOffset + 0.5f, vehRoot))
+            {
+                Vector3 altLeft = Quaternion.Euler(0f, 55f, 0f) * shelterDir;
+                float altLeftOffset = Mathf.Lerp(2.7f, 4.1f, Mathf.Abs(Vector3.Dot(altLeft, vehFwd)));
+                if (!IsDirectionBlockedByEnvironment(rayOrigin, altLeft, altLeftOffset + 0.5f, vehRoot))
+                {
+                    shelterDir = altLeft;
+                    hullOffset = altLeftOffset;
+                }
+                else
+                {
+                    Vector3 altRight = Quaternion.Euler(0f, -55f, 0f) * shelterDir;
+                    float altRightOffset = Mathf.Lerp(2.7f, 4.1f, Mathf.Abs(Vector3.Dot(altRight, vehFwd)));
+                    if (!IsDirectionBlockedByEnvironment(rayOrigin, altRight, altRightOffset + 0.5f, vehRoot))
+                    {
+                        shelterDir = altRight;
+                        hullOffset = altRightOffset;
+                    }
+                }
+            }
+
+            return vehPos + shelterDir * hullOffset;
+        }
+
+        private static bool IsDirectionBlockedByEnvironment(Vector3 origin, Vector3 dir, float dist, Transform ignoreRoot)
+        {
+            if (Physics.Raycast(origin, dir, out RaycastHit hit, dist))
+            {
+                Collider col = hit.collider;
+                if (col != null && !col.isTrigger && col.transform != null && col.transform.root != ignoreRoot)
+                {
+                    if (col.GetComponentInParent<Creature>() == null)
+                        return true;
+                }
+            }
+            return false;
+        }
+
+        // =====================================================================
+        // Helper: Smart Wall-Side Cover & Threat Direction (Stand BEHIND Walls)
+        // =====================================================================
+        private static Vector3 GetEffectiveThreatDirection(Soldier soldier, Squad squad, Vector3 referencePos, Vector3 fallbackDir)
+        {
+            // 1. Direct visible target of this soldier (live incoming/outgoing fire)
+            if (soldier != null && soldier.aiController != null && soldier.aiController.visibleTarget != null)
+            {
+                Vector3 toTarget = soldier.aiController.visibleTarget.GetCenterOfUnit() - referencePos;
+                toTarget.y = 0f;
+                if (toTarget.sqrMagnitude > 0.25f)
+                    return toTarget.normalized;
+            }
+
+            // 2. Closest visible target engaged by any squadmate (squad's active combat sector)
+            if (squad != null && squad.units != null)
+            {
+                var units = squad.units;
+                int count = units.Count;
+                float bestDistSq = float.MaxValue;
+                Vector3 bestToEnemy = Vector3.zero;
+
+                for (int i = 0; i < count; i++)
+                {
+                    Soldier mate = units[i];
+                    if (mate == null || !mate.IsAlive || mate.aiController == null) continue;
+                    Spottable mateTarget = mate.aiController.visibleTarget;
+                    if (mateTarget == null) continue;
+
+                    Vector3 enemyPos = mateTarget.GetCenterOfUnit();
+                    Vector3 toEnemy = enemyPos - referencePos;
+                    toEnemy.y = 0f;
+                    float dSq = toEnemy.sqrMagnitude;
+                    if (dSq > 0.25f && dSq < bestDistSq)
+                    {
+                        bestDistSq = dSq;
+                        bestToEnemy = toEnemy;
+                    }
+                }
+
+                if (bestToEnemy.sqrMagnitude > 0.25f)
+                    return bestToEnemy.normalized;
+            }
+
+            // 3. Opposite faction territory / spawn direction from BattleManager.instance.currentPhase
+            string faction = soldier != null ? soldier.faction : (squad != null && squad.Leader != null ? squad.Leader.faction : null);
+            BattleManager bm = BattleManager.instance;
+            BattlePhase phase = bm != null ? bm.currentPhase : null;
+            if (phase != null && !string.IsNullOrEmpty(faction) && phase.EnemyFactionHasSpawn(faction))
+            {
+                Vector3 enemyTerritory = phase.GetOppositeFactionTerritoryPosition(faction);
+                Vector3 toTerritory = enemyTerritory - referencePos;
+                toTerritory.y = 0f;
+                if (toTerritory.sqrMagnitude > 1.0f)
+                    return toTerritory.normalized;
+            }
+
+            // 4. Fallback direction
+            fallbackDir.y = 0f;
+            return fallbackDir.sqrMagnitude > 0.001f ? fallbackDir.normalized : Vector3.forward;
+        }
+
+        private static bool IsPositionShelteredByFrontCover(Vector3 pos, Vector3 threatDir, Transform ignoreRoot)
+        {
+            if (threatDir.sqrMagnitude < 0.001f)
+                return false;
+
+            // Check if there is low/waist-height (0.50m) or chest-height (0.88m) cover within 1.85m toward +threatDir
+            return IsDirectionBlockedByEnvironment(pos + Vector3.up * 0.50f, threatDir, 1.85f, ignoreRoot) ||
+                   IsDirectionBlockedByEnvironment(pos + Vector3.up * 0.88f, threatDir, 1.85f, ignoreRoot);
+        }
+
+        private static bool IsPositionOnExposedSideOfWall(Vector3 pos, Vector3 threatDir, Transform ignoreRoot, out RaycastHit rearWallHit)
+        {
+            rearWallHit = default;
+            if (threatDir.sqrMagnitude < 0.001f)
+                return false;
+
+            // 1. If there is already cover in front (+threatDir within 1.85m) at waist or chest height,
+            //    the position is sheltered (e.g. behind a sandbag, inside a trench, or behind a windowsill).
+            if (IsPositionShelteredByFrontCover(pos, threatDir, ignoreRoot))
+                return false;
+
+            // 2. No cover in front toward +threatDir! Now check if there is a vertical wall directly behind
+            //    the soldier's back (-threatDir within 1.95m at waist/chest height 0.75m).
+            Vector3 rearOrigin = pos + Vector3.up * 0.75f;
+            if (Physics.Raycast(rearOrigin, -threatDir, out rearWallHit, 1.95f))
+            {
+                Collider col = rearWallHit.collider;
+                if (col != null &&
+                    !col.isTrigger &&
+                    col.transform != null &&
+                    col.transform.root != ignoreRoot &&
+                    Mathf.Abs(rearWallHit.normal.y) < 0.55f &&
+                    col.GetComponentInParent<Creature>() == null)
+                {
+                    return true;
+                }
+            }
+
+            return false;
+        }
+
+        private static bool TryFindShelteredSideOfWall(Vector3 currentPos, Vector3 threatDir, Transform ignoreRoot, out Vector3 shelteredPos)
+        {
+            shelteredPos = Vector3.zero;
+            if (!IsPositionOnExposedSideOfWall(currentPos, threatDir, ignoreRoot, out RaycastHit rearWallHit))
+                return false;
+
+            // Probe from 2.30m behind the front face of the wall back toward +threatDir to locate the back face
+            // and verify the wall is a freestanding wall/sandbag/fence/hedgerow (thickness <= 1.65m), not a hill or solid building
+            Vector3 probeOrigin = rearWallHit.point - threatDir * 2.30f;
+            if (!Physics.Raycast(probeOrigin, threatDir, out RaycastHit backFaceHit, 2.25f))
+                return false;
+
+            Collider backCol = backFaceHit.collider;
+            if (backCol == null || backCol.isTrigger || backCol.GetComponentInParent<Creature>() != null)
+                return false;
+
+            float wallThickness = Vector3.Distance(rearWallHit.point, backFaceHit.point);
+            if (wallThickness < 0.04f || wallThickness > 1.65f)
+                return false;
+
+            // Ideal sheltered position is 0.85m behind the back face of the wall (so the wall is now in +threatDir)
+            Vector3 candidateXZ = backFaceHit.point - threatDir * 0.85f;
+            Vector3 groundRayStart = new Vector3(candidateXZ.x, currentPos.y + 1.35f, candidateXZ.z);
+            if (!Physics.Raycast(groundRayStart, Vector3.down, out RaycastHit groundHit, 3.0f))
+                return false;
+
+            if (groundHit.collider == null || groundHit.collider.isTrigger || groundHit.normal.y < 0.65f)
+                return false;
+
+            Vector3 candidatePos = groundHit.point;
+            if (Mathf.Abs(candidatePos.y - currentPos.y) > 1.50f)
+                return false;
+
+            // Ensure the space between the back face of the wall and candidatePos is open (not inside another collider)
+            Vector3 backSurfaceCheck = backFaceHit.point - threatDir * 0.08f;
+            Vector3 toCandidate = (candidatePos + Vector3.up * 0.75f) - backSurfaceCheck;
+            if (toCandidate.sqrMagnitude > 0.01f &&
+                IsDirectionBlockedByEnvironment(backSurfaceCheck, toCandidate.normalized, toCandidate.magnitude, ignoreRoot))
+            {
+                return false;
+            }
+
+            // Ensure lateral shoulder clearance at candidatePos
+            Vector3 right = new Vector3(threatDir.z, 0f, -threatDir.x);
+            Vector3 chestPos = candidatePos + Vector3.up * 0.80f;
+            if (IsDirectionBlockedByEnvironment(chestPos, right, 0.35f, ignoreRoot) &&
+                IsDirectionBlockedByEnvironment(chestPos, -right, 0.35f, ignoreRoot))
+            {
+                return false;
+            }
+
+            // Outdoor sky check: if currentPos is outdoors (no roof within 6m above), require candidatePos
+            // to also have open sky above it so soldiers never try to step through the outer shell of a closed house prefab!
+            bool currentIsOutdoor = !IsDirectionBlockedByEnvironment(currentPos + Vector3.up * 0.85f, Vector3.up, 6.0f, ignoreRoot);
+            if (currentIsOutdoor && IsDirectionBlockedByEnvironment(candidatePos + Vector3.up * 0.85f, Vector3.up, 6.0f, ignoreRoot))
+            {
+                return false;
+            }
+
+            shelteredPos = candidatePos;
+            return true;
+        }
+
+        private static void HandleGunnerBipodAndWallMounting(SoldierAI ai, Soldier soldier, AttachmentBipod bip, Vector3 targetPos, float dist)
+        {
+            if (!VisionConfig.EnableGunnerBipodWallMounting.Value || ai == null || soldier == null || soldier.IsOnVehicle())
+                return;
+
+            IntPtr ptr = soldier.Pointer;
+
+            // 1. If already deployed on a bipod, maintain stance or undeploy if moving / flanked > 60 deg
+            if (soldier.UsingBipod())
+            {
+                ai.actualPose = soldier.m_pose;
+                if (ai.IsMoving() || soldier.IsCharging())
+                {
+                    soldier.PutAwayBipod(0.30f, false, false, false);
+                    return;
+                }
+
+                if (ai.HasEnemyAndCanFireAtHim && dist > 2f)
+                {
+                    Vector3 toTarget = targetPos - soldier.transform.position;
+                    if (soldier.AngleToDirection(toTarget) > 60f)
+                    {
+                        soldier.PutAwayBipod(0.35f, false, false, false);
+                    }
+                }
+                return;
+            }
+
+            if (soldier.IsBipodTransitioning())
+            {
+                ai.actualPose = soldier.m_pose;
+                return;
+            }
+
+            // 2. When stationary and aiming at an enemy with a functional bipod, scan for wall/ledge or ground mount
+            if (bip == null || ai.IsMoving() || !ai.HasEnemyAndCanFireAtHim || dist <= 5.0f)
+                return;
+
+            if (_nextBipodDeployCheckTime.TryGetValue(ptr, out float nextCheck) && Time.time < nextCheck)
+                return;
+
+            _nextBipodDeployCheckTime[ptr] = Time.time + 0.35f;
+
+            // Must be roughly facing the target before locking into a bipod mount
+            if (soldier.AngleToDirection(targetPos - soldier.transform.position) > 35f)
+                return;
+
+            if (!soldier.CanStartBipodDeploy())
+                return;
+
+            // Try A: Scan for wall/sandbag/windowsill surface at current stance (Crouch or Standing)
+            // Note: Calling ScanBipodSurface directly bypasses vanilla BipodCheck's overly strict IsTowardWall() abort
+            if (soldier.m_pose != SoldierPose.Prone)
+            {
+                if (soldier.ScanBipodSurface(bip, out Vector3 curAnchor, out Collider curSupport) && curSupport != null)
+                {
+                    SetBotPose(ai, soldier, soldier.m_pose);
+                    if (soldier.m_pose == SoldierPose.Idle)
+                    {
+                        _bipodStandUntil[ptr] = Time.time + 4.0f;
+                    }
+                    soldier.OperateBipod(bip, curAnchor, curSupport, true, false);
+                    BipodsDeployed++;
+                    return;
+                }
+            }
+
+            // Compute horizontal forward & right vectors for multi-height wall surface scanning
+            Vector3 fwd = soldier.transform.forward;
+            fwd.y = 0f;
+            fwd = fwd.sqrMagnitude > 0.001f ? fwd.normalized : Vector3.forward;
+            Vector3 right = new Vector3(fwd.z, 0f, -fwd.x);
+            Vector3 scanBase = soldier.transform.position + fwd * 0.35f;
+            float feetY = soldier.transform.position.y;
+
+            // Try B: If Prone behind a waist-high wall/sandbag (~0.85m), step up to Crouch and mount the wall
+            if (soldier.m_pose == SoldierPose.Prone)
+            {
+                if (soldier.ScanBipodSurfaceAt(bip, scanBase + Vector3.up * 0.85f, right, out Vector3 crouchAnchor, out Collider crouchSupport) &&
+                    crouchSupport != null &&
+                    crouchAnchor.y > feetY + 0.45f)
+                {
+                    SetBotPose(ai, soldier, SoldierPose.Crouch);
+                    _bipodStandUntil[ptr] = Time.time + 2.5f;
+                    _noProneUntil[ptr] = Time.time + 8.0f;
+                    soldier.OperateBipod(bip, crouchAnchor, crouchSupport, true, false);
+                    BipodsDeployed++;
+                    return;
+                }
+            }
+
+            // Try C: If Crouch/Prone behind a chest-high wall/windowsill (~1.30m), stand up and mount (AI equivalent of TryStandForHighBipod)
+            if (soldier.m_pose != SoldierPose.Idle && (soldier.IsOnCover() || soldier.IsTowardWall() || IsMuzzleBlockedByWall(soldier, targetPos, dist)))
+            {
+                if (soldier.ScanBipodSurfaceAt(bip, scanBase + Vector3.up * 1.30f, right, out Vector3 standAnchor, out Collider standSupport) &&
+                    standSupport != null &&
+                    standAnchor.y > feetY + 0.92f)
+                {
+                    SetBotPose(ai, soldier, SoldierPose.Idle);
+                    _bipodStandUntil[ptr] = Time.time + 3.5f;
+                    _nextStanceDropAllowed[ptr] = Time.time + 3.5f;
+                    _noProneUntil[ptr] = Time.time + 8.0f;
+                    soldier.StartCoroutine(soldier.RetryBipodDeployAfterStanding());
+                    BipodsDeployed++;
+                    return;
+                }
+            }
+
+            // Try D: No wall/ledge surface in front — drop Prone and deploy ground bipod ONLY if ground LOF is clear
+            // and we haven't recently failed a ground bipod check (prevents Prone <-> Crouch oscillation!)
+            bool canTryProneBipod = (!_noProneUntil.TryGetValue(ptr, out float noProne) || Time.time >= noProne) &&
+                                    !soldier.IsOnCover() &&
+                                    !soldier.IsTowardWall();
+
+            if (dist > 8.5f && canTryProneBipod && HasClearLineOfFireFromProne(soldier, targetPos, dist))
+            {
+                SetBotPose(ai, soldier, SoldierPose.Prone);
+                soldier.BipodCheck(true);
+                if (soldier.UsingBipod())
+                {
+                    BipodsDeployed++;
+                }
+                else
+                {
+                    // Ground slope/uneven terrain rejected bipod deploy — stay Crouched and don't retry Prone for 8s
+                    _noProneUntil[ptr] = Time.time + 8.0f;
+                    SetBotPose(ai, soldier, SoldierPose.Crouch);
+                }
+            }
+        }
+
+        // =====================================================================
+        // Priority 3D: Smart Anti-Armor Target & Fire Discipline
+        // - Stops infantry with small arms from shooting uselessly at armored tanks
+        // - Redirects aim to exposed crew members (open-topped TDs, halftracks, jeeps, pintle gunners)
+        // - Allows shooting vulnerable rubber wheels on wheeled vehicles or penetrable armor/tracks
+        // =====================================================================
+        private static bool TryEvaluateVehicleTarget(
+            Soldier shooter,
+            Vehicle veh,
+            float dist,
+            out Soldier exposedCrewTarget,
+            out Vector3 customAimPoint,
+            out bool hasCustomAimPoint)
+        {
+            exposedCrewTarget = null;
+            customAimPoint = Vector3.zero;
+            hasCustomAimPoint = false;
+
+            if (shooter == null || veh == null)
+                return false;
+
+            GenericGun heldGun = shooter.GetHeldGun();
+            if (heldGun == null)
+                return false;
+
+            float maxShootDist = heldGun.DamageRange();
+            if (dist > maxShootDist + 5f)
+                return false;
+
+            bool isAtWeapon = heldGun.IsAtWeapon();
+            bool isExplosiveOrFlame = heldGun.isFlamethrower || heldGun.IsGrenadeLauncher();
+            float bulletPenMm = 0f;
+
+            AmmoItem ammoItem = heldGun.GetAmmoItem();
+            if (ammoItem == null)
+                ammoItem = heldGun.usedAmmoItem;
+
+            if (ammoItem != null)
+            {
+                BulletData bd = ammoItem.GetBulletData();
+                if (bd != null)
+                {
+                    if (bd.IsHe() || bd.IsFire() || bd.explosion_penetration > 10f || bd.mmPenetration > 25)
+                    {
+                        isExplosiveOrFlame = true;
+                    }
+                    bulletPenMm = bd.CalculateMmPenetrationWithFallof(dist);
+                }
+            }
+
+            if (bulletPenMm <= 0.01f)
+            {
+                bulletPenMm = isAtWeapon ? 35f : 6f;
+            }
+
+            Vector3 shooterPos = shooter.transform.position;
+
+            // 1. Check for exposed crew members / passengers (Seats.showUnitSet == true)
+            //    If the shooter is NOT using a dedicated AT rocket/HE weapon, shooting an exposed
+            //    crewman/gunner/driver is always the most effective way small arms can help!
+            var seats = veh.seats;
+            if (seats != null)
+            {
+                float bestCrewDistSq = float.MaxValue;
+                int seatCount = seats.Length;
+                for (int i = 0; i < seatCount; i++)
+                {
+                    Seats seat = seats[i];
+                    if (seat == null || !seat.showUnitSet)
+                        continue;
+
+                    Soldier crew = seat.unitSet;
+                    if (crew == null || !crew.IsAlive || crew.faction == shooter.faction)
+                        continue;
+
+                    Spottable crewSpottable = crew.Cast<Spottable>();
+                    if (shooter.CanSee(crewSpottable))
+                    {
+                        float dSq = (crew.transform.position - shooterPos).sqrMagnitude;
+                        if (dSq < bestCrewDistSq)
+                        {
+                            bestCrewDistSq = dSq;
+                            exposedCrewTarget = crew;
+                        }
+                    }
+                }
+
+                if (exposedCrewTarget != null && !isAtWeapon && !isExplosiveOrFlame)
+                {
+                    customAimPoint = exposedCrewTarget.GetCenterOfUnit();
+                    hasCustomAimPoint = true;
+                    return true;
+                }
+            }
+
+            // 2. Dedicated explosive / HEAT / Flamethrower / heavy AT weapons (>40mm pen) can engage vehicle hulls directly
+            if (isExplosiveOrFlame || bulletPenMm >= 40f)
+            {
+                return true;
+            }
+
+            bool isTank = veh.TryCast<VehicleTank>() != null;
+
+            // Standard small arms (<12mm penetration) cannot penetrate tank hulls or tank tracks
+            if (isTank && !isAtWeapon && bulletPenMm < 12f)
+            {
+                if (exposedCrewTarget != null)
+                {
+                    customAimPoint = exposedCrewTarget.GetCenterOfUnit();
+                    hasCustomAimPoint = true;
+                    return true;
+                }
+                return false;
+            }
+
+            // 3. Inspect vehicle damageable parts for penetrable hull armor, vulnerable wheels, or breakable tracks
+            var parts = veh.damageableParts;
+            if (parts != null)
+            {
+                bool canPenetrateMainHull = false;
+                Vector3 bestPartPos = Vector3.zero;
+                float bestPartDistSq = float.MaxValue;
+
+                Vector3 bestWheelOrTrackPos = Vector3.zero;
+                float bestWheelOrTrackDistSq = float.MaxValue;
+
+                int partCount = parts.Count;
+                for (int i = 0; i < partCount; i++)
+                {
+                    VehicleDamagablePart part = parts[i];
+                    if (part == null || part.transform == null)
+                        continue;
+
+                    // Cosmetic detachable parts (fenders/skirts) do 0 damage to vehicle health
+                    if (part.TryCast<VehicleDamagableDetachablePart>() != null)
+                        continue;
+
+                    VehicleDamageableWheelPart wheelPart = part.TryCast<VehicleDamageableWheelPart>();
+                    if (wheelPart != null)
+                    {
+                        // Small arms can shoot out un-flattened rubber tires on wheeled vehicles within 60m
+                        if (!isTank && !wheelPart.WheelIsFlat && dist <= 60f && bulletPenMm > wheelPart.armorThickness + 0.5f)
+                        {
+                            Vector3 wPos = wheelPart.transform.position;
+                            float dSq = (wPos - shooterPos).sqrMagnitude;
+                            if (dSq < bestWheelOrTrackDistSq)
+                            {
+                                bestWheelOrTrackDistSq = dSq;
+                                bestWheelOrTrackPos = wPos;
+                            }
+                        }
+                        continue;
+                    }
+
+                    VehicleDamageableTrackPart trackPart = part.TryCast<VehicleDamageableTrackPart>();
+                    if (trackPart != null)
+                    {
+                        // AT rifles / heavy guns that can penetrate track armor can shoot out unbroken tracks
+                        if (!trackPart.TrackIsBroken && bulletPenMm > trackPart.armorThickness + 0.5f)
+                        {
+                            Vector3 tPos = trackPart.transform.position;
+                            float dSq = (tPos - shooterPos).sqrMagnitude;
+                            if (dSq < bestWheelOrTrackDistSq)
+                            {
+                                bestWheelOrTrackDistSq = dSq;
+                                bestWheelOrTrackPos = tPos;
+                            }
+                        }
+                        continue;
+                    }
+
+                    // Outer hull / superstructure / cab armor plate
+                    float effectiveArmor = part.considerAngledArmor ? (part.armorThickness * 1.15f) : part.armorThickness;
+                    if (bulletPenMm > effectiveArmor + 0.5f)
+                    {
+                        canPenetrateMainHull = true;
+                        Vector3 pPos = part.transform.position;
+                        float dSq = (pPos - shooterPos).sqrMagnitude;
+                        if (dSq < bestPartDistSq)
+                        {
+                            bestPartDistSq = dSq;
+                            bestPartPos = pPos;
+                        }
+                    }
+                }
+
+                if (canPenetrateMainHull)
+                {
+                    if (isTank && bestPartDistSq < float.MaxValue)
+                    {
+                        // Aim AT rifle at the specific thinner armor plate it can penetrate
+                        customAimPoint = bestPartPos;
+                        hasCustomAimPoint = true;
+                    }
+                    return true;
+                }
+
+                if (bestWheelOrTrackDistSq < float.MaxValue)
+                {
+                    // Hull is too thick, but the shooter can flatten a wheel or break a track!
+                    customAimPoint = bestWheelOrTrackPos;
+                    hasCustomAimPoint = true;
+                    return true;
+                }
+            }
+
+            // Fallback: if an AT rifle couldn't penetrate the tank's armor or tracks, but an exposed crewman is visible
+            if (exposedCrewTarget != null)
+            {
+                customAimPoint = exposedCrewTarget.GetCenterOfUnit();
+                hasCustomAimPoint = true;
+                return true;
+            }
+
+            return false;
+        }
+
+        private static void TryThrowNormalGrenadeAtVehicle(Soldier soldier, Vehicle targetVeh, float dist)
+        {
+            if (soldier == null || targetVeh == null || soldier.inventory == null)
+                return;
+
+            if (dist <= 7.5f || dist > 32f || soldier.isInBodyAnimation || soldier.isInHandsAnimation)
+                return;
+
+            // Vanilla SequentialUpdate (0x18055f91e) only checks FindItemOfType<VirtualATGrenade>() against vehicles.
+            // Allow infantry within throwing range to also throw normal grenades (VirtualGrenade) at tanks/vehicles!
+            VirtualItem grenadeItem = soldier.inventory.FindItemOfType<VirtualGrenade>();
+            if (grenadeItem != null)
+            {
+                float maxThrowRange = soldier.GetGrenadeThrowRange(grenadeItem);
+                if (dist <= maxThrowRange && UnityEngine.Random.Range(0, 100) > 65)
+                {
+                    soldier.Throw(grenadeItem, targetVeh.Cast<Spottable>());
+                }
+            }
+        }
+
+        // =====================================================================
+        // PATCH 1: SoldierAI.SequentialUpdate (shared=1, len=1250)
+        // - Veteran survival tracking & dynamic rank promotion
+        // - Priority 1A: Seek cover FIRST when bleeding, then bandage in cover
+        // - Priority 1B: Redirect vanilla's "Favourite Fighting Pose" (uncrouched unless needed; always crouch/prone when shooting)
+        // - Priority 1C: Gunner wall-seeking & bipod mounting
+        // - Priority 3: Auto-peek stance recovery when reloading/suppressed
+        // - Priority 4: Search & liberate nearby surrendered comrades
+        // =====================================================================
+        [HarmonyPatch(typeof(SoldierAI), nameof(SoldierAI.SequentialUpdate))]
+        public static class SoldierAI_SequentialUpdate_Patch
+        {
+            public static void Prefix(SoldierAI __instance, out bool __state)
+            {
+                __state = false;
+                try
+                {
+                    if (!VisionConfig.EnableMod.Value || !VisionConfig.BandageOnlyAfterFindingCover.Value || __instance == null)
+                        return;
+
+                    Soldier soldier = __instance.character;
+                    if (soldier == null || !soldier.IsAlive || soldier.IsPlayer() || soldier.IsOnVehicle())
+                        return;
+
+                    // If bleeding and actively moving toward a destination/cover, give up to 3.5s to reach cover
+                    // before stopping to bandage, without overwriting the squad's destination!
+                    if (soldier.isBleeding || soldier.GetBleedValue() > 0.01f)
+                    {
+                        IntPtr ptr = soldier.Pointer;
+                        if (!_bleedCoverDeadline.TryGetValue(ptr, out float deadline))
+                        {
+                            deadline = Time.time + 3.5f;
+                            _bleedCoverDeadline[ptr] = deadline;
+                        }
+
+                        if (!soldier.IsOnCover() && Time.time < deadline)
+                        {
+                            bool movingToCover = TrySeekNearbyCover(__instance, soldier);
+                            if (movingToCover && __instance.IsMoving() && soldier.isBleeding)
+                            {
+                                // Temporarily mask isBleeding during SequentialUpdate so vanilla doesn't interrupt movement to cover
+                                soldier.isBleeding = false;
+                                __state = true;
+                            }
+                        }
+                    }
+                }
+                catch { }
+            }
+
+            public static void Postfix(SoldierAI __instance, bool __state)
+            {
+                try
+                {
+                    if (__instance == null)
+                        return;
+
+                    Soldier soldier = __instance.character;
+                    if (__state && soldier != null)
+                    {
+                        soldier.isBleeding = true;
+                    }
+
+                    if (!VisionConfig.EnableMod.Value || soldier == null || !soldier.IsAlive || soldier.IsPlayer())
+                        return;
+
+                    IntPtr ptr = soldier.Pointer;
+
+                    // 1. Update Veteran progression & field rank promotions
+                    CheckAndApplyFieldPromotion(soldier);
+
+                    if (soldier.IsOnVehicle())
+                        return;
+
+                    // 2. Priority 1A (Don't Die): Bandage AFTER finding cover (or if stationary / deadline expired)
+                    bool isBleeding = soldier.isBleeding || soldier.GetBleedValue() > 0.01f;
+                    if (isBleeding)
+                    {
+                        if (!VisionConfig.BandageOnlyAfterFindingCover.Value)
+                        {
+                            if (!soldier.isInBodyAnimation && !soldier.isInHandsAnimation)
+                            {
+                                SetBotPose(__instance, soldier, SoldierPose.Crouch);
+                                __instance.TryStopBleeding();
+                            }
+                            return;
+                        }
+
+                        if (!_bleedCoverDeadline.TryGetValue(ptr, out float deadline))
+                        {
+                            deadline = Time.time + 3.5f;
+                            _bleedCoverDeadline[ptr] = deadline;
+                        }
+
+                        bool readyToBandage = soldier.IsOnCover() ||
+                                              Time.time >= deadline ||
+                                              !__instance.IsMoving();
+
+                        if (readyToBandage)
+                        {
+                            SoldierPose healPose = soldier.IsOnCover() ? SoldierPose.Crouch : SoldierPose.Prone;
+                            SetBotPose(__instance, soldier, healPose);
+                            if (!soldier.isInBodyAnimation && !soldier.isInHandsAnimation)
+                            {
+                                __instance.TryStopBleeding();
+                            }
+                            return;
+                        }
+                        else
+                        {
+                            // Sprinting to cover while bleeding: stay standing so they reach cover quickly!
+                            SetBotPose(__instance, soldier, SoldierPose.Idle);
+                            return;
+                        }
+                    }
+                    else
+                    {
+                        _bleedCoverDeadline.Remove(ptr);
+                    }
+
+                    // 3. Auto-Peek Recovery: Duck back down after peeking if reloading, suppressed, or target lost
+                    bool isPeeking = false;
+                    if (_peekRestoreTime.TryGetValue(ptr, out float restoreAt))
+                    {
+                        bool shouldDuck = Time.time > restoreAt ||
+                                          soldier.IsReloading ||
+                                          soldier.GetSuppressionValue() > 30f ||
+                                          !__instance.HasEnemyAndCanFireAtHim;
+                        if (shouldDuck)
+                        {
+                            _peekRestoreTime.Remove(ptr);
+                            _nextPeekAllowedTime[ptr] = Time.time + 3.0f;
+                            if (!__instance.IsMoving() && soldier.m_pose == SoldierPose.Idle)
+                            {
+                                SetBotPose(__instance, soldier, SoldierPose.Crouch);
+                                _combatStanceHoldUntil[ptr] = Time.time + 5.0f;
+                                _combatCrouchLockUntil[ptr] = Time.time + 3.5f;
+                            }
+                        }
+                        else
+                        {
+                            isPeeking = true;
+                        }
+                    }
+
+                    // 3B. Priority 3D: Smart Anti-Armor Target & Fire Discipline
+                    //     Stop infantry with small arms from shooting armored tanks unless they can shoot
+                    //     a visible exposed crew member or penetrate a vehicle part/wheel/track!
+                    if (VisionConfig.PreventSmallArmsFireAtTanks.Value &&
+                        __instance.visibleTarget != null &&
+                        __instance.visibleTarget.IsWheeledVehicleOrTank())
+                    {
+                        Vehicle targetVeh = __instance.visibleTarget.TryCast<Vehicle>();
+                        if (targetVeh != null)
+                        {
+                            // Allow throwing normal grenades (in addition to vanilla's AT grenades) at tanks/vehicles in throw range
+                            TryThrowNormalGrenadeAtVehicle(soldier, targetVeh, __instance.distFromTarget);
+
+                            if (TryEvaluateVehicleTarget(
+                                soldier,
+                                targetVeh,
+                                __instance.distFromTarget,
+                                out Soldier exposedCrew,
+                                out _,
+                                out _))
+                            {
+                                if (exposedCrew != null)
+                                {
+                                    // Redirect target directly to the exposed crew member so the AI aims at the crewman, not the steel hull!
+                                    Spottable crewSpottable = exposedCrew.Cast<Spottable>();
+                                    __instance.visibleTarget = crewSpottable;
+                                    soldier.CurrentVisibleTarget = crewSpottable;
+                                    __instance.distFromTarget = Vector3.Distance(soldier.transform.position, exposedCrew.transform.position);
+                                    if (!_nextTankDisciplineCountTime.TryGetValue(ptr, out float nextCount) || Time.time >= nextCount)
+                                    {
+                                        _nextTankDisciplineCountTime[ptr] = Time.time + 3.0f;
+                                        ExposedCrewTargeted++;
+                                    }
+                                }
+                            }
+                            else
+                            {
+                                // Held weapon cannot penetrate any part of this tank/vehicle and no exposed crew member is visible!
+                                // If this soldier is flagged isAtUnit (e.g., expended AT ammo and switched to rifle/pistol),
+                                // check if there is a visible enemy foot soldier they should engage instead.
+                                bool switchedToFootEnemy = false;
+                                if (soldier.isAtUnit)
+                                {
+                                    soldier.isAtUnit = false;
+                                    Spottable altEnemy = soldier.GetBestVisibleEnemy(out float altDist);
+                                    soldier.isAtUnit = true;
+                                    if (altEnemy != null && !altEnemy.IsWheeledVehicleOrTank())
+                                    {
+                                        __instance.visibleTarget = altEnemy;
+                                        soldier.CurrentVisibleTarget = altEnemy;
+                                        __instance.distFromTarget = altDist;
+                                        GenericGun heldGun = soldier.GetHeldGun();
+                                        __instance.targetInWeaponRange = heldGun != null && heldGun.DamageRange() >= altDist;
+                                        switchedToFootEnemy = true;
+                                    }
+                                }
+
+                                if (!switchedToFootEnemy)
+                                {
+                                    // Stop shooting small arms at the tank and keep head down in cover!
+                                    __instance.targetInWeaponRange = false;
+                                    soldier.SetGunTriggerPressed(false);
+                                    _combatStanceHoldUntil[ptr] = Time.time + 6.0f;
+                                    _combatCrouchLockUntil[ptr] = Time.time + 3.5f;
+                                    if (!_nextTankDisciplineCountTime.TryGetValue(ptr, out float nextCount) || Time.time >= nextCount)
+                                    {
+                                        _nextTankDisciplineCountTime[ptr] = Time.time + 3.0f;
+                                        UselessTankFirePrevented++;
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    // 4. Redirect Vanilla's "Favourite Fighting Pose" & Handle Gunner Bipod Wall Mounting
+                    bool isGunner = IsMachineGunnerOrHasBipod(soldier, out AttachmentBipod bipod);
+                    bool isHighBipodStanding = _bipodStandUntil.TryGetValue(ptr, out float standUntil) && Time.time < standUntil;
+                    float suppression = soldier.GetSuppressionValue();
+                    float dist = __instance.distFromTarget;
+
+                    if (__instance.HasEnemyAndCanFireAtHim || suppression >= 8f)
+                    {
+                        // Hold combat stance for at least 6.0s after losing LOS so bots never rapidly stand/prone in grass!
+                        _combatStanceHoldUntil[ptr] = Time.time + 6.0f;
+                    }
+
+                    // Check if this soldier is a mechanic actively assigned to repair a vehicle
+                    VehicleRepairTask repairTask = null;
+                    bool isRepairingVehicle = false;
+                    if (VisionConfig.EnableSmartTankCrewRepair.Value && soldier.targetDestination != null)
+                    {
+                        repairTask = soldier.targetDestination.TryCast<VehicleRepairTask>();
+                        if (repairTask != null && repairTask.VehicleStillneedsRepair && repairTask.vehToRepair != null)
+                        {
+                            isRepairingVehicle = true;
+                            Vector3 shelterPos = GetShelteredRepairPosition(repairTask.vehToRepair, soldier, out _);
+                            repairTask.targetPos = shelterPos;
+                            repairTask.pose = SoldierPose.Crouch;
+                            if ((__instance.MoveDestination - shelterPos).sqrMagnitude > 0.64f)
+                            {
+                                __instance.MoveDestination = shelterPos;
+                            }
+                        }
+                    }
+
+                    // Priority 1D: Smart Wall-Side Cover (Stand BEHIND walls relative to incoming fire, never IN FRONT with wall at back)
+                    if (VisionConfig.EnableSmartWallSideCover.Value &&
+                        !isRepairingVehicle &&
+                        !soldier.IsCharging() &&
+                        !soldier.UsingBipod() &&
+                        !soldier.IsBipodTransitioning())
+                    {
+                        if (!_nextWallSideCheckTime.TryGetValue(ptr, out float nextWallSide) || Time.time >= nextWallSide)
+                        {
+                            _nextWallSideCheckTime[ptr] = Time.time + 0.90f;
+                            Vector3 threatDir = GetEffectiveThreatDirection(soldier, soldier.joinedSquad, soldier.transform.position, soldier.transform.forward);
+                            if (threatDir.sqrMagnitude > 0.01f)
+                            {
+                                DestinationWithoutCover noCoverDest = soldier.targetDestination != null
+                                    ? soldier.targetDestination.TryCast<DestinationWithoutCover>()
+                                    : null;
+
+                                if (noCoverDest != null &&
+                                    TryFindShelteredSideOfWall(noCoverDest.targetPos, threatDir, soldier.transform.root, out Vector3 shelteredDestPos))
+                                {
+                                    noCoverDest.targetPos = shelteredDestPos;
+                                    noCoverDest.pose = SoldierPose.Crouch;
+                                    if ((__instance.MoveDestination - shelteredDestPos).sqrMagnitude > 0.49f)
+                                    {
+                                        __instance.MoveDestination = shelteredDestPos;
+                                    }
+                                    _nextWallSideCheckTime[ptr] = Time.time + 3.5f;
+                                    WallSideRepositionsCount++;
+                                }
+                                else if (!__instance.IsMoving() &&
+                                         IsPositionOnExposedSideOfWall(soldier.transform.position, threatDir, soldier.transform.root, out _))
+                                {
+                                    // Soldier is stationary in front of a wall with the wall at their back and open air toward the threat!
+                                    if (soldier.joinedSquad != null)
+                                    {
+                                        soldier.joinedSquad.formationDirection = threatDir;
+                                    }
+
+                                    if (TryFindShelteredSideOfWall(soldier.transform.position, threatDir, soldier.transform.root, out Vector3 shelteredPos))
+                                    {
+                                        if (noCoverDest != null)
+                                        {
+                                            noCoverDest.targetPos = shelteredPos;
+                                            noCoverDest.pose = SoldierPose.Crouch;
+                                        }
+                                        else
+                                        {
+                                            // Try upgrading to a sheltered CombatCover first; if still exposed, assign shelteredPos behind the wall
+                                            soldier.TryToGetToActualCover();
+                                            if (soldier.targetDestination == null ||
+                                                IsPositionOnExposedSideOfWall(soldier.targetDestination.GetCoverPosition(), threatDir, soldier.transform.root, out _))
+                                            {
+                                                DestinationWithoutCover newDest = new DestinationWithoutCover(shelteredPos, SoldierPose.Crouch);
+                                                soldier.CoverPosition(newDest.Cast<AiDestination>());
+                                            }
+                                        }
+
+                                        if ((__instance.MoveDestination - shelteredPos).sqrMagnitude > 0.49f)
+                                        {
+                                            __instance.MoveDestination = shelteredPos;
+                                        }
+                                        _nextWallSideCheckTime[ptr] = Time.time + 4.0f;
+                                        WallSideRepositionsCount++;
+                                    }
+                                    else if (soldier.HasDestinationAssigned &&
+                                             (__instance.HasEnemyAndCanFireAtHim || suppression >= 5f || soldier.isAlerted))
+                                    {
+                                        // Back is against a thick/closed building facing incoming fire — seek a sheltered CombatCover node
+                                        soldier.TryToGetToActualCover();
+                                        _nextWallSideCheckTime[ptr] = Time.time + 3.0f;
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    if (VisionConfig.EnforceStandingWhenOutOfCombat.Value && !soldier.IsStealth)
+                    {
+                        // Clear any sticky default crouch/prone pose field unless stealth-following
+                        __instance.pose = SoldierPose.Idle;
+
+                        // Vanilla GetDestinationInsideArea sets DestinationWithoutCover.pose to Random.Range(1, 3) (50% Prone!).
+                        // Redirect open-ground destination poses so bots never lie Prone in open fields without reason.
+                        if (soldier.targetDestination != null)
+                        {
+                            DestinationWithoutCover noCoverDest = soldier.targetDestination.TryCast<DestinationWithoutCover>();
+                            if (noCoverDest != null && noCoverDest.pose == SoldierPose.Prone && suppression < 35f)
+                            {
+                                noCoverDest.pose = SoldierPose.Crouch;
+                            }
+                        }
+                    }
+
+                    if (soldier.UsingBipod() || soldier.IsBipodTransitioning())
+                    {
+                        // Keep current bipod stance locked
+                        __instance.actualPose = soldier.m_pose;
+                    }
+                    else if (isRepairingVehicle)
+                    {
+                        // Tank crew repairing or skirting around the hull to the sheltered leeward side:
+                        // Stay crouched so the tank's armor shields their head/torso!
+                        SetBotPose(__instance, soldier, SoldierPose.Crouch);
+                    }
+                    else if (__instance.IsMoving())
+                    {
+                        // Moving soldier stance handling:
+                        // Note: In vanilla SoldierAI.get_IsMoveTime (0x180562080), when HasEnemyAndCanFireAtHim is true,
+                        // IsMoveTime toggles true (2.5s) <-> false (4.5s) on a 7.0s square wave!
+                        // Forcing Idle whenever IsMoving() is true while HasEnemyAndCanFireAtHim is true (or right after
+                        // crouching when lower eye height loses LOS) caused bots to oscillate Stand <-> Crouch!
+                        bool inCombatCrouchLock = _combatCrouchLockUntil.TryGetValue(ptr, out float crouchLockUntil) && Time.time < crouchLockUntil;
+                        bool stealthCrouch = soldier.IsStealth &&
+                                             soldier.joinedSquad != null &&
+                                             soldier.joinedSquad.Leader != null &&
+                                             soldier.joinedSquad.Leader.m_pose > SoldierPose.Idle;
+
+                        if (soldier.IsCharging())
+                        {
+                            SetBotPose(__instance, soldier, SoldierPose.Idle);
+                        }
+                        else if (__instance.HasEnemyAndCanFireAtHim && dist > 4.5f)
+                        {
+                            // Moving while actively engaging a visible enemy (2.5s walk-and-shoot / combat-step phase):
+                            // Never crawl Prone while moving; maintain Crouch if LOF from Crouch is clear so stance
+                            // stays consistent across both phases of vanilla's 7.0s IsMoveTime cycle!
+                            Vector3 targetPos = __instance.visibleTarget != null
+                                ? __instance.visibleTarget.GetCenterOfUnit()
+                                : (soldier.transform.position + soldier.transform.forward * Mathf.Max(dist, 15f));
+
+                            if (soldier.m_pose == SoldierPose.Prone || __instance.actualPose == SoldierPose.Prone)
+                            {
+                                SetBotPose(__instance, soldier, SoldierPose.Crouch);
+                            }
+                            else if (VisionConfig.NeverShootStandingInOpen.Value &&
+                                     !isPeeking &&
+                                     !isHighBipodStanding &&
+                                     (soldier.m_pose == SoldierPose.Crouch || HasClearLineOfFireFromCrouch(soldier, targetPos, dist)))
+                            {
+                                SetBotPose(__instance, soldier, SoldierPose.Crouch);
+                            }
+                            else
+                            {
+                                SetBotPose(__instance, soldier, SoldierPose.Idle);
+                            }
+                        }
+                        else if (VisionConfig.EnforceStandingWhenOutOfCombat.Value)
+                        {
+                            // Moving without an active fireable enemy:
+                            // Always lift Prone movers immediately so they never crawl along paths,
+                            // but respect _combatCrouchLockUntil before standing from Crouch -> Idle so brief LOS
+                            // flickers behind ridges/bushes never cause rapid Stand <-> Crouch loops!
+                            if (soldier.m_pose == SoldierPose.Prone || __instance.actualPose == SoldierPose.Prone)
+                            {
+                                SoldierPose liftPose = (inCombatCrouchLock || suppression >= 28f || stealthCrouch)
+                                    ? SoldierPose.Crouch
+                                    : SoldierPose.Idle;
+                                SetBotPose(__instance, soldier, liftPose);
+                            }
+                            else if (!inCombatCrouchLock && suppression < 28f && !stealthCrouch)
+                            {
+                                SetBotPose(__instance, soldier, SoldierPose.Idle);
+                            }
+                            else if (soldier.m_pose == SoldierPose.Crouch)
+                            {
+                                __instance.actualPose = SoldierPose.Crouch;
+                            }
+                        }
+                    }
+                    else
+                    {
+                        // Stationary soldier stance redirection
+                        if (__instance.HasEnemyAndCanFireAtHim && !soldier.IsCharging())
+                        {
+                            // Engaging a visible enemy while stationary: NEVER shoot from standing in the open
+                            // (unless crouching is blocked by a low wall/hill crest directly in front!)
+                            if (VisionConfig.NeverShootStandingInOpen.Value &&
+                                !isPeeking &&
+                                !isHighBipodStanding &&
+                                dist > 4.5f)
+                            {
+                                Vector3 targetPos = __instance.visibleTarget != null
+                                    ? __instance.visibleTarget.GetCenterOfUnit()
+                                    : (soldier.transform.position + soldier.transform.forward * Mathf.Max(dist, 15f));
+
+                                bool canCrouchShoot = soldier.m_pose != SoldierPose.Idle ||
+                                                      suppression >= 32f ||
+                                                      HasClearLineOfFireFromCrouch(soldier, targetPos, dist);
+
+                                if (!canCrouchShoot)
+                                {
+                                    // Crouching from standing here would put a low wall/ridge in front of the muzzle; stay standing!
+                                    SetBotPose(__instance, soldier, SoldierPose.Idle);
+                                }
+                                else
+                                {
+                                    bool canGoProne = (!_noProneUntil.TryGetValue(ptr, out float noProne) || Time.time >= noProne) &&
+                                                      !soldier.IsOnCover() &&
+                                                      !soldier.IsTowardWall();
+
+                                    SoldierPose combatPose = SoldierPose.Crouch;
+                                    if ((suppression >= 35f || isGunner) &&
+                                        canGoProne &&
+                                        HasClearLineOfFireFromProne(soldier, targetPos, dist))
+                                    {
+                                        combatPose = SoldierPose.Prone;
+                                    }
+
+                                    // Always override __instance.actualPose (which vanilla SequentialUpdate may have just set to Prone!)
+                                    if (__instance.actualPose != combatPose || soldier.m_pose != combatPose)
+                                    {
+                                        SetBotPose(__instance, soldier, combatPose);
+                                        if (!_nextStanceDropAllowed.TryGetValue(ptr, out float nextAllowed) || Time.time >= nextAllowed)
+                                        {
+                                            _nextStanceDropAllowed[ptr] = Time.time + 3.5f;
+                                            SelfPreservationDrops++;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        else if (VisionConfig.EnforceStandingWhenOutOfCombat.Value)
+                        {
+                            // Stationary with NO fireable enemy:
+                            // Keep defenders crouched when occupying a CombatCover, holding inside an objective capture zone,
+                            // sheltered behind front cover/walls, or when they/their squad are alerted!
+                            bool inCombatHold = _combatStanceHoldUntil.TryGetValue(ptr, out float holdUntil) && Time.time < holdUntil;
+                            bool stealthCrouch = soldier.IsStealth &&
+                                                 soldier.joinedSquad != null &&
+                                                 soldier.joinedSquad.Leader != null &&
+                                                 soldier.joinedSquad.Leader.m_pose > SoldierPose.Idle;
+                            CombatCover activeCover = soldier.targetDestination != null
+                                ? soldier.targetDestination.TryCast<CombatCover>()
+                                : null;
+                            bool onActualCombatCover = soldier.IsOnCover() ||
+                                                       (activeCover != null && (soldier.transform.position - activeCover.GetCoverPosition()).sqrMagnitude <= 3.2f * 3.2f);
+                            MissionObjective currentObj = (soldier.joinedSquad != null && soldier.joinedSquad.currentTask != null)
+                                ? soldier.joinedSquad.currentTask.TryCast<MissionObjective>()
+                                : null;
+                            bool inObjectiveZone = currentObj != null && soldier.PositionIsInsideValidConquerZone(soldier.transform.position, currentObj);
+                            bool isSquadAlerted = soldier.isAlerted || (soldier.joinedSquad != null && soldier.joinedSquad.IsEnemyAwareOfThisSquad);
+                            Vector3 threatDir = GetEffectiveThreatDirection(soldier, soldier.joinedSquad, soldier.transform.position, soldier.transform.forward);
+                            bool isShelteredByWall = VisionConfig.EnableSmartWallSideCover.Value &&
+                                                     IsPositionShelteredByFrontCover(soldier.transform.position, threatDir, soldier.transform.root);
+                            bool hasMortar = __instance.HeldMortar != null;
+
+                            bool holdDefensiveCrouch = onActualCombatCover || inObjectiveZone || isShelteredByWall || isSquadAlerted;
+                            bool coverRequiresStanding = onActualCombatCover &&
+                                                         activeCover != null &&
+                                                         activeCover.GetCoverPose() == SoldierPose.Idle &&
+                                                         !inCombatHold &&
+                                                         suppression < 8f &&
+                                                         !isSquadAlerted;
+
+                            if ((!holdDefensiveCrouch || coverRequiresStanding) && !inCombatHold && suppression < 8f && !stealthCrouch && !hasMortar)
+                            {
+                                SetBotPose(__instance, soldier, SoldierPose.Idle);
+                            }
+                            else if (suppression < 35f && !stealthCrouch && !hasMortar)
+                            {
+                                // Hold Crouch in cover / trenches / objective zones (and lift any vanilla 50% Prone pose to Crouch when not heavily suppressed)
+                                if (__instance.actualPose != SoldierPose.Crouch || soldier.m_pose != SoldierPose.Crouch)
+                                {
+                                    SetBotPose(__instance, soldier, SoldierPose.Crouch);
+                                }
+                            }
+                        }
+                    }
+
+                    // Gunner bipod surface deployment (only when stationary)
+                    if (isGunner && !__instance.IsMoving())
+                    {
+                        Vector3 targetPos = __instance.visibleTarget != null
+                            ? __instance.visibleTarget.GetCenterOfUnit()
+                            : (soldier.transform.position + soldier.transform.forward * 25f);
+                        HandleGunnerBipodAndWallMounting(__instance, soldier, bipod, targetPos, dist);
+                    }
+
+                    // 5. Priority 4 (Rescue & Liberate): Free nearby surrendered friendly comrades
+                    if (VisionConfig.EnableComradeLiberation.Value &&
+                        suppression < 35f &&
+                        !soldier.UsingBipod() &&
+                        (!__instance.HasEnemyAndCanFireAtHim || dist > 28f))
+                    {
+                        if (!_nextLiberateCheckTime.TryGetValue(ptr, out float nextLib) || Time.time >= nextLib)
+                        {
+                            _nextLiberateCheckTime[ptr] = Time.time + 1.5f;
+                            TryLiberateNearbyComrade(__instance, soldier);
+                        }
+                    }
+                }
+                catch { }
+            }
+
+            private static void TryLiberateNearbyComrade(SoldierAI ai, Soldier rescuer)
+            {
+                var allSquads = Squad.AllSquads;
+                if (allSquads == null) return;
+
+                string myFaction = rescuer.faction;
+                Vector3 myPos = rescuer.transform.position;
+                float bestDistSq = VisionConfig.LiberateSearchRadius.Value * VisionConfig.LiberateSearchRadius.Value;
+                Soldier bestSurrendered = null;
+
+                foreach (var kvp in allSquads)
+                {
+                    Squad sq = kvp.Value;
+                    if (sq == null || sq.units == null) continue;
+                    var units = sq.units;
+                    int c = units.Count;
+                    for (int i = 0; i < c; i++)
+                    {
+                        Soldier f = units[i];
+                        if (f == null || !f.IsAlive || f.Pointer == rescuer.Pointer) continue;
+                        if (f.faction != myFaction || !f.HasSurrended()) continue;
+
+                        float dSq = (f.transform.position - myPos).sqrMagnitude;
+                        if (dSq < bestDistSq)
+                        {
+                            bestDistSq = dSq;
+                            bestSurrendered = f;
+                        }
+                    }
+                }
+
+                if (bestSurrendered != null)
+                {
+                    if (bestDistSq <= 3.8f * 3.8f)
+                    {
+                        string sqId = rescuer.joinedSquad != null ? rescuer.joinedSquad.InstanceID.ToString() : "";
+                        bestSurrendered.UnSurrenderSynched(sqId);
+                        ComradesLiberated++;
+                        AddCombatExperienceBonus(rescuer, 30f);
+                    }
+                    else if (!rescuer.IsSquadLeader())
+                    {
+                        ai.MoveDirectlyToward(bestSurrendered.transform.position, 2.2f);
+                    }
+                }
+            }
+        }
+
+        // =====================================================================
+        // PATCH 2: SoldierAI.ProcessAiAccuracy (shared=1, len=1102)
+        // Signature: public static float ProcessAiAccuracy(Soldier user, SoldierAI.AiAccuracyMode mode)
+        // - Linearly scales AI inaccuracy/spread down by up to 20% over 15 minutes
+        // =====================================================================
+        [HarmonyPatch(typeof(SoldierAI), nameof(SoldierAI.ProcessAiAccuracy))]
+        public static class SoldierAI_ProcessAiAccuracy_Patch
+        {
+            public static void Postfix(Soldier __0, ref float __result)
+            {
+                try
+                {
+                    if (!VisionConfig.EnableMod.Value || !VisionConfig.EnableVeteranSystem.Value || __0 == null || __result <= 0f)
+                        return;
+
+                    float vet01 = GetVeterancy01(__0);
+                    if (vet01 <= 0.02f) return;
+
+                    float maxReduction = Mathf.Clamp(VisionConfig.VeteranMaxSpreadReduction.Value, 0f, 0.40f);
+                    float spreadMult = 1.0f - (vet01 * maxReduction);
+                    __result *= spreadMult;
+                }
+                catch { }
+            }
+        }
+
+        // =====================================================================
+        // PATCH 3: SoldierAI.OnSuppressed (shared=1, len=455)
+        // - Reduces vanilla's 8.0s cover check cooldown down to 4.8s -> 2.2s
+        // - Forces suppressed troops in the open to drop Prone/Crouch & upgrade path to cover
+        // =====================================================================
+        [HarmonyPatch(typeof(SoldierAI), nameof(SoldierAI.OnSuppressed))]
+        public static class SoldierAI_OnSuppressed_Patch
+        {
+            public static void Postfix(SoldierAI __instance)
+            {
+                try
+                {
+                    if (!VisionConfig.EnableMod.Value || __instance == null)
+                        return;
+
+                    Soldier soldier = __instance.character;
+                    if (soldier == null || !soldier.IsAlive || soldier.IsPlayer())
+                        return;
+
+                    IntPtr ptr = soldier.Pointer;
+                    _combatStanceHoldUntil[ptr] = Time.time + 6.0f;
+
+                    // Surviving under suppression builds veteran experience slightly
+                    AddCombatExperienceBonus(soldier, 1.5f);
+
+                    float vet01 = GetVeterancy01(soldier);
+                    float desiredCooldown = Mathf.Lerp(4.8f, 2.2f, vet01);
+                    if (__instance.nextSuppressionCheckTime > Time.time + desiredCooldown)
+                    {
+                        __instance.nextSuppressionCheckTime = Time.time + desiredCooldown;
+                    }
+
+                    if (VisionConfig.EnableSelfPreservationStance.Value &&
+                        !soldier.IsOnVehicle() &&
+                        !soldier.IsCharging())
+                    {
+                        TrySeekNearbyCover(__instance, soldier);
+
+                        if (!__instance.IsMoving())
+                        {
+                            bool canGoProne = (!_noProneUntil.TryGetValue(ptr, out float noProne) || Time.time >= noProne) &&
+                                              !soldier.IsOnCover() &&
+                                              !soldier.IsTowardWall();
+
+                            SoldierPose targetPose = (soldier.GetSuppressionValue() >= 35f && canGoProne)
+                                ? SoldierPose.Prone
+                                : SoldierPose.Crouch;
+
+                            if (soldier.m_pose < targetPose)
+                            {
+                                SetBotPose(__instance, soldier, targetPose);
+                                SelfPreservationDrops++;
+                            }
+                        }
+                    }
+                }
+                catch { }
+            }
+        }
+
+        // =====================================================================
+        // PATCH 4: SoldierAI.UpdateMoveDirection (shared=1, len=712)
+        // - Priority 2: Teaches AI soldiers to vault low walls, fences & sandbags
+        // =====================================================================
+        [HarmonyPatch(typeof(SoldierAI), nameof(SoldierAI.UpdateMoveDirection))]
+        public static class SoldierAI_UpdateMoveDirection_Patch
+        {
+            public static void Postfix(SoldierAI __instance)
+            {
+                try
+                {
+                    if (!VisionConfig.EnableMod.Value || !VisionConfig.EnableWallVaulting.Value || __instance == null)
+                        return;
+
+                    Soldier soldier = __instance.character;
+                    if (soldier == null || !soldier.IsAlive || soldier.IsPlayer() || soldier.IsOnVehicle())
+                        return;
+
+                    IntPtr ptr = soldier.Pointer;
+                    if (_nextVaultCheckTime.TryGetValue(ptr, out float nextVault) && Time.time < nextVault)
+                        return;
+
+                    _nextVaultCheckTime[ptr] = Time.time + 0.40f;
+
+                    if (!__instance.IsMoving() ||
+                        soldier.isInBodyAnimation ||
+                        soldier.IsJumping() ||
+                        soldier.IsCarryingBody() ||
+                        soldier.IsCarried() ||
+                        soldier.HasSurrended())
+                    {
+                        return;
+                    }
+
+                    if (soldier.CanVault(out Vector3 vaultPos))
+                    {
+                        soldier.Vault(vaultPos);
+                        _nextVaultCheckTime[ptr] = Time.time + 1.80f;
+                        WallsVaulted++;
+                    }
+                }
+                catch { }
+            }
+        }
+
+        // =====================================================================
+        // PATCH 5: SoldierAI.RotateAndFireToward (shared=1, len=1136)
+        // - Priority 1: Always at least Crouch (or Prone for MGs) BEFORE shooting when stationary; Gunner wall bipod deployment
+        // - Priority 3A: Stop shooting walls + Auto-Peek over low cover/windowsills
+        // - Priority 3B: Friendly Fire Avoidance (5-deg cone + 0.65m corridor)
+        // - Priority 3C: Anti-stacking personal space (~2.4m firing line spacing)
+        // =====================================================================
+        [HarmonyPatch(typeof(SoldierAI), nameof(SoldierAI.RotateAndFireToward))]
+        public static class SoldierAI_RotateAndFireToward_Patch
+        {
+            public static bool Prefix(SoldierAI __instance, ref Vector3 __0, float __1, out bool __state)
+            {
+                __state = false;
+                try
+                {
+                    if (!VisionConfig.EnableMod.Value || __instance == null)
+                        return true;
+
+                    __state = __instance.allowFireAtEnemy;
+                    Soldier soldier = __instance.character;
+                    if (soldier == null || !soldier.IsAlive || soldier.IsPlayer())
+                        return true;
+
+                    IntPtr ptr = soldier.Pointer;
+                    _combatStanceHoldUntil[ptr] = Time.time + 6.0f;
+
+                    float dist = __instance.distFromTarget;
+                    if (dist <= 0.1f)
+                        dist = Vector3.Distance(soldier.transform.position, __0);
+
+                    // Priority 3D: Smart Anti-Armor Target & Fire Discipline
+                    // Stop infantry with small arms from rotating/firing at armored tanks unless they can
+                    // hit a visible exposed crew member or penetrate a vehicle part/wheel/track!
+                    if (VisionConfig.PreventSmallArmsFireAtTanks.Value &&
+                        __instance.visibleTarget != null &&
+                        __instance.visibleTarget.IsWheeledVehicleOrTank() &&
+                        !soldier.IsOnVehicle())
+                    {
+                        Vehicle targetVeh = __instance.visibleTarget.TryCast<Vehicle>();
+                        if (targetVeh != null)
+                        {
+                            if (TryEvaluateVehicleTarget(
+                                soldier,
+                                targetVeh,
+                                dist,
+                                out _,
+                                out Vector3 customAimPoint,
+                                out bool hasCustomAimPoint))
+                            {
+                                if (hasCustomAimPoint)
+                                {
+                                    // Aim directly at the exposed crewman, un-flattened rubber tire, or penetrable armor plate/track!
+                                    __0 = customAimPoint;
+                                    dist = Vector3.Distance(soldier.transform.position, __0);
+                                }
+                            }
+                            else
+                            {
+                                __instance.targetInWeaponRange = false;
+                                __instance.allowFireAtEnemy = false;
+                                soldier.SetGunTriggerPressed(false);
+                                if (!_nextTankDisciplineCountTime.TryGetValue(ptr, out float nextCount) || Time.time >= nextCount)
+                                {
+                                    _nextTankDisciplineCountTime[ptr] = Time.time + 3.0f;
+                                    UselessTankFirePrevented++;
+                                }
+                                return false;
+                            }
+                        }
+                    }
+
+                    float vet01 = GetVeterancy01(soldier);
+                    bool blockFire = false;
+                    bool isMoving = __instance.IsMoving();
+                    bool isPeeking = _peekRestoreTime.TryGetValue(ptr, out float peekEnd) && Time.time < peekEnd;
+                    bool isHighBipodStanding = _bipodStandUntil.TryGetValue(ptr, out float standUntil) && Time.time < standUntil;
+                    bool isGunner = IsMachineGunnerOrHasBipod(soldier, out AttachmentBipod bipod);
+
+                    // 0. Gunner Bipod Wall / Ground Mounting (only when stationary!)
+                    if (!isMoving && isGunner && !soldier.IsOnVehicle() && !soldier.IsCharging())
+                    {
+                        HandleGunnerBipodAndWallMounting(__instance, soldier, bipod, __0, dist);
+                    }
+
+                    // 1. Priority 1: Never Shoot Standing in the Open — Crouch (or Prone for Gunners) BEFORE Shooting
+                    // CRITICAL FIX: Only drop from standing to crouch if HasClearLineOfFireFromCrouch is true (or heavily suppressed)
+                    // so bots standing behind waist-high walls/sandbags/ridges don't drop into a blocked crouch and oscillate!
+                    if (!isMoving &&
+                        (VisionConfig.EnableSelfPreservationStance.Value || VisionConfig.NeverShootStandingInOpen.Value) &&
+                        !isPeeking &&
+                        !isHighBipodStanding &&
+                        !soldier.IsOnVehicle() &&
+                        !soldier.IsCharging() &&
+                        !soldier.UsingBipod())
+                    {
+                        if (soldier.m_pose == SoldierPose.Idle && dist > 4.5f && dist < 220f)
+                        {
+                            float curSupp = soldier.GetSuppressionValue();
+                            if (curSupp >= 32f || HasClearLineOfFireFromCrouch(soldier, __0, dist))
+                            {
+                                bool canGoProne = (!_noProneUntil.TryGetValue(ptr, out float noProne) || Time.time >= noProne) &&
+                                                  !soldier.IsOnCover() &&
+                                                  !soldier.IsTowardWall();
+
+                                SoldierPose fightPose = SoldierPose.Crouch;
+                                if ((curSupp >= 35f || isGunner) &&
+                                    canGoProne &&
+                                    HasClearLineOfFireFromProne(soldier, __0, dist))
+                                {
+                                    fightPose = SoldierPose.Prone;
+                                }
+
+                                SetBotPose(__instance, soldier, fightPose);
+
+                                if (!_nextStanceDropAllowed.TryGetValue(ptr, out float nextAllowed) || Time.time >= nextAllowed)
+                                {
+                                    // Brief 0.30s pause when dropping from standing so they lower their silhouette before firing
+                                    _stanceDropHoldFireUntil[ptr] = Time.time + 0.30f;
+                                    _nextStanceDropAllowed[ptr] = Time.time + 3.5f;
+                                    SelfPreservationDrops++;
+                                }
+                            }
+                            else
+                            {
+                                // Standing is required to clear the cover/ridge in front; keep actualPose synced to Idle
+                                __instance.actualPose = SoldierPose.Idle;
+                            }
+                        }
+
+                        if (_stanceDropHoldFireUntil.TryGetValue(ptr, out float holdUntil) && Time.time < holdUntil)
+                        {
+                            blockFire = true;
+                        }
+                    }
+
+                    // 2. Priority 3A: Stop Shooting Walls & Auto-Peek Over Cover (or High-Wall Bipod Mount)
+                    if (VisionConfig.EnableWallShootingPrevention.Value && !soldier.IsOnVehicle())
+                    {
+                        if (!_nextWallCheckTime.TryGetValue(ptr, out float nextWall) || Time.time >= nextWall)
+                        {
+                            _nextWallCheckTime[ptr] = Time.time + 0.12f;
+                            if (IsMuzzleBlockedByWall(soldier, __0, dist))
+                            {
+                                _wallBlockedUntil[ptr] = Time.time + 0.20f;
+                                WallsBlocked++;
+
+                                // Auto-Peek up one stance if crouched/prone behind a low wall/sandbag/windowsill:
+                                // - Respect _nextPeekAllowedTime cooldown after ducking so bots don't bounce up and down
+                                // - Never peek while reloading / in hands animation (native SetPose forces Crouch during hands anim!)
+                                // - Use < 25f suppression threshold (with > 30f duck threshold in SequentialUpdate for hysteresis)
+                                // - Verify the higher stance actually has a clear line of fire over the obstacle
+                                bool canPeekNow = !_nextPeekAllowedTime.TryGetValue(ptr, out float nextPeek) || Time.time >= nextPeek;
+                                if (!isMoving &&
+                                    canPeekNow &&
+                                    VisionConfig.EnableAutoPeekOverCover.Value &&
+                                    soldier.GetSuppressionValue() < 25f &&
+                                    !soldier.IsReloading &&
+                                    !soldier.isInHandsAnimation &&
+                                    !soldier.isInBodyAnimation &&
+                                    !soldier.UsingBipod())
+                                {
+                                    if (soldier.m_pose == SoldierPose.Prone && HasClearLineOfFireFromCrouch(soldier, __0, dist))
+                                    {
+                                        SetBotPose(__instance, soldier, SoldierPose.Crouch);
+                                        _noProneUntil[ptr] = Time.time + 10.0f;
+                                        _combatStanceHoldUntil[ptr] = Time.time + 6.0f;
+                                        _peekRestoreTime[ptr] = Time.time + 4.5f;
+                                        _nextStanceDropAllowed[ptr] = Time.time + 4.5f;
+                                        AutoPeeksTriggered++;
+                                    }
+                                    else if (soldier.m_pose == SoldierPose.Crouch &&
+                                             (soldier.CanAutoCoverStand() || isGunner || HasClearLineOfFireFromStanding(soldier, __0, dist)))
+                                    {
+                                        if (HasClearLineOfFireFromStanding(soldier, __0, dist))
+                                        {
+                                            SetBotPose(__instance, soldier, SoldierPose.Idle);
+                                            _noProneUntil[ptr] = Time.time + 10.0f;
+                                            _combatStanceHoldUntil[ptr] = Time.time + 6.0f;
+                                            _peekRestoreTime[ptr] = Time.time + 4.0f;
+                                            _nextStanceDropAllowed[ptr] = Time.time + 4.0f;
+                                            if (isGunner && bipod != null)
+                                            {
+                                                _bipodStandUntil[ptr] = Time.time + 4.0f;
+                                                soldier.StartCoroutine(soldier.RetryBipodDeployAfterStanding());
+                                            }
+                                            AutoPeeksTriggered++;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        if (_wallBlockedUntil.TryGetValue(ptr, out float wallUntil) && Time.time < wallUntil)
+                        {
+                            blockFire = true;
+                        }
+                    }
+
+                    // 3. Priority 3B: Friendly Fire Avoidance (5-deg Cone + 0.65m Corridor)
+                    if (VisionConfig.EnableFriendlyFireAvoidance.Value)
+                    {
+                        if (!_nextFFCheckTime.TryGetValue(ptr, out float nextFF) || Time.time >= nextFF)
+                        {
+                            _nextFFCheckTime[ptr] = Time.time + 0.10f;
+                            if (IsFriendlyInLineOfFire(soldier, __0, dist, vet01, out Vector3 sidestepDir))
+                            {
+                                _ffBlockedUntil[ptr] = Time.time + 0.22f;
+                                FriendlyFirePrevented++;
+
+                                // Nudge laterally to clear the friendly line of fire if on foot and not locked in cover
+                                if (!soldier.IsOnVehicle() && !soldier.IsOnCover() && !soldier.IsTowardWall() && !soldier.UsingBipod() && sidestepDir.sqrMagnitude > 0.01f)
+                                {
+                                    SoldierPose nudgePose = __instance.actualPose == SoldierPose.Prone ? SoldierPose.Crouch : __instance.actualPose;
+                                    soldier.MoveFPS(sidestepDir, nudgePose, false, __1);
+                                }
+                            }
+                        }
+
+                        if (_ffBlockedUntil.TryGetValue(ptr, out float ffUntil) && Time.time < ffUntil)
+                        {
+                            blockFire = true;
+                        }
+                    }
+
+                    // 4. Priority 3C: Anti-Stacking Personal Space (~2.4m Firing Line Separation)
+                    if (VisionConfig.EnableAntiStacking.Value &&
+                        !soldier.IsOnVehicle() &&
+                        !soldier.IsOnCover() &&
+                        !soldier.IsTowardWall() &&
+                        !soldier.UsingBipod() &&
+                        !__instance.IsMoving())
+                    {
+                        if (!_nextAntiStackTime.TryGetValue(ptr, out float nextAS) || Time.time >= nextAS)
+                        {
+                            _nextAntiStackTime[ptr] = Time.time + 0.08f;
+                            if (TryGetAntiStackPush(soldier, out Vector3 pushDir))
+                            {
+                                SoldierPose pushPose = __instance.actualPose == SoldierPose.Prone ? SoldierPose.Crouch : __instance.actualPose;
+                                soldier.MoveFPS(pushDir, pushPose, false, __1);
+                                AntiStackNudges++;
+                            }
+                        }
+                    }
+
+                    // Apply trigger block before RotateAndFireToward executes so the bot still aims/rotates
+                    // toward the enemy without firing into a wall or a squadmate's back
+                    if (blockFire)
+                    {
+                        __instance.allowFireAtEnemy = false;
+                        soldier.SetGunTriggerPressed(false);
+                    }
+                }
+                catch { }
+                return true;
+            }
+
+            public static void Postfix(SoldierAI __instance, bool __state)
+            {
+                try
+                {
+                    if (!VisionConfig.EnableMod.Value || __instance == null)
+                        return;
+
+                    // Restore original allowFireAtEnemy state for next tick
+                    __instance.allowFireAtEnemy = __state;
+                }
+                catch { }
+            }
+        }
+
+        // =====================================================================
+        // PATCH 6: SquadSoldierLabel.RefreshVisual (shared=1, len=212)
+        // - Appends [Vet I], [Vet II], [Vet III ★] & rank color in Squad Roster UI
+        // =====================================================================
+        [HarmonyPatch(typeof(SquadSoldierLabel), nameof(SquadSoldierLabel.RefreshVisual))]
+        public static class SquadSoldierLabel_RefreshVisual_Patch
+        {
+            public static void Postfix(SquadSoldierLabel __instance)
+            {
+                try
+                {
+                    if (!VisionConfig.EnableMod.Value ||
+                        !VisionConfig.EnableVeteranSystem.Value ||
+                        !VisionConfig.ShowVeteranSquadRosterTags.Value ||
+                        __instance == null)
+                    {
+                        return;
+                    }
+
+                    Soldier s = __instance.assignedSoldier;
+                    Text nameLabel = __instance.name_surname;
+                    if (s == null || nameLabel == null)
+                        return;
+
+                    int tier = GetVeteranTier(s);
+                    if (tier <= 0)
+                        return;
+
+                    string tag = tier == 1 ? " [Vet I]" : (tier == 2 ? " [Vet II]" : " [Vet III \u2605]");
+                    string curText = nameLabel.text ?? "";
+                    if (!curText.Contains("[Vet"))
+                    {
+                        nameLabel.text = curText + tag;
+                    }
+
+                    if (tier == 1)
+                        nameLabel.color = new Color(0.95f, 0.82f, 0.55f, 1f); // Warm Bronze
+                    else if (tier == 2)
+                        nameLabel.color = new Color(0.85f, 0.95f, 1.00f, 1f); // Crisp Silver
+                    else
+                        nameLabel.color = new Color(1.00f, 0.86f, 0.22f, 1f); // Veteran Gold
+                }
+                catch { }
+            }
+        }
+
+        // =====================================================================
+        // PATCH 7: VehicleRepairTask.GetCoverPosition (shared=1, len=177)
+        // - Vanilla returns vehToRepair.transform.position (the center of the tank!).
+        // - Redirects the repair destination to the sheltered leeward/rear side of the
+        //   tank hull (opposite the enemy threat / turret direction) so the crewman
+        //   walks around the hull and uses the tank's armor as solid cover.
+        // =====================================================================
+        [HarmonyPatch(typeof(VehicleRepairTask), nameof(VehicleRepairTask.GetCoverPosition))]
+        public static class VehicleRepairTask_GetCoverPosition_Patch
+        {
+            public static void Postfix(VehicleRepairTask __instance, ref Vector3 __result)
+            {
+                try
+                {
+                    if (!VisionConfig.EnableMod.Value ||
+                        !VisionConfig.EnableSmartTankCrewRepair.Value ||
+                        __instance == null)
+                    {
+                        return;
+                    }
+
+                    Vehicle veh = __instance.vehToRepair;
+                    if (veh == null || veh.transform == null)
+                        return;
+
+                    Vector3 shelterPos = GetShelteredRepairPosition(veh, null, out _);
+                    __instance.targetPos = shelterPos;
+                    __instance.pose = SoldierPose.Crouch;
+                    __result = shelterPos;
+                }
+                catch { }
+            }
+        }
+
+        // =====================================================================
+        // PATCH 8: VehicleRepairTask.IsReached (shared=1, len=328)
+        // - Vanilla returns true whenever the mechanic is within 5.5m of the tank's center,
+        //   which is immediately true the instant he pops out of his hatch on the exposed
+        //   front or side in the enemy firing line!
+        // - Requires the mechanic to actually reach the sheltered leeward hemisphere/point
+        //   behind the tank hull before starting the vulnerable repair animation (with a
+        //   6.5s safety fallback if the rear of the tank is wedged against an obstacle).
+        // =====================================================================
+        [HarmonyPatch(typeof(VehicleRepairTask), nameof(VehicleRepairTask.IsReached))]
+        public static class VehicleRepairTask_IsReached_Patch
+        {
+            public static void Postfix(VehicleRepairTask __instance, Vector3 __0, ref bool __result)
+            {
+                try
+                {
+                    if (!__result ||
+                        !VisionConfig.EnableMod.Value ||
+                        !VisionConfig.EnableSmartTankCrewRepair.Value ||
+                        __instance == null)
+                    {
+                        return;
+                    }
+
+                    // If the vehicle is already fully repaired, let OnCoverReached run immediately so the crewman re-mounts
+                    if (!__instance.VehicleStillneedsRepair)
+                        return;
+
+                    Vehicle veh = __instance.vehToRepair;
+                    if (veh == null || veh.transform == null)
+                        return;
+
+                    IntPtr taskPtr = __instance.Pointer;
+                    if (!_repairTaskStartTime.TryGetValue(taskPtr, out float startTime))
+                    {
+                        startTime = Time.time;
+                        _repairTaskStartTime[taskPtr] = startTime;
+                    }
+
+                    // Safety timeout: if the crewman has been trying to get around the tank for > 6.5s
+                    // (e.g., tank is wedged against a building or cliff), allow repair from current < 5.5m spot
+                    if (Time.time - startTime > 6.5f)
+                        return;
+
+                    Vector3 shelterPos = GetShelteredRepairPosition(veh, null, out Vector3 shelterDir);
+                    Vector3 vehPos = veh.transform.position;
+
+                    Vector3 toShelter = __0 - shelterPos;
+                    toShelter.y = 0f;
+                    if (toShelter.sqrMagnitude <= 2.25f * 2.25f)
+                        return;
+
+                    Vector3 toSoldier = __0 - vehPos;
+                    toSoldier.y = 0f;
+                    if (toSoldier.sqrMagnitude > 0.04f && Vector3.Dot(toSoldier.normalized, shelterDir) >= 0.30f)
+                        return;
+
+                    // Mechanic is still on the exposed side / front in the firing line — keep moving around the hull!
+                    __result = false;
+                }
+                catch { }
+            }
+        }
+
+        // =====================================================================
+        // PATCH 9: VehicleRepairTask.OnCoverReached (shared=1, len=720)
+        // - Forces the mechanic into Crouch behind the tank hull while repairing
+        // - Holds off starting the locked repair animation if an enemy has flanked
+        //   within 35m with direct LOS and heavy suppression (> 55) on the mechanic
+        // =====================================================================
+        [HarmonyPatch(typeof(VehicleRepairTask), nameof(VehicleRepairTask.OnCoverReached))]
+        public static class VehicleRepairTask_OnCoverReached_Patch
+        {
+            public static bool Prefix(VehicleRepairTask __instance, Soldier __0)
+            {
+                try
+                {
+                    if (!VisionConfig.EnableMod.Value ||
+                        !VisionConfig.EnableSmartTankCrewRepair.Value ||
+                        __instance == null ||
+                        __0 == null)
+                    {
+                        return true;
+                    }
+
+                    if (!__instance.VehicleStillneedsRepair || !__0.IsAI())
+                        return true;
+
+                    // Keep the crewman crouched behind the tank's armor
+                    if (__0.aiController != null)
+                    {
+                        SetBotPose(__0.aiController, __0, SoldierPose.Crouch);
+
+                        // If an enemy has flanked around the hull at close range (< 35m) and is heavily suppressing
+                        // the mechanic directly, pause starting the locked repair animation so he can defend himself first
+                        if (__0.GetSuppressionValue() > 55f &&
+                            __0.aiController.HasEnemyAndCanFireAtHim &&
+                            __0.aiController.distFromTarget > 0.1f &&
+                            __0.aiController.distFromTarget < 35f)
+                        {
+                            return false;
+                        }
+                    }
+                    else
+                    {
+                        __0.SetPose(SoldierPose.Crouch, true, false, 0.2f);
+                    }
+
+                    if (_countedRepairTasks.Add(__instance.Pointer))
+                    {
+                        ShelteredRepairsCount++;
+                    }
+                }
+                catch { }
+                return true;
+            }
+        }
+
+        // =====================================================================
+        // PATCH 10: CombatCover.IsCoverAvailable (shared=0, len=330)
+        // - Vanilla only checks Vector3.Angle(coverForward, shootDirection) < localLookAngleWideness.
+        // - Many walls/houses have omnidirectional (180/360 deg) or two-sided CombatCover nodes,
+        //   causing defenders to pick cover nodes on the EXPOSED front side of a wall (with the
+        //   wall at their back and open air toward the enemy).
+        // - Rejects any CombatCover whose position has open air toward +shootDirection and a
+        //   vertical wall directly behind it (-shootDirection within 1.95m).
+        // =====================================================================
+        [HarmonyPatch(typeof(CombatCover), nameof(CombatCover.IsCoverAvailable))]
+        public static class CombatCover_IsCoverAvailable_Patch
+        {
+            public static void Postfix(CombatCover __instance, Vector3 __0, ref bool __result)
+            {
+                try
+                {
+                    if (!__result ||
+                        !VisionConfig.EnableMod.Value ||
+                        !VisionConfig.EnableSmartWallSideCover.Value ||
+                        __instance == null)
+                    {
+                        return;
+                    }
+
+                    Vector3 threatDir = __0;
+                    threatDir.y = 0f;
+                    if (threatDir.sqrMagnitude < 0.001f)
+                        return;
+
+                    threatDir.Normalize();
+
+                    // For directional wall cover nodes, cap allowed look angle at 78 deg so soldiers don't
+                    // pick side/back-facing wall cover nodes that leave them exposed to the threat vector
+                    if (__instance.localLookAngleWideness < 175f)
+                    {
+                        Vector3 coverFwd = __instance.GetLookRotation() * Vector3.forward;
+                        coverFwd.y = 0f;
+                        if (coverFwd.sqrMagnitude > 0.001f && Vector3.Angle(coverFwd, threatDir) > 78f)
+                        {
+                            __result = false;
+                            return;
+                        }
+                    }
+
+                    // Reject cover nodes on the exposed front face of a wall (no cover in +threatDir, wall in -threatDir)
+                    Vector3 coverPos = __instance.GetCoverPosition();
+                    if (IsPositionOnExposedSideOfWall(coverPos, threatDir, null, out _))
+                    {
+                        __result = false;
+                    }
+                }
+                catch { }
+            }
+        }
+
+        // =====================================================================
+        // PATCH 11: Squad.SendUnitsToCovers & Squad.GetCoveredPositionInArea
+        // - In vanilla, when a defending squad reaches its objective (HoldArea -> SendUnitsToCovers),
+        //   formationDirection can still be set to the squad's travel vector toward the objective
+        //   center rather than toward the enemy faction's territory or active visible targets!
+        // - Ensures formationDirection points toward the actual enemy threat before CoverManager.GetCovers runs.
+        // =====================================================================
+        [HarmonyPatch(typeof(Squad), nameof(Squad.SendUnitsToCovers))]
+        public static class Squad_SendUnitsToCovers_Patch
+        {
+            public static void Prefix(Squad __instance, Vector3 __0)
+            {
+                try
+                {
+                    if (!VisionConfig.EnableMod.Value ||
+                        !VisionConfig.EnableSmartWallSideCover.Value ||
+                        __instance == null)
+                    {
+                        return;
+                    }
+
+                    Vector3 threatDir = GetEffectiveThreatDirection(__instance.Leader, __instance, __0, __instance.formationDirection);
+                    if (threatDir.sqrMagnitude > 0.01f)
+                    {
+                        __instance.formationDirection = threatDir;
+                    }
+                }
+                catch { }
+            }
+        }
+
+        [HarmonyPatch(typeof(Squad), nameof(Squad.GetCoveredPositionInArea))]
+        public static class Squad_GetCoveredPositionInArea_Patch
+        {
+            public static void Prefix(Squad __instance, Vector3 __0)
+            {
+                try
+                {
+                    if (!VisionConfig.EnableMod.Value ||
+                        !VisionConfig.EnableSmartWallSideCover.Value ||
+                        __instance == null)
+                    {
+                        return;
+                    }
+
+                    Vector3 threatDir = GetEffectiveThreatDirection(__instance.Leader, __instance, __0, __instance.formationDirection);
+                    if (threatDir.sqrMagnitude > 0.01f)
+                    {
+                        __instance.formationDirection = threatDir;
+                    }
+                }
+                catch { }
+            }
+        }
+
+        // =====================================================================
+        // Helper & Patches 12-14: Death Screen Kill Attribution (Who, What, Friendly Fire, Hit & Distance)
+        // =====================================================================
+        private static string CleanUnityObjectName(string rawName)
+        {
+            if (string.IsNullOrWhiteSpace(rawName))
+                return "";
+
+            string cleaned = rawName.Replace("(Clone)", "").Trim();
+            return cleaned;
+        }
+
+        private static string FormatSoldierIdentity(Soldier s)
+        {
+            if (s == null)
+                return "";
+
+            string rankPrefix;
+            if (s.rank == Rank.corporal)
+                rankPrefix = "Cpl. ";
+            else if (s.rank == Rank.seargent)
+                rankPrefix = "Sgt. ";
+            else if (s.rank == Rank.first_seargent)
+                rankPrefix = "1st Sgt. ";
+            else if ((int)s.rank > (int)Rank.first_seargent)
+                rankPrefix = "Lt. ";
+            else
+                rankPrefix = "Pvt. ";
+
+            string name = string.IsNullOrWhiteSpace(s.name_surname) ? "Unknown Soldier" : s.name_surname.Trim();
+            int vetTier = GetVeteranTier(s);
+            if (vetTier > 0 && !name.Contains("[Vet"))
+            {
+                string vetTag = vetTier == 1 ? " [Vet I]" : (vetTier == 2 ? " [Vet II]" : " [Vet III \u2605]");
+                name += vetTag;
+            }
+            return rankPrefix + name;
+        }
+
+        private static string GetShooterWeaponOrVehicleName(Soldier shooter)
+        {
+            if (shooter == null)
+                return "";
+
+            if (shooter.IsOnVehicle())
+            {
+                Vehicle veh = shooter.GetCurrentVehicle();
+                string vehName = (veh != null && !string.IsNullOrWhiteSpace(veh.name))
+                    ? CleanUnityObjectName(veh.name)
+                    : "Vehicle";
+
+                ItemObject heldInVeh = shooter.GetHeldItem();
+                if (heldInVeh != null && !string.IsNullOrWhiteSpace(heldInVeh.name))
+                    return $"{CleanUnityObjectName(heldInVeh.name)} ({vehName})";
+
+                return vehName;
+            }
+
+            ItemObject held = shooter.GetHeldItem();
+            if (held != null && !string.IsNullOrWhiteSpace(held.name))
+                return CleanUnityObjectName(held.name);
+
+            GenericGun curWep = shooter.GetHeldGun();
+            if (curWep != null && !string.IsNullOrWhiteSpace(curWep.name))
+                return CleanUnityObjectName(curWep.name);
+
+            return "";
+        }
+
+        private static string FormatBodyPart(BodyPartType part)
+        {
+            switch (part)
+            {
+                case BodyPartType.head:
+                    return "Headshot";
+                case BodyPartType.chest:
+                    return "Torso";
+                case BodyPartType.arm_l:
+                case BodyPartType.arm_r:
+                    return "Arm";
+                case BodyPartType.leg_l:
+                case BodyPartType.leg_r:
+                    return "Leg";
+                default:
+                    return "Torso";
+            }
+        }
+
+        private static bool IsPlayerCharacter(Soldier s)
+        {
+            if (s == null || s.Pointer == IntPtr.Zero)
+                return false;
+
+            if (s.IsPlayer() || PlayerController.CharacterIsPlayer(s))
+                return true;
+
+            Soldier cur = Soldier.CurrentControlledSoldierOrNull();
+            return cur != null && cur.Pointer == s.Pointer;
+        }
+
+        [HarmonyPatch(typeof(Corvostudio.Weapons.Explosion), nameof(Corvostudio.Weapons.Explosion.CreateExplosion))]
+        public static class Explosion_CreateExplosion_Patch
+        {
+            public static void Prefix(Vector3 __0, float __1, float __2, float __3, Soldier __4, GameObject __5, HitType __6, bool __7)
+            {
+                try
+                {
+                    if (!VisionConfig.EnableMod.Value || !VisionConfig.EnableDeathScreenAttribution.Value)
+                        return;
+
+                    string expSource = "";
+                    if (__5 != null)
+                    {
+                        ItemGrenade gren = __5.GetComponent<ItemGrenade>();
+                        if (gren == null)
+                            gren = __5.GetComponentInParent<ItemGrenade>();
+
+                        if (gren != null && !string.IsNullOrWhiteSpace(gren.name))
+                        {
+                            expSource = CleanUnityObjectName(gren.name);
+                        }
+                        else if (!__7)
+                        {
+                            Vehicle expVeh = __5.GetComponentInParent<Vehicle>();
+                            if (expVeh != null && !string.IsNullOrWhiteSpace(expVeh.name))
+                                expSource = CleanUnityObjectName(expVeh.name);
+                        }
+                    }
+
+                    if (string.IsNullOrEmpty(expSource))
+                    {
+                        if (__7)
+                        {
+                            expSource = "Artillery / Mortar Barrage";
+                        }
+                        else if (__4 != null && __4.IsOnVehicle())
+                        {
+                            Vehicle shooterVeh = __4.GetCurrentVehicle();
+                            expSource = (shooterVeh != null && !string.IsNullOrWhiteSpace(shooterVeh.name))
+                                ? $"{CleanUnityObjectName(shooterVeh.name)} (HE Shell)"
+                                : "Vehicle HE Shell";
+                        }
+                        else if (__4 != null)
+                        {
+                            string heldName = GetShooterWeaponOrVehicleName(__4);
+                            expSource = !string.IsNullOrEmpty(heldName) ? heldName : "Grenade / Explosive";
+                        }
+                        else
+                        {
+                            expSource = "Explosion";
+                        }
+                    }
+
+                    _activeExplosionWeaponName = expSource;
+                    _activeExplosionIsArtillery = __7;
+
+                    // Also record blast attribution if the player is within blast radius in case direct blast kills them
+                    Soldier player = Soldier.CurrentControlledSoldierOrNull();
+                    if (player != null && player.Pointer != IntPtr.Zero)
+                    {
+                        float blastDist = Vector3.Distance(__0, player.GetCenterOfUnit());
+                        if (blastDist <= Mathf.Max(14f, __1 * 3.5f))
+                        {
+                            int distMeters = (__4 != null && __4.Pointer != player.Pointer)
+                                ? Mathf.RoundToInt(Vector3.Distance(__4.GetCenterOfUnit(), player.GetCenterOfUnit()))
+                                : Mathf.RoundToInt(blastDist);
+
+                            bool isSelf = __4 != null && __4.Pointer == player.Pointer;
+                            bool isFF = __4 != null && !isSelf && !string.IsNullOrEmpty(__4.faction) && __4.faction == player.faction;
+
+                            _lastDamageByVictim[player.Pointer] = new DamageAttribution
+                            {
+                                AttackerName = __4 != null ? FormatSoldierIdentity(__4) : "",
+                                IsSelfInflicted = isSelf,
+                                IsFriendlyFire = isFF,
+                                WeaponOrSource = expSource,
+                                HitDetail = "Explosion",
+                                DistanceMeters = Mathf.Max(0, distMeters),
+                                Timestamp = Time.time
+                            };
+                        }
+                    }
+                }
+                catch { }
+            }
+
+            public static void Postfix()
+            {
+                _activeExplosionWeaponName = null;
+                _activeExplosionIsArtillery = false;
+            }
+        }
+
+        [HarmonyPatch(typeof(Bullet), nameof(Bullet.BulletDamage))]
+        public static class Bullet_BulletDamage_Patch
+        {
+            public static void Prefix(ImpactSpecifier __0, BulletData __1, Vector3 __2, int __3, Soldier __4)
+            {
+                try
+                {
+                    if (!VisionConfig.EnableMod.Value || !VisionConfig.EnableDeathScreenAttribution.Value || __0 == null)
+                        return;
+
+                    Soldier victim = null;
+                    string hitDetail = "Torso";
+
+                    BodyPart bp = __0.TryCast<BodyPart>();
+                    if (bp != null && bp.unit != null)
+                    {
+                        victim = bp.unit.TryCast<Soldier>();
+                        hitDetail = FormatBodyPart(bp.bodyPart);
+                    }
+                    else
+                    {
+                        ItemHelmet helmet = __0.TryCast<ItemHelmet>();
+                        if (helmet != null && helmet.User != null)
+                        {
+                            victim = helmet.User;
+                            hitDetail = "Headshot (Helmet)";
+                        }
+                        else
+                        {
+                            VehicleDamagablePart vPart = __0.TryCast<VehicleDamagablePart>();
+                            if (vPart != null && vPart.rootVeh != null)
+                            {
+                                Soldier curPlayer = Soldier.CurrentControlledSoldierOrNull();
+                                if (curPlayer != null &&
+                                    curPlayer.IsOnVehicle() &&
+                                    curPlayer.GetCurrentVehicle() != null &&
+                                    curPlayer.GetCurrentVehicle().Pointer == vPart.rootVeh.Pointer)
+                                {
+                                    victim = curPlayer;
+                                    hitDetail = "Vehicle Hit";
+                                }
+                            }
+                        }
+                    }
+
+                    if (victim == null || !IsPlayerCharacter(victim))
+                        return;
+
+                    bool fromExplosion = !string.IsNullOrEmpty(_activeExplosionWeaponName);
+                    string weaponOrSource = fromExplosion
+                        ? _activeExplosionWeaponName
+                        : GetShooterWeaponOrVehicleName(__4);
+
+                    if (fromExplosion)
+                    {
+                        hitDetail = hitDetail.StartsWith("Headshot", StringComparison.Ordinal)
+                            ? $"Shrapnel {hitDetail}"
+                            : $"Shrapnel ({hitDetail})";
+                    }
+
+                    bool isSelf = __4 != null && __4.Pointer == victim.Pointer;
+                    bool isFF = __4 != null && !isSelf && !string.IsNullOrEmpty(__4.faction) && __4.faction == victim.faction;
+
+                    int distMeters = __3;
+                    if ((fromExplosion || distMeters <= 0) && __4 != null && !isSelf)
+                    {
+                        distMeters = Mathf.RoundToInt(Vector3.Distance(__4.GetCenterOfUnit(), victim.GetCenterOfUnit()));
+                    }
+
+                    _lastDamageByVictim[victim.Pointer] = new DamageAttribution
+                    {
+                        AttackerName = __4 != null ? FormatSoldierIdentity(__4) : (_activeExplosionIsArtillery ? "Artillery Support" : ""),
+                        IsSelfInflicted = isSelf,
+                        IsFriendlyFire = isFF,
+                        WeaponOrSource = weaponOrSource,
+                        HitDetail = hitDetail,
+                        DistanceMeters = Mathf.Max(0, distMeters),
+                        Timestamp = Time.time
+                    };
+                }
+                catch { }
+            }
+        }
+
+        [HarmonyPatch(typeof(DeathPanel), nameof(DeathPanel.ShowDeath))]
+        public static class DeathPanel_ShowDeath_Patch
+        {
+            public static void Postfix(Soldier __0)
+            {
+                try
+                {
+                    if (!VisionConfig.EnableMod.Value || !VisionConfig.EnableDeathScreenAttribution.Value || __0 == null)
+                        return;
+
+                    if (!_lastDamageByVictim.TryGetValue(__0.Pointer, out DamageAttribution attr) ||
+                        Time.time - attr.Timestamp > 120f)
+                    {
+                        return;
+                    }
+
+                    bool bledOut = (Time.time - attr.Timestamp) > 1.5f;
+                    string actionVerb = bledOut ? "Bled out from wounds by" : "Killed by";
+
+                    string prefixTag = "";
+                    string richColor = "#E8E2D0";
+                    if (attr.IsSelfInflicted)
+                    {
+                        prefixTag = "[SELF-INFLICTED] ";
+                        richColor = "#FFB347";
+                    }
+                    else if (attr.IsFriendlyFire)
+                    {
+                        prefixTag = "[FRIENDLY FIRE] ";
+                        richColor = "#FF5555";
+                    }
+
+                    string whoAndWhat;
+                    if (attr.IsSelfInflicted)
+                    {
+                        string ownSource = !string.IsNullOrEmpty(attr.WeaponOrSource) ? attr.WeaponOrSource : "Explosion";
+                        whoAndWhat = $"Killed by own {ownSource}";
+                    }
+                    else
+                    {
+                        string attacker = !string.IsNullOrEmpty(attr.AttackerName) ? attr.AttackerName : "Enemy Fire";
+                        if (!string.IsNullOrEmpty(attr.WeaponOrSource) &&
+                            !string.Equals(attacker, attr.WeaponOrSource, StringComparison.OrdinalIgnoreCase))
+                        {
+                            whoAndWhat = $"{actionVerb} {attacker} ({attr.WeaponOrSource})";
+                        }
+                        else
+                        {
+                            whoAndWhat = $"{actionVerb} {attacker}";
+                        }
+                    }
+
+                    string detailSuffix = !string.IsNullOrEmpty(attr.HitDetail)
+                        ? $" [{attr.HitDetail} \u2022 {attr.DistanceMeters}m]"
+                        : $" [{attr.DistanceMeters}m]";
+
+                    string fullLine = prefixTag + whoAndWhat + detailSuffix;
+
+                    // 1. Update native DeathPanel UI text so it appears right beneath the birth/death years
+                    DeathPanel dp = DeathPanel.instance;
+                    if (dp != null && dp.text_year != null)
+                    {
+                        Text yearLabel = dp.text_year;
+                        yearLabel.supportRichText = true;
+                        yearLabel.horizontalOverflow = HorizontalWrapMode.Overflow;
+                        yearLabel.verticalOverflow = VerticalWrapMode.Overflow;
+
+                        string curYearText = yearLabel.text ?? "";
+                        if (!curYearText.Contains(whoAndWhat))
+                        {
+                            yearLabel.text = $"{curYearText}\n<size=20><color={richColor}>{fullLine}</color></size>";
+                        }
+                    }
+
+                    // 2. Store for OnGUI overlay banner (so it is also visible on top of ragdoll_overhaul's black death fade)
+                    ActiveDeathAttributionText = fullLine;
+                    ActiveDeathAttributionIsFF = attr.IsFriendlyFire;
+                    ActiveDeathAttributionIsSelf = attr.IsSelfInflicted;
+                    ActiveDeathAttributionStartTime = Time.unscaledTime;
+                    ActiveDeathAttributionExpireTime = Time.unscaledTime + 8.5f;
+                    ActiveDeathAttributionVictimPtr = __0.Pointer;
+                }
+                catch { }
+            }
+        }
+    }
+}

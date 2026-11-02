@@ -1,0 +1,27 @@
+# LLM / AI Agent Workspace & Scratch Files
+AGENTS.md
+CLAUDE.md
+NOTES.md
+GEMINI.md
+.gemini/
+.claude/
+.cursor/
+.cursorrules
+.aider*
+.antigravity/
+
+# Local Toolchains, Backups & Reverse-Engineering Dumps
+backups/
+docs/
+tools/
+
+# Build Outputs & IDE Artifacts
+build/
+bin/
+obj/
+*.user
+*.suo
+.vs/
+.vscode/
+Thumbs.db
+.DS_Store
