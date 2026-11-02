@@ -3338,7 +3338,9 @@ namespace EasyRed2HumanAI
             if (string.IsNullOrWhiteSpace(rawName))
                 return "";
 
-            string cleaned = rawName.Replace("(Clone)", "").Trim();
+            string cleaned = rawName.Replace("(Clone)", "").Replace('_', ' ').Trim();
+            while (cleaned.Contains("  "))
+                cleaned = cleaned.Replace("  ", " ");
             return cleaned;
         }
 
@@ -3359,7 +3361,10 @@ namespace EasyRed2HumanAI
             else
                 rankPrefix = "Pvt. ";
 
-            string name = string.IsNullOrWhiteSpace(s.name_surname) ? "Unknown Soldier" : s.name_surname.Trim();
+            string name = string.IsNullOrWhiteSpace(s.name_surname) ? "Unknown Soldier" : s.name_surname.Replace('_', ' ').Trim();
+            while (name.Contains("  "))
+                name = name.Replace("  ", " ");
+
             int bracketIdx = name.IndexOf(" [", StringComparison.Ordinal);
             if (bracketIdx >= 0)
                 name = name.Substring(0, bracketIdx);
@@ -3664,7 +3669,9 @@ namespace EasyRed2HumanAI
                         ? $" [{attr.HitDetail} \u2022 {attr.DistanceMeters}m]"
                         : $" [{attr.DistanceMeters}m]";
 
-                    string fullLine = prefixTag + whoAndWhat + detailSuffix;
+                    string fullLine = (prefixTag + whoAndWhat + detailSuffix).Replace('_', ' ');
+                    while (fullLine.Contains("  "))
+                        fullLine = fullLine.Replace("  ", " ");
 
                     // 1. Update native DeathPanel UI text so it appears right beneath the birth/death years
                     DeathPanel dp = DeathPanel.instance;
@@ -3676,9 +3683,9 @@ namespace EasyRed2HumanAI
                         yearLabel.verticalOverflow = VerticalWrapMode.Overflow;
 
                         string curYearText = yearLabel.text ?? "";
-                        if (!curYearText.Contains(whoAndWhat))
+                        if (!curYearText.Contains(whoAndWhat.Replace('_', ' ')))
                         {
-                            yearLabel.text = $"{curYearText}\n<size=20><color={richColor}>{fullLine}</color></size>";
+                            yearLabel.text = $"{curYearText}\n<size=25><color={richColor}>{fullLine}</color></size>";
                         }
                     }
 

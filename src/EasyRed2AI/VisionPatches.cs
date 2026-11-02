@@ -462,7 +462,7 @@ namespace EasyRed2HumanAI
                     var input = UnityInput.Current;
                     if (input != null)
                     {
-                        if (input.GetKeyDown(KeyCode.F7))
+                        if (input.GetKeyDown(KeyCode.F6))
                         {
                             _showConfigMenu = !_showConfigMenu;
                             if (_showConfigMenu)
@@ -478,12 +478,12 @@ namespace EasyRed2HumanAI
                             string state = VisionConfig.EnableMod.Value
                                 ? $"ENABLED (Stand:{VisionConfig.StandingSightRange.Value}m, Crouch:{VisionConfig.CrouchingSightRange.Value}m, Prone:{VisionConfig.ProneSightRange.Value}m)"
                                 : "DISABLED (Vanilla AI)";
-                            ShowToast($"[HumanAI v0.3.0] Mod {state}");
+                            ShowToast($"[HumanAI v{Plugin.PluginVersion}] Mod {state}");
                         }
                         else if (input.GetKeyDown(KeyCode.F9))
                         {
                             Plugin.Instance.Config.Reload();
-                            ShowToast($"[HumanAI v0.3.0] Reloaded Config! Stand:{VisionConfig.StandingSightRange.Value}m | Crouch:{VisionConfig.CrouchingSightRange.Value}m | Prone:{VisionConfig.ProneSightRange.Value}m | Personalities:{VisionConfig.EnableRolePersonalities.Value}");
+                            ShowToast($"[HumanAI v{Plugin.PluginVersion}] Reloaded Config! Stand:{VisionConfig.StandingSightRange.Value}m | Crouch:{VisionConfig.CrouchingSightRange.Value}m | Prone:{VisionConfig.ProneSightRange.Value}m | Personalities:{VisionConfig.EnableRolePersonalities.Value}");
                         }
                         else if (input.GetKeyDown(KeyCode.F10))
                         {
@@ -535,27 +535,63 @@ namespace EasyRed2HumanAI
                         }
                         else
                         {
-                            float boxW = Mathf.Min(Screen.width - 40f, 760f);
-                            float boxH = 42f;
+                            float boxW = Mathf.Min(Screen.width - 40f, 920f);
+                            float boxH = 58f;
                             float boxX = (Screen.width - boxW) * 0.5f;
-                            float boxY = Screen.height * 0.79f;
+                            float boxY = Screen.height * 0.78f;
 
-                            GUI.color = new Color(0.05f, 0.05f, 0.05f, 0.86f);
+                            GUI.color = new Color(0.04f, 0.04f, 0.05f, 0.90f);
                             GUI.Box(new Rect(boxX, boxY, boxW, boxH), "");
+                            GUI.Box(new Rect(boxX + 2f, boxY + 2f, boxW - 4f, boxH - 4f), "");
+
+                            GUIStyle labelStyle = GUI.skin != null ? GUI.skin.label : null;
+                            int oldFontSize = 0;
+                            TextAnchor oldAlign = TextAnchor.UpperLeft;
+                            FontStyle oldFontStyle = FontStyle.Normal;
+                            bool oldWordWrap = false;
+
+                            if (labelStyle != null)
+                            {
+                                oldFontSize = labelStyle.fontSize;
+                                oldAlign = labelStyle.alignment;
+                                oldFontStyle = labelStyle.fontStyle;
+                                oldWordWrap = labelStyle.wordWrap;
+
+                                labelStyle.fontSize = 19;
+                                labelStyle.alignment = TextAnchor.MiddleCenter;
+                                labelStyle.fontStyle = FontStyle.Bold;
+                                labelStyle.wordWrap = true;
+                            }
+
+                            Rect textRect = new Rect(boxX + 16f, boxY + 4f, boxW - 32f, boxH - 8f);
+                            Rect shadowRect = new Rect(textRect.x + 1.5f, textRect.y + 1.5f, textRect.width, textRect.height);
+
+                            // Crisp dark drop-shadow
+                            GUI.color = new Color(0f, 0f, 0f, 0.92f);
+                            GUI.Label(shadowRect, VeteranAndTacticsPatches.ActiveDeathAttributionText);
 
                             if (VeteranAndTacticsPatches.ActiveDeathAttributionIsFF)
                                 GUI.color = new Color(1.0f, 0.36f, 0.36f, 1.0f);
                             else if (VeteranAndTacticsPatches.ActiveDeathAttributionIsSelf)
-                                GUI.color = new Color(1.0f, 0.72f, 0.30f, 1.0f);
+                                GUI.color = new Color(1.0f, 0.74f, 0.30f, 1.0f);
                             else
-                                GUI.color = new Color(0.94f, 0.91f, 0.83f, 1.0f);
+                                GUI.color = new Color(0.96f, 0.93f, 0.85f, 1.0f);
 
-                            GUI.Label(new Rect(boxX + 18f, boxY + 11f, boxW - 36f, 24f), VeteranAndTacticsPatches.ActiveDeathAttributionText);
+                            GUI.Label(textRect, VeteranAndTacticsPatches.ActiveDeathAttributionText);
+
+                            if (labelStyle != null)
+                            {
+                                labelStyle.fontSize = oldFontSize;
+                                labelStyle.alignment = oldAlign;
+                                labelStyle.fontStyle = oldFontStyle;
+                                labelStyle.wordWrap = oldWordWrap;
+                            }
+
                             GUI.color = Color.white;
                         }
                     }
 
-                    // Render F7 Interactive Feature Toggle Menu
+                    // Render F6 Interactive Feature Toggle Menu
                     if (_showConfigMenu)
                     {
                         Cursor.visible = true;
@@ -578,7 +614,7 @@ namespace EasyRed2HumanAI
 
                 GUI.color = new Color(1.0f, 0.88f, 0.35f, 1.0f);
                 GUI.Label(new Rect(panelX + 20f, panelY + 14f, panelW - 40f, 24f),
-                    "Easy Red 2 — Humanized AI & Veteran Tactics v0.3.0  |  Feature Toggles (F7 to Close)");
+                    $"Easy Red 2 — Humanized AI & Veteran Tactics v{Plugin.PluginVersion}  |  Feature Toggles (F6 to Close)");
 
                 GUI.color = new Color(0.75f, 0.78f, 0.82f, 1.0f);
                 GUI.Label(new Rect(panelX + 20f, panelY + 36f, panelW - 40f, 20f),
@@ -642,18 +678,18 @@ namespace EasyRed2HumanAI
                 if (GUI.Button(new Rect(panelX + 20f, bottomY, 220f, 26f), "Reload .cfg from Disk (F9)"))
                 {
                     Plugin.Instance.Config.Reload();
-                    ShowToast("[HumanAI v0.3.0] Reloaded configuration from disk!");
+                    ShowToast($"[HumanAI v{Plugin.PluginVersion}] Reloaded configuration from disk!");
                 }
 
                 GUI.color = new Color(0.85f, 1.0f, 0.85f, 1.0f);
                 if (GUI.Button(new Rect(panelX + 260f, bottomY, 220f, 26f), "Save to .cfg File"))
                 {
                     Plugin.Instance.Config.Save();
-                    ShowToast("[HumanAI v0.3.0] Saved configuration to com.antigravity.easyred2.humanai.cfg!");
+                    ShowToast($"[HumanAI v{Plugin.PluginVersion}] Saved configuration to com.antigravity.easyred2.humanai.cfg!");
                 }
 
                 GUI.color = new Color(1.0f, 0.80f, 0.80f, 1.0f);
-                if (GUI.Button(new Rect(panelX + 520f, bottomY, 220f, 26f), "Close Menu (F7)"))
+                if (GUI.Button(new Rect(panelX + 520f, bottomY, 220f, 26f), "Close Menu (F6)"))
                 {
                     _showConfigMenu = false;
                 }
