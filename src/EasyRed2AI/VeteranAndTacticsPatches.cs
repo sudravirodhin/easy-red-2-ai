@@ -4503,7 +4503,7 @@ namespace EasyRed2HumanAI
                 int age = secondYear - firstYear;
                 if (age >= 12 && age <= 95)
                 {
-                    return $"{trimmed} (Age {age})";
+                    return $"{firstYear} - {secondYear} (Age {age})";
                 }
             }
 
@@ -4761,9 +4761,20 @@ namespace EasyRed2HumanAI
                     DeathPanel dp = DeathPanel.instance;
                     Text yearLabel = dp != null ? dp.text_year : null;
                     string yearLineWithAge = "";
+                    int yearFontSize = 38;
 
                     if (yearLabel != null)
                     {
+                        yearFontSize = yearLabel.fontSize;
+                        if (yearLabel.resizeTextForBestFit && yearLabel.resizeTextMaxSize > yearFontSize)
+                            yearFontSize = yearLabel.resizeTextMaxSize;
+                        if (yearFontSize < 38)
+                            yearFontSize = 38;
+
+                        // Disable Best-Fit auto-shrinking so adding "(Age XX)" and multi-line attribution
+                        // never causes Unity to shrink the birth/death years text to fit the original box.
+                        yearLabel.resizeTextForBestFit = false;
+                        yearLabel.fontSize = yearFontSize;
                         yearLabel.supportRichText = true;
                         yearLabel.horizontalOverflow = HorizontalWrapMode.Overflow;
                         yearLabel.verticalOverflow = VerticalWrapMode.Overflow;
@@ -4778,7 +4789,7 @@ namespace EasyRed2HumanAI
                         Time.time - attr.Timestamp > 120f)
                     {
                         if (yearLabel != null && !string.IsNullOrEmpty(yearLineWithAge))
-                            yearLabel.text = yearLineWithAge;
+                            yearLabel.text = $"<size={yearFontSize}>{yearLineWithAge}</size>";
 
                         ActiveDeathAttributionExpireTime = 0f;
                         ActiveDeathAttributionText = null;
@@ -4860,8 +4871,8 @@ namespace EasyRed2HumanAI
                     if (yearLabel != null)
                     {
                         yearLabel.text = !string.IsNullOrEmpty(howLine)
-                            ? $"{yearLineWithAge}\n<size=24><color={richColor}>{whoLine}</color></size>\n<size=20><color={subColor}>{howLine}</color></size>"
-                            : $"{yearLineWithAge}\n<size=24><color={richColor}>{whoLine}</color></size>";
+                            ? $"<size={yearFontSize}>{yearLineWithAge}</size>\n<size=27><color={richColor}>{whoLine}</color></size>\n<size=23><color={subColor}>{howLine}</color></size>"
+                            : $"<size={yearFontSize}>{yearLineWithAge}</size>\n<size=27><color={richColor}>{whoLine}</color></size>";
                         shownOnNativeDeathPanel = true;
                     }
 
