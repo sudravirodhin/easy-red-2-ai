@@ -4452,10 +4452,62 @@ namespace EasyRed2HumanAI
             if (bracketIdx >= 0)
                 name = name.Substring(0, bracketIdx);
 
-            bool showVet = VisionConfig.EnableVeteranSystem.Value;
-            bool showPers = VisionConfig.EnableRolePersonalities.Value && VisionConfig.ShowPersonalityOnDeathScreen.Value;
-            name += BuildSoldierBracketTag(s, showVet, showPers, true);
             return rankPrefix + name;
+        }
+
+        private static string FormatYearLineWithAge(string yearLine)
+        {
+            if (string.IsNullOrWhiteSpace(yearLine))
+                return "";
+
+            string trimmed = yearLine.Trim();
+            if (trimmed.IndexOf("Age ", StringComparison.OrdinalIgnoreCase) >= 0)
+                return trimmed;
+
+            int firstYear = -1;
+            int secondYear = -1;
+            int i = 0;
+            while (i <= trimmed.Length - 4)
+            {
+                if (char.IsDigit(trimmed[i]) &&
+                    char.IsDigit(trimmed[i + 1]) &&
+                    char.IsDigit(trimmed[i + 2]) &&
+                    char.IsDigit(trimmed[i + 3]) &&
+                    (i == 0 || !char.IsDigit(trimmed[i - 1])) &&
+                    (i + 4 == trimmed.Length || !char.IsDigit(trimmed[i + 4])))
+                {
+                    int yr = (trimmed[i] - '0') * 1000
+                           + (trimmed[i + 1] - '0') * 100
+                           + (trimmed[i + 2] - '0') * 10
+                           + (trimmed[i + 3] - '0');
+                    if (yr >= 1850 && yr <= 2050)
+                    {
+                        if (firstYear < 0)
+                        {
+                            firstYear = yr;
+                        }
+                        else
+                        {
+                            secondYear = yr;
+                            break;
+                        }
+                    }
+                    i += 4;
+                    continue;
+                }
+                i++;
+            }
+
+            if (firstYear > 0 && secondYear > firstYear)
+            {
+                int age = secondYear - firstYear;
+                if (age >= 12 && age <= 95)
+                {
+                    return $"{trimmed} (Age {age})";
+                }
+            }
+
+            return trimmed;
         }
 
         private static string GetShooterWeaponOrVehicleName(Soldier shooter)
@@ -4706,9 +4758,30 @@ namespace EasyRed2HumanAI
                     if (!VisionConfig.EnableMod.Value || !VisionConfig.EnableDeathScreenAttribution.Value || __0 == null)
                         return;
 
+                    DeathPanel dp = DeathPanel.instance;
+                    Text yearLabel = dp != null ? dp.text_year : null;
+                    string yearLineWithAge = "";
+
+                    if (yearLabel != null)
+                    {
+                        yearLabel.supportRichText = true;
+                        yearLabel.horizontalOverflow = HorizontalWrapMode.Overflow;
+                        yearLabel.verticalOverflow = VerticalWrapMode.Overflow;
+
+                        string curYearText = yearLabel.text ?? "";
+                        int nlIdx = curYearText.IndexOf('\n');
+                        string baseYearLine = nlIdx >= 0 ? curYearText.Substring(0, nlIdx) : curYearText;
+                        yearLineWithAge = FormatYearLineWithAge(baseYearLine);
+                    }
+
                     if (!_lastDamageByVictim.TryGetValue(__0.Pointer, out DamageAttribution attr) ||
                         Time.time - attr.Timestamp > 120f)
                     {
+                        if (yearLabel != null && !string.IsNullOrEmpty(yearLineWithAge))
+                            yearLabel.text = yearLineWithAge;
+
+                        ActiveDeathAttributionExpireTime = 0f;
+                        ActiveDeathAttributionText = null;
                         return;
                     }
 
@@ -4717,68 +4790,98 @@ namespace EasyRed2HumanAI
 
                     string prefixTag = "";
                     string richColor = "#E8E2D0";
+                    string subColor = "#CFC8B8";
                     if (attr.IsSelfInflicted)
                     {
                         prefixTag = "[SELF-INFLICTED] ";
                         richColor = "#FFB347";
+                        subColor = "#FFD08A";
                     }
                     else if (attr.IsFriendlyFire)
                     {
                         prefixTag = "[FRIENDLY FIRE] ";
                         richColor = "#FF5555";
+                        subColor = "#FF8888";
                     }
 
-                    string whoAndWhat;
+                    string whoLine;
                     if (attr.IsSelfInflicted)
                     {
                         string ownSource = !string.IsNullOrEmpty(attr.WeaponOrSource) ? attr.WeaponOrSource : "Explosion";
-                        whoAndWhat = $"Killed by own {ownSource}";
+                        whoLine = $"{prefixTag}Killed by own {ownSource}";
                     }
                     else
                     {
-                        string attacker = !string.IsNullOrEmpty(attr.AttackerName) ? attr.AttackerName : "Enemy Fire";
-                        if (!string.IsNullOrEmpty(attr.WeaponOrSource) &&
-                            !string.Equals(attacker, attr.WeaponOrSource, StringComparison.OrdinalIgnoreCase))
-                        {
-                            whoAndWhat = $"{actionVerb} {attacker} ({attr.WeaponOrSource})";
-                        }
-                        else
-                        {
-                            whoAndWhat = $"{actionVerb} {attacker}";
-                        }
+                        string attacker = !string.IsNullOrEmpty(attr.AttackerName)
+                            ? attr.AttackerName
+                            : (!string.IsNullOrEmpty(attr.WeaponOrSource) ? attr.WeaponOrSource : "Enemy Fire");
+                        whoLine = $"{prefixTag}{actionVerb} {attacker}";
                     }
 
-                    string detailSuffix = !string.IsNullOrEmpty(attr.HitDetail)
-                        ? $" [{attr.HitDetail} \u2022 {attr.DistanceMeters}m]"
-                        : $" [{attr.DistanceMeters}m]";
+                    whoLine = whoLine.Replace('_', ' ').Trim();
+                    while (whoLine.Contains("  "))
+                        whoLine = whoLine.Replace("  ", " ");
 
-                    string fullLine = (prefixTag + whoAndWhat + detailSuffix).Replace('_', ' ');
-                    while (fullLine.Contains("  "))
-                        fullLine = fullLine.Replace("  ", " ");
-
-                    // 1. Update native DeathPanel UI text so it appears right beneath the birth/death years
-                    DeathPanel dp = DeathPanel.instance;
-                    if (dp != null && dp.text_year != null)
+                    List<string> detailParts = new List<string>(3);
+                    if (!attr.IsSelfInflicted && !string.IsNullOrEmpty(attr.WeaponOrSource))
                     {
-                        Text yearLabel = dp.text_year;
-                        yearLabel.supportRichText = true;
-                        yearLabel.horizontalOverflow = HorizontalWrapMode.Overflow;
-                        yearLabel.verticalOverflow = VerticalWrapMode.Overflow;
-
-                        string curYearText = yearLabel.text ?? "";
-                        if (!curYearText.Contains(whoAndWhat.Replace('_', ' ')))
+                        string cleanWep = attr.WeaponOrSource.Replace('_', ' ').Trim();
+                        while (cleanWep.Contains("  "))
+                            cleanWep = cleanWep.Replace("  ", " ");
+                        if (!string.IsNullOrEmpty(cleanWep) &&
+                            !whoLine.EndsWith(cleanWep, StringComparison.OrdinalIgnoreCase))
                         {
-                            yearLabel.text = $"{curYearText}\n<size=25><color={richColor}>{fullLine}</color></size>";
+                            detailParts.Add(cleanWep);
                         }
                     }
 
-                    // 2. Store for OnGUI overlay banner (so it is also visible on top of ragdoll_overhaul's black death fade)
-                    ActiveDeathAttributionText = fullLine;
-                    ActiveDeathAttributionIsFF = attr.IsFriendlyFire;
-                    ActiveDeathAttributionIsSelf = attr.IsSelfInflicted;
-                    ActiveDeathAttributionStartTime = Time.unscaledTime;
-                    ActiveDeathAttributionExpireTime = Time.unscaledTime + 8.5f;
-                    ActiveDeathAttributionVictimPtr = __0.Pointer;
+                    if (!string.IsNullOrEmpty(attr.HitDetail))
+                    {
+                        string cleanHit = attr.HitDetail.Replace('_', ' ').Trim();
+                        while (cleanHit.Contains("  "))
+                            cleanHit = cleanHit.Replace("  ", " ");
+                        if (!string.IsNullOrEmpty(cleanHit) &&
+                            !whoLine.EndsWith(cleanHit, StringComparison.OrdinalIgnoreCase) &&
+                            (detailParts.Count == 0 || !string.Equals(detailParts[0], cleanHit, StringComparison.OrdinalIgnoreCase)))
+                        {
+                            detailParts.Add(cleanHit);
+                        }
+                    }
+
+                    if (!attr.IsSelfInflicted || attr.DistanceMeters > 0)
+                    {
+                        detailParts.Add($"{attr.DistanceMeters}m");
+                    }
+
+                    string howLine = detailParts.Count > 0 ? string.Join("  \u2022  ", detailParts) : "";
+
+                    // 1. Update native DeathPanel UI text as a centered multi-line obituary stack beneath birth/death years + age
+                    bool shownOnNativeDeathPanel = false;
+                    if (yearLabel != null)
+                    {
+                        yearLabel.text = !string.IsNullOrEmpty(howLine)
+                            ? $"{yearLineWithAge}\n<size=24><color={richColor}>{whoLine}</color></size>\n<size=20><color={subColor}>{howLine}</color></size>"
+                            : $"{yearLineWithAge}\n<size=24><color={richColor}>{whoLine}</color></size>";
+                        shownOnNativeDeathPanel = true;
+                    }
+
+                    // 2. Only activate the OnGUI fallback box if native DeathPanel is missing or hidden by a third-party mod
+                    if (shownOnNativeDeathPanel)
+                    {
+                        ActiveDeathAttributionExpireTime = 0f;
+                        ActiveDeathAttributionText = null;
+                    }
+                    else
+                    {
+                        ActiveDeathAttributionText = !string.IsNullOrEmpty(howLine)
+                            ? $"{whoLine}\n{howLine}"
+                            : whoLine;
+                        ActiveDeathAttributionIsFF = attr.IsFriendlyFire;
+                        ActiveDeathAttributionIsSelf = attr.IsSelfInflicted;
+                        ActiveDeathAttributionStartTime = Time.unscaledTime;
+                        ActiveDeathAttributionExpireTime = Time.unscaledTime + 8.5f;
+                        ActiveDeathAttributionVictimPtr = __0.Pointer;
+                    }
                 }
                 catch { }
             }
