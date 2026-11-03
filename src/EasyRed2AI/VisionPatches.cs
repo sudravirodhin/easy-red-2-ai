@@ -573,7 +573,7 @@ namespace EasyRed2HumanAI
                             ShowToast(
                                 $"[HumanAI Stats] Vets:{VeteranAndTacticsPatches.ActiveVeteransCount} (Prom:{VeteranAndTacticsPatches.FieldPromotionsCount}) | " +
                                 $"Drops:{VeteranAndTacticsPatches.SelfPreservationDrops} | Bipods:{VeteranAndTacticsPatches.BipodsDeployed} | WallBlk:{VeteranAndTacticsPatches.WallsBlocked} | " +
-                                $"WallSide:{VeteranAndTacticsPatches.WallSideRepositionsCount} | TankBlk:{VeteranAndTacticsPatches.UselessTankFirePrevented} (Crew:{VeteranAndTacticsPatches.ExposedCrewTargeted}) | " +
+                                $"Melee:{VeteranAndTacticsPatches.MeleeAttacksTriggered} | TankBlk:{VeteranAndTacticsPatches.UselessTankFirePrevented} (Crew:{VeteranAndTacticsPatches.ExposedCrewTargeted}) | " +
                                 $"FFSaved:{VeteranAndTacticsPatches.FriendlyFirePrevented} | Repairs:{VeteranAndTacticsPatches.ShelteredRepairsCount}",
                                 6.5f);
                         }
@@ -687,7 +687,7 @@ namespace EasyRed2HumanAI
             private static void DrawConfigMenu()
             {
                 float panelW = 760f;
-                float panelH = 592f;
+                float panelH = 618f;
                 float panelX = (Screen.width - panelW) * 0.5f;
                 float panelY = (Screen.height - panelH) * 0.5f;
 
@@ -745,6 +745,7 @@ namespace EasyRed2HumanAI
 
                 yR += 6f;
                 DrawSectionHeader(colRightX, ref yR, "Muzzle Discipline, Anti-Armor & HUD");
+                DrawToggleButton(colRightX, ref yR, colW, rowH, "Point-Blank Bayonet & Melee CQB", VisionConfig.EnablePointBlankMelee);
                 DrawToggleButton(colRightX, ref yR, colW, rowH, "Stop Small-Arms Fire at Tanks / Aim Crew", VisionConfig.PreventSmallArmsFireAtTanks);
                 DrawToggleButton(colRightX, ref yR, colW, rowH, "Gunner Bipod Wall & Ground Mounting", VisionConfig.EnableGunnerBipodWallMounting);
                 DrawToggleButton(colRightX, ref yR, colW, rowH, "Wall-Shooting Prevention", VisionConfig.EnableWallShootingPrevention);

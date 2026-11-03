@@ -88,6 +88,9 @@ namespace EasyRed2HumanAI
         private static readonly Dictionary<IntPtr, float> _nextWallSidestepTime = new Dictionary<IntPtr, float>(256);
         private static readonly Dictionary<IntPtr, float> _nextTankDisciplineCountTime = new Dictionary<IntPtr, float>(256);
         private static readonly Dictionary<IntPtr, float> _poseLockUntil = new Dictionary<IntPtr, float>(256);
+        private static readonly Dictionary<IntPtr, float> _nextBayonetCheckTime = new Dictionary<IntPtr, float>(256);
+        private static readonly Dictionary<IntPtr, float> _nextMeleeAttemptTime = new Dictionary<IntPtr, float>(256);
+        private static readonly Dictionary<IntPtr, float> _nextMeleeStepTime = new Dictionary<IntPtr, float>(256);
         private static readonly Dictionary<IntPtr, float> _repairTaskStartTime = new Dictionary<IntPtr, float>(64);
         private static readonly HashSet<IntPtr> _countedRepairTasks = new HashSet<IntPtr>();
 
@@ -158,6 +161,7 @@ namespace EasyRed2HumanAI
         public static int ThreatSectorOrientationsCount;
         public static int UselessTankFirePrevented;
         public static int ExposedCrewTargeted;
+        public static int MeleeAttacksTriggered;
 
         // =====================================================================
         // Veteran Progression & Role Personality System (3 Archetypes per Role)
@@ -834,6 +838,9 @@ namespace EasyRed2HumanAI
             PruneDict(_nextWallSidestepTime, alivePtrs);
             PruneDict(_nextTankDisciplineCountTime, alivePtrs);
             PruneDict(_poseLockUntil, alivePtrs);
+            PruneDict(_nextBayonetCheckTime, alivePtrs);
+            PruneDict(_nextMeleeAttemptTime, alivePtrs);
+            PruneDict(_nextMeleeStepTime, alivePtrs);
             PruneDict(_vehicleAimCache, alivePtrs);
             PruneDict(_threatSectorCache, alivePtrs);
             PruneDict(_lastDamageByVictim, alivePtrs);
@@ -1591,6 +1598,45 @@ namespace EasyRed2HumanAI
             return hasActive;
         }
 
+        private static readonly float[] _watchSweepOffsets = new float[]
+        {
+            0f, -18f, 18f, -36f, 36f, -54f, 54f, -72f, 72f, -90f, 90f, -112f, 112f, -135f, 135f, -158f, 158f, 180f
+        };
+
+        private static Vector3 CenterGazeInWindowAperture(Vector3 upperOrigin, Vector3 dir, Transform ignoreRoot, float fanT, float maxFanDeg)
+        {
+            // Probe left (-8, -16, -24, -32 deg) and right (+8, +16, +24, +32 deg) at window height (1.28m)
+            // to find the angular bounds of the window opening so the soldier's vision cone is centered out the window
+            // rather than staring perpendicular to the window wall or clipping the window jamb.
+            float minOpenDeg = 0f;
+            for (int step = 1; step <= 4; step++)
+            {
+                float deg = -8f * step;
+                Vector3 probe = Quaternion.Euler(0f, deg, 0f) * dir;
+                if (!IsDirectionBlockedByEnvironment(upperOrigin, probe, 5.5f, ignoreRoot))
+                    minOpenDeg = deg;
+                else
+                    break;
+            }
+
+            float maxOpenDeg = 0f;
+            for (int step = 1; step <= 4; step++)
+            {
+                float deg = 8f * step;
+                Vector3 probe = Quaternion.Euler(0f, deg, 0f) * dir;
+                if (!IsDirectionBlockedByEnvironment(upperOrigin, probe, 5.5f, ignoreRoot))
+                    maxOpenDeg = deg;
+                else
+                    break;
+            }
+
+            float centerDeg = 0.5f * (minOpenDeg + maxOpenDeg);
+            float halfWidth = 0.5f * (maxOpenDeg - minOpenDeg);
+            float safeMargin = Mathf.Max(0f, halfWidth - 6f);
+            float safeFan = Mathf.Clamp(fanT * maxFanDeg, -safeMargin, safeMargin);
+            return (Quaternion.Euler(0f, centerDeg + safeFan, 0f) * dir).normalized;
+        }
+
         private static Vector3 PickClearWatchDirection(Soldier soldier, Vector3 myPos, Vector3 baseDir, float maxFanDeg)
         {
             baseDir.y = 0f;
@@ -1604,25 +1650,82 @@ namespace EasyRed2HumanAI
             Vector3 fannedDir = Quaternion.Euler(0f, fanAngle, 0f) * baseDir;
 
             Transform root = soldier.transform.root;
-            Vector3 eyeCheckOrigin = myPos + Vector3.up * 1.15f;
+            Vector3 upperOrigin = myPos + Vector3.up * 1.28f;
+            Vector3 sillOrigin = myPos + Vector3.up * 0.52f;
 
-            // If the fanned direction doesn't stare directly into a nearby wall/doorframe within 1.55m, use it
-            if (!IsDirectionBlockedByEnvironment(eyeCheckOrigin, fannedDir, 1.55f, root))
+            // 1. Check if fannedDir is blocked by an indoor/nearby wall (< 4.5m) or already looks out a window/parapet
+            //    (sill/wall <= 2.35m at 0.52m height, open exterior view >= 7.5m at 1.28m height).
+            bool fannedBlocked = RaycastEnvironment(upperOrigin, fannedDir, 4.5f, root, out _);
+            bool fannedHasWindowSill = !fannedBlocked &&
+                                       !RaycastEnvironment(upperOrigin, fannedDir, 7.5f, root, out _) &&
+                                       RaycastEnvironment(sillOrigin, fannedDir, 2.35f, root, out _);
+
+            if (fannedHasWindowSill)
+            {
+                return CenterGazeInWindowAperture(upperOrigin, fannedDir, root, t, maxFanDeg);
+            }
+
+            // Detect when a bot is sitting right next to a window (45-90 deg to the side) but fannedDir points
+            // perpendicular to the window along an indoor hallway/room!
+            bool nearbyWindowDetected = false;
+            if (!fannedBlocked)
+            {
+                Vector3 left90 = new Vector3(-fannedDir.z, 0f, fannedDir.x);
+                Vector3 right90 = new Vector3(fannedDir.z, 0f, -fannedDir.x);
+                if ((RaycastEnvironment(sillOrigin, left90, 2.35f, root, out _) && !RaycastEnvironment(upperOrigin, left90, 7.5f, root, out _)) ||
+                    (RaycastEnvironment(sillOrigin, right90, 2.35f, root, out _) && !RaycastEnvironment(upperOrigin, right90, 7.5f, root, out _)))
+                {
+                    nearbyWindowDetected = true;
+                }
+            }
+
+            if (!fannedBlocked && !nearbyWindowDetected)
                 return fannedDir;
 
-            // Otherwise try un-fanned baseDir, then +24 deg / -24 deg corner-peek offsets
-            if (!IsDirectionBlockedByEnvironment(eyeCheckOrigin, baseDir, 1.55f, root))
-                return baseDir;
+            // 2. Sweep 360 deg around baseDir to find the best window aperture or longest unobstructed exterior sightline
+            Vector3 bestDir = fannedDir;
+            float bestScore = -999f;
+            bool bestIsWindow = false;
 
-            Vector3 leftPeek = Quaternion.Euler(0f, -24f, 0f) * baseDir;
-            if (!IsDirectionBlockedByEnvironment(eyeCheckOrigin, leftPeek, 1.55f, root))
-                return leftPeek;
+            for (int i = 0; i < _watchSweepOffsets.Length; i++)
+            {
+                float angleOffset = _watchSweepOffsets[i];
+                Vector3 cand = i == 0 ? baseDir : (Quaternion.Euler(0f, angleOffset, 0f) * baseDir);
 
-            Vector3 rightPeek = Quaternion.Euler(0f, 24f, 0f) * baseDir;
-            if (!IsDirectionBlockedByEnvironment(eyeCheckOrigin, rightPeek, 1.55f, root))
-                return rightPeek;
+                float clearDist = 18.0f;
+                if (RaycastEnvironment(upperOrigin, cand, 18.0f, root, out RaycastHit upperHit))
+                {
+                    clearDist = upperHit.distance;
+                }
 
-            return fannedDir;
+                if (clearDist < 2.0f)
+                    continue;
+
+                bool isWindowAperture = clearDist >= 7.0f &&
+                                        RaycastEnvironment(sillOrigin, cand, 2.35f, root, out RaycastHit sillHit) &&
+                                        sillHit.distance < clearDist - 3.0f;
+
+                float alignDot = Vector3.Dot(cand, baseDir); // -1.0 .. +1.0
+                float score = clearDist + (alignDot * 5.5f);
+                if (isWindowAperture)
+                {
+                    score += 18.0f; // Strong preference for looking out a window opening rather than perpendicular into the room
+                }
+
+                if (score > bestScore)
+                {
+                    bestScore = score;
+                    bestDir = cand;
+                    bestIsWindow = isWindowAperture;
+                }
+            }
+
+            if (bestIsWindow || fannedBlocked)
+            {
+                return CenterGazeInWindowAperture(upperOrigin, bestDir, root, t, maxFanDeg);
+            }
+
+            return bestDir;
         }
 
         private static void InsertClosestContact(
@@ -1864,6 +1967,7 @@ namespace EasyRed2HumanAI
                 // Pre-contact fallback: no enemy squads are currently spotted/aware/loud nearby,
                 // so orient toward the general enemy approach vector with a wider 24-deg overwatch fan
                 hasActiveContact = false;
+                Vector3 fallbackBase = soldier.transform.forward;
                 BattleManager bm = BattleManager.instance;
                 BattlePhase phase = bm != null ? bm.currentPhase : null;
                 if (phase != null && !string.IsNullOrEmpty(myFaction) && phase.EnemyFactionHasSpawn(myFaction))
@@ -1872,9 +1976,10 @@ namespace EasyRed2HumanAI
                     toEnemySpawn.y = 0f;
                     if (toEnemySpawn.sqrMagnitude > 1.0f)
                     {
-                        watchDir = PickClearWatchDirection(soldier, myPos, toEnemySpawn, 24f);
+                        fallbackBase = toEnemySpawn;
                     }
                 }
+                watchDir = PickClearWatchDirection(soldier, myPos, fallbackBase, 24f);
             }
 
             _threatSectorCache[ptr] = new ThreatSectorCache
@@ -2438,6 +2543,167 @@ namespace EasyRed2HumanAI
         }
 
         // =====================================================================
+        // Helper: Point-Blank Bayonet, Melee & Butt-Stroke CQB Combat
+        // - Automatically unfolds/mounts integrated bayonets (e.g. Mosin M44, Carcano M38, Type 44)
+        //   or installs detachable bayonets from the soldier's inventory when entering combat
+        // - Overrides vanilla's tiny 1.6m SequentialUpdate-only melee trigger and prevents
+        //   bots from crouching/hip-firing bullets into each other at 1-2.5m instead of
+        //   lunging with bayonets, knives/shovels, or rifle butt-strokes
+        // =====================================================================
+        private static void TryEnsureBayonetMounted(Soldier soldier)
+        {
+            if (soldier == null ||
+                soldier.Pointer == IntPtr.Zero ||
+                soldier.IsOnVehicle() ||
+                soldier.HasBayonetReady ||
+                soldier.isInHandsAnimation ||
+                soldier.IsReloading)
+            {
+                return;
+            }
+
+            IntPtr ptr = soldier.Pointer;
+            if (_nextBayonetCheckTime.TryGetValue(ptr, out float nextCheck) && Time.time < nextCheck)
+                return;
+
+            _nextBayonetCheckTime[ptr] = Time.time + 2.5f;
+
+            GenericGun heldGun = soldier.GetHeldGun();
+            if (heldGun == null)
+                return;
+
+            // 1. Foldable / integrated bayonet on rifle (starts folded in AttachmentBayonet.Awake)
+            if (heldGun.integratedBayonet != null)
+            {
+                if (!heldGun.integratedBayonet.IsMounted)
+                {
+                    heldGun.integratedBayonet.SetMounted(true);
+                }
+                return;
+            }
+
+            // 2. Detachable bayonet in the soldier's inventory matching the rifle's bayonet slot
+            if (soldier.inventory != null && heldGun.SupportAttachmentType((AttachmentType)3))
+            {
+                VirtualAttachmentItem bayoItem = soldier.inventory.FindAttachment((AttachmentType)3);
+                if (bayoItem != null)
+                {
+                    soldier.inventory.InstallAttachment(bayoItem, true);
+                }
+            }
+        }
+
+        private static bool IsEngagedInPointBlankMelee(
+            SoldierAI ai,
+            Soldier soldier,
+            float dist,
+            out Soldier enemySoldier,
+            out float lungeRange,
+            out float ceaseFireRange,
+            out float strikeRange)
+        {
+            enemySoldier = null;
+            lungeRange = 0f;
+            ceaseFireRange = 0f;
+            strikeRange = 0f;
+
+            if (!VisionConfig.EnablePointBlankMelee.Value ||
+                ai == null ||
+                soldier == null ||
+                dist > 6.2f ||
+                ai.visibleTarget == null ||
+                ai.HeldMortar != null ||
+                soldier.IsOnVehicle() ||
+                soldier.UsingBipod() ||
+                soldier.IsBipodTransitioning() ||
+                soldier.HasSurrended() ||
+                soldier.IsCarryingBody() ||
+                soldier.IsCarried())
+            {
+                return false;
+            }
+
+            enemySoldier = ai.visibleTarget.TryCast<Soldier>();
+            if (enemySoldier == null ||
+                !enemySoldier.IsAlive ||
+                enemySoldier.IsOnVehicle() ||
+                enemySoldier.HasSurrended())
+            {
+                return false;
+            }
+
+            Vector3 myPos = soldier.transform.position;
+            Vector3 enemyPos = enemySoldier.transform.position;
+            if (Mathf.Abs(enemyPos.y - myPos.y) > 1.65f)
+                return false;
+
+            bool hasBayonet = soldier.HasBayonetReady;
+            bool holdsMelee = soldier.HoldsMeleeWeapon;
+            GenericGun heldGun = soldier.GetHeldGun();
+            bool gunEmptyOrReloading = soldier.IsReloading ||
+                                       soldier.MustReload() ||
+                                       (heldGun != null && heldGun.GetCurrentAmmoCount() <= 0);
+            bool boltCyclingClose = soldier.CantAimDueToBoltActionUsage ||
+                                    (heldGun != null && (heldGun.bolt_required || heldGun.IsReloadingOrUsingBolt()));
+
+            if (holdsMelee)
+            {
+                lungeRange = 6.0f;
+                ceaseFireRange = 6.0f;
+                strikeRange = 1.90f;
+            }
+            else if (hasBayonet)
+            {
+                lungeRange = (soldier.IsCharging() || gunEmptyOrReloading || boltCyclingClose) ? 5.2f : 3.8f;
+                ceaseFireRange = (gunEmptyOrReloading || boltCyclingClose) ? 4.5f : 2.75f;
+                strikeRange = 2.25f;
+            }
+            else
+            {
+                lungeRange = gunEmptyOrReloading ? 4.8f : (boltCyclingClose ? 3.2f : 2.5f);
+                ceaseFireRange = (gunEmptyOrReloading || boltCyclingClose) ? 3.8f : 2.15f;
+                strikeRange = 1.65f;
+            }
+
+            if (dist > lungeRange)
+                return false;
+
+            Vector3 toEnemy = (enemyPos + Vector3.up * 1.05f) - (myPos + Vector3.up * 1.05f);
+            float checkDist = Mathf.Min(dist - 0.25f, 3.5f);
+            if (checkDist > 0.30f &&
+                IsDirectionBlockedByEnvironment(myPos + Vector3.up * 1.05f, toEnemy.normalized, checkDist, soldier.transform.root))
+            {
+                return false;
+            }
+
+            return true;
+        }
+
+        private static void TryExecuteMeleeAttack(SoldierAI ai, Soldier soldier, Soldier enemy)
+        {
+            if (ai == null || soldier == null || enemy == null)
+                return;
+
+            Vector3 toEnemy = enemy.transform.position - soldier.transform.position;
+            toEnemy.y = 0f;
+            if (toEnemy.sqrMagnitude > 0.01f && soldier.AngleToDirection(toEnemy) > 42f)
+                return;
+
+            ai.MeleeBlockWindow();
+            if (soldier.IsBlocking || soldier.isInHandsAnimation || soldier.isInBodyAnimation)
+                return;
+
+            IntPtr ptr = soldier.Pointer;
+            if (_nextMeleeAttemptTime.TryGetValue(ptr, out float nextMelee) && Time.time < nextMelee)
+                return;
+
+            _nextMeleeAttemptTime[ptr] = Time.time + 0.38f;
+            soldier.SetGunTriggerPressed(false);
+            soldier.Melee();
+            MeleeAttacksTriggered++;
+        }
+
+        // =====================================================================
         // PATCH 1: SoldierAI.SequentialUpdate (shared=1, len=1250)
         // - Veteran survival tracking & dynamic rank promotion
         // - Priority 1A: Seek cover FIRST when bleeding, then bandage in cover
@@ -2751,6 +3017,54 @@ namespace EasyRed2HumanAI
                     float suppression = soldier.GetSuppressionValue();
                     float dist = __instance.distFromTarget;
 
+                    if (VisionConfig.EnablePointBlankMelee.Value &&
+                        ((__instance.HasEnemyAndCanFireAtHim && dist <= 45f) || soldier.IsCharging() || soldier.isAlerted))
+                    {
+                        TryEnsureBayonetMounted(soldier);
+                    }
+
+                    bool inPointBlankMelee = IsEngagedInPointBlankMelee(
+                        __instance,
+                        soldier,
+                        dist,
+                        out Soldier meleeEnemy,
+                        out _,
+                        out _,
+                        out float seqStrikeRange);
+
+                    if (inPointBlankMelee && meleeEnemy != null)
+                    {
+                        __instance.knifeCharge = soldier.HoldsMeleeWeapon || soldier.HasBayonetReady;
+                        __instance.moveLookingTarget = true;
+                        SetBotPose(__instance, soldier, SoldierPose.Idle, true);
+
+                        // If no bayonet is ready and the gun is empty/reloading (or enemy is < 2.2m), draw inventory knife/shovel
+                        if (!soldier.HasBayonetReady &&
+                            !soldier.HoldsMeleeWeapon &&
+                            soldier.InventoryKnife != null &&
+                            !soldier.isInHandsAnimation)
+                        {
+                            GenericGun heldGun = soldier.GetHeldGun();
+                            bool gunEmpty = soldier.IsReloading ||
+                                            soldier.MustReload() ||
+                                            (heldGun != null && heldGun.GetCurrentAmmoCount() <= 0);
+                            if (gunEmpty || dist <= 2.15f)
+                            {
+                                soldier.ToggleInventoryKnife();
+                            }
+                        }
+
+                        if (dist > 1.15f && !soldier.isInBodyAnimation)
+                        {
+                            __instance.MoveDirectlyToward(meleeEnemy.transform.position, 0.35f);
+                        }
+
+                        if (dist <= seqStrikeRange)
+                        {
+                            TryExecuteMeleeAttack(__instance, soldier, meleeEnemy);
+                        }
+                    }
+
                     if (__instance.HasEnemyAndCanFireAtHim || suppression >= 8f)
                     {
                         // Hold combat stance for at least 6.0s after losing LOS so bots never rapidly stand/prone in grass!
@@ -2895,9 +3209,9 @@ namespace EasyRed2HumanAI
                                              soldier.joinedSquad.Leader != null &&
                                              soldier.joinedSquad.Leader.m_pose > SoldierPose.Idle;
 
-                        if (soldier.IsCharging())
+                        if (soldier.IsCharging() || inPointBlankMelee)
                         {
-                            SetBotPose(__instance, soldier, SoldierPose.Idle);
+                            SetBotPose(__instance, soldier, SoldierPose.Idle, true);
                         }
                         else if (__instance.HasEnemyAndCanFireAtHim && dist > 4.5f)
                         {
@@ -2953,7 +3267,11 @@ namespace EasyRed2HumanAI
                     else
                     {
                         // Stationary soldier stance redirection
-                        if (isPeeking || isHighBipodStanding)
+                        if (inPointBlankMelee)
+                        {
+                            SetBotPose(__instance, soldier, SoldierPose.Idle, true);
+                        }
+                        else if (isPeeking || isHighBipodStanding)
                         {
                             // Preserve active auto-peek or high-wall bipod stance against vanilla SequentialUpdate overwrites
                             __instance.actualPose = soldier.m_pose;
@@ -3416,10 +3734,60 @@ namespace EasyRed2HumanAI
                         __instance.actualPose = soldier.m_pose;
                     }
 
+                    // 0. Priority 0 (CQB): Point-Blank Melee, Bayonet & Butt-Stroke Engagement
+                    // When an enemy foot soldier is right in front of us in CQB, stand up, close distance,
+                    // suppress point-blank gunfire within ceaseFireRange, and execute bayonet/melee strikes!
+                    bool inPointBlankMelee = false;
+                    if (dist <= 6.2f &&
+                        IsEngagedInPointBlankMelee(
+                            __instance,
+                            soldier,
+                            dist,
+                            out Soldier meleeEnemy,
+                            out _,
+                            out float ceaseFireRange,
+                            out float strikeRange) &&
+                        meleeEnemy != null)
+                    {
+                        inPointBlankMelee = true;
+                        if (soldier.m_pose != SoldierPose.Idle)
+                        {
+                            SetBotPose(__instance, soldier, SoldierPose.Idle, true);
+                        }
+
+                        Vector3 enemyPos = meleeEnemy.transform.position;
+                        if (dist > 1.15f && !soldier.isInBodyAnimation)
+                        {
+                            if (!_nextMeleeStepTime.TryGetValue(ptr, out float nextStep) || Time.time >= nextStep)
+                            {
+                                _nextMeleeStepTime[ptr] = Time.time + 0.20f;
+                                __instance.MoveDirectlyToward(enemyPos, 0.30f);
+                                __instance.moveLookingTarget = true;
+                            }
+                        }
+
+                        if (dist <= ceaseFireRange)
+                        {
+                            blockFire = true;
+                            Vector3 dirToEnemy = enemyPos - soldier.transform.position;
+                            dirToEnemy.y = 0f;
+                            if (dirToEnemy.sqrMagnitude > 0.01f)
+                            {
+                                soldier.RotateToward(dirToEnemy.normalized, __1 * 2.5f);
+                            }
+                        }
+
+                        if (dist <= strikeRange)
+                        {
+                            TryExecuteMeleeAttack(__instance, soldier, meleeEnemy);
+                        }
+                    }
+
                     // 1. Priority 1: Never Shoot Standing in the Open — Crouch (or Prone for Gunners) BEFORE Shooting
                     // CRITICAL FIX: Only drop from standing to crouch if HasClearLineOfFireFromCrouch is true (or heavily suppressed)
                     // so bots standing behind waist-high walls/sandbags/ridges don't drop into a blocked crouch and oscillate!
                     if (!isMoving &&
+                        !inPointBlankMelee &&
                         (VisionConfig.EnableSelfPreservationStance.Value || VisionConfig.NeverShootStandingInOpen.Value) &&
                         !isPeeking &&
                         !isHighBipodStanding &&
@@ -3716,7 +4084,7 @@ namespace EasyRed2HumanAI
                         float angle = soldier.AngleToDirection(watchDir);
                         if (_isTurningToWatchSector.Contains(ptr))
                         {
-                            if (angle <= 5.0f)
+                            if (angle <= 4.0f)
                             {
                                 _isTurningToWatchSector.Remove(ptr);
                             }
@@ -3725,7 +4093,7 @@ namespace EasyRed2HumanAI
                                 soldier.RotateToward(watchDir, __0);
                             }
                         }
-                        else if (angle > 18.0f)
+                        else if (angle > 14.0f)
                         {
                             _isTurningToWatchSector.Add(ptr);
                             ThreatSectorOrientationsCount++;

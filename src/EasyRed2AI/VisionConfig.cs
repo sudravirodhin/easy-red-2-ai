@@ -64,6 +64,7 @@ namespace EasyRed2HumanAI
         public static ConfigEntry<bool> EnableSmartWallSideCover;
         public static ConfigEntry<bool> EnableThreatSectorConcentration;
         public static ConfigEntry<bool> PreventSmallArmsFireAtTanks;
+        public static ConfigEntry<bool> EnablePointBlankMelee;
 
         // 7. Phase 3: Role-Based AI Personalities (3 Archetypes per Infantry & Vehicle Role)
         public static ConfigEntry<bool> EnableRolePersonalities;
@@ -368,6 +369,12 @@ namespace EasyRed2HumanAI
                 "PreventSmallArmsFireAtTanks",
                 true,
                 "Stop infantry from uselessly firing small arms (rifles, SMGs, MGs, pistols) at armored tanks/vehicles unless their weapon can actually penetrate a vehicle part/wheel/track or they can shoot a visible exposed crew member.");
+
+            EnablePointBlankMelee = config.Bind(
+                "6. Tactical Self-Preservation & Muzzle Discipline",
+                "EnablePointBlankMelee",
+                true,
+                "In point-blank CQB (<= 3.8m with bayonet, <= 2.5m with any weapon, or <= 5.0m when empty/reloading/bolt-cycling), bots automatically fix/unfold bayonets, stand up, close distance, draw knives when empty, and execute bayonet stabs, melee slashes, and rifle butt-strokes instead of crouched point-blank mag-dumping.");
 
             // 7. AI Role Personalities (3 Archetypes per Infantry & Vehicle Role)
             EnableRolePersonalities = config.Bind(

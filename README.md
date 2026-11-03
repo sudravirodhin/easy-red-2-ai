@@ -1,10 +1,10 @@
-# Easy Red 2 — Humanized AI & Veteran Tactics (`v0.3.5`)
+# Easy Red 2 — Humanized AI & Veteran Tactics (`v0.3.6`)
 
 > [!IMPORTANT]
 > **Disclosure — Vibecoded Project:**
 > This mod was **vibecoded** (designed, reverse-engineered, and written collaboratively with an AI coding agent). If you are averse to AI-assisted or AI-generated software/mods, please be aware of this upfront before downloading or using this repository.
 
-A comprehensive **BepInEx 6 (IL2CPP)** AI and fairness overhaul for **Easy Red 2** designed to reduce frustrating *"how did they see me?"* and *"what just killed me?"* moments. It replaces vanilla's robotic X-ray spotting, erratic stance oscillation, suicidal open-field bandaging/repairs, standing in front of walls, and wasteful small-arms fire against tanks with human-like perception, self-preservation, cover intelligence, a 15-minute linear Veteran progression system, **30 Role-Based AI Personalities (3 per Infantry, Vehicle & Aircraft role)**, an **in-game `F6` Feature Toggle Menu**, and full Death Screen Kill Attribution.
+A comprehensive **BepInEx 6 (IL2CPP)** AI and fairness overhaul for **Easy Red 2** designed to reduce frustrating *"how did they see me?"* and *"what just killed me?"* moments. It replaces vanilla's robotic X-ray spotting, erratic stance oscillation, suicidal open-field bandaging/repairs, standing in front of walls, point-blank hip-fire mag-dumping, and wasteful small-arms fire against tanks with human-like perception, self-preservation, cover & window intelligence, bayonet/melee CQB, a 15-minute linear Veteran progression system, **30 Role-Based AI Personalities (3 per Infantry, Vehicle & Aircraft role)**, an **in-game `F6` Feature Toggle Menu**, and full Death Screen Kill Attribution.
 
 ---
 
@@ -23,15 +23,15 @@ A comprehensive **BepInEx 6 (IL2CPP)** AI and fairness overhaul for **Easy Red 2
 
 Download your preferred package from the **[Releases](https://github.com/sudravirodhin/easy-red-2-ai/releases)** page:
 
-### Option A: With BepInEx Included (`EasyRed2HumanAI-v0.3.5-with-BepInEx.zip`) — *Recommended for Fresh Installs*
+### Option A: With BepInEx Included (`EasyRed2HumanAI-v0.3.6-with-BepInEx.zip`) — *Recommended for Fresh Installs*
 Includes **[BepInEx 6.0.0-be.791 (Unity.IL2CPP-win-x64)](https://builds.bepinex.dev/projects/bepinex_be)**, the `.NET 6` runtime, Unity `2022.3.62` base libraries, pre-generated IL2CPP `interop` assemblies for Easy Red 2 Build `921`, and `EasyRed2HumanAI.dll` (with no other third-party mods).
 1. Open your **Easy Red 2** installation folder (e.g. `Steam\steamapps\common\Easy Red 2`, where `Easy Red 2.exe` is located).
-2. Extract all contents of `EasyRed2HumanAI-v0.3.5-with-BepInEx.zip` directly into the `Easy Red 2` folder.
+2. Extract all contents of `EasyRed2HumanAI-v0.3.6-with-BepInEx.zip` directly into the `Easy Red 2` folder.
 3. Launch the game!
 
-### Option B: Without BepInEx / Plugin Only (`EasyRed2HumanAI-v0.3.5-PluginOnly.zip` or `EasyRed2HumanAI.dll`)
+### Option B: Without BepInEx / Plugin Only (`EasyRed2HumanAI-v0.3.6-PluginOnly.zip` or `EasyRed2HumanAI.dll`)
 For users who already have **[BepInEx 6 Bleeding Edge (`BepInEx-Unity.IL2CPP-win-x64`)](https://builds.bepinex.dev/projects/bepinex_be)** installed:
-1. Download `EasyRed2HumanAI-v0.3.5-PluginOnly.zip` (or `EasyRed2HumanAI.dll` directly).
+1. Download `EasyRed2HumanAI-v0.3.6-PluginOnly.zip` (or `EasyRed2HumanAI.dll` directly).
 2. Place `EasyRed2HumanAI.dll` into:
    ```text
    Easy Red 2\BepInEx\plugins\EasyRed2HumanAI.dll
@@ -43,12 +43,12 @@ For users who already have **[BepInEx 6 Bleeding Edge (`BepInEx-Unity.IL2CPP-win
 
 ### 1. Humanized Vision, Stance Stealth & FOV Cones ([`VisionPatches.cs`](src/EasyRed2AI/VisionPatches.cs))
 
-| Feature | Vanilla Behavior | Humanized AI (`v0.3.5`) |
+| Feature | Vanilla Behavior | Humanized AI (`v0.3.6`) |
 | :--- | :--- | :--- |
 | **Stance Sight Ranges** | `220m` Standing, `50m` Crouching, `37m` Prone when unspotted — but jumps **all stances to a flat `300m`** the instant `IsEnemyAwareOfThisSquad` is true. | **150m Standing**, **80m Crouching**, **40m Prone**. Squad combat awareness applies only a **1.20x multiplier** (`48m` prone, `96m` crouched) so taking cover in grass/craters actually conceals you during firefights. |
 | **Individual Firing Reveal** | One soldier firing alerts the enemy to the entire squad's crouched/prone members out to `300m`. | Only the **specific soldier who fired** gets a temporary **+85m visibility penalty for 4.0 seconds** (muzzle flash, smoke, and gunshot sound). Silent squadmates stay hidden. |
 | **Human FOV Cones** | Alerted or suppressed bots bypass the FOV check and gain **360-degree omnidirectional vision** out to `300m`. | Enforces realistic human vision cones even in combat: **20m** 360° close hearing/awareness, **80° half-angle** (160° cone) mid-range out to **75m**, and **45° half-angle** (90° cone) beyond **75m**. |
-| **Threat-Sector Gaze & Flanking** | Stationary defenders never rotate once `StopMove` is called (staring at whatever random angle their last step pointed) and suffer a **2.5s freeze** (`alertStartTime`) before locking onto spotted targets `> 30m`. | Stationary defenders orient toward **Known Enemy Contact Sectors** (spotted/loud/aware squads within `175m`), spot targets in their central `28°` overwatch cone **1.20x further** and **4x faster (`0.15s–0.55s`)**, and leave **quiet, unspotted flanks unwatched** (`60°` peripheral FOV & `0.72x` peripheral range) so flanking maneuvers are rewarded. |
+| **Threat-Sector Gaze, Window Alignment & Flanking** | Stationary defenders never rotate once `StopMove` is called (often staring perpendicular to a window along an interior room wall) and suffer a **2.5s freeze** (`alertStartTime`) before locking onto spotted targets `> 30m`. | Stationary defenders orient toward **Known Enemy Contact Sectors** (`175m`), automatically detect **Window Apertures** (open exterior sightline at `1.28m` over a `0.52m` windowsill) and center their vision cone squarely out the window, spot targets in their central `28°` overwatch cone **1.20x further** and **4x faster (`0.15s–0.55s`)**, and leave **quiet flanks unwatched** so flanking is rewarded. |
 | **Scopes & Tank Optics** | Sniper scopes and tank turret optics do not dynamically scale spotting distance by magnification. | Scales AI spotting range by actual optic magnification (`60 / AimingFOV`, capped at **2.25x**) within a focused **25° half-angle** optic gaze cone. |
 | **Aircraft Spotting** | AI pilots spot unmarked individual infantry across the map through foliage. | Pilots only spot ground infantry from afar if their squad is **Marked/Spotted** or near a radio request; unmarked standing infantry are capped at **180m**, and unmarked crouching/prone infantry remain hidden unless actively firing. |
 
@@ -102,8 +102,11 @@ Instead of every bot using identical suppression thresholds, peeking rhythms, an
 
 ---
 
-### 5. Muzzle Discipline, Bipods, Anti-Armor & Mobility ([`VeteranAndTacticsPatches.cs`](src/EasyRed2AI/VeteranAndTacticsPatches.cs))
+### 5. Muzzle Discipline, Point-Blank Bayonet/Melee CQB, Bipods, Anti-Armor & Mobility ([`VeteranAndTacticsPatches.cs`](src/EasyRed2AI/VeteranAndTacticsPatches.cs))
 
+* **Point-Blank Bayonet, Melee & Butt-Stroke CQB (`EnablePointBlankMelee`)**:
+  * **Automatic Bayonet Fixing**: Bots entering combat automatically unfold/mount integrated foldable bayonets (`heldGun.integratedBayonet.SetMounted(true)`, e.g. Mosin M44, Carcano M38, Type 44) and install detachable bayonets from their inventory (`soldier.inventory.FindAttachment((AttachmentType)3)`).
+  * **CQB Lunge, Knife Draw & Bayonet/Melee Strikes**: Fixes vanilla's tiny `1.6m` `SequentialUpdate`-only melee check (`SoldierAI.SequentialUpdate` at `0x18055FA61`) and `MeleeWeaponCheck`'s refusal to switch to a knife while ammo remains (`0x18055C8BF`). In close quarters (`<= 3.8m` with bayonet, `<= 2.5m` with any weapon, or `<= 5.0m` when empty/reloading/bolt-cycling), bots stand up, close the distance, draw their trench knife/shovel when empty (`ToggleInventoryKnife`), suppress point-blank gunfire within strike range, utilize `MeleeBlockWindow()`, and execute bayonet stabs, melee slashes, and rifle butt-strokes (`Soldier.Melee()`).
 * **Smart Anti-Armor Target & Fire Discipline (`PreventSmallArmsFireAtTanks`)**:
   * **Targets Exposed Crew (`Seats.showUnitSet`)**: Redirects small-arms fire directly at visible exposed crew members or passengers (open-topped TDs, halftracks, jeeps, pintle MG gunners) instead of the steel hull.
   * **Targets Vulnerable Weak Spots (Tires, Tracks & Light Armor)**: Aims small arms at **un-flattened rubber tires** (`VehicleDamageableWheelPart`) within `60m` and aims AT rifles at penetrable armor plates or **unbroken tank tracks** (`VehicleDamageableTrackPart`).
