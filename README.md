@@ -1,4 +1,4 @@
-# Easy Red 2 — Humanized AI & Veteran Tactics (`v0.3.7`)
+# Easy Red 2 — Humanized AI & Veteran Tactics (`v0.3.8`)
 
 > [!IMPORTANT]
 > **Disclosure — Vibecoded Project:**
@@ -23,15 +23,15 @@ A comprehensive **BepInEx 6 (IL2CPP)** AI and fairness overhaul for **Easy Red 2
 
 Download your preferred package from the **[Releases](https://github.com/sudravirodhin/easy-red-2-ai/releases)** page:
 
-### Option A: With BepInEx Included (`EasyRed2HumanAI-v0.3.7-with-BepInEx.zip`) — *Recommended for Fresh Installs*
+### Option A: With BepInEx Included (`EasyRed2HumanAI-v0.3.8-with-BepInEx.zip`) — *Recommended for Fresh Installs*
 Includes **[BepInEx 6.0.0-be.791 (Unity.IL2CPP-win-x64)](https://builds.bepinex.dev/projects/bepinex_be)**, the `.NET 6` runtime, Unity `2022.3.62` base libraries, pre-generated IL2CPP `interop` assemblies for Easy Red 2 Build `921`, and `EasyRed2HumanAI.dll` (with no other third-party mods).
 1. Open your **Easy Red 2** installation folder (e.g. `Steam\steamapps\common\Easy Red 2`, where `Easy Red 2.exe` is located).
-2. Extract all contents of `EasyRed2HumanAI-v0.3.7-with-BepInEx.zip` directly into the `Easy Red 2` folder.
+2. Extract all contents of `EasyRed2HumanAI-v0.3.8-with-BepInEx.zip` directly into the `Easy Red 2` folder.
 3. Launch the game!
 
-### Option B: Without BepInEx / Plugin Only (`EasyRed2HumanAI-v0.3.7-PluginOnly.zip` or `EasyRed2HumanAI.dll`)
+### Option B: Without BepInEx / Plugin Only (`EasyRed2HumanAI-v0.3.8-PluginOnly.zip` or `EasyRed2HumanAI.dll`)
 For users who already have **[BepInEx 6 Bleeding Edge (`BepInEx-Unity.IL2CPP-win-x64`)](https://builds.bepinex.dev/projects/bepinex_be)** installed:
-1. Download `EasyRed2HumanAI-v0.3.6-PluginOnly.zip` (or `EasyRed2HumanAI.dll` directly).
+1. Download `EasyRed2HumanAI-v0.3.8-PluginOnly.zip` (or `EasyRed2HumanAI.dll` directly).
 2. Place `EasyRed2HumanAI.dll` into:
    ```text
    Easy Red 2\BepInEx\plugins\EasyRed2HumanAI.dll
@@ -125,6 +125,7 @@ Instead of every bot using identical suppression thresholds, peeking rhythms, an
 ### 6. Death Screen Kill Attribution & Soldier Age Obituary (`EnableDeathScreenAttribution`)
 
 Displays a clean, centered multi-line obituary directly on the native `DeathPanel` (and suppresses any duplicate HUD toast box whenever `DeathPanel` is active):
+* **Instant Full-Page Display (No Staggered Fade-In)**: Bypasses vanilla's slow sequential `Animation` fade-in (where `text_year` only faded in right before the entire panel disappeared) so `"KILLED IN ACTION"`, the soldier's name, birth/death years + age, and kill attribution appear **all at once immediately at 100% opacity** and remain readable for the full death screen duration in both Singleplayer and Co-op.
 * **Calculated Soldier Age**: Parses the fallen soldier's birth and death years on the obituary screen and appends their exact age at death (`1925 - 1944 (Age 19)`).
 * **Line 1 — Who Killed You**: Displays the attacker's clean rank (`Pvt.`, `Cpl.`, `Sgt.`, `1st Sgt.`, `Lt.`) and full name (`Killed by Sgt. Hans Müller` or `Bled out from wounds by...`), highlighted with `[FRIENDLY FIRE]` in coral red or `[SELF-INFLICTED]` in amber when applicable.
 * **Line 2 — Weapon, Hit Location & Distance**: Compact bullet-separated sub-line (`MP40  •  Headshot (Helmet)  •  42m`) showing the weapon, grenade, vehicle, or artillery barrage, hit zone (`Headshot`, `Headshot (Helmet)`, `Torso`, `Arm`, `Leg`, `Shrapnel`, `Explosion`), and distance in meters.

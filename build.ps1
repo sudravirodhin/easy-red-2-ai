@@ -124,11 +124,13 @@ dotnet $csc /nologo /target:library /optimize+ /nostdlib `
     /r:"$coreDir\Il2CppInterop.Runtime.dll" `
     /r:"$interopDir\Il2Cppmscorlib.dll" `
     /r:"$interopDir\UnityEngine.CoreModule.dll" `
+    /r:"$interopDir\UnityEngine.AnimationModule.dll" `
     /r:"$interopDir\UnityEngine.PhysicsModule.dll" `
     /r:"$interopDir\UnityEngine.IMGUIModule.dll" `
     /r:"$interopDir\UnityEngine.InputLegacyModule.dll" `
     /r:"$interopDir\UnityEngine.TextRenderingModule.dll" `
     /r:"$interopDir\UnityEngine.UI.dll" `
+    /r:"$interopDir\UnityEngine.UIModule.dll" `
     /r:"$interopDir\Assembly-CSharp.dll" `
     /out:"$buildDir\EasyRed2HumanAI.dll" `
     "$workspace\src\EasyRed2AI\Plugin.cs" `

@@ -138,6 +138,12 @@ namespace EasyRed2HumanAI
         public static float ActiveDeathAttributionExpireTime;
         public static IntPtr ActiveDeathAttributionVictimPtr;
 
+        // Instant DeathPanel visibility state (bypasses staggered legacy Animation fade-in)
+        private static float _deathPanelShowStartUnscaledTime;
+        private static float _deathPanelHoldUntilUnscaledTime;
+        private static float _deathPanelCleanupUntilUnscaledTime;
+        private static IntPtr _deathPanelVictimPtr;
+
         private static float _nextStateCleanupTime;
 
         // Procedural 32x32 chevron textures for Tier 1 (^), Tier 2 (^^), Tier 3 (^^^ ★)
@@ -688,6 +694,9 @@ namespace EasyRed2HumanAI
         {
             if (!VisionConfig.EnableMod.Value)
                 return;
+
+            if (VisionConfig.EnableDeathScreenAttribution.Value)
+                MaintainInstantDeathPanel();
 
             // Periodic dictionary cleanup & active veteran count every 3 seconds
             if (Time.time > _nextStateCleanupTime)
@@ -4791,6 +4800,9 @@ namespace EasyRed2HumanAI
                         if (yearLabel != null && !string.IsNullOrEmpty(yearLineWithAge))
                             yearLabel.text = $"<size={yearFontSize}>{yearLineWithAge}</size>";
 
+                        if (dp != null)
+                            ActivateInstantDeathPanel(dp, __0.Pointer);
+
                         ActiveDeathAttributionExpireTime = 0f;
                         ActiveDeathAttributionText = null;
                         return;
@@ -4876,6 +4888,9 @@ namespace EasyRed2HumanAI
                         shownOnNativeDeathPanel = true;
                     }
 
+                    if (dp != null)
+                        ActivateInstantDeathPanel(dp, __0.Pointer);
+
                     // 2. Only activate the OnGUI fallback box if native DeathPanel is missing or hidden by a third-party mod
                     if (shownOnNativeDeathPanel)
                     {
@@ -4893,6 +4908,143 @@ namespace EasyRed2HumanAI
                         ActiveDeathAttributionExpireTime = Time.unscaledTime + 8.5f;
                         ActiveDeathAttributionVictimPtr = __0.Pointer;
                     }
+                }
+                catch { }
+            }
+        }
+
+        private static void ActivateInstantDeathPanel(DeathPanel dp, IntPtr victimPtr)
+        {
+            if (dp == null)
+                return;
+
+            // Sample the legacy Animation at 72% (peak full-page visibility) and stop it so
+            // text_reason, text_name, and text_year appear immediately all at once instead of staggering.
+            Animation anim = dp.GetComponent<Animation>();
+            if (anim != null)
+            {
+                if (anim.GetStateCount() > 0)
+                {
+                    AnimationState state = anim.GetStateAtIndex(0);
+                    if (state != null && state.length > 0f)
+                    {
+                        state.enabled = true;
+                        state.weight = 1f;
+                        state.time = state.length * 0.72f;
+                        anim.Sample();
+                    }
+                }
+                anim.Stop();
+            }
+
+            _deathPanelShowStartUnscaledTime = Time.unscaledTime;
+            _deathPanelHoldUntilUnscaledTime = Time.unscaledTime + 4.2f;
+            _deathPanelCleanupUntilUnscaledTime = Time.unscaledTime + 15.0f;
+            _deathPanelVictimPtr = victimPtr;
+
+            ApplyDeathPanelAlpha(dp, 1.0f);
+        }
+
+        public static void MaintainInstantDeathPanel()
+        {
+            if (_deathPanelCleanupUntilUnscaledTime <= 0f)
+                return;
+
+            float now = Time.unscaledTime;
+            if (now > _deathPanelCleanupUntilUnscaledTime)
+            {
+                _deathPanelCleanupUntilUnscaledTime = 0f;
+                DeathPanel dpDone = DeathPanel.instance;
+                if (dpDone != null)
+                    ApplyDeathPanelAlpha(dpDone, 0f);
+                return;
+            }
+
+            DeathPanel dp = DeathPanel.instance;
+            if (dp == null)
+                return;
+
+            Animation anim = dp.GetComponent<Animation>();
+            if (anim != null && anim.isPlaying)
+                anim.Stop();
+
+            if (now < _deathPanelHoldUntilUnscaledTime)
+            {
+                float elapsed = now - _deathPanelShowStartUnscaledTime;
+
+                // Allow early dismissal if player presses the skip key after a brief 0.45s grace period
+                if (elapsed > 0.45f && DeathPanel.IsSkipping())
+                {
+                    _deathPanelHoldUntilUnscaledTime = now;
+                }
+                else if (elapsed > 2.6f)
+                {
+                    // Or once the player has taken active control of a new living soldier
+                    Soldier cur = Soldier.CurrentControlledSoldierOrNull();
+                    bool activelyControllingNewSoldier =
+                        cur != null &&
+                        cur.IsAlive &&
+                        cur.Pointer != _deathPanelVictimPtr &&
+                        !PlayerGUI.IsSelectingSquad() &&
+                        !RespawnPanel.InRespawningView;
+
+                    if (activelyControllingNewSoldier)
+                    {
+                        _deathPanelHoldUntilUnscaledTime = now;
+                    }
+                }
+            }
+
+            if (now < _deathPanelHoldUntilUnscaledTime)
+            {
+                float remaining = _deathPanelHoldUntilUnscaledTime - now;
+                float alpha = remaining < 0.30f ? Mathf.Clamp01(remaining / 0.30f) : 1.0f;
+                ApplyDeathPanelAlpha(dp, alpha);
+            }
+            else
+            {
+                ApplyDeathPanelAlpha(dp, 0.0f);
+            }
+        }
+
+        private static void ApplyDeathPanelAlpha(DeathPanel dp, float alpha)
+        {
+            if (dp == null)
+                return;
+
+            CanvasGroup cg = dp.GetComponent<CanvasGroup>();
+            if (cg != null)
+                cg.alpha = alpha;
+
+            SetTextAlpha(dp.text_reason, alpha);
+            SetTextAlpha(dp.text_name, alpha);
+            SetTextAlpha(dp.text_year, alpha);
+        }
+
+        private static void SetTextAlpha(Text txt, float alpha)
+        {
+            if (txt == null)
+                return;
+
+            Color c = txt.color;
+            if (Mathf.Abs(c.a - alpha) > 0.002f)
+            {
+                c.a = alpha;
+                txt.color = c;
+            }
+        }
+
+        [HarmonyPatch(typeof(PlayerGUI), nameof(PlayerGUI.LateUpdate))]
+        public static class PlayerGUI_LateUpdate_Patch
+        {
+            public static void Postfix()
+            {
+                try
+                {
+                    if (!VisionConfig.EnableMod.Value || !VisionConfig.EnableDeathScreenAttribution.Value)
+                        return;
+
+                    MaintainInstantDeathPanel();
                 }
                 catch { }
             }
