@@ -7,6 +7,7 @@ namespace EasyRed2HumanAI
         public static ConfigEntry<bool> EnableMod;
         public static ConfigEntry<bool> DebugLogging;
         public static ConfigEntry<bool> EnableDeathScreenAttribution;
+        public static ConfigEntry<bool> EnableQuickTapSpot;
 
         // 1. Infantry Sight & Stance
         public static ConfigEntry<float> StandingSightRange;
@@ -91,6 +92,12 @@ namespace EasyRed2HumanAI
                 "EnableDeathScreenAttribution",
                 true,
                 "Display who killed you, whether it was Friendly Fire, what weapon/vehicle/explosive was used, hit location, and distance on the death screen.");
+
+            EnableQuickTapSpot = config.Bind(
+                "0. General",
+                "EnableQuickTapSpot",
+                true,
+                "QoL: Short-pressing your configured Squad Orders keybind (GameInput.OrdersMenu, default Tab) spots in your look direction (PlayerController.TrySpotInLookDirection), even as a Squad Leader or Radioman, while holding the key still opens the radial Squad Orders wheel.");
 
             // 1. Infantry Sight & Stance
             StandingSightRange = config.Bind(

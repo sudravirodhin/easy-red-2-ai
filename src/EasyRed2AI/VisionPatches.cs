@@ -516,6 +516,30 @@ namespace EasyRed2HumanAI
                     // Render 3D Veteran Chevron Icons & periodic dictionary cleanup
                     VeteranAndTacticsPatches.RenderVeteran3DMarkersAndCleanup();
 
+                    // QoL: Short-press of the radial Squad Orders keybind (GameInput.OrdersMenu, default Tab) spots in look direction
+                    if (VisionConfig.EnableMod.Value && VisionConfig.EnableQuickTapSpot.Value && !_showConfigMenu)
+                    {
+                        PlayerController pc = PlayerController.currentController;
+                        Soldier player = pc != null ? pc.ControlledCharacter : null;
+                        if (pc != null &&
+                            !pc.lockRotationAndFiring &&
+                            player != null &&
+                            player.IsAlive &&
+                            !player.HasSurrended() &&
+                            player.joinedSquad != null)
+                        {
+                            VirtualGamepad gpad = GamepadsAPI.GetGamepad(0);
+                            if (gpad != null && gpad.GetButtonUp(GameInput.OrdersMenu, out float heldDuration, 0))
+                            {
+                                float holdThreshold = PlayerController.holdButtonDuration > 0.05f ? PlayerController.holdButtonDuration : 0.25f;
+                                if (heldDuration > 0f && heldDuration < holdThreshold)
+                                {
+                                    PlayerController.TrySpotInLookDirection();
+                                }
+                            }
+                        }
+                    }
+
                     // Hotkeys via BepInEx UnityInput
                     var input = UnityInput.Current;
                     if (input != null)
@@ -663,7 +687,7 @@ namespace EasyRed2HumanAI
             private static void DrawConfigMenu()
             {
                 float panelW = 760f;
-                float panelH = 566f;
+                float panelH = 592f;
                 float panelX = (Screen.width - panelW) * 0.5f;
                 float panelY = (Screen.height - panelH) * 0.5f;
 
@@ -729,6 +753,7 @@ namespace EasyRed2HumanAI
                 DrawToggleButton(colRightX, ref yR, colW, rowH, "Anti-Stacking Personal Spacing", VisionConfig.EnableAntiStacking);
                 DrawToggleButton(colRightX, ref yR, colW, rowH, "Wall & Fence Vaulting", VisionConfig.EnableWallVaulting);
                 DrawToggleButton(colRightX, ref yR, colW, rowH, "Surrendered Comrade Liberation", VisionConfig.EnableComradeLiberation);
+                DrawToggleButton(colRightX, ref yR, colW, rowH, "Short-Press Orders Key to Spot", VisionConfig.EnableQuickTapSpot);
                 DrawToggleButton(colRightX, ref yR, colW, rowH, "Death Screen Kill Attribution", VisionConfig.EnableDeathScreenAttribution);
 
                 // Bottom Action Buttons
