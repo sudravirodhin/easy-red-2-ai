@@ -1,4 +1,4 @@
-# Easy Red 2 — Humanized AI & Veteran Tactics (`v0.3.4`)
+# Easy Red 2 — Humanized AI & Veteran Tactics (`v0.3.5`)
 
 > [!IMPORTANT]
 > **Disclosure — Vibecoded Project:**
@@ -23,15 +23,15 @@ A comprehensive **BepInEx 6 (IL2CPP)** AI and fairness overhaul for **Easy Red 2
 
 Download your preferred package from the **[Releases](https://github.com/sudravirodhin/easy-red-2-ai/releases)** page:
 
-### Option A: With BepInEx Included (`EasyRed2HumanAI-v0.3.4-with-BepInEx.zip`) — *Recommended for Fresh Installs*
+### Option A: With BepInEx Included (`EasyRed2HumanAI-v0.3.5-with-BepInEx.zip`) — *Recommended for Fresh Installs*
 Includes **[BepInEx 6.0.0-be.791 (Unity.IL2CPP-win-x64)](https://builds.bepinex.dev/projects/bepinex_be)**, the `.NET 6` runtime, Unity `2022.3.62` base libraries, pre-generated IL2CPP `interop` assemblies for Easy Red 2 Build `921`, and `EasyRed2HumanAI.dll` (with no other third-party mods).
 1. Open your **Easy Red 2** installation folder (e.g. `Steam\steamapps\common\Easy Red 2`, where `Easy Red 2.exe` is located).
-2. Extract all contents of `EasyRed2HumanAI-v0.3.4-with-BepInEx.zip` directly into the `Easy Red 2` folder.
+2. Extract all contents of `EasyRed2HumanAI-v0.3.5-with-BepInEx.zip` directly into the `Easy Red 2` folder.
 3. Launch the game!
 
-### Option B: Without BepInEx / Plugin Only (`EasyRed2HumanAI-v0.3.4-PluginOnly.zip` or `EasyRed2HumanAI.dll`)
+### Option B: Without BepInEx / Plugin Only (`EasyRed2HumanAI-v0.3.5-PluginOnly.zip` or `EasyRed2HumanAI.dll`)
 For users who already have **[BepInEx 6 Bleeding Edge (`BepInEx-Unity.IL2CPP-win-x64`)](https://builds.bepinex.dev/projects/bepinex_be)** installed:
-1. Download `EasyRed2HumanAI-v0.3.4-PluginOnly.zip` (or `EasyRed2HumanAI.dll` directly).
+1. Download `EasyRed2HumanAI-v0.3.5-PluginOnly.zip` (or `EasyRed2HumanAI.dll` directly).
 2. Place `EasyRed2HumanAI.dll` into:
    ```text
    Easy Red 2\BepInEx\plugins\EasyRed2HumanAI.dll
@@ -43,7 +43,7 @@ For users who already have **[BepInEx 6 Bleeding Edge (`BepInEx-Unity.IL2CPP-win
 
 ### 1. Humanized Vision, Stance Stealth & FOV Cones ([`VisionPatches.cs`](src/EasyRed2AI/VisionPatches.cs))
 
-| Feature | Vanilla Behavior | Humanized AI (`v0.3.4`) |
+| Feature | Vanilla Behavior | Humanized AI (`v0.3.5`) |
 | :--- | :--- | :--- |
 | **Stance Sight Ranges** | `220m` Standing, `50m` Crouching, `37m` Prone when unspotted — but jumps **all stances to a flat `300m`** the instant `IsEnemyAwareOfThisSquad` is true. | **150m Standing**, **80m Crouching**, **40m Prone**. Squad combat awareness applies only a **1.20x multiplier** (`48m` prone, `96m` crouched) so taking cover in grass/craters actually conceals you during firefights. |
 | **Individual Firing Reveal** | One soldier firing alerts the enemy to the entire squad's crouched/prone members out to `300m`. | Only the **specific soldier who fired** gets a temporary **+85m visibility penalty for 4.0 seconds** (muzzle flash, smoke, and gunshot sound). Silent squadmates stay hidden. |
@@ -109,8 +109,9 @@ Instead of every bot using identical suppression thresholds, peeking rhythms, an
   * **Targets Vulnerable Weak Spots (Tires, Tracks & Light Armor)**: Aims small arms at **un-flattened rubber tires** (`VehicleDamageableWheelPart`) within `60m` and aims AT rifles at penetrable armor plates or **unbroken tank tracks** (`VehicleDamageableTrackPart`).
   * **Throws Normal & AT Grenades at Close Range**: Infantry within throwing range (`7.5m` to `GetGrenadeThrowRange`) throw **both normal grenades (`VirtualGrenade`) and anti-tank grenades (`VirtualATGrenade`)** at enemy tanks and vehicles.
   * **Holds Useless Small-Arms Fire & Re-Targets Foot Soldiers**: If a soldier's weapon cannot harm the tank and no exposed crewman is visible, they hold fire, stay crouched in cover, and re-target enemy foot soldiers.
-* **Wall-Shooting Prevention & Auto-Peek (`EnableWallShootingPrevention` & `EnableAutoPeekOverCover`)**:
-  * Raycasts `2.2m` ahead of the weapon muzzle before pulling the trigger and steps up one stance (`Prone → Crouch` or `Crouch → Stand`) to peek over low obstacles when clear.
+* **Wall-Shooting Prevention, Barrel-Clearance Auto-Peek & Corner Sidestep (`EnableWallShootingPrevention` & `EnableAutoPeekOverCover`)**:
+  * Uses multi-hop self-collider-aware raycasting (`RaycastEnvironment`) from the soldier's spine and weapon receiver (`heldGun.transform.position`) through the muzzle out to `2.2m+`, catching thin walls, windowsills, and stone parapets even when the barrel tip pokes into the wall or when post-dispersion `GetFireDir()` would clip the wall lip.
+  * Evaluates stance clearance at actual dual barrel heights (`0.22m–0.32m` Prone, `0.64m–0.78m` Crouch, `1.18m–1.32m` Standing) rather than eye level, automatically rising (`Prone → Crouch → Stand`) to clear waist-high walls and stepping laterally (`1.25m–1.80m`) when a vertical doorframe, pillar, or building corner blocks even standing fire.
 * **Machine Gunner Bipod Wall & Ground Mounting (`EnableGunnerBipodWallMounting`)**:
   * Gunners actively seek nearby walls, sandbags, and windowsills and deploy their bipods (`BipodCheck(true)`).
 * **Friendly Fire Avoidance, Anti-Stacking, Wall Vaulting, Comrade Liberation & Quick-Tap Spot**:

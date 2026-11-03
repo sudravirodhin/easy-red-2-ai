@@ -85,6 +85,7 @@ namespace EasyRed2HumanAI
         private static readonly Dictionary<IntPtr, float> _nextBipodDeployCheckTime = new Dictionary<IntPtr, float>(128);
         private static readonly Dictionary<IntPtr, float> _bipodStandUntil = new Dictionary<IntPtr, float>(128);
         private static readonly Dictionary<IntPtr, float> _nextWallSideCheckTime = new Dictionary<IntPtr, float>(256);
+        private static readonly Dictionary<IntPtr, float> _nextWallSidestepTime = new Dictionary<IntPtr, float>(256);
         private static readonly Dictionary<IntPtr, float> _nextTankDisciplineCountTime = new Dictionary<IntPtr, float>(256);
         private static readonly Dictionary<IntPtr, float> _poseLockUntil = new Dictionary<IntPtr, float>(256);
         private static readonly Dictionary<IntPtr, float> _repairTaskStartTime = new Dictionary<IntPtr, float>(64);
@@ -830,6 +831,7 @@ namespace EasyRed2HumanAI
             PruneDict(_nextBipodDeployCheckTime, alivePtrs);
             PruneDict(_bipodStandUntil, alivePtrs);
             PruneDict(_nextWallSideCheckTime, alivePtrs);
+            PruneDict(_nextWallSidestepTime, alivePtrs);
             PruneDict(_nextTankDisciplineCountTime, alivePtrs);
             PruneDict(_poseLockUntil, alivePtrs);
             PruneDict(_vehicleAimCache, alivePtrs);
@@ -884,53 +886,153 @@ namespace EasyRed2HumanAI
         // =====================================================================
         // Helper: Muzzle Obstruction, Friendly Fire Cone & Anti-Stacking
         // =====================================================================
+        private static bool RaycastEnvironment(Vector3 origin, Vector3 dir, float maxDist, Transform ignoreRoot, out RaycastHit envHit)
+        {
+            envHit = default;
+            float remaining = maxDist;
+            Vector3 curOrigin = origin;
+
+            // Step through up to 6 self-colliders (shooter's own torso/arm/hand hitboxes), triggers, or Creature colliders
+            // without allocating an Il2CppStructArray via Physics.RaycastAll.
+            for (int hop = 0; hop < 6 && remaining > 0.02f; hop++)
+            {
+                if (!Physics.Raycast(curOrigin, dir, out RaycastHit hit, remaining))
+                    return false;
+
+                Collider col = hit.collider;
+                if (col != null && !col.isTrigger)
+                {
+                    Transform hitTransform = col.transform;
+                    if (hitTransform != null && hitTransform.root != ignoreRoot)
+                    {
+                        if (col.GetComponentInParent<Creature>() == null)
+                        {
+                            envHit = hit;
+                            return true;
+                        }
+                    }
+                }
+
+                float advance = hit.distance + 0.04f;
+                curOrigin += dir * advance;
+                remaining -= advance;
+            }
+
+            return false;
+        }
+
+        private static float GetBarrelHeightForPose(SoldierPose pose)
+        {
+            switch (pose)
+            {
+                case SoldierPose.Prone:
+                    return 0.25f;
+                case SoldierPose.Crouch:
+                    return 0.68f;
+                default:
+                    return 1.24f;
+            }
+        }
+
         private static bool IsMuzzleBlockedByWall(Soldier shooter, Vector3 targetPos, float distToTarget)
         {
-            if (distToTarget <= 3.2f)
+            if (shooter == null || distToTarget <= 1.2f)
                 return false;
 
-            // Never judge muzzle obstruction while the gun bone is dipped/animated during a stance transition or reload
-            if (shooter.isInBodyAnimation || shooter.isInHandsAnimation || shooter.IsReloading)
-                return false;
-
-            // Only evaluate wall obstruction once the soldier has rotated to face toward the target
-            if (shooter.AngleToDirection(targetPos - shooter.transform.position) > 28f)
+            // Only evaluate wall obstruction once the soldier has rotated within firing/aiming sector
+            // (Vanilla RotateAndFireToward pulls the trigger whenever AngleToDirection <= 30 deg)
+            if (shooter.AngleToDirection(targetPos - shooter.transform.position) > 35f)
                 return false;
 
             // Check native TPS/FPS wall proximity flag first
             if (shooter.IsTowardWall())
                 return true;
 
-            Vector3 gunPos = shooter.GunPosition();
-            Vector3 toTarget = targetPos - gunPos;
-            Vector3 aimDir = toTarget.sqrMagnitude > 0.01f ? toTarget.normalized : shooter.GetFireDir();
+            Transform myRoot = shooter.transform.root;
+            Vector3 soldierPos = shooter.transform.position;
+            float barrelH = GetBarrelHeightForPose(shooter.m_pose);
 
-            float maxCheck = Mathf.Min(VisionConfig.MuzzleObstructionCheckDist.Value, distToTarget - 1.2f);
-            if (maxCheck <= 0.35f)
-                return false;
-
-            // Start 0.28m forward of GunPosition along the steady aim line toward targetPos (avoids false positives from idle barrel sway/dip)
-            Vector3 origin = gunPos + aimDir * 0.28f;
-            if (Physics.Raycast(origin, aimDir, out RaycastHit hit, maxCheck))
+            // 1. Steady Stance Barrel Corridor from Spine:
+            //    - Starts 0.10m behind the soldier's spine at actual stance barrel height (0.25m Prone / 0.68m Crouch / 1.24m Stand).
+            //    - Catches walls/windowsills/sandbags even when the rifle barrel tip (GunPosition) is poking into or through the wall!
+            //    - Immune to procedural hand/body animation barrel dip, so it safely blocks wall shots during bolt-cycling & transitions.
+            Vector3 spineAtBarrel = soldierPos + Vector3.up * barrelH;
+            Vector3 toTargetFromSpine = targetPos - spineAtBarrel;
+            if (toTargetFromSpine.sqrMagnitude > 0.04f)
             {
-                Collider col = hit.collider;
-                if (col != null && !col.isTrigger)
+                Vector3 spineAimDir = toTargetFromSpine.normalized;
+                float spineMaxCheck = Mathf.Min(VisionConfig.MuzzleObstructionCheckDist.Value + 0.65f, distToTarget - 0.35f);
+                if (spineMaxCheck > 0.25f)
                 {
-                    Transform hitRoot = col.transform.root;
-                    Transform myRoot = shooter.transform.root;
-                    if (hitRoot != myRoot)
-                    {
-                        // Ignore if we hit a Creature (another soldier) since FriendlyFire handles friendlies
-                        // and hitting an enemy at point blank is fine
-                        Creature hitCreature = col.GetComponentInParent<Creature>();
-                        if (hitCreature == null)
-                        {
-                            return true;
-                        }
-                    }
+                    Vector3 spineStart = spineAtBarrel - spineAimDir * 0.10f;
+                    if (RaycastEnvironment(spineStart, spineAimDir, spineMaxCheck, myRoot, out _))
+                        return true;
+
+                    // Lower barrel lip-clearance check (-0.06m) so barrels grazing a stone parapet or windowsill lip are caught
+                    if (RaycastEnvironment(spineStart - Vector3.up * 0.06f, spineAimDir, Mathf.Min(spineMaxCheck, 2.0f), myRoot, out _))
+                        return true;
                 }
             }
+
+            // 2. Live Weapon Receiver & Muzzle Ray (when not mid-body-transition or reloading):
+            //    In SoldierAI.RotateAndFireToward (0x18055E50C), vanilla computes ai.shootDirection from heldGun.transform.position
+            //    (the weapon receiver in the soldier's hands, offset to the right shoulder and behind GunPosition).
+            if (!shooter.isInBodyAnimation && !shooter.IsReloading)
+            {
+                Vector3 gunPos = shooter.GunPosition();
+                GenericGun heldGun = shooter.GetHeldGun();
+                Vector3 receiverPos = (heldGun != null && heldGun.transform != null) ? heldGun.transform.position : gunPos;
+
+                // Clamp against downward bolt-cycle / recoil hand dips
+                float minLiveY = soldierPos.y + barrelH - 0.12f;
+                if (receiverPos.y < minLiveY) receiverPos.y = minLiveY;
+                if (gunPos.y < minLiveY) gunPos.y = minLiveY;
+
+                Vector3 toTarget = targetPos - receiverPos;
+                Vector3 aimDir = toTarget.sqrMagnitude > 0.01f ? toTarget.normalized : shooter.GetFireDir();
+
+                float maxCheck = Mathf.Min(VisionConfig.MuzzleObstructionCheckDist.Value + 0.35f, distToTarget - 0.35f);
+                if (maxCheck > 0.25f)
+                {
+                    if (RaycastEnvironment(receiverPos - aimDir * 0.10f, aimDir, maxCheck, myRoot, out _))
+                        return true;
+
+                    if (RaycastEnvironment(gunPos - aimDir * 0.15f, aimDir, maxCheck, myRoot, out _))
+                        return true;
+
+                    if (RaycastEnvironment(gunPos - Vector3.up * 0.06f - aimDir * 0.10f, aimDir, Mathf.Min(maxCheck, 1.85f), myRoot, out _))
+                        return true;
+                }
+            }
+
             return false;
+        }
+
+        private static bool IsActualFireDirectionBlockedByWall(Soldier shooter, float distToTarget)
+        {
+            if (shooter == null || distToTarget <= 1.2f)
+                return false;
+
+            Vector3 fireDir = shooter.GetFireDir();
+            if (fireDir.sqrMagnitude < 0.01f)
+                return false;
+            fireDir.Normalize();
+
+            Transform myRoot = shooter.transform.root;
+            Vector3 soldierPos = shooter.transform.position;
+            float barrelH = GetBarrelHeightForPose(shooter.m_pose);
+            float minLiveY = soldierPos.y + barrelH - 0.12f;
+
+            GenericGun heldGun = shooter.GetHeldGun();
+            Vector3 receiverPos = (heldGun != null && heldGun.transform != null) ? heldGun.transform.position : shooter.GunPosition();
+            if (receiverPos.y < minLiveY)
+                receiverPos.y = minLiveY;
+
+            float maxCheck = Mathf.Min(VisionConfig.MuzzleObstructionCheckDist.Value + 0.35f, distToTarget - 0.35f);
+            if (maxCheck <= 0.25f)
+                return false;
+
+            return RaycastEnvironment(receiverPos - fireDir * 0.10f, fireDir, maxCheck, myRoot, out _);
         }
 
         private static bool IsFriendlyInLineOfFire(Soldier shooter, Vector3 targetPos, float distToTarget, float vet01, out Vector3 sidestepDir)
@@ -1209,53 +1311,136 @@ namespace EasyRed2HumanAI
             return false;
         }
 
-        private static bool HasClearLineOfFireAtHeight(Soldier soldier, Vector3 targetPos, float dist, float heightOffset, float maxRayDist)
+        private static bool HasClearLineOfFireAtHeight(Soldier soldier, Vector3 targetPos, float dist, float lowerBarrelHeight, float upperBarrelHeight, float maxRayDist)
         {
-            if (soldier == null || dist <= 2.5f)
+            if (soldier == null || dist <= 1.5f)
                 return false;
 
-            Vector3 origin = soldier.transform.position + Vector3.up * heightOffset;
-            Vector3 toTarget = (targetPos + Vector3.up * 0.25f) - origin;
-            float len = toTarget.magnitude;
-            if (len <= 1.2f)
+            return HasClearLineOfFireFromPosition(soldier.transform.position, soldier.transform.root, targetPos, dist, lowerBarrelHeight, upperBarrelHeight, maxRayDist);
+        }
+
+        private static bool HasClearLineOfFireFromPosition(
+            Vector3 basePos,
+            Transform ignoreRoot,
+            Vector3 targetPos,
+            float dist,
+            float lowerBarrelHeight,
+            float upperBarrelHeight,
+            float maxRayDist)
+        {
+            if (dist <= 1.5f)
+                return false;
+
+            // Check both the lower barrel-clearance line and the upper barrel/sight line toward targetPos
+            // (starting 0.10m behind the spine axis and stepping past self-colliders via RaycastEnvironment)
+            // so a wall/parapet between 0.60m and 1.15m tall never passes an overly high eye-level ray!
+            Vector3 lowerOrigin = basePos + Vector3.up * lowerBarrelHeight;
+            Vector3 toTargetLower = targetPos - lowerOrigin;
+            float lenLower = toTargetLower.magnitude;
+            if (lenLower <= 1.0f)
                 return true;
 
-            Vector3 dir = toTarget / len;
-            float checkDist = Mathf.Min(len - 0.8f, maxRayDist);
-            if (checkDist <= 0.5f)
-                return true;
-
-            if (Physics.Raycast(origin, dir, out RaycastHit hit, checkDist))
+            Vector3 dirLower = toTargetLower / lenLower;
+            float checkDistLower = Mathf.Min(lenLower - 0.50f, maxRayDist);
+            if (checkDistLower > 0.35f)
             {
-                Collider col = hit.collider;
-                if (col != null && !col.isTrigger && col.transform != null)
+                if (RaycastEnvironment(lowerOrigin - dirLower * 0.10f, dirLower, checkDistLower + 0.10f, ignoreRoot, out _))
+                    return false;
+            }
+
+            Vector3 upperOrigin = basePos + Vector3.up * upperBarrelHeight;
+            Vector3 toTargetUpper = targetPos - upperOrigin;
+            float lenUpper = toTargetUpper.magnitude;
+            if (lenUpper > 1.0f)
+            {
+                Vector3 dirUpper = toTargetUpper / lenUpper;
+                float checkDistUpper = Mathf.Min(lenUpper - 0.50f, maxRayDist);
+                if (checkDistUpper > 0.35f)
                 {
-                    if (col.transform.root != soldier.transform.root)
-                    {
-                        Creature hitCreature = col.GetComponentInParent<Creature>();
-                        if (hitCreature == null)
-                        {
-                            return false;
-                        }
-                    }
+                    if (RaycastEnvironment(upperOrigin - dirUpper * 0.10f, dirUpper, checkDistUpper + 0.10f, ignoreRoot, out _))
+                        return false;
                 }
             }
+
             return true;
         }
 
         private static bool HasClearLineOfFireFromProne(Soldier soldier, Vector3 targetPos, float dist)
         {
-            return HasClearLineOfFireAtHeight(soldier, targetPos, dist, 0.38f, 15.0f);
+            return HasClearLineOfFireAtHeight(soldier, targetPos, dist, 0.22f, 0.32f, 15.0f);
         }
 
         private static bool HasClearLineOfFireFromCrouch(Soldier soldier, Vector3 targetPos, float dist)
         {
-            return HasClearLineOfFireAtHeight(soldier, targetPos, dist, 0.92f, 18.0f);
+            return HasClearLineOfFireAtHeight(soldier, targetPos, dist, 0.64f, 0.78f, 18.0f);
         }
 
         private static bool HasClearLineOfFireFromStanding(Soldier soldier, Vector3 targetPos, float dist)
         {
-            return HasClearLineOfFireAtHeight(soldier, targetPos, dist, 1.48f, 18.0f);
+            return HasClearLineOfFireAtHeight(soldier, targetPos, dist, 1.18f, 1.32f, 18.0f);
+        }
+
+        private static bool TrySidestepWallObstruction(SoldierAI ai, Soldier soldier, Vector3 targetPos, float dist)
+        {
+            if (ai == null || soldier == null || soldier.Pointer == IntPtr.Zero || soldier.transform == null)
+                return false;
+
+            IntPtr ptr = soldier.Pointer;
+            if (_nextWallSidestepTime.TryGetValue(ptr, out float nextSide) && Time.time < nextSide)
+                return false;
+
+            _nextWallSidestepTime[ptr] = Time.time + 3.5f;
+
+            Vector3 curPos = soldier.transform.position;
+            Vector3 toTargetXZ = targetPos - curPos;
+            toTargetXZ.y = 0f;
+            if (toTargetXZ.sqrMagnitude < 0.25f)
+                return false;
+            toTargetXZ.Normalize();
+
+            Vector3 right = new Vector3(toTargetXZ.z, 0f, -toTargetXZ.x);
+            Transform myRoot = soldier.transform.root;
+            bool preferRight = (GetDeterministicHash(ptr, 61) & 1) == 0;
+
+            float[] stepDistances = { 1.25f, 1.80f };
+            for (int dIdx = 0; dIdx < stepDistances.Length; dIdx++)
+            {
+                float stepDist = stepDistances[dIdx];
+                for (int side = 0; side < 2; side++)
+                {
+                    Vector3 sideDir = ((side == 0) == preferRight) ? right : -right;
+                    if (IsDirectionBlockedByEnvironment(curPos + Vector3.up * 0.75f, sideDir, stepDist + 0.30f, myRoot))
+                        continue;
+
+                    Vector3 candidateXZ = curPos + sideDir * stepDist;
+                    Vector3 groundProbe = new Vector3(candidateXZ.x, curPos.y + 1.25f, candidateXZ.z);
+                    if (!Physics.Raycast(groundProbe, Vector3.down, out RaycastHit groundHit, 2.6f))
+                        continue;
+
+                    if (groundHit.collider == null || groundHit.collider.isTrigger || groundHit.normal.y < 0.65f)
+                        continue;
+
+                    Vector3 stepPos = groundHit.point;
+                    if (Mathf.Abs(stepPos.y - curPos.y) > 1.20f)
+                        continue;
+
+                    // Check if stepping to stepPos clears the vertical wall frame / corner / pillar in Standing or Crouch
+                    if (HasClearLineOfFireFromPosition(stepPos, myRoot, targetPos, dist, 1.18f, 1.32f, 18.0f) ||
+                        HasClearLineOfFireFromPosition(stepPos, myRoot, targetPos, dist, 0.64f, 0.78f, 18.0f))
+                    {
+                        if ((ai.MoveDestination - curPos).sqrMagnitude <= 2.5f * 2.5f)
+                        {
+                            ai.MoveDestination = stepPos;
+                        }
+                        ai.MoveDirectlyToward(stepPos, 0.45f);
+                        _nextWallSidestepTime[ptr] = Time.time + 4.5f;
+                        AntiStackNudges++;
+                        return true;
+                    }
+                }
+            }
+
+            return false;
         }
 
         // =====================================================================
@@ -1385,16 +1570,7 @@ namespace EasyRed2HumanAI
 
         private static bool IsDirectionBlockedByEnvironment(Vector3 origin, Vector3 dir, float dist, Transform ignoreRoot)
         {
-            if (Physics.Raycast(origin, dir, out RaycastHit hit, dist))
-            {
-                Collider col = hit.collider;
-                if (col != null && !col.isTrigger && col.transform != null && col.transform.root != ignoreRoot)
-                {
-                    if (col.GetComponentInParent<Creature>() == null)
-                        return true;
-                }
-            }
-            return false;
+            return RaycastEnvironment(origin, dir, dist, ignoreRoot, out _);
         }
 
         // =====================================================================
@@ -2418,16 +2594,33 @@ namespace EasyRed2HumanAI
                     // 3. Auto-Peek Recovery: Duck back down after peeking if reloading, suppressed, or target lost
                     float vet01 = GetVeterancy01(soldier);
                     SoldierPersonality personality = GetPersonality(soldier);
-                    GetEffectivePeekParameters(soldier, vet01, out _, out float duckBackSupp, out float peekCooldown);
+                    GetEffectivePeekParameters(soldier, vet01, out float maxPeekSupp, out float duckBackSupp, out float peekCooldown);
 
                     bool isPeeking = false;
                     if (_peekRestoreTime.TryGetValue(ptr, out float restoreAt))
                     {
-                        bool shouldDuck = Time.time > restoreAt ||
-                                          soldier.IsReloading ||
+                        bool urgentDuck = soldier.IsReloading ||
                                           soldier.GetSuppressionValue() > duckBackSupp ||
                                           !__instance.HasEnemyAndCanFireAtHim;
-                        if (shouldDuck)
+
+                        bool timerExpiredAndCanCrouch = false;
+                        if (!urgentDuck && Time.time > restoreAt)
+                        {
+                            Vector3 peekTargetPos = __instance.visibleTarget != null
+                                ? __instance.visibleTarget.GetCenterOfUnit()
+                                : (soldier.transform.position + soldier.transform.forward * Mathf.Max(__instance.distFromTarget, 15f));
+                            if (HasClearLineOfFireFromCrouch(soldier, peekTargetPos, __instance.distFromTarget))
+                            {
+                                timerExpiredAndCanCrouch = true;
+                            }
+                            else
+                            {
+                                // Still actively engaging over a waist-high wall that blocks Crouch — keep peeking until reload/suppression/target-loss!
+                                _peekRestoreTime[ptr] = Time.time + 2.5f;
+                            }
+                        }
+
+                        if (urgentDuck || timerExpiredAndCanCrouch)
                         {
                             _peekRestoreTime.Remove(ptr);
                             _nextPeekAllowedTime[ptr] = Time.time + peekCooldown;
@@ -2715,14 +2908,17 @@ namespace EasyRed2HumanAI
                                 ? __instance.visibleTarget.GetCenterOfUnit()
                                 : (soldier.transform.position + soldier.transform.forward * Mathf.Max(dist, 15f));
 
+                            bool crouchClear = HasClearLineOfFireFromCrouch(soldier, targetPos, dist);
+                            bool standClear = !crouchClear && HasClearLineOfFireFromStanding(soldier, targetPos, dist);
+
                             if (soldier.m_pose == SoldierPose.Prone || __instance.actualPose == SoldierPose.Prone)
                             {
-                                SetBotPose(__instance, soldier, SoldierPose.Crouch);
+                                SetBotPose(__instance, soldier, standClear ? SoldierPose.Idle : SoldierPose.Crouch);
                             }
                             else if (VisionConfig.NeverShootStandingInOpen.Value &&
                                      !isPeeking &&
                                      !isHighBipodStanding &&
-                                     (soldier.m_pose == SoldierPose.Crouch || HasClearLineOfFireFromCrouch(soldier, targetPos, dist)))
+                                     (crouchClear || (!standClear && soldier.m_pose == SoldierPose.Crouch)))
                             {
                                 SetBotPose(__instance, soldier, SoldierPose.Crouch);
                             }
@@ -2772,14 +2968,28 @@ namespace EasyRed2HumanAI
                                     ? __instance.visibleTarget.GetCenterOfUnit()
                                     : (soldier.transform.position + soldier.transform.forward * Mathf.Max(dist, 15f));
 
-                                bool canCrouchShoot = soldier.m_pose != SoldierPose.Idle ||
-                                                      suppression >= 32f ||
-                                                      HasClearLineOfFireFromCrouch(soldier, targetPos, dist);
+                                bool crouchClear = HasClearLineOfFireFromCrouch(soldier, targetPos, dist);
+                                bool standClear = !crouchClear && HasClearLineOfFireFromStanding(soldier, targetPos, dist);
+                                bool mustStandToClearWall = !crouchClear &&
+                                                            standClear &&
+                                                            suppression < maxPeekSupp &&
+                                                            !soldier.IsReloading;
 
-                                if (!canCrouchShoot)
+                                if (mustStandToClearWall)
                                 {
-                                    // Crouching from standing here would put a low wall/ridge in front of the muzzle; stay standing!
-                                    SetBotPose(__instance, soldier, SoldierPose.Idle);
+                                    // Crouching/Proning behind this waist-high wall/parapet puts the wall in front of the barrel,
+                                    // while Standing clears it — stand up (or stay standing) so the weapon barrel clears the wall!
+                                    if (__instance.actualPose != SoldierPose.Idle || soldier.m_pose != SoldierPose.Idle)
+                                    {
+                                        SetBotPose(__instance, soldier, SoldierPose.Idle);
+                                        _noProneUntil[ptr] = Time.time + 10.0f;
+                                        _peekRestoreTime[ptr] = Time.time + 4.5f;
+                                    }
+                                }
+                                else if (!crouchClear && soldier.m_pose == SoldierPose.Idle && suppression < 32f)
+                                {
+                                    // Keep standing if already standing and crouching is obstructed
+                                    __instance.actualPose = SoldierPose.Idle;
                                 }
                                 else
                                 {
@@ -3258,20 +3468,22 @@ namespace EasyRed2HumanAI
                         }
                     }
 
-                    // 2. Priority 3A: Stop Shooting Walls & Auto-Peek Over Cover (or High-Wall Bipod Mount)
+                    // 2. Priority 3A: Stop Shooting Walls & Auto-Peek Over Cover (or High-Wall Bipod Mount / Corner Sidestep)
                     if (VisionConfig.EnableWallShootingPrevention.Value && !soldier.IsOnVehicle())
                     {
-                        if (!_nextWallCheckTime.TryGetValue(ptr, out float nextWall) || Time.time >= nextWall)
+                        float angleToTarget = soldier.AngleToDirection(__0 - soldier.transform.position);
+                        if (angleToTarget <= 35f &&
+                            (!_nextWallCheckTime.TryGetValue(ptr, out float nextWall) || Time.time >= nextWall))
                         {
-                            _nextWallCheckTime[ptr] = Time.time + 0.20f;
+                            _nextWallCheckTime[ptr] = Time.time + 0.05f;
                             if (IsMuzzleBlockedByWall(soldier, __0, dist))
                             {
-                                _wallBlockedUntil[ptr] = Time.time + 0.26f;
+                                _wallBlockedUntil[ptr] = Time.time + 0.14f;
                                 WallsBlocked++;
 
-                                // Auto-Peek up one stance if crouched/prone behind a low wall/sandbag/windowsill:
+                                // Auto-Peek up one (or two) stances if crouched/prone behind a low wall/sandbag/windowsill:
                                 // - Respect _nextPeekAllowedTime cooldown and _poseLockUntil dwell time so bots never bounce
-                                // - Require soldier to already be facing the target (<= 22 deg) and not in any animation
+                                // - Require soldier to already be facing the target (<= 25 deg) and not mid-body-animation
                                 // - Verify current stance LOF is genuinely blocked AND the higher stance has clear LOF
                                 bool canPeekNow = (!_nextPeekAllowedTime.TryGetValue(ptr, out float nextPeek) || Time.time >= nextPeek) &&
                                                   (!_poseLockUntil.TryGetValue(ptr, out float poseLock) || Time.time >= poseLock);
@@ -3281,37 +3493,71 @@ namespace EasyRed2HumanAI
                                     VisionConfig.EnableAutoPeekOverCover.Value &&
                                     soldier.GetSuppressionValue() < maxPeekSupp &&
                                     !soldier.IsReloading &&
-                                    !soldier.isInHandsAnimation &&
                                     !soldier.isInBodyAnimation &&
                                     !soldier.UsingBipod() &&
-                                    soldier.AngleToDirection(__0 - soldier.transform.position) <= 22f)
+                                    angleToTarget <= 25f)
                                 {
+                                    bool crouchClear = HasClearLineOfFireFromCrouch(soldier, __0, dist);
+                                    bool standClear = !crouchClear && HasClearLineOfFireFromStanding(soldier, __0, dist);
+
                                     if (soldier.m_pose == SoldierPose.Prone &&
-                                        !HasClearLineOfFireFromProne(soldier, __0, dist) &&
-                                        HasClearLineOfFireFromCrouch(soldier, __0, dist))
+                                        !HasClearLineOfFireFromProne(soldier, __0, dist))
                                     {
-                                        SetBotPose(__instance, soldier, SoldierPose.Crouch, true);
-                                        _noProneUntil[ptr] = Time.time + 10.0f;
-                                        _combatStanceHoldUntil[ptr] = Time.time + 6.0f;
-                                        _peekRestoreTime[ptr] = Time.time + 5.0f;
-                                        _nextStanceDropAllowed[ptr] = Time.time + 5.0f;
-                                        AutoPeeksTriggered++;
-                                    }
-                                    else if (soldier.m_pose == SoldierPose.Crouch &&
-                                             !HasClearLineOfFireFromCrouch(soldier, __0, dist) &&
-                                             HasClearLineOfFireFromStanding(soldier, __0, dist))
-                                    {
-                                        SetBotPose(__instance, soldier, SoldierPose.Idle, true);
-                                        _noProneUntil[ptr] = Time.time + 10.0f;
-                                        _combatStanceHoldUntil[ptr] = Time.time + 6.0f;
-                                        _peekRestoreTime[ptr] = Time.time + 4.5f;
-                                        _nextStanceDropAllowed[ptr] = Time.time + 4.5f;
-                                        if (isGunner && bipod != null)
+                                        if (crouchClear)
                                         {
-                                            _bipodStandUntil[ptr] = Time.time + 4.5f;
-                                            soldier.StartCoroutine(soldier.RetryBipodDeployAfterStanding());
+                                            SetBotPose(__instance, soldier, SoldierPose.Crouch, true);
+                                            _noProneUntil[ptr] = Time.time + 10.0f;
+                                            _combatStanceHoldUntil[ptr] = Time.time + 6.0f;
+                                            _peekRestoreTime[ptr] = Time.time + 5.0f;
+                                            _nextStanceDropAllowed[ptr] = Time.time + 5.0f;
+                                            AutoPeeksTriggered++;
                                         }
-                                        AutoPeeksTriggered++;
+                                        else if (standClear)
+                                        {
+                                            // Both Prone and Crouch are blocked by a waist-high wall, but Standing clears it!
+                                            SetBotPose(__instance, soldier, SoldierPose.Idle, true);
+                                            _noProneUntil[ptr] = Time.time + 10.0f;
+                                            _combatStanceHoldUntil[ptr] = Time.time + 6.0f;
+                                            _peekRestoreTime[ptr] = Time.time + 4.5f;
+                                            _nextStanceDropAllowed[ptr] = Time.time + 4.5f;
+                                            if (isGunner && bipod != null)
+                                            {
+                                                _bipodStandUntil[ptr] = Time.time + 4.5f;
+                                                soldier.StartCoroutine(soldier.RetryBipodDeployAfterStanding());
+                                            }
+                                            AutoPeeksTriggered++;
+                                        }
+                                        else if (!soldier.IsCharging())
+                                        {
+                                            TrySidestepWallObstruction(__instance, soldier, __0, dist);
+                                        }
+                                    }
+                                    else if (soldier.m_pose == SoldierPose.Crouch && !crouchClear)
+                                    {
+                                        if (standClear)
+                                        {
+                                            SetBotPose(__instance, soldier, SoldierPose.Idle, true);
+                                            _noProneUntil[ptr] = Time.time + 10.0f;
+                                            _combatStanceHoldUntil[ptr] = Time.time + 6.0f;
+                                            _peekRestoreTime[ptr] = Time.time + 4.5f;
+                                            _nextStanceDropAllowed[ptr] = Time.time + 4.5f;
+                                            if (isGunner && bipod != null)
+                                            {
+                                                _bipodStandUntil[ptr] = Time.time + 4.5f;
+                                                soldier.StartCoroutine(soldier.RetryBipodDeployAfterStanding());
+                                            }
+                                            AutoPeeksTriggered++;
+                                        }
+                                        else if (!soldier.IsCharging())
+                                        {
+                                            // Both Crouch and Standing are blocked (vertical doorframe / pillar / tall wall edge) — step sideways!
+                                            TrySidestepWallObstruction(__instance, soldier, __0, dist);
+                                        }
+                                    }
+                                    else if (soldier.m_pose == SoldierPose.Idle && !soldier.IsCharging())
+                                    {
+                                        // Already Standing and muzzle is still blocked by a vertical wall edge/pillar — step sideways!
+                                        TrySidestepWallObstruction(__instance, soldier, __0, dist);
                                     }
                                 }
                             }
@@ -3390,6 +3636,25 @@ namespace EasyRed2HumanAI
                 {
                     if (!VisionConfig.EnableMod.Value || __instance == null)
                         return;
+
+                    // If RotateAndFireToward just ran with allowFireAtEnemy == true, it just computed the new
+                    // ai.shootDirection (including random AI inaccuracy dispersion) and set pressTriggerRequest.
+                    // Verify that the post-dispersion GetFireDir() vector doesn't clip a wall lip or window frame!
+                    if (__state &&
+                        __instance.allowFireAtEnemy &&
+                        VisionConfig.EnableWallShootingPrevention.Value)
+                    {
+                        Soldier soldier = __instance.character;
+                        if (soldier != null && soldier.IsAlive && !soldier.IsPlayer() && !soldier.IsOnVehicle())
+                        {
+                            if (IsActualFireDirectionBlockedByWall(soldier, __instance.distFromTarget))
+                            {
+                                soldier.SetGunTriggerPressed(false);
+                                _wallBlockedUntil[soldier.Pointer] = Time.time + 0.10f;
+                                WallsBlocked++;
+                            }
+                        }
+                    }
 
                     // Restore original allowFireAtEnemy state for next tick
                     __instance.allowFireAtEnemy = __state;
