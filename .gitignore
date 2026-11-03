@@ -17,6 +17,7 @@ tools/
 
 # Build Outputs & IDE Artifacts
 build/
+releases/
 bin/
 obj/
 *.user
