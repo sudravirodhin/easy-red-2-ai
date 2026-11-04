@@ -37,6 +37,13 @@ For users who already have **[BepInEx 6 Bleeding Edge (`BepInEx-Unity.IL2CPP-win
    Easy Red 2\BepInEx\plugins\EasyRed2HumanAI.dll
    ```
 
+### Switching to Vanilla or Uninstalling (`Uninstall-BepInEx-Mod.bat`)
+Included in `EasyRed2HumanAI-v0.3.9-with-BepInEx.zip` (and in the root of this repository) is **[`Uninstall-BepInEx-Mod.bat`](Uninstall-BepInEx-Mod.bat)**. Double-click it inside your `Easy Red 2` folder when the game is closed to:
+* **`[1] Play Vanilla Temporarily`**: Moves `BepInEx`, `dotnet`, and `winhttp.dll` into `_BepInEx_Disabled_Backup\` so the game runs 100% pure vanilla without losing your configs or other plugins.
+* **`[2] Restore Modded Game`**: Moves everything back from `_BepInEx_Disabled_Backup\` in one click.
+* **`[3] Uninstall Completely`**: Permanently deletes `BepInEx`, `dotnet`, `winhttp.dll`, `doorstop_config.ini`, `.doorstop_version`, and `changelog.txt`.
+*(Tip: If you only want to toggle this AI mod off mid-match without closing the game, press **`F8`** in-game!)*
+
 ---
 
 ## Key Improvements Over Vanilla
