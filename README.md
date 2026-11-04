@@ -1,4 +1,4 @@
-# Easy Red 2 — Humanized AI & Veteran Tactics (`v0.3.9`)
+# Easy Red 2 — Humanized AI & Veteran Tactics (`v0.4.0`)
 
 > [!IMPORTANT]
 > **Disclosure — Vibecoded Project:**
@@ -23,22 +23,22 @@ A comprehensive **BepInEx 6 (IL2CPP)** AI and fairness overhaul for **Easy Red 2
 
 Download your preferred package from the **[Releases](https://github.com/sudravirodhin/easy-red-2-ai/releases)** page:
 
-### Option A: With BepInEx Included (`EasyRed2HumanAI-v0.3.9-with-BepInEx.zip`) — *Recommended for Fresh Installs*
+### Option A: With BepInEx Included (`EasyRed2HumanAI-v0.4.0-with-BepInEx.zip`) — *Recommended for Fresh Installs*
 Includes **[BepInEx 6.0.0-be.791 (Unity.IL2CPP-win-x64)](https://builds.bepinex.dev/projects/bepinex_be)**, the `.NET 6` runtime, Unity `2022.3.62` base libraries, pre-generated IL2CPP `interop` assemblies for Easy Red 2 Build `921`, and `EasyRed2HumanAI.dll` (with no other third-party mods).
 1. Open your **Easy Red 2** installation folder (e.g. `Steam\steamapps\common\Easy Red 2`, where `Easy Red 2.exe` is located).
-2. Extract all contents of `EasyRed2HumanAI-v0.3.9-with-BepInEx.zip` directly into the `Easy Red 2` folder.
+2. Extract all contents of `EasyRed2HumanAI-v0.4.0-with-BepInEx.zip` directly into the `Easy Red 2` folder.
 3. Launch the game!
 
-### Option B: Without BepInEx / Plugin Only (`EasyRed2HumanAI-v0.3.9-PluginOnly.zip` or `EasyRed2HumanAI.dll`)
+### Option B: Without BepInEx / Plugin Only (`EasyRed2HumanAI-v0.4.0-PluginOnly.zip` or `EasyRed2HumanAI.dll`)
 For users who already have **[BepInEx 6 Bleeding Edge (`BepInEx-Unity.IL2CPP-win-x64`)](https://builds.bepinex.dev/projects/bepinex_be)** installed:
-1. Download `EasyRed2HumanAI-v0.3.9-PluginOnly.zip` (or `EasyRed2HumanAI.dll` directly).
+1. Download `EasyRed2HumanAI-v0.4.0-PluginOnly.zip` (or `EasyRed2HumanAI.dll` directly).
 2. Place `EasyRed2HumanAI.dll` into:
    ```text
    Easy Red 2\BepInEx\plugins\EasyRed2HumanAI.dll
    ```
 
 ### Switching to Vanilla or Uninstalling (`Uninstall-BepInEx-Mod.bat`)
-Included in `EasyRed2HumanAI-v0.3.9-with-BepInEx.zip` (and in the root of this repository) is **[`Uninstall-BepInEx-Mod.bat`](Uninstall-BepInEx-Mod.bat)**. Double-click it inside your `Easy Red 2` folder when the game is closed to:
+Included in `EasyRed2HumanAI-v0.4.0-with-BepInEx.zip` (and in the root of this repository) is **[`Uninstall-BepInEx-Mod.bat`](Uninstall-BepInEx-Mod.bat)**. Double-click it inside your `Easy Red 2` folder when the game is closed to:
 * **`[1] Play Vanilla Temporarily`**: Moves `BepInEx`, `dotnet`, and `winhttp.dll` into `_BepInEx_Disabled_Backup\` so the game runs 100% pure vanilla without losing your configs or other plugins.
 * **`[2] Restore Modded Game`**: Moves everything back from `_BepInEx_Disabled_Backup\` in one click.
 * **`[3] Uninstall Completely`**: Permanently deletes `BepInEx`, `dotnet`, `winhttp.dll`, `doorstop_config.ini`, `.doorstop_version`, and `changelog.txt`.
@@ -112,7 +112,7 @@ Instead of every bot using identical suppression thresholds, peeking rhythms, an
 ### 5. Muzzle Discipline, Point-Blank Bayonet/Melee CQB, Bipods, Anti-Armor & Mobility ([`VeteranAndTacticsPatches.cs`](src/EasyRed2AI/VeteranAndTacticsPatches.cs))
 
 * **Point-Blank Bayonet, Melee & Butt-Stroke CQB (`EnablePointBlankMelee`)**:
-  * **Automatic Bayonet Fixing**: Bots entering combat automatically unfold/mount integrated foldable bayonets (`heldGun.integratedBayonet.SetMounted(true)`, e.g. Mosin M44, Carcano M38, Type 44) and install detachable bayonets from their inventory (`soldier.inventory.FindAttachment((AttachmentType)3)`).
+  * **Automatic Bayonet Fixing (Co-op Safe)**: Bots entering combat automatically unfold/mount integrated foldable bayonets (`heldGun.integratedBayonet.SetMounted(true)`, e.g. Mosin M44, Carcano M38, Type 44) once per soldier without triggering heavy `SyncSoldierEquipment` Photon RPC bursts.
   * **CQB Lunge, Knife Draw & Bayonet/Melee Strikes**: Fixes vanilla's tiny `1.6m` `SequentialUpdate`-only melee check (`SoldierAI.SequentialUpdate` at `0x18055FA61`) and `MeleeWeaponCheck`'s refusal to switch to a knife while ammo remains (`0x18055C8BF`). In close quarters (`<= 3.8m` with bayonet, `<= 2.5m` with any weapon, or `<= 5.0m` when empty/reloading/bolt-cycling), bots stand up, close the distance, draw their trench knife/shovel when empty (`ToggleInventoryKnife`), suppress point-blank gunfire within strike range, utilize `MeleeBlockWindow()`, and execute bayonet stabs, melee slashes, and rifle butt-strokes (`Soldier.Melee()`).
 * **Smart Anti-Armor Target & Fire Discipline (`PreventSmallArmsFireAtTanks`)**:
   * **Targets Exposed Crew (`Seats.showUnitSet`)**: Redirects small-arms fire directly at visible exposed crew members or passengers (open-topped TDs, halftracks, jeeps, pintle MG gunners) instead of the steel hull.
@@ -136,6 +136,17 @@ Displays a clean, centered multi-line obituary directly on the native `DeathPane
 * **Calculated Soldier Age**: Parses the fallen soldier's birth and death years on the obituary screen and appends their exact age at death (`1925 - 1944 (Age 19)`).
 * **Line 1 — Who Killed You**: Displays the attacker's clean rank (`Pvt.`, `Cpl.`, `Sgt.`, `1st Sgt.`, `Lt.`) and full name (`Killed by Sgt. Hans Müller` or `Bled out from wounds by...`), highlighted with `[FRIENDLY FIRE]` in coral red or `[SELF-INFLICTED]` in amber when applicable.
 * **Line 2 — Weapon, Hit Location & Distance**: Compact bullet-separated sub-line (`MP40  •  Headshot (Helmet)  •  42m`) showing the weapon, grenade, vehicle, or artillery barrage, hit zone (`Headshot`, `Headshot (Helmet)`, `Torso`, `Arm`, `Leg`, `Shrapnel`, `Explosion`), and distance in meters.
+
+---
+
+### 7. Performance & Co-op Network Sync Architecture (`v0.4.0`)
+
+Designed specifically for **100+ active bots** and **Photon Co-op stability**:
+* **Single-Raycast Solid Environment Mask (`ResourcesManager.groundMask`)**: All muzzle-obstruction, auto-peek, window-aperture, and wall-side cover checks use `Physics.Raycast(..., GetSolidEnvironmentMask(), QueryTriggerInteraction.Ignore)`, completely eliminating multi-hop raycast loops and expensive IL2CPP `GetComponentInParent<Creature>()` hierarchy walks.
+* **O(1) Vision Lookups & Stationary Window Caching**: `Creature.CanSee` performs a pure O(1) dictionary read (`HasActiveThreatSectorContact`) and never triggers `Squad.AllSquads` iteration or 18-angle window raycast sweeps on cache misses; stationary window-aperture calculations are cached per soldier position (`_watchWindowCache`).
+* **Cover Node Exposure Caching (`_coverExposureCache`)**: `CombatCover.IsCoverAvailable` caches wall-exposure results per `(cover.Pointer, octant)`, eliminating hundreds of redundant raycasts when `CoverManager.GetCovers` evaluates cover nodes for a squad.
+* **Strict Photon Ownership Guards (`OwnSyncher` / `controlled_by_player`)**: Every AI mutation hook verifies local Photon ownership (`IsLocallyOwnedBot` / `IsLocallyOwnedVehicle`) so Co-op clients and hosts never fight over remote unit state or player-controlled soldiers.
+* **Global Bot Photon RPC Rate-Limiter**: Prevents multi-bot RPC bursts by globally pacing AI-triggered network actions (`Vault`, `Throw`, `ToggleInventoryKnife`, `Melee`, `UnSurrenderSynched`) and eliminating `InstallAttachment` (`SyncSoldierEquipment`) loops.
 
 ---
 

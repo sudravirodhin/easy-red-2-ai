@@ -131,6 +131,7 @@ dotnet $csc /nologo /target:library /optimize+ /nostdlib `
     /r:"$interopDir\UnityEngine.TextRenderingModule.dll" `
     /r:"$interopDir\UnityEngine.UI.dll" `
     /r:"$interopDir\UnityEngine.UIModule.dll" `
+    /r:"$interopDir\PhotonUnityNetworking.dll" `
     /r:"$interopDir\Assembly-CSharp.dll" `
     /out:"$buildDir\EasyRed2HumanAI.dll" `
     "$workspace\src\EasyRed2AI\Plugin.cs" `

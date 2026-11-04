@@ -368,7 +368,7 @@ namespace EasyRed2HumanAI
 
                     bool isInfantryTarget = !__0.IsWheeledVehicleOrTank() && !__0.IsAirVehicle();
                     float turretAimFov = turret.GetAimingFOV();
-                    Vehicle turretVeh = turret.GetComponentInParent<Vehicle>();
+                    Vehicle turretVeh = VeteranAndTacticsPatches.GetCachedTurretVehicle(turret);
                     VeteranAndTacticsPatches.SoldierPersonality crewPers = turretVeh != null
                         ? VeteranAndTacticsPatches.GetVehicleCrewPersonality(turretVeh)
                         : VeteranAndTacticsPatches.SoldierPersonality.None;

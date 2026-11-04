@@ -62,6 +62,7 @@ namespace EasyRed2HumanAI
             public string BaseName;
             public SoldierPersonality Personality;
             public byte RoleCategory;
+            public bool NameInitialized;
         }
 
         // Per-soldier state keyed by IL2CPP IntPtr
@@ -91,8 +92,25 @@ namespace EasyRed2HumanAI
         private static readonly Dictionary<IntPtr, float> _nextBayonetCheckTime = new Dictionary<IntPtr, float>(256);
         private static readonly Dictionary<IntPtr, float> _nextMeleeAttemptTime = new Dictionary<IntPtr, float>(256);
         private static readonly Dictionary<IntPtr, float> _nextMeleeStepTime = new Dictionary<IntPtr, float>(256);
+        private static readonly Dictionary<IntPtr, float> _nextPromotionCheckTime = new Dictionary<IntPtr, float>(256);
         private static readonly Dictionary<IntPtr, float> _repairTaskStartTime = new Dictionary<IntPtr, float>(64);
         private static readonly HashSet<IntPtr> _countedRepairTasks = new HashSet<IntPtr>();
+        private static readonly HashSet<IntPtr> _bayonetCheckedSoldiers = new HashSet<IntPtr>();
+        private static readonly Dictionary<IntPtr, Vehicle> _turretVehicleCache = new Dictionary<IntPtr, Vehicle>(64);
+        private static readonly Dictionary<long, bool> _coverExposureCache = new Dictionary<long, bool>(1024);
+
+        private struct WatchWindowCache
+        {
+            public Vector3 Pos;
+            public float BaseAngleDeg;
+            public Vector3 ResultDir;
+            public float ExpireTime;
+        }
+
+        private static readonly Dictionary<IntPtr, WatchWindowCache> _watchWindowCache = new Dictionary<IntPtr, WatchWindowCache>(256);
+        private static int _cachedSolidEnvMask;
+        private static float _nextAllowedBotRpcTime;
+        private static float _nextCoverCacheClearTime;
 
         private struct VehicleAimCache
         {
@@ -316,18 +334,19 @@ namespace EasyRed2HumanAI
                 };
                 _records[ptr] = rec;
             }
-            else
-            {
-                byte currentRoleCat = DetermineRoleCategory(s);
-                if (currentRoleCat != rec.RoleCategory)
+                else
                 {
-                    rec.RoleCategory = currentRoleCat;
-                    rec.Personality = RollPersonalityForRole(s, currentRoleCat);
-                    _records[ptr] = rec;
+                    byte currentRoleCat = DetermineRoleCategory(s);
+                    if (currentRoleCat != rec.RoleCategory)
+                    {
+                        rec.RoleCategory = currentRoleCat;
+                        rec.Personality = RollPersonalityForRole(s, currentRoleCat);
+                        rec.NameInitialized = false;
+                        _records[ptr] = rec;
+                    }
                 }
+                return rec;
             }
-            return rec;
-        }
 
         public static SoldierPersonality GetPersonality(Soldier s)
         {
@@ -565,16 +584,26 @@ namespace EasyRed2HumanAI
             if (s == null || s.Pointer == IntPtr.Zero)
                 return;
 
-            SoldierRecord rec = GetOrCreateRecord(s);
             IntPtr ptr = s.Pointer;
+            float now = Time.time;
+            if (_nextPromotionCheckTime.TryGetValue(ptr, out float nextPromo) && now < nextPromo)
+                return;
+
+            float jitter = (GetDeterministicHash(ptr, 19) % 100) * 0.01f;
+            _nextPromotionCheckTime[ptr] = now + 4.0f + jitter;
+
+            SoldierRecord rec = GetOrCreateRecord(s);
             int tier = VisionConfig.EnableVeteranSystem.Value ? GetVeteranTier(s) : 0;
+            bool tierPromoted = false;
 
             if (tier > rec.PromotedTier)
             {
                 rec.PromotedTier = tier;
-                _records[ptr] = rec;
+                tierPromoted = true;
 
-                if (VisionConfig.EnableVeteranSystem.Value && VisionConfig.PromoteVeteranRanks.Value)
+                if (VisionConfig.EnableVeteranSystem.Value &&
+                    VisionConfig.PromoteVeteranRanks.Value &&
+                    IsLocallyOwnedBot(s))
                 {
                     Rank targetRank = s.rank;
                     if (tier == 1 && targetRank < Rank.corporal)
@@ -593,18 +622,28 @@ namespace EasyRed2HumanAI
                 }
             }
 
-            // Keep soldier's name_surname synced with their Veteran and/or Personality tag for 3D hover / UI
-            bool showVetTag = VisionConfig.EnableVeteranSystem.Value && (VisionConfig.ShowVeteranSquadRosterTags.Value || VisionConfig.ShowVeteran3DIcons.Value);
-            bool showPersTag = VisionConfig.EnableRolePersonalities.Value && VisionConfig.ShowPersonalityInSquadRoster.Value;
-            string baseName = string.IsNullOrEmpty(rec.BaseName) ? (s.name_surname ?? "") : rec.BaseName;
-            int bracketIdx = baseName.IndexOf(" [", StringComparison.Ordinal);
-            if (bracketIdx >= 0)
-                baseName = baseName.Substring(0, bracketIdx);
-
-            string desiredName = baseName + BuildSoldierBracketTag(s, showVetTag, showPersTag, false);
-            if (s.name_surname != desiredName)
+            if (tierPromoted || !rec.NameInitialized)
             {
-                s.name_surname = desiredName;
+                rec.NameInitialized = true;
+                _records[ptr] = rec;
+
+                // Keep soldier's name_surname synced with their Veteran and/or Personality tag for 3D hover / UI
+                bool showVetTag = VisionConfig.EnableVeteranSystem.Value && (VisionConfig.ShowVeteranSquadRosterTags.Value || VisionConfig.ShowVeteran3DIcons.Value);
+                bool showPersTag = VisionConfig.EnableRolePersonalities.Value && VisionConfig.ShowPersonalityInSquadRoster.Value;
+                string baseName = string.IsNullOrEmpty(rec.BaseName) ? (s.name_surname ?? "") : rec.BaseName;
+                int bracketIdx = baseName.IndexOf(" [", StringComparison.Ordinal);
+                if (bracketIdx >= 0)
+                    baseName = baseName.Substring(0, bracketIdx);
+
+                string desiredName = baseName + BuildSoldierBracketTag(s, showVetTag, showPersTag, false);
+                if (s.name_surname != desiredName)
+                {
+                    s.name_surname = desiredName;
+                }
+            }
+            else if (tierPromoted)
+            {
+                _records[ptr] = rec;
             }
         }
 
@@ -850,9 +889,32 @@ namespace EasyRed2HumanAI
             PruneDict(_nextBayonetCheckTime, alivePtrs);
             PruneDict(_nextMeleeAttemptTime, alivePtrs);
             PruneDict(_nextMeleeStepTime, alivePtrs);
+            PruneDict(_nextPromotionCheckTime, alivePtrs);
             PruneDict(_vehicleAimCache, alivePtrs);
             PruneDict(_threatSectorCache, alivePtrs);
+            PruneDict(_watchWindowCache, alivePtrs);
             PruneDict(_lastDamageByVictim, alivePtrs);
+
+            if (_bayonetCheckedSoldiers.Count > 0)
+            {
+                var deadBayo = new List<IntPtr>();
+                foreach (var k in _bayonetCheckedSoldiers)
+                {
+                    if (!alivePtrs.Contains(k))
+                        deadBayo.Add(k);
+                }
+                for (int i = 0; i < deadBayo.Count; i++)
+                {
+                    _bayonetCheckedSoldiers.Remove(deadBayo[i]);
+                }
+            }
+
+            if (Time.time > _nextCoverCacheClearTime)
+            {
+                _nextCoverCacheClearTime = Time.time + 60f;
+                _coverExposureCache.Clear();
+                _turretVehicleCache.Clear();
+            }
 
             if (_isTurningToWatchSector.Count > 0)
             {
@@ -900,41 +962,83 @@ namespace EasyRed2HumanAI
         }
 
         // =====================================================================
-        // Helper: Muzzle Obstruction, Friendly Fire Cone & Anti-Stacking
+        // Helper: Co-op Ownership, RPC Rate-Limiting & Solid Environment Raycast
         // =====================================================================
-        private static bool RaycastEnvironment(Vector3 origin, Vector3 dir, float maxDist, Transform ignoreRoot, out RaycastHit envHit)
+        public static bool IsLocallyOwnedBot(Soldier s)
         {
-            envHit = default;
-            float remaining = maxDist;
-            Vector3 curOrigin = origin;
+            if (s == null || s.Pointer == IntPtr.Zero || !s.IsAlive || s.IsPlayer())
+                return false;
 
-            // Step through up to 6 self-colliders (shooter's own torso/arm/hand hitboxes), triggers, or Creature colliders
-            // without allocating an Il2CppStructArray via Physics.RaycastAll.
-            for (int hop = 0; hop < 6 && remaining > 0.02f; hop++)
+            SyncSoldier syncher = s.soldierSyncher;
+            if (syncher != null && (!syncher.OwnSyncher || syncher.controlled_by_player))
+                return false;
+
+            return true;
+        }
+
+        public static bool IsLocallyOwnedVehicle(Vehicle v)
+        {
+            if (v == null || v.Pointer == IntPtr.Zero)
+                return false;
+
+            SyncVehicle syncher = v.vehicleSyncher;
+            return syncher == null || syncher.OwnSyncher;
+        }
+
+        private static bool TryConsumeBotRpcBudget(float minInterval = 0.35f)
+        {
+            float now = Time.time;
+            if (now < _nextAllowedBotRpcTime)
+                return false;
+
+            _nextAllowedBotRpcTime = now + minInterval;
+            return true;
+        }
+
+        public static Vehicle GetCachedTurretVehicle(Turret turret)
+        {
+            if (turret == null || turret.Pointer == IntPtr.Zero)
+                return null;
+
+            IntPtr ptr = turret.Pointer;
+            if (_turretVehicleCache.TryGetValue(ptr, out Vehicle cachedVeh))
             {
-                if (!Physics.Raycast(curOrigin, dir, out RaycastHit hit, remaining))
-                    return false;
-
-                Collider col = hit.collider;
-                if (col != null && !col.isTrigger)
-                {
-                    Transform hitTransform = col.transform;
-                    if (hitTransform != null && hitTransform.root != ignoreRoot)
-                    {
-                        if (col.GetComponentInParent<Creature>() == null)
-                        {
-                            envHit = hit;
-                            return true;
-                        }
-                    }
-                }
-
-                float advance = hit.distance + 0.04f;
-                curOrigin += dir * advance;
-                remaining -= advance;
+                if (cachedVeh != null && cachedVeh.Pointer != IntPtr.Zero)
+                    return cachedVeh;
             }
 
-            return false;
+            Vehicle resolved = turret.GetComponentInParent<Vehicle>();
+            _turretVehicleCache[ptr] = resolved;
+            return resolved;
+        }
+
+        public static int GetSolidEnvironmentMask()
+        {
+            if (_cachedSolidEnvMask != 0)
+                return _cachedSolidEnvMask;
+
+            try
+            {
+                int gm = ResourcesManager.groundMask.value;
+                if (gm != 0)
+                {
+                    _cachedSolidEnvMask = gm;
+                    return gm;
+                }
+            }
+            catch { }
+
+            int terrainLayer = LayerMask.NameToLayer("Terrain");
+            _cachedSolidEnvMask = terrainLayer >= 0 ? ((1 << 0) | (1 << terrainLayer)) : (1 << 0);
+            return _cachedSolidEnvMask;
+        }
+
+        private static bool RaycastEnvironment(Vector3 origin, Vector3 dir, float maxDist, Transform ignoreRoot, out RaycastHit envHit)
+        {
+            // ResourcesManager.groundMask (Default | Terrain) hits only solid environment geometry (walls, buildings,
+            // sandbags, terrain) and ignores soldier BodyPart colliders, ragdolls, items, foliage, and triggers.
+            // This eliminates multi-hop raycast loops and IL2CPP GetComponentInParent<Creature>() hierarchy walks!
+            return Physics.Raycast(origin, dir, out envHit, maxDist, GetSolidEnvironmentMask(), QueryTriggerInteraction.Ignore);
         }
 
         private static float GetBarrelHeightForPose(SoldierPose pose)
@@ -1600,11 +1704,11 @@ namespace EasyRed2HumanAI
             if (soldier == null || soldier.Pointer == IntPtr.Zero)
                 return false;
 
-            if (_threatSectorCache.TryGetValue(soldier.Pointer, out ThreatSectorCache cached) && Time.time < cached.ExpireTime)
-                return cached.HasActiveContact;
-
-            TryGetKnownThreatSectorDirection(soldier, out _, out bool hasActive);
-            return hasActive;
+            // Pure O(1) dictionary lookup — NEVER trigger Squad.AllSquads iteration or 18-angle window raycast
+            // sweeps inside Creature.CanSee! ThreatSectorCache is populated by SequentialUpdate & MovementRoutine.
+            return _threatSectorCache.TryGetValue(soldier.Pointer, out ThreatSectorCache cached) &&
+                   Time.time < cached.ExpireTime &&
+                   cached.HasActiveContact;
         }
 
         private static readonly float[] _watchSweepOffsets = new float[]
@@ -1653,7 +1757,17 @@ namespace EasyRed2HumanAI
                 return Vector3.zero;
             baseDir.Normalize();
 
-            int h = GetDeterministicHash(soldier.Pointer, 97);
+            IntPtr ptr = soldier.Pointer;
+            float baseAngleDeg = Mathf.Atan2(baseDir.x, baseDir.z) * Mathf.Rad2Deg;
+            if (_watchWindowCache.TryGetValue(ptr, out WatchWindowCache wCache) &&
+                Time.time < wCache.ExpireTime &&
+                (myPos - wCache.Pos).sqrMagnitude < 0.25f &&
+                Mathf.Abs(Mathf.DeltaAngle(baseAngleDeg, wCache.BaseAngleDeg)) < 10.0f)
+            {
+                return wCache.ResultDir;
+            }
+
+            int h = GetDeterministicHash(ptr, 97);
             float t = ((h % 1001) / 500.0f) - 1.0f; // -1.0 .. +1.0
             float fanAngle = t * maxFanDeg;
             Vector3 fannedDir = Quaternion.Euler(0f, fanAngle, 0f) * baseDir;
@@ -1669,9 +1783,18 @@ namespace EasyRed2HumanAI
                                        !RaycastEnvironment(upperOrigin, fannedDir, 7.5f, root, out _) &&
                                        RaycastEnvironment(sillOrigin, fannedDir, 2.35f, root, out _);
 
+            Vector3 finalDir;
             if (fannedHasWindowSill)
             {
-                return CenterGazeInWindowAperture(upperOrigin, fannedDir, root, t, maxFanDeg);
+                finalDir = CenterGazeInWindowAperture(upperOrigin, fannedDir, root, t, maxFanDeg);
+                _watchWindowCache[ptr] = new WatchWindowCache
+                {
+                    Pos = myPos,
+                    BaseAngleDeg = baseAngleDeg,
+                    ResultDir = finalDir,
+                    ExpireTime = Time.time + 8.0f
+                };
+                return finalDir;
             }
 
             // Detect when a bot is sitting right next to a window (45-90 deg to the side) but fannedDir points
@@ -1689,7 +1812,16 @@ namespace EasyRed2HumanAI
             }
 
             if (!fannedBlocked && !nearbyWindowDetected)
+            {
+                _watchWindowCache[ptr] = new WatchWindowCache
+                {
+                    Pos = myPos,
+                    BaseAngleDeg = baseAngleDeg,
+                    ResultDir = fannedDir,
+                    ExpireTime = Time.time + 8.0f
+                };
                 return fannedDir;
+            }
 
             // 2. Sweep 360 deg around baseDir to find the best window aperture or longest unobstructed exterior sightline
             Vector3 bestDir = fannedDir;
@@ -1729,12 +1861,18 @@ namespace EasyRed2HumanAI
                 }
             }
 
-            if (bestIsWindow || fannedBlocked)
-            {
-                return CenterGazeInWindowAperture(upperOrigin, bestDir, root, t, maxFanDeg);
-            }
+            finalDir = (bestIsWindow || fannedBlocked)
+                ? CenterGazeInWindowAperture(upperOrigin, bestDir, root, t, maxFanDeg)
+                : bestDir;
 
-            return bestDir;
+            _watchWindowCache[ptr] = new WatchWindowCache
+            {
+                Pos = myPos,
+                BaseAngleDeg = baseAngleDeg,
+                ResultDir = finalDir,
+                ExpireTime = Time.time + 8.0f
+            };
+            return finalDir;
         }
 
         private static void InsertClosestContact(
@@ -1991,9 +2129,10 @@ namespace EasyRed2HumanAI
                 watchDir = PickClearWatchDirection(soldier, myPos, fallbackBase, 24f);
             }
 
+            float sectorJitter = (GetDeterministicHash(ptr, 53) % 35) * 0.01f;
             _threatSectorCache[ptr] = new ThreatSectorCache
             {
-                ExpireTime = Time.time + 0.60f,
+                ExpireTime = Time.time + 1.50f + sectorJitter,
                 WatchDir = watchDir,
                 HasActiveContact = hasActiveContact
             };
@@ -2097,15 +2236,9 @@ namespace EasyRed2HumanAI
             // 2. No cover in front toward +threatDir! Now check if there is a vertical wall directly behind
             //    the soldier's back (-threatDir within 1.95m at waist/chest height 0.75m).
             Vector3 rearOrigin = pos + Vector3.up * 0.75f;
-            if (Physics.Raycast(rearOrigin, -threatDir, out rearWallHit, 1.95f))
+            if (Physics.Raycast(rearOrigin, -threatDir, out rearWallHit, 1.95f, GetSolidEnvironmentMask(), QueryTriggerInteraction.Ignore))
             {
-                Collider col = rearWallHit.collider;
-                if (col != null &&
-                    !col.isTrigger &&
-                    col.transform != null &&
-                    col.transform.root != ignoreRoot &&
-                    Mathf.Abs(rearWallHit.normal.y) < 0.55f &&
-                    col.GetComponentInParent<Creature>() == null)
+                if (Mathf.Abs(rearWallHit.normal.y) < 0.55f)
                 {
                     return true;
                 }
@@ -2122,12 +2255,9 @@ namespace EasyRed2HumanAI
 
             // Probe from 2.30m behind the front face of the wall back toward +threatDir to locate the back face
             // and verify the wall is a freestanding wall/sandbag/fence/hedgerow (thickness <= 1.65m), not a hill or solid building
+            int envMask = GetSolidEnvironmentMask();
             Vector3 probeOrigin = rearWallHit.point - threatDir * 2.30f;
-            if (!Physics.Raycast(probeOrigin, threatDir, out RaycastHit backFaceHit, 2.25f))
-                return false;
-
-            Collider backCol = backFaceHit.collider;
-            if (backCol == null || backCol.isTrigger || backCol.GetComponentInParent<Creature>() != null)
+            if (!Physics.Raycast(probeOrigin, threatDir, out RaycastHit backFaceHit, 2.25f, envMask, QueryTriggerInteraction.Ignore))
                 return false;
 
             float wallThickness = Vector3.Distance(rearWallHit.point, backFaceHit.point);
@@ -2137,10 +2267,10 @@ namespace EasyRed2HumanAI
             // Ideal sheltered position is 0.85m behind the back face of the wall (so the wall is now in +threatDir)
             Vector3 candidateXZ = backFaceHit.point - threatDir * 0.85f;
             Vector3 groundRayStart = new Vector3(candidateXZ.x, currentPos.y + 1.35f, candidateXZ.z);
-            if (!Physics.Raycast(groundRayStart, Vector3.down, out RaycastHit groundHit, 3.0f))
+            if (!Physics.Raycast(groundRayStart, Vector3.down, out RaycastHit groundHit, 3.0f, envMask, QueryTriggerInteraction.Ignore))
                 return false;
 
-            if (groundHit.collider == null || groundHit.collider.isTrigger || groundHit.normal.y < 0.65f)
+            if (groundHit.normal.y < 0.65f)
                 return false;
 
             Vector3 candidatePos = groundHit.point;
@@ -2532,7 +2662,7 @@ namespace EasyRed2HumanAI
 
         private static void TryThrowNormalGrenadeAtVehicle(Soldier soldier, Vehicle targetVeh, float dist)
         {
-            if (soldier == null || targetVeh == null || soldier.inventory == null)
+            if (!IsLocallyOwnedBot(soldier) || targetVeh == null || soldier.inventory == null)
                 return;
 
             if (dist <= 7.5f || dist > 32f || soldier.isInBodyAnimation || soldier.isInHandsAnimation)
@@ -2544,7 +2674,7 @@ namespace EasyRed2HumanAI
             if (grenadeItem != null)
             {
                 float maxThrowRange = soldier.GetGrenadeThrowRange(grenadeItem);
-                if (dist <= maxThrowRange && UnityEngine.Random.Range(0, 100) > 65)
+                if (dist <= maxThrowRange && UnityEngine.Random.Range(0, 100) > 65 && TryConsumeBotRpcBudget(0.45f))
                 {
                     soldier.Throw(grenadeItem, targetVeh.Cast<Spottable>());
                 }
@@ -2554,15 +2684,15 @@ namespace EasyRed2HumanAI
         // =====================================================================
         // Helper: Point-Blank Bayonet, Melee & Butt-Stroke CQB Combat
         // - Automatically unfolds/mounts integrated bayonets (e.g. Mosin M44, Carcano M38, Type 44)
-        //   or installs detachable bayonets from the soldier's inventory when entering combat
+        //   once per soldier without calling InstallAttachment (which triggers a heavy SyncSoldierEquipment
+        //   Photon RPC across all clients and causes Co-op desyncs when squads alert!)
         // - Overrides vanilla's tiny 1.6m SequentialUpdate-only melee trigger and prevents
         //   bots from crouching/hip-firing bullets into each other at 1-2.5m instead of
         //   lunging with bayonets, knives/shovels, or rifle butt-strokes
         // =====================================================================
         private static void TryEnsureBayonetMounted(Soldier soldier)
         {
-            if (soldier == null ||
-                soldier.Pointer == IntPtr.Zero ||
+            if (!IsLocallyOwnedBot(soldier) ||
                 soldier.IsOnVehicle() ||
                 soldier.HasBayonetReady ||
                 soldier.isInHandsAnimation ||
@@ -2572,33 +2702,19 @@ namespace EasyRed2HumanAI
             }
 
             IntPtr ptr = soldier.Pointer;
-            if (_nextBayonetCheckTime.TryGetValue(ptr, out float nextCheck) && Time.time < nextCheck)
+            if (!_bayonetCheckedSoldiers.Add(ptr))
                 return;
-
-            _nextBayonetCheckTime[ptr] = Time.time + 2.5f;
 
             GenericGun heldGun = soldier.GetHeldGun();
             if (heldGun == null)
                 return;
 
-            // 1. Foldable / integrated bayonet on rifle (starts folded in AttachmentBayonet.Awake)
-            if (heldGun.integratedBayonet != null)
+            // Unfold integrated / foldable bayonet on rifle (starts folded in AttachmentBayonet.Awake).
+            // Never call soldier.inventory.InstallAttachment(bayoItem, true) for AI bots because InstallAttachment
+            // broadcasts SyncSoldier.SyncSoldierEquipment over Photon for every soldier in an alerted squad!
+            if (heldGun.integratedBayonet != null && !heldGun.integratedBayonet.IsMounted)
             {
-                if (!heldGun.integratedBayonet.IsMounted)
-                {
-                    heldGun.integratedBayonet.SetMounted(true);
-                }
-                return;
-            }
-
-            // 2. Detachable bayonet in the soldier's inventory matching the rifle's bayonet slot
-            if (soldier.inventory != null && heldGun.SupportAttachmentType((AttachmentType)3))
-            {
-                VirtualAttachmentItem bayoItem = soldier.inventory.FindAttachment((AttachmentType)3);
-                if (bayoItem != null)
-                {
-                    soldier.inventory.InstallAttachment(bayoItem, true);
-                }
+                heldGun.integratedBayonet.SetMounted(true);
             }
         }
 
@@ -2690,7 +2806,7 @@ namespace EasyRed2HumanAI
 
         private static void TryExecuteMeleeAttack(SoldierAI ai, Soldier soldier, Soldier enemy)
         {
-            if (ai == null || soldier == null || enemy == null)
+            if (ai == null || !IsLocallyOwnedBot(soldier) || enemy == null)
                 return;
 
             Vector3 toEnemy = enemy.transform.position - soldier.transform.position;
@@ -2706,7 +2822,10 @@ namespace EasyRed2HumanAI
             if (_nextMeleeAttemptTime.TryGetValue(ptr, out float nextMelee) && Time.time < nextMelee)
                 return;
 
-            _nextMeleeAttemptTime[ptr] = Time.time + 0.38f;
+            if (!TryConsumeBotRpcBudget(0.25f))
+                return;
+
+            _nextMeleeAttemptTime[ptr] = Time.time + 0.45f;
             soldier.SetGunTriggerPressed(false);
             soldier.Melee();
             MeleeAttacksTriggered++;
@@ -2733,7 +2852,7 @@ namespace EasyRed2HumanAI
                         return;
 
                     Soldier soldier = __instance.character;
-                    if (soldier == null || !soldier.IsAlive || soldier.IsPlayer() || soldier.IsOnVehicle())
+                    if (!IsLocallyOwnedBot(soldier) || soldier.IsOnVehicle())
                         return;
 
                     // 1. Threat-Sector Alert Propagation & Faster Target Lock-On:
@@ -2810,10 +2929,10 @@ namespace EasyRed2HumanAI
 
                     IntPtr ptr = soldier.Pointer;
 
-                    // 1. Update Veteran progression & field rank promotions
+                    // 1. Update Veteran progression & field rank promotions (throttled per soldier)
                     CheckAndApplyFieldPromotion(soldier);
 
-                    if (soldier.IsOnVehicle())
+                    if (!IsLocallyOwnedBot(soldier) || soldier.IsOnVehicle())
                         return;
 
                     // 2. Priority 1A (Don't Die): Bandage AFTER finding cover (or if stationary / deadline expired)
@@ -2939,7 +3058,10 @@ namespace EasyRed2HumanAI
                                  Time.time > soldier.throw_end_time + 5.0f)
                         {
                             VirtualItem fragItem = soldier.inventory.FindItemOfType<VirtualGrenade>();
-                            if (fragItem != null && __instance.distFromTarget <= soldier.GetGrenadeThrowRange(fragItem) && UnityEngine.Random.Range(0, 100) > 60)
+                            if (fragItem != null &&
+                                __instance.distFromTarget <= soldier.GetGrenadeThrowRange(fragItem) &&
+                                UnityEngine.Random.Range(0, 100) > 60 &&
+                                TryConsumeBotRpcBudget(0.45f))
                             {
                                 soldier.Throw(fragItem, __instance.visibleTarget);
                             }
@@ -3057,7 +3179,7 @@ namespace EasyRed2HumanAI
                             bool gunEmpty = soldier.IsReloading ||
                                             soldier.MustReload() ||
                                             (heldGun != null && heldGun.GetCurrentAmmoCount() <= 0);
-                            if (gunEmpty || dist <= 2.15f)
+                            if ((gunEmpty || dist <= 2.15f) && TryConsumeBotRpcBudget(0.35f))
                             {
                                 soldier.ToggleInventoryKnife();
                             }
@@ -3480,10 +3602,13 @@ namespace EasyRed2HumanAI
                 {
                     if (bestDistSq <= 3.8f * 3.8f)
                     {
-                        string sqId = rescuer.joinedSquad != null ? rescuer.joinedSquad.InstanceID.ToString() : "";
-                        bestSurrendered.UnSurrenderSynched(sqId);
-                        ComradesLiberated++;
-                        AddCombatExperienceBonus(rescuer, 30f);
+                        if (TryConsumeBotRpcBudget(0.45f))
+                        {
+                            string sqId = rescuer.joinedSquad != null ? rescuer.joinedSquad.InstanceID.ToString() : "";
+                            bestSurrendered.UnSurrenderSynched(sqId);
+                            ComradesLiberated++;
+                            AddCombatExperienceBonus(rescuer, 30f);
+                        }
                     }
                     else if (!rescuer.IsSquadLeader())
                     {
@@ -3550,7 +3675,7 @@ namespace EasyRed2HumanAI
                         return;
 
                     Soldier soldier = __instance.character;
-                    if (soldier == null || !soldier.IsAlive || soldier.IsPlayer())
+                    if (!IsLocallyOwnedBot(soldier))
                         return;
 
                     IntPtr ptr = soldier.Pointer;
@@ -3610,14 +3735,14 @@ namespace EasyRed2HumanAI
                         return;
 
                     Soldier soldier = __instance.character;
-                    if (soldier == null || !soldier.IsAlive || soldier.IsPlayer() || soldier.IsOnVehicle())
+                    if (!IsLocallyOwnedBot(soldier) || soldier.IsOnVehicle())
                         return;
 
                     IntPtr ptr = soldier.Pointer;
                     if (_nextVaultCheckTime.TryGetValue(ptr, out float nextVault) && Time.time < nextVault)
                         return;
 
-                    _nextVaultCheckTime[ptr] = Time.time + 0.40f;
+                    _nextVaultCheckTime[ptr] = Time.time + 0.50f;
 
                     if (!__instance.IsMoving() ||
                         soldier.isInBodyAnimation ||
@@ -3629,10 +3754,10 @@ namespace EasyRed2HumanAI
                         return;
                     }
 
-                    if (soldier.CanVault(out Vector3 vaultPos))
+                    if (soldier.CanVault(out Vector3 vaultPos) && TryConsumeBotRpcBudget(0.35f))
                     {
                         soldier.Vault(vaultPos);
-                        _nextVaultCheckTime[ptr] = Time.time + 1.80f;
+                        _nextVaultCheckTime[ptr] = Time.time + 2.20f;
                         WallsVaulted++;
                     }
                 }
@@ -3660,7 +3785,7 @@ namespace EasyRed2HumanAI
 
                     __state = __instance.allowFireAtEnemy;
                     Soldier soldier = __instance.character;
-                    if (soldier == null || !soldier.IsAlive || soldier.IsPlayer())
+                    if (!IsLocallyOwnedBot(soldier))
                         return true;
 
                     IntPtr ptr = soldier.Pointer;
@@ -3852,10 +3977,10 @@ namespace EasyRed2HumanAI
                         if (angleToTarget <= 35f &&
                             (!_nextWallCheckTime.TryGetValue(ptr, out float nextWall) || Time.time >= nextWall))
                         {
-                            _nextWallCheckTime[ptr] = Time.time + 0.05f;
+                            _nextWallCheckTime[ptr] = Time.time + 0.25f;
                             if (IsMuzzleBlockedByWall(soldier, __0, dist))
                             {
-                                _wallBlockedUntil[ptr] = Time.time + 0.14f;
+                                _wallBlockedUntil[ptr] = Time.time + 0.28f;
                                 WallsBlocked++;
 
                                 // Auto-Peek up one (or two) stances if crouched/prone behind a low wall/sandbag/windowsill:
@@ -3952,10 +4077,10 @@ namespace EasyRed2HumanAI
                     {
                         if (!_nextFFCheckTime.TryGetValue(ptr, out float nextFF) || Time.time >= nextFF)
                         {
-                            _nextFFCheckTime[ptr] = Time.time + 0.12f;
+                            _nextFFCheckTime[ptr] = Time.time + 0.25f;
                             if (IsFriendlyInLineOfFire(soldier, __0, dist, vet01, out _))
                             {
-                                _ffBlockedUntil[ptr] = Time.time + 0.25f;
+                                _ffBlockedUntil[ptr] = Time.time + 0.30f;
                                 FriendlyFirePrevented++;
                             }
                         }
@@ -4014,26 +4139,7 @@ namespace EasyRed2HumanAI
                     if (!VisionConfig.EnableMod.Value || __instance == null)
                         return;
 
-                    // If RotateAndFireToward just ran with allowFireAtEnemy == true, it just computed the new
-                    // ai.shootDirection (including random AI inaccuracy dispersion) and set pressTriggerRequest.
-                    // Verify that the post-dispersion GetFireDir() vector doesn't clip a wall lip or window frame!
-                    if (__state &&
-                        __instance.allowFireAtEnemy &&
-                        VisionConfig.EnableWallShootingPrevention.Value)
-                    {
-                        Soldier soldier = __instance.character;
-                        if (soldier != null && soldier.IsAlive && !soldier.IsPlayer() && !soldier.IsOnVehicle())
-                        {
-                            if (IsActualFireDirectionBlockedByWall(soldier, __instance.distFromTarget))
-                            {
-                                soldier.SetGunTriggerPressed(false);
-                                _wallBlockedUntil[soldier.Pointer] = Time.time + 0.10f;
-                                WallsBlocked++;
-                            }
-                        }
-                    }
-
-                    // Restore original allowFireAtEnemy state for next tick
+                    // Restore original allowFireAtEnemy state for next tick without running unthrottled per-frame raycasts
                     __instance.allowFireAtEnemy = __state;
                 }
                 catch { }
@@ -4066,7 +4172,7 @@ namespace EasyRed2HumanAI
                     }
 
                     Soldier soldier = __instance.character;
-                    if (soldier == null || !soldier.IsAlive || soldier.IsPlayer())
+                    if (!IsLocallyOwnedBot(soldier))
                         return;
 
                     IntPtr ptr = soldier.Pointer;
@@ -4179,7 +4285,7 @@ namespace EasyRed2HumanAI
                     }
 
                     Vehicle veh = __instance.vehToRepair;
-                    if (veh == null || veh.transform == null)
+                    if (!IsLocallyOwnedVehicle(veh) || veh.transform == null)
                         return;
 
                     Vector3 shelterPos = GetShelteredRepairPosition(veh, null, out _);
@@ -4220,7 +4326,7 @@ namespace EasyRed2HumanAI
                         return;
 
                     Vehicle veh = __instance.vehToRepair;
-                    if (veh == null || veh.transform == null)
+                    if (!IsLocallyOwnedVehicle(veh) || veh.transform == null)
                         return;
 
                     IntPtr taskPtr = __instance.Pointer;
@@ -4276,7 +4382,7 @@ namespace EasyRed2HumanAI
                         return true;
                     }
 
-                    if (!__instance.VehicleStillneedsRepair || !__0.IsAI())
+                    if (!__instance.VehicleStillneedsRepair || !__0.IsAI() || !IsLocallyOwnedBot(__0))
                         return true;
 
                     // Keep the crewman crouched behind the tank's armor
@@ -4354,8 +4460,21 @@ namespace EasyRed2HumanAI
                     }
 
                     // Reject cover nodes on the exposed front face of a wall (no cover in +threatDir, wall in -threatDir)
-                    Vector3 coverPos = __instance.GetCoverPosition();
-                    if (IsPositionOnExposedSideOfWall(coverPos, threatDir, null, out _))
+                    // Cache per (cover.Pointer, 8-way compass octant) so CoverManager.GetCovers never runs hundreds of
+                    // uncached raycasts across the same cover nodes in a single frame!
+                    float angleDeg = Mathf.Atan2(threatDir.x, threatDir.z) * Mathf.Rad2Deg;
+                    if (angleDeg < 0f) angleDeg += 360f;
+                    int octant = Mathf.FloorToInt((angleDeg + 22.5f) / 45f) & 7;
+                    long cacheKey = ((long)__instance.Pointer << 4) | (uint)octant;
+
+                    if (!_coverExposureCache.TryGetValue(cacheKey, out bool isExposed))
+                    {
+                        Vector3 coverPos = __instance.GetCoverPosition();
+                        isExposed = IsPositionOnExposedSideOfWall(coverPos, threatDir, null, out _);
+                        _coverExposureCache[cacheKey] = isExposed;
+                    }
+
+                    if (isExposed)
                     {
                         __result = false;
                     }
@@ -4385,6 +4504,9 @@ namespace EasyRed2HumanAI
                         return;
                     }
 
+                    if (__instance.Leader != null && !IsLocallyOwnedBot(__instance.Leader))
+                        return;
+
                     Vector3 threatDir = GetEffectiveThreatDirection(__instance.Leader, __instance, __0, __instance.formationDirection);
                     if (threatDir.sqrMagnitude > 0.01f)
                     {
@@ -4408,6 +4530,9 @@ namespace EasyRed2HumanAI
                     {
                         return;
                     }
+
+                    if (__instance.Leader != null && !IsLocallyOwnedBot(__instance.Leader))
+                        return;
 
                     Vector3 refPos = (__instance.Leader != null && __instance.Leader.transform != null)
                         ? __instance.Leader.transform.position
@@ -5099,8 +5224,8 @@ namespace EasyRed2HumanAI
                         return;
                     }
 
-                    Vehicle veh = __instance.turret.GetComponentInParent<Vehicle>();
-                    if (veh == null) return;
+                    Vehicle veh = GetCachedTurretVehicle(__instance.turret);
+                    if (!IsLocallyOwnedVehicle(veh)) return;
 
                     SoldierPersonality crewPers = GetVehicleCrewPersonality(veh);
                     if (crewPers == SoldierPersonality.TankCrew_Brawler || crewPers == SoldierPersonality.LightCrew_Outrider)
@@ -5137,7 +5262,7 @@ namespace EasyRed2HumanAI
                         !VisionConfig.EnableRolePersonalities.Value ||
                         !VisionConfig.EnableVehicleAndPilotPersonalities.Value ||
                         __instance == null ||
-                        __instance.veh == null)
+                        !IsLocallyOwnedVehicle(__instance.veh))
                     {
                         return;
                     }
