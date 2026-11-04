@@ -50,7 +50,7 @@ Included in `EasyRed2HumanAI-v0.4.0-with-BepInEx.zip` (and in the root of this r
 
 ### 1. Humanized Vision, Stance Stealth & FOV Cones ([`VisionPatches.cs`](src/EasyRed2AI/VisionPatches.cs))
 
-| Feature | Vanilla Behavior | Humanized AI (`v0.3.6`) |
+| Feature | Vanilla Behavior | Humanized AI (`v0.4.0`) |
 | :--- | :--- | :--- |
 | **Stance Sight Ranges** | `220m` Standing, `50m` Crouching, `37m` Prone when unspotted — but jumps **all stances to a flat `300m`** the instant `IsEnemyAwareOfThisSquad` is true. | **150m Standing**, **80m Crouching**, **40m Prone**. Squad combat awareness applies only a **1.20x multiplier** (`48m` prone, `96m` crouched) so taking cover in grass/craters actually conceals you during firefights. |
 | **Individual Firing Reveal** | One soldier firing alerts the enemy to the entire squad's crouched/prone members out to `300m`. | Only the **specific soldier who fired** gets a temporary **+85m visibility penalty for 4.0 seconds** (muzzle flash, smoke, and gunshot sound). Silent squadmates stay hidden. |
@@ -147,6 +147,21 @@ Designed specifically for **100+ active bots** and **Photon Co-op stability**:
 * **Cover Node Exposure Caching (`_coverExposureCache`)**: `CombatCover.IsCoverAvailable` caches wall-exposure results per `(cover.Pointer, octant)`, eliminating hundreds of redundant raycasts when `CoverManager.GetCovers` evaluates cover nodes for a squad.
 * **Strict Photon Ownership Guards (`OwnSyncher` / `controlled_by_player`)**: Every AI mutation hook verifies local Photon ownership (`IsLocallyOwnedBot` / `IsLocallyOwnedVehicle`) so Co-op clients and hosts never fight over remote unit state or player-controlled soldiers.
 * **Global Bot Photon RPC Rate-Limiter**: Prevents multi-bot RPC bursts by globally pacing AI-triggered network actions (`Vault`, `Throw`, `ToggleInventoryKnife`, `Melee`, `UnSurrenderSynched`) and eliminating `InstallAttachment` (`SyncSoldierEquipment`) loops.
+
+---
+
+## Co-op & Multiplayer FAQ — Does This Work as Host-Only?
+
+**Short Answer:** **Yes!** You can run this mod on the **Host / Server only** (leaving joining friends on 100% vanilla *Easy Red 2*), or install it on **both Host and Clients** for the complete experience.
+
+Because *Easy Red 2* uses Photon (`PUN2`) ownership rules (`BattleLoader.RequestOwnershipAndSpawnOn`), here is what works **Host-Only** vs. when a **Client also installs the mod**:
+
+| Feature / Scenario | Host-Only (Joining Players are Vanilla) | Host + Client Both Modded |
+| :--- | :--- | :--- |
+| **All Enemy & Friendly AI Squads on the Map** | **100% Modded AI** (simulated by the Host/Server and synced via Photon). | **100% Modded AI**. |
+| **A Vanilla Client's Own Infantry Squadmates (On Foot)** | **100% Modded AI!** When a player spawns on foot, Photon transfers ownership *only* of the single soldier they directly control (`0x180A71EE2`). Their AI infantry squadmates stay owned and simulated by the Host/Server! | **100% Modded AI**. |
+| **A Client's Own Vehicle / Tank Crewmates** | **Vanilla AI for that vehicle's crew.** When a client spawns inside a vehicle (`0x180A7230A`), *Easy Red 2* transfers Photon ownership of all AI crew members seated in that vehicle to the driving client so turret aiming stays synced to local vehicle physics. | **100% Modded AI** (modded `TurretAI` target priority, optic cones, and sheltered tank crew repair). |
+| **Local Player UI & Quality-of-Life Features** | Host only. Vanilla clients see the vanilla death screen and vanilla UI. | **Full Client QoL**: Detailed **Death Screen Kill Attribution & Soldier Age Obituary**, **`[Vet I–III ★]` Squad Roster & 3D Crosshair Badges**, and **Quick-Tap `Tab` Spotting**. |
 
 ---
 
