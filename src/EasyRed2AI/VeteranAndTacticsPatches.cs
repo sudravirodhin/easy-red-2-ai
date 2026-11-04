@@ -4918,6 +4918,8 @@ namespace EasyRed2HumanAI
             if (dp == null)
                 return;
 
+            DisableDeathPanelRaycasts(dp);
+
             // Sample the legacy Animation at 72% (peak full-page visibility) and stop it so
             // text_reason, text_name, and text_year appear immediately all at once instead of staggering.
             Animation anim = dp.GetComponent<Animation>();
@@ -4938,11 +4940,64 @@ namespace EasyRed2HumanAI
             }
 
             _deathPanelShowStartUnscaledTime = Time.unscaledTime;
-            _deathPanelHoldUntilUnscaledTime = Time.unscaledTime + 4.2f;
+            _deathPanelHoldUntilUnscaledTime = Time.unscaledTime + 3.85f;
             _deathPanelCleanupUntilUnscaledTime = Time.unscaledTime + 15.0f;
             _deathPanelVictimPtr = victimPtr;
 
             ApplyDeathPanelAlpha(dp, 1.0f);
+        }
+
+        private static void DisableDeathPanelRaycasts(DeathPanel dp)
+        {
+            if (dp == null)
+                return;
+
+            if (dp.text_reason != null)
+                dp.text_reason.raycastTarget = false;
+            if (dp.text_name != null)
+                dp.text_name.raycastTarget = false;
+            if (dp.text_year != null)
+                dp.text_year.raycastTarget = false;
+
+            Graphic rootGraphic = dp.GetComponent<Graphic>();
+            if (rootGraphic != null)
+                rootGraphic.raycastTarget = false;
+
+            CanvasGroup cg = dp.GetComponent<CanvasGroup>();
+            if (cg != null)
+            {
+                cg.blocksRaycasts = false;
+                cg.interactable = false;
+            }
+        }
+
+        private static void FinishInstantDeathPanel(DeathPanel dp)
+        {
+            _deathPanelCleanupUntilUnscaledTime = 0f;
+            if (dp == null)
+                return;
+
+            // Advance the legacy Animation to its exact end-of-clip state (100%) and sample it once
+            // so all animated components on DeathPanel return to their resting post-death state.
+            Animation anim = dp.GetComponent<Animation>();
+            if (anim != null)
+            {
+                if (anim.GetStateCount() > 0)
+                {
+                    AnimationState state = anim.GetStateAtIndex(0);
+                    if (state != null)
+                    {
+                        state.enabled = true;
+                        state.weight = 1f;
+                        state.normalizedTime = 1.0f;
+                        anim.Sample();
+                    }
+                }
+                anim.Stop();
+            }
+
+            ApplyDeathPanelAlpha(dp, 0.0f);
+            DisableDeathPanelRaycasts(dp);
         }
 
         public static void MaintainInstantDeathPanel()
@@ -4951,18 +5006,14 @@ namespace EasyRed2HumanAI
                 return;
 
             float now = Time.unscaledTime;
-            if (now > _deathPanelCleanupUntilUnscaledTime)
+            DeathPanel dp = DeathPanel.instance;
+            if (dp == null || now > _deathPanelCleanupUntilUnscaledTime)
             {
-                _deathPanelCleanupUntilUnscaledTime = 0f;
-                DeathPanel dpDone = DeathPanel.instance;
-                if (dpDone != null)
-                    ApplyDeathPanelAlpha(dpDone, 0f);
+                FinishInstantDeathPanel(dp);
                 return;
             }
 
-            DeathPanel dp = DeathPanel.instance;
-            if (dp == null)
-                return;
+            DisableDeathPanelRaycasts(dp);
 
             Animation anim = dp.GetComponent<Animation>();
             if (anim != null && anim.isPlaying)
@@ -4972,23 +5023,18 @@ namespace EasyRed2HumanAI
             {
                 float elapsed = now - _deathPanelShowStartUnscaledTime;
 
-                // Allow early dismissal if player presses the skip key after a brief 0.45s grace period
-                if (elapsed > 0.45f && DeathPanel.IsSkipping())
+                // Dismiss immediately as soon as squad/teammate selection or respawn view opens,
+                // or if the player presses the skip key, or already controls a new living soldier.
+                if (PlayerGUI.IsSelectingSquad() ||
+                    RespawnPanel.InRespawningView ||
+                    (elapsed > 0.35f && DeathPanel.IsSkipping()))
                 {
                     _deathPanelHoldUntilUnscaledTime = now;
                 }
-                else if (elapsed > 2.6f)
+                else if (elapsed > 0.45f)
                 {
-                    // Or once the player has taken active control of a new living soldier
                     Soldier cur = Soldier.CurrentControlledSoldierOrNull();
-                    bool activelyControllingNewSoldier =
-                        cur != null &&
-                        cur.IsAlive &&
-                        cur.Pointer != _deathPanelVictimPtr &&
-                        !PlayerGUI.IsSelectingSquad() &&
-                        !RespawnPanel.InRespawningView;
-
-                    if (activelyControllingNewSoldier)
+                    if (cur != null && cur.IsAlive && cur.Pointer != _deathPanelVictimPtr)
                     {
                         _deathPanelHoldUntilUnscaledTime = now;
                     }
@@ -5003,7 +5049,7 @@ namespace EasyRed2HumanAI
             }
             else
             {
-                ApplyDeathPanelAlpha(dp, 0.0f);
+                FinishInstantDeathPanel(dp);
             }
         }
 
@@ -5031,22 +5077,6 @@ namespace EasyRed2HumanAI
             {
                 c.a = alpha;
                 txt.color = c;
-            }
-        }
-
-        [HarmonyPatch(typeof(PlayerGUI), nameof(PlayerGUI.LateUpdate))]
-        public static class PlayerGUI_LateUpdate_Patch
-        {
-            public static void Postfix()
-            {
-                try
-                {
-                    if (!VisionConfig.EnableMod.Value || !VisionConfig.EnableDeathScreenAttribution.Value)
-                        return;
-
-                    MaintainInstantDeathPanel();
-                }
-                catch { }
             }
         }
 

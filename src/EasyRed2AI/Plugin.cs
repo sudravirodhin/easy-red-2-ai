@@ -11,7 +11,7 @@ namespace EasyRed2HumanAI
     {
         public const string PluginGuid = "com.antigravity.easyred2.humanai";
         public const string PluginName = "Easy Red 2 - Humanized AI & Veteran Tactics";
-        public const string PluginVersion = "0.3.8";
+        public const string PluginVersion = "0.3.9";
 
         internal static Plugin Instance;
         internal static new ManualLogSource Log;
@@ -64,7 +64,6 @@ namespace EasyRed2HumanAI
             SafePatch(typeof(VeteranAndTacticsPatches.Explosion_CreateExplosion_Patch));
             SafePatch(typeof(VeteranAndTacticsPatches.Bullet_BulletDamage_Patch));
             SafePatch(typeof(VeteranAndTacticsPatches.DeathPanel_ShowDeath_Patch));
-            SafePatch(typeof(VeteranAndTacticsPatches.PlayerGUI_LateUpdate_Patch));
             SafePatch(typeof(VeteranAndTacticsPatches.TurretAI_RefreshTargets_Patch));
             SafePatch(typeof(VeteranAndTacticsPatches.AIPlane_Update_Patch));
 
