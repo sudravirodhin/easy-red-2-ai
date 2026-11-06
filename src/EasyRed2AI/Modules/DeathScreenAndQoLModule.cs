@@ -10,7 +10,6 @@ namespace EasyRed2HumanAI
     {
         internal struct DamageAttribution
         {
-            public string AttackerName;
             public bool IsFriendlyFire;
             public bool IsSelfInflicted;
             public string WeaponOrSource;
@@ -169,34 +168,6 @@ namespace EasyRed2HumanAI
             while (cleaned.Contains("  "))
                 cleaned = cleaned.Replace("  ", " ");
             return cleaned;
-        }
-
-        private static string FormatSoldierIdentity(Soldier s)
-        {
-            if (s == null)
-                return "";
-
-            string rankPrefix;
-            if (s.rank == Rank.corporal)
-                rankPrefix = "Cpl. ";
-            else if (s.rank == Rank.seargent)
-                rankPrefix = "Sgt. ";
-            else if (s.rank == Rank.first_seargent)
-                rankPrefix = "1st Sgt. ";
-            else if ((int)s.rank > (int)Rank.first_seargent)
-                rankPrefix = "Lt. ";
-            else
-                rankPrefix = "Pvt. ";
-
-            string name = string.IsNullOrWhiteSpace(s.name_surname) ? "Unknown Soldier" : s.name_surname.Replace('_', ' ').Trim();
-            while (name.Contains("  "))
-                name = name.Replace("  ", " ");
-
-            int bracketIdx = name.IndexOf(" [", StringComparison.Ordinal);
-            if (bracketIdx >= 0)
-                name = name.Substring(0, bracketIdx);
-
-            return rankPrefix + name;
         }
 
         private static string FormatYearLineWithAge(string yearLine)
@@ -386,7 +357,6 @@ namespace EasyRed2HumanAI
 
                             _lastDamageByVictim[player.Pointer] = new DamageAttribution
                             {
-                                AttackerName = __4 != null ? FormatSoldierIdentity(__4) : "",
                                 IsSelfInflicted = isSelf,
                                 IsFriendlyFire = isFF,
                                 WeaponOrSource = expSource,
@@ -478,10 +448,9 @@ namespace EasyRed2HumanAI
 
                     _lastDamageByVictim[victim.Pointer] = new DamageAttribution
                     {
-                        AttackerName = __4 != null ? FormatSoldierIdentity(__4) : (_activeExplosionIsArtillery ? "Artillery Support" : ""),
                         IsSelfInflicted = isSelf,
                         IsFriendlyFire = isFF,
-                        WeaponOrSource = weaponOrSource,
+                        WeaponOrSource = !string.IsNullOrEmpty(weaponOrSource) ? weaponOrSource : (_activeExplosionIsArtillery ? "Artillery / Mortar Barrage" : "Enemy Fire"),
                         HitDetail = hitDetail,
                         DistanceMeters = Mathf.Max(0, distMeters),
                         Timestamp = Time.time
@@ -494,7 +463,7 @@ namespace EasyRed2HumanAI
         [HarmonyPatch(typeof(DeathPanel), nameof(DeathPanel.ShowDeath))]
         public static class DeathPanel_ShowDeath_Patch
         {
-            public static void Postfix(Soldier __0)
+            public static void Postfix(Soldier __0, string __1, bool __2)
             {
                 try
                 {
@@ -502,6 +471,20 @@ namespace EasyRed2HumanAI
                         return;
 
                     DeathPanel dp = DeathPanel.instance;
+
+                    // If the soldier surrendered or is still alive (showDeath == false), do NOT display cause-of-death attribution
+                    if (!__2 || __0.HasSurrended() || __0.IsAlive)
+                    {
+                        _lastDamageByVictim.Remove(__0.Pointer);
+                        ActiveDeathAttributionExpireTime = 0f;
+                        ActiveDeathAttributionText = null;
+
+                        if (dp != null)
+                            ActivateInstantDeathPanel(dp, __0.Pointer);
+
+                        return;
+                    }
+
                     Text yearLabel = dp != null ? dp.text_year : null;
                     string yearLineWithAge = "";
                     int yearFontSize = 38;
@@ -526,8 +509,10 @@ namespace EasyRed2HumanAI
                         yearLineWithAge = FormatYearLineWithAge(baseYearLine);
                     }
 
-                    if (!_lastDamageByVictim.TryGetValue(__0.Pointer, out DamageAttribution attr) ||
-                        Time.time - attr.Timestamp > 120f)
+                    bool hasAttr = _lastDamageByVictim.TryGetValue(__0.Pointer, out DamageAttribution attr);
+                    _lastDamageByVictim.Remove(__0.Pointer);
+
+                    if (!hasAttr || Time.time - attr.Timestamp > 120f)
                     {
                         if (yearLabel != null && !string.IsNullOrEmpty(yearLineWithAge))
                             yearLabel.text = $"<size={yearFontSize}>{yearLineWithAge}</size>";
@@ -541,53 +526,34 @@ namespace EasyRed2HumanAI
                     }
 
                     bool bledOut = (Time.time - attr.Timestamp) > 1.5f;
-                    string actionVerb = bledOut ? "Bled out from wounds by" : "Killed by";
 
                     string prefixTag = "";
-                    string richColor = "#E8E2D0";
-                    string subColor = "#CFC8B8";
+                    string subColor = "#D8D2C2";
                     if (attr.IsSelfInflicted)
                     {
                         prefixTag = "[SELF-INFLICTED] ";
-                        richColor = "#FFB347";
-                        subColor = "#FFD08A";
+                        subColor = "#FFB347";
                     }
                     else if (attr.IsFriendlyFire)
                     {
                         prefixTag = "[FRIENDLY FIRE] ";
-                        richColor = "#FF5555";
-                        subColor = "#FF8888";
+                        subColor = "#FF6666";
                     }
 
-                    string whoLine;
-                    if (attr.IsSelfInflicted)
+                    List<string> detailParts = new List<string>(4);
+                    if (bledOut)
                     {
-                        string ownSource = !string.IsNullOrEmpty(attr.WeaponOrSource) ? attr.WeaponOrSource : "Explosion";
-                        whoLine = $"{prefixTag}Killed by own {ownSource}";
-                    }
-                    else
-                    {
-                        string attacker = !string.IsNullOrEmpty(attr.AttackerName)
-                            ? attr.AttackerName
-                            : (!string.IsNullOrEmpty(attr.WeaponOrSource) ? attr.WeaponOrSource : "Enemy Fire");
-                        whoLine = $"{prefixTag}{actionVerb} {attacker}";
+                        detailParts.Add("Bled out");
                     }
 
-                    whoLine = whoLine.Replace('_', ' ').Trim();
-                    while (whoLine.Contains("  "))
-                        whoLine = whoLine.Replace("  ", " ");
-
-                    List<string> detailParts = new List<string>(3);
-                    if (!attr.IsSelfInflicted && !string.IsNullOrEmpty(attr.WeaponOrSource))
+                    string cleanWep = "";
+                    if (!string.IsNullOrEmpty(attr.WeaponOrSource))
                     {
-                        string cleanWep = attr.WeaponOrSource.Replace('_', ' ').Trim();
+                        cleanWep = attr.WeaponOrSource.Replace('_', ' ').Trim();
                         while (cleanWep.Contains("  "))
                             cleanWep = cleanWep.Replace("  ", " ");
-                        if (!string.IsNullOrEmpty(cleanWep) &&
-                            !whoLine.EndsWith(cleanWep, StringComparison.OrdinalIgnoreCase))
-                        {
+                        if (!string.IsNullOrEmpty(cleanWep))
                             detailParts.Add(cleanWep);
-                        }
                     }
 
                     if (!string.IsNullOrEmpty(attr.HitDetail))
@@ -596,8 +562,7 @@ namespace EasyRed2HumanAI
                         while (cleanHit.Contains("  "))
                             cleanHit = cleanHit.Replace("  ", " ");
                         if (!string.IsNullOrEmpty(cleanHit) &&
-                            !whoLine.EndsWith(cleanHit, StringComparison.OrdinalIgnoreCase) &&
-                            (detailParts.Count == 0 || !string.Equals(detailParts[0], cleanHit, StringComparison.OrdinalIgnoreCase)))
+                            !string.Equals(cleanWep, cleanHit, StringComparison.OrdinalIgnoreCase))
                         {
                             detailParts.Add(cleanHit);
                         }
@@ -608,14 +573,16 @@ namespace EasyRed2HumanAI
                         detailParts.Add($"{attr.DistanceMeters}m");
                     }
 
-                    string howLine = detailParts.Count > 0 ? string.Join("  \u2022  ", detailParts) : "";
+                    string causeLine = detailParts.Count > 0
+                        ? prefixTag + string.Join("  \u2022  ", detailParts)
+                        : (prefixTag + "Killed in Action").Trim();
 
                     bool shownOnNativeDeathPanel = false;
                     if (yearLabel != null)
                     {
-                        yearLabel.text = !string.IsNullOrEmpty(howLine)
-                            ? $"<size={yearFontSize}>{yearLineWithAge}</size>\n<size=27><color={richColor}>{whoLine}</color></size>\n<size=23><color={subColor}>{howLine}</color></size>"
-                            : $"<size={yearFontSize}>{yearLineWithAge}</size>\n<size=27><color={richColor}>{whoLine}</color></size>";
+                        yearLabel.text = !string.IsNullOrEmpty(causeLine)
+                            ? $"<size={yearFontSize}>{yearLineWithAge}</size>\n<size=26><color={subColor}>{causeLine}</color></size>"
+                            : $"<size={yearFontSize}>{yearLineWithAge}</size>";
                         shownOnNativeDeathPanel = true;
                     }
 
@@ -629,9 +596,7 @@ namespace EasyRed2HumanAI
                     }
                     else
                     {
-                        ActiveDeathAttributionText = !string.IsNullOrEmpty(howLine)
-                            ? $"{whoLine}\n{howLine}"
-                            : whoLine;
+                        ActiveDeathAttributionText = causeLine;
                         ActiveDeathAttributionIsFF = attr.IsFriendlyFire;
                         ActiveDeathAttributionIsSelf = attr.IsSelfInflicted;
                         ActiveDeathAttributionStartTime = Time.unscaledTime;

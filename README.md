@@ -174,7 +174,7 @@ Instead of every bot using identical suppression thresholds, peeking rhythms, an
 ### 7. Death Screen Kill Attribution, Quick-Tap Spotting & 64-Char Room Names ([`DeathScreenAndQoLModule.cs`](src/EasyRed2AI/Modules/DeathScreenAndQoLModule.cs))
 
 * **Instant Full-Page Death Screen Obituary (`EnableDeathScreenAttribution`)**:
-  * Bypasses vanilla's slow sequential `Animation` fade-in so `"KILLED IN ACTION"`, the soldier's name, **calculated Soldier Age (`1925 - 1944 (Age 19)`)**, **Killer Rank + Full Name** (`[FRIENDLY FIRE]` / `[SELF-INFLICTED]`), and **Weapon • Hit Location • Distance (`MP40 • Headshot (Helmet) • 42m`)** appear immediately at 100% opacity.
+  * Bypasses vanilla's slow sequential `Animation` fade-in so `"KILLED IN ACTION"`, the soldier's name, **calculated Soldier Age (`1925 - 1944 (Age 19)`)**, and **Cause of Death — Weapon/Vehicle/Artillery • Hit Location • Distance (`MP40 • Headshot (Helmet) • 42m`, plus `[FRIENDLY FIRE]` / `[SELF-INFLICTED]` / `Bled out` indicators)** appear immediately at 100% opacity (while cleanly omitting death attribution when surrendering).
 * **Quick-Tap `Tab` (`OrdersMenu`) Spotting (`EnableQuickTapSpot`)**:
   * Short-pressing your configured Squad Orders keybind (`Tab`) spots in your look direction (`PlayerController.TrySpotInLookDirection`) even as a Squad Leader or Radioman, while holding the key still opens the radial orders wheel.
 * **64-Character Multiplayer Room Names (`EnableExtendedRoomNames`)**:
