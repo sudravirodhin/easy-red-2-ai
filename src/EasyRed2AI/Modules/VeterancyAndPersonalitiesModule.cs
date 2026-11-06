@@ -92,6 +92,8 @@ namespace EasyRed2HumanAI
         public static int StaticGunsStaffedCount;
         public static int SmartApcDismountsCount;
         public static int TankStandoffHoldsCount;
+        public static int BridgeCrossingsAssistedCount;
+        public static int ShellShockSurrendersCount;
 
         private static byte DetermineRoleCategory(Soldier s)
         {

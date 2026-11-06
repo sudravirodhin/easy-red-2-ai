@@ -52,6 +52,7 @@ namespace EasyRed2HumanAI
             SafePatch(typeof(VeteranAndTacticsPatches.SoldierAI_ProcessAiAccuracy_Patch));
             SafePatch(typeof(VeteranAndTacticsPatches.SoldierAI_OnSuppressed_Patch));
             SafePatch(typeof(VeteranAndTacticsPatches.SoldierAI_UpdateMoveDirection_Patch));
+            SafePatch(typeof(VeteranAndTacticsPatches.SoldierAI_GetSpacingFromSquad_Patch));
             SafePatch(typeof(VeteranAndTacticsPatches.SoldierAI_RotateAndFireToward_Patch));
             SafePatch(typeof(VeteranAndTacticsPatches.SoldierAI_MovementRoutine_Patch));
             SafePatch(typeof(VeteranAndTacticsPatches.SquadSoldierLabel_RefreshVisual_Patch));

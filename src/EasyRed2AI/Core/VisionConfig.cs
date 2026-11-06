@@ -76,6 +76,8 @@ namespace EasyRed2HumanAI
         public static ConfigEntry<bool> EnablePointBlankMelee;
         public static ConfigEntry<bool> EnableStrategicDoorDiscipline;
         public static ConfigEntry<bool> EnableCombinedArmsPrioritySupport;
+        public static ConfigEntry<bool> EnableBridgeCrossingDiscipline;
+        public static ConfigEntry<bool> EnableShellShockSurrender;
 
         // 7. Phase 3: Role-Based AI Personalities (3 Archetypes per Infantry & Vehicle Role)
         public static ConfigEntry<bool> EnableRolePersonalities;
@@ -458,6 +460,18 @@ namespace EasyRed2HumanAI
                 "EnableCombinedArmsPrioritySupport",
                 true,
                 "Combined-Arms Priority Support: AI tanks, emplacements/turrets, and CAS aircraft prioritize KNOWN enemy squads and vehicles (Spotted/Marked squads, active Friendly Radio Support Requests, and enemy squads actively engaging friendly infantry) instead of randomly attacking lone targets or orbiting the first objective in the list.");
+
+            EnableBridgeCrossingDiscipline = config.Bind(
+                "6. Tactical Self-Preservation & Muzzle Discipline",
+                "EnableBridgeCrossingDiscipline",
+                true,
+                "Bridge & Narrow Crossing Discipline: prevents vanilla's 5m-35m sideways squad-spacing scatter (SoldierAI.GetSpacingFromSquad) from flinging pathfinding waypoints off bridges into rivers/ravines, and prevents bots on bridges from going Prone, stopping mid-span for overwatch, or nudging laterally off bridge edges.");
+
+            EnableShellShockSurrender = config.Bind(
+                "6. Tactical Self-Preservation & Muzzle Discipline",
+                "EnableShellShockSurrender",
+                true,
+                "Shell-Shocked & Skittish Dynamic Surrender: isolated, heavily suppressed/shell-shocked Skittish ([Cautious] / [Triage]) or green rookie soldiers who are overrun at close range (<= 18m) with no inspiring Squad Leader nearby can dynamically surrender (SurrenderSynched), and can later be liberated by friendly counterattacks.");
 
             // 7. AI Role Personalities (3 Archetypes per Infantry & Vehicle Role)
             EnableRolePersonalities = config.Bind(

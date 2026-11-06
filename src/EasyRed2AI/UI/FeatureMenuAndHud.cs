@@ -70,7 +70,7 @@ namespace EasyRed2HumanAI
                                 $"Drops:{VeteranAndTacticsPatches.SelfPreservationDrops} (Indoor:{VeteranAndTacticsPatches.IndoorPronePreventedCount}) | " +
                                 $"Callouts:{VeteranAndTacticsPatches.LocalCalloutsSharedCount} | Supp:{VeteranAndTacticsPatches.SuppressiveEventsCount} | Bounds:{VeteranAndTacticsPatches.BoundingOverwatchHoldsCount} | " +
                                 $"Garrisons:{VeteranAndTacticsPatches.MacroGarrisonsAssignedCount} | Emplace:{VeteranAndTacticsPatches.StaticGunsStaffedCount} | APC:{VeteranAndTacticsPatches.SmartApcDismountsCount} | TankHold:{VeteranAndTacticsPatches.TankStandoffHoldsCount} | " +
-                                $"CombArms:{VeteranAndTacticsPatches.CombinedArmsPriorityAssistsCount} | WoodPen:{VeteranAndTacticsPatches.ThinCoverPenetrationsCount} | PlaneAudio:{VeteranAndTacticsPatches.PlaneAudioLoopsDesyncedCount} | FFSaved:{VeteranAndTacticsPatches.FriendlyFirePrevented}",
+                                $"CombArms:{VeteranAndTacticsPatches.CombinedArmsPriorityAssistsCount} | Bridges:{VeteranAndTacticsPatches.BridgeCrossingsAssistedCount} | Surr:{VeteranAndTacticsPatches.ShellShockSurrendersCount}/{VeteranAndTacticsPatches.ComradesLiberated} | FFSaved:{VeteranAndTacticsPatches.FriendlyFirePrevented}",
                                 6.5f);
                         }
                     }
@@ -85,6 +85,7 @@ namespace EasyRed2HumanAI
                             $"Bounds:{VeteranAndTacticsPatches.BoundingOverwatchHoldsCount} | Garrisons:{VeteranAndTacticsPatches.MacroGarrisonsAssignedCount} | " +
                             $"Emplace:{VeteranAndTacticsPatches.StaticGunsStaffedCount} | APC:{VeteranAndTacticsPatches.SmartApcDismountsCount} | " +
                             $"TankHold:{VeteranAndTacticsPatches.TankStandoffHoldsCount} | CombArms:{VeteranAndTacticsPatches.CombinedArmsPriorityAssistsCount} | " +
+                            $"Bridges:{VeteranAndTacticsPatches.BridgeCrossingsAssistedCount} | Surr:{VeteranAndTacticsPatches.ShellShockSurrendersCount} (Lib:{VeteranAndTacticsPatches.ComradesLiberated}) | " +
                             $"WoodPen:{VeteranAndTacticsPatches.ThinCoverPenetrationsCount} | PlaneAudio:{VeteranAndTacticsPatches.PlaneAudioLoopsDesyncedCount} | Chutes:{VeteranAndTacticsPatches.ParachutesDriftedCount} | " +
                             $"Doors:{VeteranAndTacticsPatches.DoorsStrategicallyClosedCount} | Bipods:{VeteranAndTacticsPatches.BipodsDeployed} | WallBlk:{VeteranAndTacticsPatches.WallsBlocked} | " +
                             $"Melee:{VeteranAndTacticsPatches.MeleeAttacksTriggered} | TankBlk:{VeteranAndTacticsPatches.UselessTankFirePrevented} (Crew:{VeteranAndTacticsPatches.ExposedCrewTargeted}) | " +
@@ -197,7 +198,7 @@ namespace EasyRed2HumanAI
             private static void DrawConfigMenu()
             {
                 float panelW = 780f;
-                float panelH = 758f;
+                float panelH = 796f;
                 float panelX = (Screen.width - panelW) * 0.5f;
                 float panelY = (Screen.height - panelH) * 0.5f;
 
@@ -284,6 +285,7 @@ namespace EasyRed2HumanAI
                     VisionConfig.EnableSelfPreservationStance,
                     VisionConfig.EnableIndoorCeilingPronePrevention,
                     VisionConfig.EnableStrategicDoorDiscipline,
+                    VisionConfig.EnableBridgeCrossingDiscipline,
                     VisionConfig.EnableBoundingOverwatch,
                     VisionConfig.EnforceStandingWhenOutOfCombat,
                     VisionConfig.NeverShootStandingInOpen,
@@ -296,10 +298,12 @@ namespace EasyRed2HumanAI
                     VisionConfig.EnableFriendlyFireAvoidance,
                     VisionConfig.EnableAntiStacking,
                     VisionConfig.EnableWallVaulting,
+                    VisionConfig.EnableShellShockSurrender,
                     VisionConfig.EnableComradeLiberation);
                 DrawToggleButton(colRightX, ref yR, colW, rowH, "Self-Preservation Stances", VisionConfig.EnableSelfPreservationStance);
                 DrawToggleButton(colRightX, ref yR, colW, rowH, "Indoor Ceiling Prone Prevention", VisionConfig.EnableIndoorCeilingPronePrevention);
                 DrawToggleButton(colRightX, ref yR, colW, rowH, "Strategic Door & Shutter Discipline", VisionConfig.EnableStrategicDoorDiscipline);
+                DrawToggleButton(colRightX, ref yR, colW, rowH, "Bridge & Narrow Crossing Discipline", VisionConfig.EnableBridgeCrossingDiscipline);
                 DrawToggleButton(colRightX, ref yR, colW, rowH, "Attacker Bounding Overwatch", VisionConfig.EnableBoundingOverwatch);
                 DrawToggleButton(colRightX, ref yR, colW, rowH, "Enforce Standing Out of Combat", VisionConfig.EnforceStandingWhenOutOfCombat);
                 DrawToggleButton(colRightX, ref yR, colW, rowH, "Never Shoot Standing in Open", VisionConfig.NeverShootStandingInOpen);
@@ -312,6 +316,7 @@ namespace EasyRed2HumanAI
                 DrawToggleButton(colRightX, ref yR, colW, rowH, "Friendly Fire Avoidance", VisionConfig.EnableFriendlyFireAvoidance);
                 DrawToggleButton(colRightX, ref yR, colW, rowH, "Anti-Stacking Personal Spacing", VisionConfig.EnableAntiStacking);
                 DrawToggleButton(colRightX, ref yR, colW, rowH, "Wall & Fence Vaulting", VisionConfig.EnableWallVaulting);
+                DrawToggleButton(colRightX, ref yR, colW, rowH, "Shell-Shocked & Skittish Surrender", VisionConfig.EnableShellShockSurrender);
                 DrawToggleButton(colRightX, ref yR, colW, rowH, "Surrendered Comrade Liberation", VisionConfig.EnableComradeLiberation);
 
                 yR += 4f;
@@ -657,6 +662,8 @@ namespace EasyRed2HumanAI
             AiCore.PruneDict(_nextSuppressiveBurstCountTime, alivePtrs);
             AiCore.PruneDict(_nextIndoorCeilingCountTime, alivePtrs);
             AiCore.PruneDict(_nextBoundingHoldCountTime, alivePtrs);
+            AiCore.PruneDict(_nextBridgeAssistCountTime, alivePtrs);
+            AiCore.PruneDict(_nextSurrenderCheckTime, alivePtrs);
             AiCore.PruneDict(_nextBotDoorCheckTime, alivePtrs);
             AiCore.PruneDict(_assignedEmplacementUntil, alivePtrs);
             AiCore.PruneDict(_lastDamageByVictim, alivePtrs);

@@ -17,6 +17,7 @@ namespace EasyRed2HumanAI
         private static float _nextAllowedBotRpcTime;
         private static readonly Dictionary<IntPtr, Vehicle> _turretVehicleCache = new Dictionary<IntPtr, Vehicle>(64);
         private static readonly Dictionary<long, bool> _ceilingCache = new Dictionary<long, bool>(512);
+        private static readonly Dictionary<long, bool> _bridgeCellCache = new Dictionary<long, bool>(512);
         private static readonly Dictionary<string, float> _debugLogCooldowns = new Dictionary<string, float>(32);
 
         public static void LogDebug(string category, string message, float minInterval = 2.0f)
@@ -145,6 +146,58 @@ namespace EasyRed2HumanAI
             return hasCeiling;
         }
 
+        public static bool IsOnBridgeOrNarrowCrossing(Vector3 feetPos)
+        {
+            // Quantize to 2m x 1m x 2m spatial grid cell so bridge/crossing checks are O(1) after first probe
+            int gx = Mathf.RoundToInt(feetPos.x * 0.5f) & 0xFFFF;
+            int gy = Mathf.RoundToInt(feetPos.y) & 0xFFFF;
+            int gz = Mathf.RoundToInt(feetPos.z * 0.5f) & 0xFFFF;
+            long cellKey = ((long)gx << 32) | ((long)gy << 16) | (uint)gz;
+
+            if (_bridgeCellCache.TryGetValue(cellKey, out bool cachedBridge))
+                return cachedBridge;
+
+            bool isBridge = false;
+            if (!HasLowCeilingOverhead(feetPos, 3.8f))
+            {
+                int mask = GetSolidEnvironmentMask();
+                Vector3 baseOrigin = feetPos + Vector3.up * 0.85f;
+                // A 2.65m downward probe from +0.85m means any ground > 1.80m below feetPos.y is a drop-off
+                const float maxDropProbe = 2.65f;
+
+                bool dropPosX = !Physics.Raycast(baseOrigin + new Vector3(3.8f, 0f, 0f), Vector3.down, maxDropProbe, mask, QueryTriggerInteraction.Ignore) ||
+                                !Physics.Raycast(baseOrigin + new Vector3(6.2f, 0f, 0f), Vector3.down, maxDropProbe, mask, QueryTriggerInteraction.Ignore);
+                bool dropNegX = false;
+                if (dropPosX)
+                {
+                    dropNegX = !Physics.Raycast(baseOrigin + new Vector3(-3.8f, 0f, 0f), Vector3.down, maxDropProbe, mask, QueryTriggerInteraction.Ignore) ||
+                               !Physics.Raycast(baseOrigin + new Vector3(-6.2f, 0f, 0f), Vector3.down, maxDropProbe, mask, QueryTriggerInteraction.Ignore);
+                }
+
+                if (dropPosX && dropNegX)
+                {
+                    isBridge = true;
+                }
+                else
+                {
+                    bool dropPosZ = !Physics.Raycast(baseOrigin + new Vector3(0f, 0f, 3.8f), Vector3.down, maxDropProbe, mask, QueryTriggerInteraction.Ignore) ||
+                                    !Physics.Raycast(baseOrigin + new Vector3(0f, 0f, 6.2f), Vector3.down, maxDropProbe, mask, QueryTriggerInteraction.Ignore);
+                    if (dropPosZ)
+                    {
+                        bool dropNegZ = !Physics.Raycast(baseOrigin + new Vector3(0f, 0f, -3.8f), Vector3.down, maxDropProbe, mask, QueryTriggerInteraction.Ignore) ||
+                                        !Physics.Raycast(baseOrigin + new Vector3(0f, 0f, -6.2f), Vector3.down, maxDropProbe, mask, QueryTriggerInteraction.Ignore);
+                        if (dropNegZ)
+                            isBridge = true;
+                    }
+                }
+            }
+
+            if (_bridgeCellCache.Count > 2048)
+                _bridgeCellCache.Clear();
+            _bridgeCellCache[cellKey] = isBridge;
+            return isBridge;
+        }
+
         public static float GetBarrelHeightForPose(SoldierPose pose)
         {
             switch (pose)
@@ -209,6 +262,7 @@ namespace EasyRed2HumanAI
         {
             _turretVehicleCache.Clear();
             _ceilingCache.Clear();
+            _bridgeCellCache.Clear();
         }
     }
 }
