@@ -668,7 +668,7 @@ namespace EasyRed2HumanAI
             }
 
             _deathPanelShowStartUnscaledTime = Time.unscaledTime;
-            _deathPanelHoldUntilUnscaledTime = Time.unscaledTime + 3.85f;
+            _deathPanelHoldUntilUnscaledTime = Time.unscaledTime + 5.5f;
             _deathPanelCleanupUntilUnscaledTime = Time.unscaledTime + 15.0f;
             _deathPanelVictimPtr = victimPtr;
 
@@ -749,18 +749,18 @@ namespace EasyRed2HumanAI
             {
                 float elapsed = now - _deathPanelShowStartUnscaledTime;
 
-                if (PlayerGUI.IsSelectingSquad() ||
-                    RespawnPanel.InRespawningView ||
-                    (elapsed > 0.35f && DeathPanel.IsSkipping()))
-                {
-                    _deathPanelHoldUntilUnscaledTime = now;
-                }
-                else if (elapsed > 0.45f)
+                if (elapsed > 0.35f)
                 {
                     Soldier cur = Soldier.CurrentControlledSoldierOrNull();
                     if (cur != null && cur.IsAlive && cur.Pointer != _deathPanelVictimPtr)
                     {
+                        // Player has taken control of a new living soldier -> dismiss immediately
                         _deathPanelHoldUntilUnscaledTime = now;
+                    }
+                    else if (elapsed > 1.5f && DeathPanel.IsSkipping())
+                    {
+                        // Player explicitly held Skip after 1.5s -> fade out smoothly
+                        _deathPanelHoldUntilUnscaledTime = Mathf.Min(_deathPanelHoldUntilUnscaledTime, now + 0.35f);
                     }
                 }
             }
@@ -768,7 +768,7 @@ namespace EasyRed2HumanAI
             if (now < _deathPanelHoldUntilUnscaledTime)
             {
                 float remaining = _deathPanelHoldUntilUnscaledTime - now;
-                float alpha = remaining < 0.30f ? Mathf.Clamp01(remaining / 0.30f) : 1.0f;
+                float alpha = remaining < 0.45f ? Mathf.Clamp01(remaining / 0.45f) : 1.0f;
                 ApplyDeathPanelAlpha(dp, alpha);
             }
             else
