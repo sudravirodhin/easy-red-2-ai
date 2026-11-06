@@ -70,7 +70,7 @@ namespace EasyRed2HumanAI
                                 $"Drops:{VeteranAndTacticsPatches.SelfPreservationDrops} (Indoor:{VeteranAndTacticsPatches.IndoorPronePreventedCount}) | " +
                                 $"Callouts:{VeteranAndTacticsPatches.LocalCalloutsSharedCount} | Supp:{VeteranAndTacticsPatches.SuppressiveEventsCount} | Bounds:{VeteranAndTacticsPatches.BoundingOverwatchHoldsCount} | " +
                                 $"Garrisons:{VeteranAndTacticsPatches.MacroGarrisonsAssignedCount} | Emplace:{VeteranAndTacticsPatches.StaticGunsStaffedCount} | APC:{VeteranAndTacticsPatches.SmartApcDismountsCount} | TankHold:{VeteranAndTacticsPatches.TankStandoffHoldsCount} | " +
-                                $"WoodPen:{VeteranAndTacticsPatches.ThinCoverPenetrationsCount} | PlaneAudio:{VeteranAndTacticsPatches.PlaneAudioLoopsDesyncedCount} | FFSaved:{VeteranAndTacticsPatches.FriendlyFirePrevented}",
+                                $"CombArms:{VeteranAndTacticsPatches.CombinedArmsPriorityAssistsCount} | WoodPen:{VeteranAndTacticsPatches.ThinCoverPenetrationsCount} | PlaneAudio:{VeteranAndTacticsPatches.PlaneAudioLoopsDesyncedCount} | FFSaved:{VeteranAndTacticsPatches.FriendlyFirePrevented}",
                                 6.5f);
                         }
                     }
@@ -84,8 +84,8 @@ namespace EasyRed2HumanAI
                             $"Callouts:{VeteranAndTacticsPatches.LocalCalloutsSharedCount} | Supp:{VeteranAndTacticsPatches.SuppressiveEventsCount} | " +
                             $"Bounds:{VeteranAndTacticsPatches.BoundingOverwatchHoldsCount} | Garrisons:{VeteranAndTacticsPatches.MacroGarrisonsAssignedCount} | " +
                             $"Emplace:{VeteranAndTacticsPatches.StaticGunsStaffedCount} | APC:{VeteranAndTacticsPatches.SmartApcDismountsCount} | " +
-                            $"TankHold:{VeteranAndTacticsPatches.TankStandoffHoldsCount} | WoodPen:{VeteranAndTacticsPatches.ThinCoverPenetrationsCount} | " +
-                            $"PlaneAudio:{VeteranAndTacticsPatches.PlaneAudioLoopsDesyncedCount} | Chutes:{VeteranAndTacticsPatches.ParachutesDriftedCount} | " +
+                            $"TankHold:{VeteranAndTacticsPatches.TankStandoffHoldsCount} | CombArms:{VeteranAndTacticsPatches.CombinedArmsPriorityAssistsCount} | " +
+                            $"WoodPen:{VeteranAndTacticsPatches.ThinCoverPenetrationsCount} | PlaneAudio:{VeteranAndTacticsPatches.PlaneAudioLoopsDesyncedCount} | Chutes:{VeteranAndTacticsPatches.ParachutesDriftedCount} | " +
                             $"Doors:{VeteranAndTacticsPatches.DoorsStrategicallyClosedCount} | Bipods:{VeteranAndTacticsPatches.BipodsDeployed} | WallBlk:{VeteranAndTacticsPatches.WallsBlocked} | " +
                             $"Melee:{VeteranAndTacticsPatches.MeleeAttacksTriggered} | TankBlk:{VeteranAndTacticsPatches.UselessTankFirePrevented} (Crew:{VeteranAndTacticsPatches.ExposedCrewTargeted}) | " +
                             $"FFSaved:{VeteranAndTacticsPatches.FriendlyFirePrevented} | Repairs:{VeteranAndTacticsPatches.ShelteredRepairsCount}",
@@ -241,12 +241,14 @@ namespace EasyRed2HumanAI
                 DrawSectionHeaderWithBundle(colLeftX, ref yL, colW, "Bundle 3: Macro, Emplacements & Armor",
                     VisionConfig.EnableMacroObjectiveDirector,
                     VisionConfig.EnableProactiveEmplacementStaffing,
+                    VisionConfig.EnableCombinedArmsPrioritySupport,
                     VisionConfig.EnableSmartApcDismount,
                     VisionConfig.EnableTankStandoffAndReverse,
                     VisionConfig.PreventSmallArmsFireAtTanks,
                     VisionConfig.EnableSmartTankCrewRepair);
                 DrawToggleButton(colLeftX, ref yL, colW, rowH, "Objective Garrison & Counterattack Director", VisionConfig.EnableMacroObjectiveDirector);
                 DrawToggleButton(colLeftX, ref yL, colW, rowH, "Proactive Static Gun & Halftrack Staffing", VisionConfig.EnableProactiveEmplacementStaffing);
+                DrawToggleButton(colLeftX, ref yL, colW, rowH, "Combined-Arms Known Target Priority", VisionConfig.EnableCombinedArmsPrioritySupport);
                 DrawToggleButton(colLeftX, ref yL, colW, rowH, "Smart APC / Transport Dismount Under Fire", VisionConfig.EnableSmartApcDismount);
                 DrawToggleButton(colLeftX, ref yL, colW, rowH, "Tank Standoff & Reverse Discipline", VisionConfig.EnableTankStandoffAndReverse);
                 DrawToggleButton(colLeftX, ref yL, colW, rowH, "Stop Small-Arms Fire at Tanks / Aim Crew", VisionConfig.PreventSmallArmsFireAtTanks);
@@ -669,6 +671,7 @@ namespace EasyRed2HumanAI
                 AiCore.ClearSpatialCaches();
                 ClearBallisticsCaches();
                 ClearDoorCaches();
+                ClearCombinedArmsCaches();
             }
 
             if (_repairTaskStartTime.Count > 0)

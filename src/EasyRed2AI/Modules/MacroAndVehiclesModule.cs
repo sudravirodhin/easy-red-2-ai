@@ -579,6 +579,810 @@ namespace EasyRed2HumanAI
         internal static readonly Dictionary<IntPtr, float> _nextApcCheckTime = new Dictionary<IntPtr, float>(64);
         internal static readonly Dictionary<IntPtr, float> _nextApcDismountCooldown = new Dictionary<IntPtr, float>(64);
         internal static readonly Dictionary<IntPtr, float> _nextTankStandoffCountTime = new Dictionary<IntPtr, float>(64);
+        internal static readonly Dictionary<IntPtr, float> _nextVehicleSupportSteerTime = new Dictionary<IntPtr, float>(64);
+        internal static readonly Dictionary<IntPtr, float> _nextPlaneOrbitSteerTime = new Dictionary<IntPtr, float>(32);
+        internal static readonly Dictionary<IntPtr, float> _nextCombinedArmsAssistCountTime = new Dictionary<IntPtr, float>(64);
+        public static int CombinedArmsPriorityAssistsCount;
+
+        private struct ActiveRadioSupportInfo
+        {
+            public string Faction;
+            public Vector3 Position;
+            public RadioRequest RequestType;
+        }
+
+        private struct KnownEnemyCluster
+        {
+            public string Faction;
+            public Vector3 Position;
+            public float BasePriority;
+            public bool IsMarkedOrPinPoint;
+            public bool IsHalfMarked;
+            public bool NearRadioRequest;
+            public bool IsEngagingFriendlies;
+            public Spottable VehicleTarget;
+            public Spottable PrimarySoldier;
+            public Spottable SecondarySoldier;
+        }
+
+        private static float _nextCombinedArmsIntelRefreshTime;
+        private static readonly List<ActiveRadioSupportInfo> _activeRadioRequests = new List<ActiveRadioSupportInfo>(16);
+        private static readonly List<KnownEnemyCluster> _knownEnemyClusters = new List<KnownEnemyCluster>(32);
+
+        public static void ClearCombinedArmsCaches()
+        {
+            _activeRadioRequests.Clear();
+            _knownEnemyClusters.Clear();
+            _nextCombinedArmsIntelRefreshTime = 0f;
+            if (_nextVehicleSupportSteerTime.Count > 128)
+                _nextVehicleSupportSteerTime.Clear();
+            if (_nextPlaneOrbitSteerTime.Count > 64)
+                _nextPlaneOrbitSteerTime.Clear();
+            if (_nextCombinedArmsAssistCountTime.Count > 128)
+                _nextCombinedArmsAssistCountTime.Clear();
+        }
+
+        private static void RecordCombinedArmsAssist(IntPtr unitPtr, float now, string tag, string msg)
+        {
+            if (!_nextCombinedArmsAssistCountTime.TryGetValue(unitPtr, out float nextCount) || now >= nextCount)
+            {
+                _nextCombinedArmsAssistCountTime[unitPtr] = now + 6.0f;
+                CombinedArmsPriorityAssistsCount++;
+                if (VisionConfig.DebugLogging.Value)
+                {
+                    AiCore.LogDebug(tag, msg);
+                }
+            }
+        }
+
+        private static string GetVehicleCrewFaction(Vehicle veh, Turret turret = null)
+        {
+            if (veh == null)
+                return null;
+
+            if (turret != null)
+            {
+                Soldier gunner = turret.GetSittedUnit(veh);
+                if (gunner != null && !string.IsNullOrEmpty(gunner.faction))
+                    return gunner.faction;
+            }
+
+            string vf = veh.GetVehicleFaction();
+            if (!string.IsNullOrEmpty(vf))
+                return vf;
+
+            var seats = veh.seats;
+            if (seats != null)
+            {
+                for (int i = 0; i < seats.Length; i++)
+                {
+                    Seats s = seats[i];
+                    if (s != null && s.unitSet != null && !string.IsNullOrEmpty(s.unitSet.faction))
+                        return s.unitSet.faction;
+                }
+            }
+
+            return null;
+        }
+
+        private static void RefreshCombinedArmsIntelIfNeeded()
+        {
+            float now = Time.time;
+            if (now < _nextCombinedArmsIntelRefreshTime)
+                return;
+
+            _nextCombinedArmsIntelRefreshTime = now + 1.0f;
+            _activeRadioRequests.Clear();
+            _knownEnemyClusters.Clear();
+
+            var allSquads = Squad.AllSquads;
+            if (allSquads == null || allSquads.Count == 0)
+                return;
+
+            // Pass 1: Collect active confirmed offensive radio support requests
+            foreach (var kvp in allSquads)
+            {
+                Squad sq = kvp.Value;
+                if (sq == null || sq.Pointer == IntPtr.Zero)
+                    continue;
+
+                Soldier leader = sq.Leader;
+                if (leader == null || !leader.IsAlive || string.IsNullOrEmpty(leader.faction))
+                    continue;
+
+                if (sq.RadioRequestActiveAndConfirmed())
+                {
+                    RadioRequest reqType = sq.radioRequest;
+                    if (reqType == RadioRequest.tankSupport || sq.RadioRequestIsExplosiveArtillery)
+                    {
+                        _activeRadioRequests.Add(new ActiveRadioSupportInfo
+                        {
+                            Faction = leader.faction,
+                            Position = sq.radioRequestPosition,
+                            RequestType = reqType
+                        });
+                        if (_activeRadioRequests.Count >= 16)
+                            break;
+                    }
+                }
+            }
+
+            // Pass 2: Collect KNOWN enemy squads & combat vehicles (Marked, Radio-Requested, or Actively Engaging Friendlies)
+            foreach (var kvp in allSquads)
+            {
+                Squad sq = kvp.Value;
+                if (sq == null || sq.Pointer == IntPtr.Zero || sq.units == null)
+                    continue;
+
+                var units = sq.units;
+                int uCount = units.Count;
+                if (uCount == 0)
+                    continue;
+
+                Soldier refSoldier = sq.Leader;
+                if (refSoldier == null || !refSoldier.IsAlive)
+                {
+                    refSoldier = null;
+                    for (int i = 0; i < uCount; i++)
+                    {
+                        Soldier u = units[i];
+                        if (u != null && u.IsAlive)
+                        {
+                            refSoldier = u;
+                            break;
+                        }
+                    }
+                }
+
+                if (refSoldier == null || refSoldier.transform == null || string.IsNullOrEmpty(refSoldier.faction))
+                    continue;
+
+                Vehicle mountedVeh = refSoldier.IsOnVehicle() ? refSoldier.GetCurrentVehicle() : null;
+                if (mountedVeh != null && mountedVeh.IsAirVehicle())
+                    continue;
+
+                string sqFaction = refSoldier.faction;
+                Vector3 sqPos = refSoldier.transform.position;
+
+                bool isPinPoint = sq.isMarkedPinPoint;
+                bool isMarked = sq.isMarked || isPinPoint;
+                bool isHalfMarked = sq.isHalfMarked;
+                bool isAware = sq.IsEnemyAwareOfThisSquad || refSoldier.IsSpotted;
+
+                bool nearRadio = false;
+                RadioRequest matchedRadioType = RadioRequest.waiting;
+                for (int r = 0; r < _activeRadioRequests.Count; r++)
+                {
+                    ActiveRadioSupportInfo req = _activeRadioRequests[r];
+                    if (req.Faction == sqFaction)
+                        continue;
+
+                    if ((req.Position - sqPos).sqrMagnitude <= 85.0f * 85.0f)
+                    {
+                        nearRadio = true;
+                        matchedRadioType = req.RequestType;
+                        break;
+                    }
+                }
+
+                Soldier primaryFoot = null;
+                Soldier secondaryFoot = null;
+                bool anyUnitSpottedOrFiring = false;
+                int aliveCount = 0;
+
+                for (int i = 0; i < uCount; i++)
+                {
+                    Soldier u = units[i];
+                    if (u == null || !u.IsAlive || u.transform == null)
+                        continue;
+
+                    aliveCount++;
+
+                    if (u.IsSpotted || VisionPatches.HasFiredRecently(u, 3.5f))
+                        anyUnitSpottedOrFiring = true;
+
+                    if (!u.IsOnVehicle())
+                    {
+                        if (primaryFoot == null)
+                        {
+                            primaryFoot = u;
+                        }
+                        else if (secondaryFoot == null)
+                        {
+                            secondaryFoot = u;
+                        }
+                        else if (u.hasMg || u.isAtUnit || u.m_pose == SoldierPose.Idle)
+                        {
+                            primaryFoot = u;
+                        }
+                    }
+                }
+
+                if (!isMarked && !isHalfMarked && !isAware && !nearRadio && !anyUnitSpottedOrFiring)
+                    continue;
+
+                float priority = Mathf.Min(aliveCount * 2.5f, 15.0f);
+                if (isPinPoint)
+                    priority += 55.0f;
+                else if (isMarked)
+                    priority += 45.0f;
+                else if (isHalfMarked)
+                    priority += 28.0f;
+
+                if (nearRadio)
+                {
+                    priority += 50.0f;
+                    if (matchedRadioType == RadioRequest.tankSupport || matchedRadioType == RadioRequest.artilleryAPHE)
+                        priority += 15.0f;
+                }
+
+                if (isAware)
+                    priority += 24.0f;
+                if (anyUnitSpottedOrFiring)
+                    priority += 10.0f;
+
+                Spottable vehSpottable = null;
+                if (mountedVeh != null && mountedVeh.CanFight() && !mountedVeh.IsAirVehicle())
+                {
+                    vehSpottable = mountedVeh.Cast<Spottable>();
+                    priority += mountedVeh.GetMainTurret(false) == null ? 12.0f : 32.0f;
+                }
+
+                Soldier firstSoldier = primaryFoot != null ? primaryFoot : refSoldier;
+                Spottable firstSpottable = firstSoldier != null ? firstSoldier.Cast<Spottable>() : null;
+                Spottable secondSpottable = secondaryFoot != null ? secondaryFoot.Cast<Spottable>() : null;
+
+                _knownEnemyClusters.Add(new KnownEnemyCluster
+                {
+                    Faction = sqFaction,
+                    Position = firstSoldier != null && firstSoldier.transform != null ? firstSoldier.transform.position : sqPos,
+                    BasePriority = priority,
+                    IsMarkedOrPinPoint = isMarked,
+                    IsHalfMarked = isHalfMarked,
+                    NearRadioRequest = nearRadio,
+                    IsEngagingFriendlies = isAware || anyUnitSpottedOrFiring,
+                    VehicleTarget = vehSpottable,
+                    PrimarySoldier = firstSpottable,
+                    SecondarySoldier = secondSpottable
+                });
+
+                if (_knownEnemyClusters.Count >= 32)
+                    break;
+            }
+        }
+
+        private static float EvaluateExistingTargetPriority(Spottable target, string myFaction, Vector3 originPos, bool hasHeavyGun)
+        {
+            if (target == null || target.Pointer == IntPtr.Zero)
+                return -999f;
+
+            Vector3 targetPos = target.GetCenterOfUnit();
+            float dist = Vector3.Distance(originPos, targetPos);
+            float score = -(dist * 0.12f);
+
+            if (target.IsWheeledVehicleOrTank())
+            {
+                score += hasHeavyGun ? 52.0f : 24.0f;
+                Vehicle v = target.TryCast<Vehicle>();
+                if (v != null)
+                {
+                    Squad vSq = v.GetSquadInside();
+                    if (vSq != null)
+                    {
+                        if (vSq.isMarkedPinPoint) score += 55.0f;
+                        else if (vSq.isMarked) score += 45.0f;
+                        else if (vSq.isHalfMarked) score += 28.0f;
+                        if (vSq.IsEnemyAwareOfThisSquad) score += 20.0f;
+                    }
+                }
+            }
+            else
+            {
+                score += 10.0f;
+                Soldier s = target.TryCast<Soldier>();
+                if (s != null && s.joinedSquad != null)
+                {
+                    Squad sq = s.joinedSquad;
+                    if (sq.isMarkedPinPoint) score += 55.0f;
+                    else if (sq.isMarked) score += 45.0f;
+                    else if (sq.isHalfMarked) score += 28.0f;
+                    if (sq.IsEnemyAwareOfThisSquad) score += 24.0f;
+                }
+            }
+
+            for (int r = 0; r < _activeRadioRequests.Count; r++)
+            {
+                ActiveRadioSupportInfo req = _activeRadioRequests[r];
+                if (req.Faction == myFaction && (req.Position - targetPos).sqrMagnitude <= 85.0f * 85.0f)
+                {
+                    score += 50.0f;
+                    break;
+                }
+            }
+
+            return score;
+        }
+
+        public static void TryPrioritizeKnownTargetForTurret(TurretAI turretAi, Vehicle veh)
+        {
+            if (turretAi == null || turretAi.turret == null || veh == null || veh.Pointer == IntPtr.Zero)
+                return;
+
+            if (!veh.CanFight() || veh.IsAirVehicle() || veh.PlayerIsInside())
+                return;
+
+            Turret turret = turretAi.turret;
+            Soldier gunner = turret.GetSittedUnit(veh);
+            if (gunner != null && gunner.IsPlayer())
+                return;
+
+            string myFaction = GetVehicleCrewFaction(veh, turret);
+            if (string.IsNullOrEmpty(myFaction))
+                return;
+
+            Vector3 firePos = turret.GetFirePos();
+            Spottable curTarget = turretAi.CurrentVisibleTarget;
+
+            if (curTarget != null && curTarget.Pointer != IntPtr.Zero)
+            {
+                if (curTarget.IsAirVehicle())
+                    return;
+
+                float curDist = Vector3.Distance(firePos, curTarget.GetCenterOfUnit());
+                // Never override point-blank self-defense
+                if (curDist < 32.0f)
+                    return;
+
+                // Never distract from an active close/mid-range duel against an armed enemy vehicle
+                if (curTarget.IsWheeledVehicleOrTank() && curDist < 130.0f)
+                {
+                    Vehicle curVeh = curTarget.TryCast<Vehicle>();
+                    if (curVeh != null && curVeh.GetMainTurret(false) != null)
+                        return;
+                }
+            }
+
+            RefreshCombinedArmsIntelIfNeeded();
+
+            turret.CheckBullets(out bool hasHe, out bool hasAp, out bool hasFire, out _);
+            float caliber = turret.GetCaliber();
+            bool hasHeavyGun = hasHe || hasAp || caliber >= 20.0f;
+            bool canDamageLightVehicles = hasHeavyGun || hasFire || caliber >= 12.0f;
+
+            float curScore = curTarget != null
+                ? EvaluateExistingTargetPriority(curTarget, myFaction, firePos, hasHeavyGun)
+                : -999f;
+
+            float bulletSpeed = turret.GetBulletSpeed();
+            float bulletGrav = turret.GetBulletGravity();
+
+            Spottable bestCandidate = null;
+            float bestScore = curScore + 18.0f;
+            float bestAngleAdj = 0f;
+
+            int clusterCount = _knownEnemyClusters.Count;
+            for (int i = 0; i < clusterCount; i++)
+            {
+                KnownEnemyCluster cluster = _knownEnemyClusters[i];
+                if (cluster.Faction == myFaction)
+                    continue;
+
+                for (int pass = 0; pass < 3; pass++)
+                {
+                    Spottable cand = null;
+                    bool isVehCand = false;
+                    if (pass == 0)
+                    {
+                        if (!canDamageLightVehicles || cluster.VehicleTarget == null)
+                            continue;
+                        cand = cluster.VehicleTarget;
+                        isVehCand = true;
+                    }
+                    else if (pass == 1)
+                    {
+                        cand = cluster.PrimarySoldier;
+                    }
+                    else
+                    {
+                        cand = cluster.SecondarySoldier;
+                    }
+
+                    if (cand == null || cand.Pointer == IntPtr.Zero)
+                        continue;
+
+                    Vector3 candPos = cand.GetCenterOfUnit();
+                    Vector3 toCand = candPos - firePos;
+                    float dist = toCand.magnitude;
+                    float maxDist = isVehCand ? 550.0f : 320.0f;
+                    if (dist < 8.0f || dist > maxDist)
+                        continue;
+
+                    float candScore = cluster.BasePriority + (isVehCand && hasHeavyGun ? 35.0f : 0f) - (dist * 0.12f);
+                    if (candScore <= bestScore)
+                        continue;
+
+                    if (!turret.CanShootInDirection(toCand / dist, 1.0f))
+                        continue;
+
+                    float angleAdj = Corvostudio.Weapons.BulletInstance.CalculateTrajectory(dist, bulletSpeed, bulletGrav, out bool canReach);
+                    if (!canReach)
+                        continue;
+
+                    if (!turretAi.CanSee(cand))
+                        continue;
+
+                    bestScore = candScore;
+                    bestCandidate = cand;
+                    bestAngleAdj = angleAdj;
+                    break; // Found a valid visible target in this cluster
+                }
+            }
+
+            if (bestCandidate != null)
+            {
+                if (curTarget == null || bestCandidate.Pointer != curTarget.Pointer)
+                {
+                    turretAi.CurrentVisibleTarget = bestCandidate;
+                    turretAi.supportedSquad = null;
+                    turretAi.targetAngleAdjust = bestAngleAdj;
+                    turretAi.targetInWeaponRange = true;
+                    turret.SelectBestAmmo(bestCandidate);
+                    RecordCombinedArmsAssist(
+                        veh.Pointer,
+                        Time.time,
+                        "CombArmsTurret",
+                        $"{myFaction} turret prioritized known/marked enemy squad target (score:{bestScore:F0}).");
+                }
+                return;
+            }
+
+            // Fix vanilla RefreshTargets quirk (0x180832b3e): allow HE turrets to answer friendly radio support
+            // requests even if a low-priority unmarked lone infantryman was spotted far away.
+            if (hasHe && curTarget != null && curScore < 18.0f && !turretAi.HasRadioSupportRequest)
+            {
+                turretAi.FindBestArtilleryRequest();
+                if (turretAi.HasRadioSupportRequest)
+                {
+                    Vector3 radioPos = turretAi.RadioRequestTargetPosition;
+                    float rDist = Vector3.Distance(turret.transform.position, radioPos);
+                    float rAngle = Corvostudio.Weapons.BulletInstance.CalculateTrajectory(rDist, bulletSpeed, bulletGrav, out bool rCanReach);
+                    if (rCanReach)
+                    {
+                        turretAi.CurrentVisibleTarget = null;
+                        turretAi.targetAngleAdjust = rAngle;
+                        turretAi.targetInWeaponRange = true;
+                        if (turretAi.supportedSquad != null)
+                        {
+                            turret.SelectBestAmmo(turretAi.supportedSquad.radioRequest);
+                        }
+                        RecordCombinedArmsAssist(
+                            veh.Pointer,
+                            Time.time,
+                            "CombArmsRadio",
+                            $"{myFaction} HE turret answering friendly radio support request ({rDist:F0}m).");
+                    }
+                    else
+                    {
+                        turretAi.supportedSquad = null;
+                    }
+                }
+            }
+        }
+
+        private static void TrySteerVehicleTowardKnownThreat(AIVehicle aiVeh, Vehicle veh, float now)
+        {
+            if (aiVeh == null || veh == null || veh.Pointer == IntPtr.Zero || veh.transform == null)
+                return;
+
+            if (!AiCore.IsLocallyOwnedVehicle(veh) ||
+                !veh.CanFight() ||
+                veh.IsAirVehicle() ||
+                veh.PlayerIsInside() ||
+                veh.PlayerIsDriving())
+            {
+                return;
+            }
+
+            Turret mainTurret = veh.GetMainTurret(false);
+            if (mainTurret == null)
+                return;
+
+            // If the main turret already has a visible target in weapon range & LOS, let Standoff / TurretAI handle it
+            TurretAI turretAi = mainTurret.GetTurretAI();
+            if (turretAi != null &&
+                turretAi.CurrentVisibleTarget != null &&
+                turretAi.targetInWeaponRange &&
+                turretAi.CanSee(turretAi.CurrentVisibleTarget))
+            {
+                return;
+            }
+
+            string myFaction = GetVehicleCrewFaction(veh, mainTurret);
+            if (string.IsNullOrEmpty(myFaction))
+                return;
+
+            Vector3 squadDest = aiVeh.GetCurrentSquadDestination();
+            float areaSize = aiVeh.GetCurrentSquadDestinationAreaSize();
+            if (areaSize < 12.0f)
+                return;
+
+            RefreshCombinedArmsIntelIfNeeded();
+
+            Vector3 vehPos = veh.transform.position;
+            Vector3 bestFocusPos = Vector3.zero;
+            float bestFocusScore = -999f;
+            bool hasFocus = false;
+
+            // 1. Check active friendly Tank Support / Artillery radio requests near the objective or vehicle
+            for (int r = 0; r < _activeRadioRequests.Count; r++)
+            {
+                ActiveRadioSupportInfo req = _activeRadioRequests[r];
+                if (req.Faction != myFaction)
+                    continue;
+
+                float distToDest = Vector3.Distance(squadDest, req.Position);
+                if (distToDest > 320.0f)
+                    continue;
+
+                float score = (req.RequestType == RadioRequest.tankSupport ? 95.0f : 70.0f) - (distToDest * 0.15f);
+                if (score > bestFocusScore)
+                {
+                    bestFocusScore = score;
+                    bestFocusPos = req.Position;
+                    hasFocus = true;
+                }
+            }
+
+            // 2. Check known/marked enemy squads contesting or near the vehicle's objective sector
+            int clusterCount = _knownEnemyClusters.Count;
+            for (int i = 0; i < clusterCount; i++)
+            {
+                KnownEnemyCluster cluster = _knownEnemyClusters[i];
+                if (cluster.Faction == myFaction)
+                    continue;
+
+                float distToDest = Vector3.Distance(squadDest, cluster.Position);
+                if (distToDest > 320.0f)
+                    continue;
+
+                float score = cluster.BasePriority - (distToDest * 0.15f);
+                if (score > bestFocusScore)
+                {
+                    bestFocusScore = score;
+                    bestFocusPos = cluster.Position;
+                    hasFocus = true;
+                }
+            }
+
+            if (!hasFocus)
+                return;
+
+            // Compute a tactical support position inside the squad's allowed destination radius
+            // so AIVehicle.DestinationHasChanged stays false and UpdatePath skips RandomPointInCircleXZ.
+            Vector3 toFocusFromDest = bestFocusPos - squadDest;
+            toFocusFromDest.y = 0f;
+            float focusDistFromDest = toFocusFromDest.magnitude;
+            float maxAllowedOffset = areaSize * 0.82f;
+
+            Vector3 desiredDest;
+            if (focusDistFromDest <= maxAllowedOffset)
+            {
+                // Threat is inside the objective area: pull back ~35m toward the approaching tank for standoff
+                Vector3 fromFocusToTank = vehPos - bestFocusPos;
+                fromFocusToTank.y = 0f;
+                Vector3 standoffDir = fromFocusToTank.sqrMagnitude > 0.25f ? fromFocusToTank.normalized : -veh.transform.forward;
+                desiredDest = bestFocusPos + standoffDir * Mathf.Min(35.0f, maxAllowedOffset * 0.65f);
+
+                Vector3 offsetFromDest = desiredDest - squadDest;
+                offsetFromDest.y = 0f;
+                if (offsetFromDest.magnitude > maxAllowedOffset)
+                {
+                    desiredDest = squadDest + offsetFromDest.normalized * maxAllowedOffset;
+                }
+            }
+            else
+            {
+                // Threat is outside the objective circle: advance to the perimeter facing the known threat
+                desiredDest = squadDest + (toFocusFromDest / focusDistFromDest) * maxAllowedOffset;
+            }
+
+            desiredDest.y = squadDest.y;
+
+            if ((aiVeh.setVehicleDestination - desiredDest).sqrMagnitude > 12.0f * 12.0f)
+            {
+                aiVeh.setVehicleDestination = desiredDest;
+                aiVeh.rerollDestination = false;
+                RecordCombinedArmsAssist(
+                    veh.Pointer,
+                    now,
+                    "CombArmsTank",
+                    $"{myFaction} combat vehicle steering toward known enemy squad / support request.");
+            }
+        }
+
+        public static void TrySteerAircraftOrbitTowardKnownThreat(AIPlane plane)
+        {
+            if (plane == null || plane.veh == null || plane.veh.Pointer == IntPtr.Zero)
+                return;
+
+            if (plane.veh.PlayerIsInside() ||
+                plane.planeState != AIPlane.PlaneAIState.flyingAroundArea)
+            {
+                return;
+            }
+
+            IntPtr vehPtr = plane.veh.Pointer;
+            float now = Time.time;
+            if (_nextPlaneOrbitSteerTime.TryGetValue(vehPtr, out float nextSteer) && now < nextSteer)
+                return;
+
+            _nextPlaneOrbitSteerTime[vehPtr] = now + 3.5f;
+
+            string myFaction = GetVehicleCrewFaction(plane.veh);
+            if (string.IsNullOrEmpty(myFaction))
+                return;
+
+            RefreshCombinedArmsIntelIfNeeded();
+
+            Vector3 bestOrbitPos = Vector3.zero;
+            float bestScore = -999f;
+            bool foundSupportZone = false;
+
+            // 1. Highest priority: friendly Explosive Artillery / Support radio requests
+            for (int r = 0; r < _activeRadioRequests.Count; r++)
+            {
+                ActiveRadioSupportInfo req = _activeRadioRequests[r];
+                if (req.Faction != myFaction)
+                    continue;
+
+                float score = req.RequestType == RadioRequest.artilleryAPHE ? 115.0f : 95.0f;
+                if (score > bestScore)
+                {
+                    bestScore = score;
+                    bestOrbitPos = req.Position;
+                    foundSupportZone = true;
+                }
+            }
+
+            // 2. Next priority: Marked/Known enemy vehicles and squads actively engaging friendly infantry
+            int clusterCount = _knownEnemyClusters.Count;
+            for (int i = 0; i < clusterCount; i++)
+            {
+                KnownEnemyCluster cluster = _knownEnemyClusters[i];
+                if (cluster.Faction == myFaction)
+                    continue;
+
+                if (!cluster.IsMarkedOrPinPoint &&
+                    !cluster.IsHalfMarked &&
+                    !cluster.NearRadioRequest &&
+                    cluster.VehicleTarget == null &&
+                    !cluster.IsEngagingFriendlies)
+                {
+                    continue;
+                }
+
+                if (cluster.BasePriority > bestScore)
+                {
+                    bestScore = cluster.BasePriority;
+                    bestOrbitPos = cluster.Position;
+                    foundSupportZone = true;
+                }
+            }
+
+            if (foundSupportZone)
+            {
+                Vector3 delta = bestOrbitPos - plane.flyTargetPosition;
+                delta.y = 0f;
+                if (delta.sqrMagnitude > 50.0f * 50.0f)
+                {
+                    plane.SetFlyAroundPos(bestOrbitPos);
+                    RecordCombinedArmsAssist(
+                        vehPtr,
+                        now,
+                        "CombArmsPlaneOrbit",
+                        $"{myFaction} aircraft shifted patrol orbit toward known enemy squad / support request.");
+                }
+            }
+        }
+
+        public static void TrySelectKnownAircraftTarget(AIPlane plane, ref Spottable currentResult)
+        {
+            if (plane == null || plane.veh == null || plane.transform == null)
+                return;
+
+            // Air-to-air dogfights always retain top priority
+            if (currentResult != null && currentResult.Pointer != IntPtr.Zero && currentResult.IsAirVehicle())
+                return;
+
+            string myFaction = GetVehicleCrewFaction(plane.veh);
+            if (string.IsNullOrEmpty(myFaction))
+                return;
+
+            RefreshCombinedArmsIntelIfNeeded();
+            if (_knownEnemyClusters.Count == 0)
+                return;
+
+            Vector3 planePos = plane.transform.position;
+            Vector3 planeFwd = plane.transform.forward;
+            Transform planeRoot = plane.transform.root;
+
+            const float effectiveMaxDist = 850.0f;
+            const float effectiveMaxAngle = 55.0f;
+
+            float curScore = currentResult != null
+                ? EvaluateExistingTargetPriority(currentResult, myFaction, planePos, true)
+                : -999f;
+
+            Spottable bestCandidate = null;
+            float bestScore = curScore + 15.0f;
+
+            bool limitUnmarkedInfantry = VisionConfig.LimitAircraftInfantrySpotting.Value;
+            float unmarkedAwareCap = Mathf.Max(VisionConfig.AircraftUnmarkedInfantryMaxDist.Value * 1.45f, 250.0f);
+            bool hasBombs = plane.HasBombsToDeliver() || plane.HasBombBayConfigured();
+
+            int clusterCount = _knownEnemyClusters.Count;
+            for (int i = 0; i < clusterCount; i++)
+            {
+                KnownEnemyCluster cluster = _knownEnemyClusters[i];
+                if (cluster.Faction == myFaction)
+                    continue;
+
+                bool isMarkedOrRadio = cluster.IsMarkedOrPinPoint || cluster.IsHalfMarked || cluster.NearRadioRequest;
+                for (int pass = 0; pass < 2; pass++)
+                {
+                    Spottable cand = pass == 0 ? cluster.VehicleTarget : cluster.PrimarySoldier;
+                    if (cand == null || cand.Pointer == IntPtr.Zero)
+                        continue;
+
+                    bool isVehCand = pass == 0;
+                    if (!isVehCand && limitUnmarkedInfantry && !isMarkedOrRadio && !cluster.IsEngagingFriendlies)
+                        continue;
+
+                    float allowedDist = (!isVehCand && limitUnmarkedInfantry && !isMarkedOrRadio)
+                        ? Mathf.Min(effectiveMaxDist, unmarkedAwareCap)
+                        : effectiveMaxDist;
+
+                    Vector3 candPos = cand.GetCenterOfUnit();
+                    Vector3 toCand = candPos - planePos;
+                    float dist = toCand.magnitude;
+                    if (dist < 95.0f || dist > allowedDist)
+                        continue;
+
+                    Vector3 dirToCand = toCand / dist;
+                    if (Vector3.Angle(planeFwd, dirToCand) > effectiveMaxAngle)
+                        continue;
+
+                    float vehBonus = 0f;
+                    if (isVehCand)
+                    {
+                        bool isArmoredTank = cand.TryCast<VehicleTank>() != null;
+                        vehBonus = (isArmoredTank && !hasBombs) ? 5.0f : 30.0f;
+                    }
+
+                    float candScore = cluster.BasePriority + vehBonus - (dist * 0.06f);
+                    if (candScore <= bestScore)
+                        continue;
+
+                    // Verify unobstructed air-to-ground line of sight
+                    if (AiCore.RaycastEnvironment(planePos, dirToCand, dist - 4.0f, planeRoot, out _))
+                        continue;
+
+                    bestScore = candScore;
+                    bestCandidate = cand;
+                    break;
+                }
+            }
+
+            if (bestCandidate != null && (currentResult == null || bestCandidate.Pointer != currentResult.Pointer))
+            {
+                currentResult = bestCandidate;
+                RecordCombinedArmsAssist(
+                    plane.veh.Pointer,
+                    Time.time,
+                    "CombArmsCAS",
+                    $"{myFaction} aircraft prioritized known/marked ground target for CAS run.");
+            }
+        }
 
         public static void UpdateMacroObjectiveAndEmplacementDirector()
         {
@@ -1119,12 +1923,8 @@ namespace EasyRed2HumanAI
             {
                 try
                 {
-                    if (!VisionConfig.EnableMod.Value ||
-                        !VisionConfig.EnableSmartApcDismount.Value ||
-                        __instance == null)
-                    {
+                    if (!VisionConfig.EnableMod.Value || __instance == null)
                         return;
-                    }
 
                     Vehicle veh = __instance.veh;
                     if (veh == null || veh.Pointer == IntPtr.Zero)
@@ -1132,11 +1932,24 @@ namespace EasyRed2HumanAI
 
                     IntPtr vehPtr = veh.Pointer;
                     float now = Time.time;
-                    if (_nextApcCheckTime.TryGetValue(vehPtr, out float nextCheck) && now < nextCheck)
-                        return;
 
-                    _nextApcCheckTime[vehPtr] = now + 0.75f;
-                    TryDismountTransportUnderThreat(veh, __instance, false);
+                    if (VisionConfig.EnableSmartApcDismount.Value)
+                    {
+                        if (!_nextApcCheckTime.TryGetValue(vehPtr, out float nextCheck) || now >= nextCheck)
+                        {
+                            _nextApcCheckTime[vehPtr] = now + 0.75f;
+                            TryDismountTransportUnderThreat(veh, __instance, false);
+                        }
+                    }
+
+                    if (VisionConfig.EnableCombinedArmsPrioritySupport.Value)
+                    {
+                        if (!_nextVehicleSupportSteerTime.TryGetValue(vehPtr, out float nextSteer) || now >= nextSteer)
+                        {
+                            _nextVehicleSupportSteerTime[vehPtr] = now + 3.5f;
+                            TrySteerVehicleTowardKnownThreat(__instance, veh, now);
+                        }
+                    }
                 }
                 catch { }
             }

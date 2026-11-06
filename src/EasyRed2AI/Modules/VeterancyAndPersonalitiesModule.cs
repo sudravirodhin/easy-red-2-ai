@@ -537,18 +537,17 @@ namespace EasyRed2HumanAI
         }
 
         // =====================================================================
-        // Vehicle & Aircraft Role Personalities (TurretAI & AIPlane)
+        // Vehicle & Aircraft Role Personalities & Combined Arms Support (TurretAI & AIPlane)
         // =====================================================================
         [HarmonyPatch(typeof(TurretAI), nameof(TurretAI.RefreshTargets))]
         public static class TurretAI_RefreshTargets_Patch
         {
-            public static void Postfix(TurretAI __instance)
+            public static void Postfix(TurretAI __instance, bool __result)
             {
                 try
                 {
-                    if (!VisionConfig.EnableMod.Value ||
-                        !VisionConfig.EnableRolePersonalities.Value ||
-                        !VisionConfig.EnableVehicleAndPilotPersonalities.Value ||
+                    if (!__result ||
+                        !VisionConfig.EnableMod.Value ||
                         __instance == null ||
                         __instance.turret == null)
                     {
@@ -557,6 +556,17 @@ namespace EasyRed2HumanAI
 
                     Vehicle veh = AiCore.GetCachedTurretVehicle(__instance.turret);
                     if (!AiCore.IsLocallyOwnedVehicle(veh)) return;
+
+                    if (VisionConfig.EnableCombinedArmsPrioritySupport.Value)
+                    {
+                        TryPrioritizeKnownTargetForTurret(__instance, veh);
+                    }
+
+                    if (!VisionConfig.EnableRolePersonalities.Value ||
+                        !VisionConfig.EnableVehicleAndPilotPersonalities.Value)
+                    {
+                        return;
+                    }
 
                     SoldierPersonality crewPers = GetVehicleCrewPersonality(veh);
                     if (crewPers == SoldierPersonality.TankCrew_Brawler || crewPers == SoldierPersonality.LightCrew_Outrider)
@@ -588,10 +598,19 @@ namespace EasyRed2HumanAI
                 try
                 {
                     if (!VisionConfig.EnableMod.Value ||
-                        !VisionConfig.EnableRolePersonalities.Value ||
-                        !VisionConfig.EnableVehicleAndPilotPersonalities.Value ||
                         __instance == null ||
                         !AiCore.IsLocallyOwnedVehicle(__instance.veh))
+                    {
+                        return;
+                    }
+
+                    if (VisionConfig.EnableCombinedArmsPrioritySupport.Value)
+                    {
+                        TrySteerAircraftOrbitTowardKnownThreat(__instance);
+                    }
+
+                    if (!VisionConfig.EnableRolePersonalities.Value ||
+                        !VisionConfig.EnableVehicleAndPilotPersonalities.Value)
                     {
                         return;
                     }

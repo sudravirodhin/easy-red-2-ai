@@ -75,6 +75,7 @@ namespace EasyRed2HumanAI
         public static ConfigEntry<bool> PreventSmallArmsFireAtTanks;
         public static ConfigEntry<bool> EnablePointBlankMelee;
         public static ConfigEntry<bool> EnableStrategicDoorDiscipline;
+        public static ConfigEntry<bool> EnableCombinedArmsPrioritySupport;
 
         // 7. Phase 3: Role-Based AI Personalities (3 Archetypes per Infantry & Vehicle Role)
         public static ConfigEntry<bool> EnableRolePersonalities;
@@ -451,6 +452,12 @@ namespace EasyRed2HumanAI
                 "EnableStrategicDoorDiscipline",
                 true,
                 "Strategic Door & Window Shutter Discipline: prevents indoor bots from accidentally popping open closed window shutters and side doors as they walk past, closes doors behind advancing/garrisoning troops once squadmates are clear, and pulls window shutters closed when heavily suppressed, reloading, or bandaging.");
+
+            EnableCombinedArmsPrioritySupport = config.Bind(
+                "6. Tactical Self-Preservation & Muzzle Discipline",
+                "EnableCombinedArmsPrioritySupport",
+                true,
+                "Combined-Arms Priority Support: AI tanks, emplacements/turrets, and CAS aircraft prioritize KNOWN enemy squads and vehicles (Spotted/Marked squads, active Friendly Radio Support Requests, and enemy squads actively engaging friendly infantry) instead of randomly attacking lone targets or orbiting the first objective in the list.");
 
             // 7. AI Role Personalities (3 Archetypes per Infantry & Vehicle Role)
             EnableRolePersonalities = config.Bind(

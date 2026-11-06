@@ -427,7 +427,7 @@ namespace EasyRed2HumanAI
         }
 
         // =====================================================================
-        // 5. Aircraft Ground Spotting (AIPlane.GetBestAircraftVisibleEnemy)
+        // 5. Aircraft Ground Spotting & CAS Target Priority (AIPlane.GetBestAircraftVisibleEnemy)
         // =====================================================================
         [HarmonyPatch(typeof(AIPlane), nameof(AIPlane.GetBestAircraftVisibleEnemy))]
         public static class AIPlane_GetBestAircraftVisibleEnemy_Patch
@@ -436,30 +436,37 @@ namespace EasyRed2HumanAI
             {
                 try
                 {
-                    if (!VisionConfig.EnableMod.Value || !VisionConfig.LimitAircraftInfantrySpotting.Value)
-                        return;
-                    if (__instance == null || __result == null)
+                    if (!VisionConfig.EnableMod.Value || __instance == null)
                         return;
 
-                    if (__result.IsAirVehicle() || __result.IsWheeledVehicleOrTank())
-                        return;
-
-                    Soldier targetSoldier = __result.TryCast<Soldier>();
-                    if (targetSoldier == null)
-                        return;
-
-                    Squad sq = targetSoldier.joinedSquad;
-                    if (sq != null && (sq.isMarked || sq.isHalfMarked || sq.isMarkedPinPoint))
-                        return;
-
-                    float dist = Vector3.Distance(__instance.transform.position, targetSoldier.GetPosition());
-                    bool recentlyFired = GetFiringVisibilityBonus(targetSoldier) > 10f;
-
-                    if (dist > VisionConfig.AircraftUnmarkedInfantryMaxDist.Value ||
-                        (targetSoldier.m_pose != SoldierPose.Idle && !recentlyFired))
+                    if (VisionConfig.LimitAircraftInfantrySpotting.Value && __result != null)
                     {
-                        BlockedPlaneSpot++;
-                        __result = null;
+                        if (!__result.IsAirVehicle() && !__result.IsWheeledVehicleOrTank())
+                        {
+                            Soldier targetSoldier = __result.TryCast<Soldier>();
+                            if (targetSoldier != null)
+                            {
+                                Squad sq = targetSoldier.joinedSquad;
+                                bool isMarkedSquad = sq != null && (sq.isMarked || sq.isHalfMarked || sq.isMarkedPinPoint);
+                                if (!isMarkedSquad)
+                                {
+                                    float dist = Vector3.Distance(__instance.transform.position, targetSoldier.GetPosition());
+                                    bool recentlyFired = GetFiringVisibilityBonus(targetSoldier) > 10f;
+
+                                    if (dist > VisionConfig.AircraftUnmarkedInfantryMaxDist.Value ||
+                                        (targetSoldier.m_pose != SoldierPose.Idle && !recentlyFired))
+                                    {
+                                        BlockedPlaneSpot++;
+                                        __result = null;
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    if (VisionConfig.EnableCombinedArmsPrioritySupport.Value)
+                    {
+                        VeteranAndTacticsPatches.TrySelectKnownAircraftTarget(__instance, ref __result);
                     }
                 }
                 catch { }
