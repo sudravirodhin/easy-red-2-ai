@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using HarmonyLib;
 using Photon.Pun;
 using UnityEngine;
 
@@ -258,11 +259,124 @@ namespace EasyRed2HumanAI
             }
         }
 
+        public static int TotalAdaptiveAiExtraTicks;
+
         public static void ClearSpatialCaches()
         {
             _turretVehicleCache.Clear();
             _ceilingCache.Clear();
             _bridgeCellCache.Clear();
+            TotalAdaptiveAiExtraTicks = 0;
+        }
+
+        // =====================================================================
+        // Adaptive AI Brain Tick Scheduler (Creature.ProcessSequentialUpdates)
+        // =====================================================================
+        // Vanilla Creature.ProcessSequentialUpdates (0x180A53760) hardcodes `cmp ebp, 1`,
+        // updating only 1 slot in Creature.allCreatures per frame. In a 120-140 bot match,
+        // each soldier waits 2.0-2.5+ seconds between SoldierAI.SequentialUpdate brain ticks,
+        // and any frame that lands on a Vehicle, dead soldier, or seated passenger wastes
+        // the entire frame's AI budget.
+        [HarmonyPatch(typeof(Creature), nameof(Creature.ProcessSequentialUpdates))]
+        public static class Creature_ProcessSequentialUpdates_Patch
+        {
+            private static bool _isRunningExtraTicks;
+
+            public static void Postfix()
+            {
+                if (_isRunningExtraTicks)
+                    return;
+
+                if (!VisionConfig.EnableMod.Value || !VisionConfig.EnableAdaptiveAiTickScaling.Value)
+                    return;
+
+                // Frame-time guard: never add extra ticks on frames slower than 25ms (< 40 FPS)
+                float dt = Time.unscaledDeltaTime;
+                if (dt > 0.025f)
+                    return;
+
+                try
+                {
+                    var list = Creature.allCreatures;
+                    if (list == null)
+                        return;
+
+                    int count = list.Count;
+                    if (count <= 1)
+                        return;
+
+                    int lastIdx = Creature.sequentialUpdateIndex - 1;
+                    if (lastIdx < 0 || lastIdx >= count)
+                        lastIdx = count - 1;
+
+                    int activeFootSoldiersTicked = 0;
+                    Creature lastCreature = list[lastIdx];
+                    if (lastCreature != null && lastCreature.IsAlive)
+                    {
+                        Soldier lastSoldier = lastCreature.TryCast<Soldier>();
+                        if (lastSoldier != null && lastSoldier.isActiveAndEnabled && !lastSoldier.IsOnVehicle())
+                        {
+                            activeFootSoldiersTicked = 1;
+                        }
+                    }
+
+                    // Scale active foot-soldier brain ticks per frame with battlefield population:
+                    //   <= 45 units : 1 active foot soldier / frame (~0.5s full cycle at 60 FPS)
+                    //   46..95 units: 2 active foot soldiers / frame (~0.6s full cycle at 60 FPS)
+                    //   96+ units   : 3 active foot soldiers / frame (~0.65s full cycle at 60 FPS)
+                    int targetFootTicks = count > 95 ? 3 : (count > 45 ? 2 : 1);
+                    if (dt > 0.019f && targetFootTicks > 2)
+                    {
+                        targetFootTicks = 2;
+                    }
+
+                    if (activeFootSoldiersTicked >= targetFootTicks)
+                        return;
+
+                    _isRunningExtraTicks = true;
+                    int maxScanSteps = Mathf.Min(count - 1, 8);
+                    int scanned = 0;
+
+                    while (activeFootSoldiersTicked < targetFootTicks && scanned < maxScanSteps)
+                    {
+                        int idx = Creature.sequentialUpdateIndex;
+                        if (idx < 0 || idx >= count)
+                            idx = 0;
+
+                        Creature.sequentialUpdateIndex = idx + 1;
+                        scanned++;
+
+                        Creature c = list[idx];
+                        if (c == null)
+                            continue;
+
+                        Soldier s = c.TryCast<Soldier>();
+                        if (s == null || !s.isActiveAndEnabled)
+                            continue;
+
+                        s.SequentialUpdate();
+
+                        SoldierAI ai = s.aiController;
+                        if (ai != null && ai.enabled)
+                        {
+                            ai.SequentialUpdate();
+                        }
+
+                        if (s.IsAlive && !s.IsOnVehicle())
+                        {
+                            activeFootSoldiersTicked++;
+                            TotalAdaptiveAiExtraTicks++;
+                        }
+                    }
+                }
+                catch
+                {
+                }
+                finally
+                {
+                    _isRunningExtraTicks = false;
+                }
+            }
         }
     }
 }

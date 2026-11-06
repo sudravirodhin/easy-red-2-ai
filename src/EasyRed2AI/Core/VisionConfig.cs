@@ -9,6 +9,7 @@ namespace EasyRed2HumanAI
         public static ConfigEntry<bool> EnableDeathScreenAttribution;
         public static ConfigEntry<bool> EnableQuickTapSpot;
         public static ConfigEntry<bool> EnableExtendedRoomNames;
+        public static ConfigEntry<bool> EnableAdaptiveAiTickScaling;
 
         // 1. Infantry Sight & Stance
         public static ConfigEntry<float> StandingSightRange;
@@ -124,6 +125,12 @@ namespace EasyRed2HumanAI
                 "EnableExtendedRoomNames",
                 true,
                 "QoL: Lift vanilla's 8-character multiplayer room name cap up to 64 characters when hosting or searching for servers.");
+
+            EnableAdaptiveAiTickScaling = config.Bind(
+                "0. General",
+                "EnableAdaptiveAiTickScaling",
+                true,
+                "Performance & Responsiveness (SP & Co-op): Dynamically scales Creature.ProcessSequentialUpdates from vanilla's hardcoded 1 slot/frame up to 2-3 active on-foot SoldierAI brain ticks/frame in large battles (while skipping non-soldier vehicle/dead slots without wasting a frame tick, and backing off automatically if frame time exceeds 25ms).");
 
             // 1. Infantry Sight & Stance
             StandingSightRange = config.Bind(

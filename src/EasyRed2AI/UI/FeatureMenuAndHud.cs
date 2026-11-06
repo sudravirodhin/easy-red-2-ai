@@ -70,7 +70,7 @@ namespace EasyRed2HumanAI
                                 $"Drops:{VeteranAndTacticsPatches.SelfPreservationDrops} (Indoor:{VeteranAndTacticsPatches.IndoorPronePreventedCount}) | " +
                                 $"Callouts:{VeteranAndTacticsPatches.LocalCalloutsSharedCount} | Supp:{VeteranAndTacticsPatches.SuppressiveEventsCount} | Bounds:{VeteranAndTacticsPatches.BoundingOverwatchHoldsCount} | " +
                                 $"Garrisons:{VeteranAndTacticsPatches.MacroGarrisonsAssignedCount} | Emplace:{VeteranAndTacticsPatches.StaticGunsStaffedCount} | APC:{VeteranAndTacticsPatches.SmartApcDismountsCount} | TankHold:{VeteranAndTacticsPatches.TankStandoffHoldsCount} | " +
-                                $"CombArms:{VeteranAndTacticsPatches.CombinedArmsPriorityAssistsCount} | Bridges:{VeteranAndTacticsPatches.BridgeCrossingsAssistedCount} | Surr:{VeteranAndTacticsPatches.ShellShockSurrendersCount}/{VeteranAndTacticsPatches.ComradesLiberated} | FFSaved:{VeteranAndTacticsPatches.FriendlyFirePrevented}",
+                                $"CombArms:{VeteranAndTacticsPatches.CombinedArmsPriorityAssistsCount} | Bridges:{VeteranAndTacticsPatches.BridgeCrossingsAssistedCount} | Surr:{VeteranAndTacticsPatches.ShellShockSurrendersCount}/{VeteranAndTacticsPatches.ComradesLiberated} | Ticks:{AiCore.TotalAdaptiveAiExtraTicks} | FFSaved:{VeteranAndTacticsPatches.FriendlyFirePrevented}",
                                 6.5f);
                         }
                     }
@@ -89,7 +89,7 @@ namespace EasyRed2HumanAI
                             $"WoodPen:{VeteranAndTacticsPatches.ThinCoverPenetrationsCount} | PlaneAudio:{VeteranAndTacticsPatches.PlaneAudioLoopsDesyncedCount} | Chutes:{VeteranAndTacticsPatches.ParachutesDriftedCount} | " +
                             $"Doors:{VeteranAndTacticsPatches.DoorsStrategicallyClosedCount} | Bipods:{VeteranAndTacticsPatches.BipodsDeployed} | WallBlk:{VeteranAndTacticsPatches.WallsBlocked} | " +
                             $"Melee:{VeteranAndTacticsPatches.MeleeAttacksTriggered} | TankBlk:{VeteranAndTacticsPatches.UselessTankFirePrevented} (Crew:{VeteranAndTacticsPatches.ExposedCrewTargeted}) | " +
-                            $"FFSaved:{VeteranAndTacticsPatches.FriendlyFirePrevented} | Repairs:{VeteranAndTacticsPatches.ShelteredRepairsCount}",
+                            $"Ticks:{AiCore.TotalAdaptiveAiExtraTicks} | FFSaved:{VeteranAndTacticsPatches.FriendlyFirePrevented} | Repairs:{VeteranAndTacticsPatches.ShelteredRepairsCount}",
                             15.0f);
                     }
                 }
@@ -222,6 +222,7 @@ namespace EasyRed2HumanAI
                 // Left Column: Bundle 1 (Vision & Memory), Bundle 3 (Macro & Vehicles), Bundle 4A (Veterancy)
                 float yL = startY;
                 DrawSectionHeaderWithBundle(colLeftX, ref yL, colW, "Bundle 1: Vision, Memory & Suppression",
+                    VisionConfig.EnableAdaptiveAiTickScaling,
                     VisionConfig.PreserveStanceStealthInCombat,
                     VisionConfig.EnforceHumanFOVWhenAlerted,
                     VisionConfig.EnableThreatSectorConcentration,
@@ -230,6 +231,7 @@ namespace EasyRed2HumanAI
                     VisionConfig.EnableScopeVisionScaling,
                     VisionConfig.LimitAircraftInfantrySpotting);
                 DrawToggleButton(colLeftX, ref yL, colW, rowH, "Master Mod Toggle (F8)", VisionConfig.EnableMod);
+                DrawToggleButton(colLeftX, ref yL, colW, rowH, "Adaptive AI Brain Tick Scaling (SP & Co-op)", VisionConfig.EnableAdaptiveAiTickScaling);
                 DrawToggleButton(colLeftX, ref yL, colW, rowH, "Preserve Stance Stealth in Combat", VisionConfig.PreserveStanceStealthInCombat);
                 DrawToggleButton(colLeftX, ref yL, colW, rowH, "Enforce Human FOV Cones", VisionConfig.EnforceHumanFOVWhenAlerted);
                 DrawToggleButton(colLeftX, ref yL, colW, rowH, "Threat-Sector Gaze & Window Alignment", VisionConfig.EnableThreatSectorConcentration);

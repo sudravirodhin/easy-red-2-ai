@@ -53,6 +53,15 @@ This document explains **what vanilla *Easy Red 2* (Game Build `921`, `GameAssem
 * **Our Justification & Fix ([`RecordAndBroadcastVisualContact`](../src/EasyRed2AI/Modules/VisionAndMemoryModule.cs#L521-L580) & [`TryMaintainSuppressiveFireOnLastKnown`](../src/EasyRed2AI/Modules/VisionAndMemoryModule.cs#L648-L779))**:
   * Shares a `12s` threat-sector gaze vector (never X-ray wallhack targeting) with friendly bots within `15m`, and lets stationary MGs/automatic rifles fire a `3.8s` suppressive burst at unobstructed cover edges (`HasClearSuppressionLineToPoint`) while nearby infantry within throwing range flush the cover with a fragmentation grenade.
 
+### 1.6. Adaptive AI Brain Tick Scheduler (`Creature.ProcessSequentialUpdates` — RVA `0x180a53760`)
+* **What Vanilla Did**:
+  * `Creature.ProcessSequentialUpdates` (`0x180a53760`) hardcodes `cmp ebp, 1` (`0x180a539b6`), processing only **1 slot** of `Creature.allCreatures` per frame.
+  * In a `120–140` unit battle at `60 FPS`, each soldier waits **`2.0–2.5+ seconds`** between `SoldierAI.SequentialUpdate` brain ticks (which drive target acquisition, `MovementRoutine`, cover selection, and weapon checks).
+  * Worse still, whenever `Creature.sequentialUpdateIndex` lands on a `Vehicle`, a dead/inactive unit, or a passenger seated inside a landing craft/truck/tank (`Soldier.IsOnVehicle() == true`, where `SoldierAI.SequentialUpdate` immediately returns at `0x18055eabb`), vanilla wastes that entire frame's AI budget on a no-op slot.
+* **Our Justification & Fix ([`Creature_ProcessSequentialUpdates_Patch`](../src/EasyRed2AI/Core/AiCore.cs#L276-L370))**:
+  * Dynamically scales active on-foot `SoldierAI` brain ticks per frame with battlefield population (`1` tick/frame at `<= 45` units, `2` ticks/frame at `46–95` units, `3` ticks/frame at `96+` units), while skipping non-soldier / seated-passenger slots without counting them against the active foot-soldier quota.
+  * Includes an automatic frame-time guard (`Time.unscaledDeltaTime > 0.025f`) that backs off to vanilla's single tick during heavy explosion/physics frames (`< 40 FPS`), cutting AI reaction latency in `120–140` bot Singleplayer and Co-op battles from `2.0–2.5s` down to **`~0.6s`** with zero extra Photon network bandwidth.
+
 ---
 
 ## 2. Infantry Combat, Stance, Cover & CQB ([`InfantryTacticsModule.cs`](../src/EasyRed2AI/Modules/InfantryTacticsModule.cs))

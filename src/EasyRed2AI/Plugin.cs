@@ -38,7 +38,8 @@ namespace EasyRed2HumanAI
 
             _harmony = new Harmony(PluginGuid);
 
-            // Bundle 1: Vision, Camo & Threat Sectors
+            // Bundle 1: Vision, Camo, Threat Sectors & Adaptive AI Brain Tick Scheduler
+            SafePatch(typeof(AiCore.Creature_ProcessSequentialUpdates_Patch));
             SafePatch(typeof(VisionPatches.Soldier_StartFire_Patch));
             SafePatch(typeof(VisionPatches.Soldier_CamoDistanceAwareEnemies_Patch));
             SafePatch(typeof(VisionPatches.Creature_CanSee_Patch));
