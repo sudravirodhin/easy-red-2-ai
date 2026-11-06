@@ -139,6 +139,11 @@ namespace EasyRed2HumanAI
         {
             private const int ImpactUnknownOrBlocked = -1;
 
+            public static void Prefix(BulletInstance __instance, BulletData bulletData)
+            {
+                VeteranAndTacticsPatches.BeginProjectileImpactContext(__instance, bulletData);
+            }
+
             public static void Postfix(
                 BulletInstance __instance,
                 Vector3 hitDirection,
@@ -148,6 +153,8 @@ namespace EasyRed2HumanAI
             {
                 try
                 {
+                    VeteranAndTacticsPatches.EndProjectileImpactContext();
+
                     if (!VisionConfig.EnableMod.Value || !VisionConfig.EnableThinCoverBulletPenetration.Value)
                         return;
 

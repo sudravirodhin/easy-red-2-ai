@@ -21,6 +21,31 @@ namespace EasyRed2HumanAI
         private static readonly Dictionary<IntPtr, DamageAttribution> _lastDamageByVictim = new Dictionary<IntPtr, DamageAttribution>(32);
         private static string _activeExplosionWeaponName;
         private static bool _activeExplosionIsArtillery;
+        private static bool _activeImpactHasContext;
+        private static BulletData _activeImpactBulletData;
+        private static bool _activeImpactIsMortar;
+        private static Vector3 _activeImpactStartPos;
+
+        public static void BeginProjectileImpactContext(Corvostudio.Weapons.BulletInstance inst, BulletData bulletData)
+        {
+            if (inst == null && bulletData == null)
+            {
+                _activeImpactHasContext = false;
+                return;
+            }
+
+            _activeImpactHasContext = true;
+            _activeImpactBulletData = bulletData ?? (inst != null ? inst.bulletData : null);
+            _activeImpactIsMortar = inst != null && inst.isMortar;
+            _activeImpactStartPos = inst != null ? inst.startPosition : Vector3.zero;
+        }
+
+        public static void EndProjectileImpactContext()
+        {
+            _activeImpactHasContext = false;
+            _activeImpactBulletData = null;
+            _activeImpactIsMortar = false;
+        }
 
         // Active Death Screen Obituary Banner state (rendered on both DeathPanel and OnGUI overlay)
         public static string ActiveDeathAttributionText;
@@ -359,7 +384,88 @@ namespace EasyRed2HumanAI
                         return;
 
                     string expSource = "";
-                    if (__5 != null)
+                    bool isOffMapArtilleryOrAir = false;
+
+                    // 1. Check if this explosion was triggered by an impacting projectile (BulletInstance.OnHit)
+                    if (_activeImpactHasContext)
+                    {
+                        BulletData bd = _activeImpactBulletData;
+                        float cal = bd != null ? bd.caliber : 0f;
+                        ShellType st = bd != null ? bd.shellType : ShellType.HE;
+
+                        if (__4 != null && __4.IsOnVehicle())
+                        {
+                            Vehicle shooterVeh = __4.GetCurrentVehicle();
+                            string vName = (shooterVeh != null && !string.IsNullOrWhiteSpace(shooterVeh.name))
+                                ? CleanUnityObjectName(shooterVeh.name)
+                                : "Vehicle";
+
+                            if (shooterVeh != null && shooterVeh.IsAirVehicle())
+                            {
+                                isOffMapArtilleryOrAir = true;
+                                expSource = st == ShellType.Rocket
+                                    ? $"{vName} (Aircraft Rocket)"
+                                    : (cal >= 45f ? $"{vName} (Aerial Bomb)" : $"{vName} ({Mathf.RoundToInt(cal)}mm Cannon)");
+                            }
+                            else
+                            {
+                                expSource = FormatVehicleWeaponName(vName, shooterVeh, bd);
+                            }
+                        }
+                        else if (_activeImpactIsMortar)
+                        {
+                            if (cal >= 130f)
+                            {
+                                isOffMapArtilleryOrAir = true;
+                                expSource = $"{Mathf.RoundToInt(cal)}mm Heavy Artillery Barrage";
+                            }
+                            else if (cal >= 95f)
+                            {
+                                isOffMapArtilleryOrAir = true;
+                                expSource = $"{Mathf.RoundToInt(cal)}mm Artillery Barrage";
+                            }
+                            else if (cal >= 45f)
+                            {
+                                expSource = $"{Mathf.RoundToInt(cal)}mm Mortar Shell";
+                            }
+                            else
+                            {
+                                isOffMapArtilleryOrAir = true;
+                                expSource = "Artillery / Mortar Barrage";
+                            }
+                        }
+                        else if (__4 != null)
+                        {
+                            if (st == ShellType.Rocket || st == ShellType.HEAT || __4.IsATUnit())
+                            {
+                                string held = GetShooterWeaponOrVehicleName(__4, null);
+                                string tag = st == ShellType.Rocket ? "AT Rocket" : "HEAT";
+                                expSource = !string.IsNullOrEmpty(held) ? $"{held} ({tag})" : $"Anti-Tank {tag}";
+                            }
+                            else if (__4.hasGrenadeLauncher)
+                            {
+                                string held = GetShooterWeaponOrVehicleName(__4, null);
+                                expSource = !string.IsNullOrEmpty(held) ? $"{held} (Rifle Grenade)" : "Rifle Grenade";
+                            }
+                            else if (cal >= 95f)
+                            {
+                                isOffMapArtilleryOrAir = true;
+                                expSource = $"{Mathf.RoundToInt(cal)}mm Artillery Shell";
+                            }
+                            else if (cal >= 30f)
+                            {
+                                expSource = $"{Mathf.RoundToInt(cal)}mm HE Shell";
+                            }
+                        }
+                        else if (cal >= 95f)
+                        {
+                            isOffMapArtilleryOrAir = true;
+                            expSource = $"{Mathf.RoundToInt(cal)}mm Artillery Barrage";
+                        }
+                    }
+
+                    // 2. Check ignoreHittable (__5) for thrown ItemGrenade or exploding Vehicle
+                    if (string.IsNullOrEmpty(expSource) && __5 != null)
                     {
                         ItemGrenade gren = __5.GetComponent<ItemGrenade>();
                         if (gren == null)
@@ -367,10 +473,23 @@ namespace EasyRed2HumanAI
 
                         if (gren != null && !string.IsNullOrWhiteSpace(gren.name))
                         {
-                            expSource = CleanUnityObjectName(gren.name);
+                            string gName = CleanUnityObjectName(gren.name);
+                            string gType = gren.grenadeType == GrenadeType.ATGrenade
+                                ? "AT Grenade"
+                                : (gren.grenadeType == GrenadeType.phosporusGrenade ? "White Phosphorus" : "Frag Grenade");
+                            expSource = gName.IndexOf("Grenade", StringComparison.OrdinalIgnoreCase) >= 0
+                                ? gName
+                                : $"{gName} ({gType})";
+                        }
+                        else
+                        {
+                            Vehicle expVeh = __5.GetComponentInParent<Vehicle>();
+                            if (expVeh != null && !string.IsNullOrWhiteSpace(expVeh.name))
+                                expSource = $"{CleanUnityObjectName(expVeh.name)} (Vehicle Detonation)";
                         }
                     }
 
+                    // 3. Fallback classification by responsible unit & blast parameters
                     if (string.IsNullOrEmpty(expSource))
                     {
                         if (__4 != null && __4.IsOnVehicle())
@@ -379,9 +498,15 @@ namespace EasyRed2HumanAI
                             if (shooterVeh != null && !string.IsNullOrWhiteSpace(shooterVeh.name))
                             {
                                 string vName = CleanUnityObjectName(shooterVeh.name);
-                                expSource = shooterVeh.IsAirVehicle()
-                                    ? $"{vName} (Bomb / Rocket)"
-                                    : $"{vName} (HE Shell)";
+                                if (shooterVeh.IsAirVehicle())
+                                {
+                                    isOffMapArtilleryOrAir = true;
+                                    expSource = $"{vName} (Aerial Bomb / Rocket)";
+                                }
+                                else
+                                {
+                                    expSource = $"{vName} (HE Shell)";
+                                }
                             }
                             else
                             {
@@ -390,47 +515,69 @@ namespace EasyRed2HumanAI
                         }
                         else if (__4 == null)
                         {
-                            expSource = "Artillery / Mortar Barrage";
-                        }
-                        else
-                        {
-                            // Foot soldier: only use held weapon name if it's an AT launcher, mortar, or rifle grenade;
-                            // if they threw a hand grenade and switched back to a rifle/pistol (e.g. Colt 1911), report Hand Grenade.
-                            if (__4.IsATUnit() || __4.hasGrenadeLauncher || __4.GetHeldGun() == null)
+                            if (__3 >= 8f)
                             {
-                                string heldName = GetShooterWeaponOrVehicleName(__4, null);
-                                expSource = !string.IsNullOrEmpty(heldName) ? heldName : "Hand Grenade / Explosive";
+                                isOffMapArtilleryOrAir = true;
+                                expSource = "Artillery Barrage";
                             }
                             else
                             {
-                                expSource = "Hand Grenade / Explosive";
+                                expSource = "Landmine / Explosive";
+                            }
+                        }
+                        else
+                        {
+                            // __2 is maxPenetration: >= 30f on a thrown explosive indicates an AT Grenade or Satchel Charge
+                            if (__2 >= 30f)
+                            {
+                                expSource = "Anti-Tank Grenade / Satchel";
+                            }
+                            else
+                            {
+                                expSource = "Frag Grenade";
                             }
                         }
                     }
 
                     _activeExplosionWeaponName = expSource;
-                    _activeExplosionIsArtillery = (__4 == null);
+                    _activeExplosionIsArtillery = isOffMapArtilleryOrAir || (__4 == null);
 
                     Soldier player = Soldier.CurrentControlledSoldierOrNull();
                     if (player != null && player.Pointer != IntPtr.Zero)
                     {
-                        float blastDist = Vector3.Distance(__0, player.GetCenterOfUnit());
+                        Vector3 playerPos = player.GetCenterOfUnit();
+                        float blastDist = Vector3.Distance(__0, playerPos);
                         // __3 is explosionRadius
                         if (blastDist <= Mathf.Max(18f, __3 * 4.0f))
                         {
-                            int distMeters = (__4 != null && __4.Pointer != player.Pointer)
-                                ? Mathf.RoundToInt(Vector3.Distance(__4.GetCenterOfUnit(), player.GetCenterOfUnit()))
-                                : Mathf.RoundToInt(blastDist);
+                            int distMeters;
+                            if (isOffMapArtilleryOrAir || __4 == null || __4.Pointer == player.Pointer)
+                            {
+                                // For off-map artillery/aerial bombs or self-damage, report distance from blast impact point
+                                distMeters = Mathf.RoundToInt(blastDist);
+                            }
+                            else if (_activeImpactHasContext && _activeImpactStartPos.sqrMagnitude > 1f)
+                            {
+                                distMeters = Mathf.RoundToInt(Vector3.Distance(_activeImpactStartPos, playerPos));
+                            }
+                            else
+                            {
+                                distMeters = Mathf.RoundToInt(Vector3.Distance(__4.GetCenterOfUnit(), playerPos));
+                            }
 
                             bool isSelf = __4 != null && __4.Pointer == player.Pointer;
                             bool isFF = __4 != null && !isSelf && !string.IsNullOrEmpty(__4.faction) && __4.faction == player.faction;
+
+                            string blastDetail = blastDist <= Mathf.Max(2.5f, __3 * 0.45f)
+                                ? "Direct Blast"
+                                : "Blast Wave";
 
                             _lastDamageByVictim[player.Pointer] = new DamageAttribution
                             {
                                 IsSelfInflicted = isSelf,
                                 IsFriendlyFire = isFF,
                                 WeaponOrSource = expSource,
-                                HitDetail = "Explosion",
+                                HitDetail = blastDetail,
                                 DistanceMeters = Mathf.Max(0, distMeters),
                                 Timestamp = Time.time
                             };
@@ -497,16 +644,20 @@ namespace EasyRed2HumanAI
 
                     bool fromExplosion = !string.IsNullOrEmpty(_activeExplosionWeaponName);
                     string expWeaponName = _activeExplosionWeaponName;
+                    int preservedDistMeters = -1;
 
                     // If a flying shrapnel BulletInstance from an explosion hits a few frames after CreateExplosion returned,
                     // preserve the explosion's WeaponOrSource instead of overwriting it with the shooter's holstered sidearm.
                     if (!fromExplosion &&
                         _lastDamageByVictim.TryGetValue(victim.Pointer, out DamageAttribution recentAttr) &&
                         (Time.time - recentAttr.Timestamp) <= 0.45f &&
-                        string.Equals(recentAttr.HitDetail, "Explosion", StringComparison.Ordinal))
+                        (string.Equals(recentAttr.HitDetail, "Direct Blast", StringComparison.Ordinal) ||
+                         string.Equals(recentAttr.HitDetail, "Blast Wave", StringComparison.Ordinal) ||
+                         recentAttr.HitDetail.StartsWith("Shrapnel", StringComparison.Ordinal)))
                     {
                         fromExplosion = true;
                         expWeaponName = recentAttr.WeaponOrSource;
+                        preservedDistMeters = recentAttr.DistanceMeters;
                     }
 
                     string weaponOrSource = fromExplosion
@@ -524,9 +675,23 @@ namespace EasyRed2HumanAI
                     bool isFF = __4 != null && !isSelf && !string.IsNullOrEmpty(__4.faction) && __4.faction == victim.faction;
 
                     // Note: __3 in Bullet.BulletDamage is int damage, NOT distance; always compute distance in meters
-                    int distMeters = (__4 != null && !isSelf)
-                        ? Mathf.RoundToInt(Vector3.Distance(__4.GetCenterOfUnit(), victim.GetCenterOfUnit()))
-                        : Mathf.RoundToInt(Vector3.Distance(__2, victim.GetCenterOfUnit()));
+                    int distMeters;
+                    if (preservedDistMeters >= 0)
+                    {
+                        distMeters = preservedDistMeters;
+                    }
+                    else if (_activeExplosionIsArtillery)
+                    {
+                        distMeters = Mathf.RoundToInt(Vector3.Distance(__2, victim.GetCenterOfUnit()));
+                    }
+                    else if (__4 != null && !isSelf)
+                    {
+                        distMeters = Mathf.RoundToInt(Vector3.Distance(__4.GetCenterOfUnit(), victim.GetCenterOfUnit()));
+                    }
+                    else
+                    {
+                        distMeters = Mathf.RoundToInt(Vector3.Distance(__2, victim.GetCenterOfUnit()));
+                    }
 
                     _lastDamageByVictim[victim.Pointer] = new DamageAttribution
                     {
