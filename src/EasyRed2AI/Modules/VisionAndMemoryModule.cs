@@ -629,6 +629,62 @@ namespace EasyRed2HumanAI
             }
         }
 
+        internal static bool IsSafeToThrowGrenadeAt(Soldier thrower, Vector3 targetPos, float dist, float friendlySafeRadius = 9.5f)
+        {
+            if (thrower == null || thrower.transform == null)
+                return false;
+
+            Vector3 myPos = thrower.transform.position;
+
+            // 1. Ensure throw arc is not blocked by an interior ceiling, window frame, or wall right in front of the thrower
+            Vector3 throwOrigin = myPos + Vector3.up * 1.45f;
+            Vector3 arcPeakTarget = targetPos + Vector3.up * 1.60f;
+            Vector3 toArc = arcPeakTarget - throwOrigin;
+            if (toArc.sqrMagnitude > 0.04f)
+            {
+                if (AiCore.IsDirectionBlockedByEnvironment(throwOrigin, toArc.normalized, Mathf.Min(dist * 0.50f, 6.5f), thrower.transform.root))
+                    return false;
+            }
+
+            // 2. Ensure no friendly soldiers (or the player) are within the blast radius of the target position
+            string myFaction = thrower.faction;
+            float safeRadiusSq = friendlySafeRadius * friendlySafeRadius;
+
+            Soldier player = Soldier.CurrentControlledSoldierOrNull();
+            if (player != null && player.IsAlive && player.faction == myFaction && player.transform != null &&
+                (player.transform.position - targetPos).sqrMagnitude <= safeRadiusSq)
+            {
+                return false;
+            }
+
+            var allSquads = Squad.AllSquads;
+            if (allSquads != null)
+            {
+                foreach (var kvp in allSquads)
+                {
+                    Squad sq = kvp.Value;
+                    if (sq == null || sq.units == null) continue;
+                    Soldier leader = sq.Leader;
+                    if (leader == null || leader.faction != myFaction || leader.transform == null) continue;
+                    if ((leader.transform.position - targetPos).sqrMagnitude > 48f * 48f) continue;
+
+                    var units = sq.units;
+                    int c = units.Count;
+                    for (int i = 0; i < c; i++)
+                    {
+                        Soldier f = units[i];
+                        if (f != null && f.IsAlive && f.transform != null &&
+                            (f.transform.position - targetPos).sqrMagnitude <= safeRadiusSq)
+                        {
+                            return false;
+                        }
+                    }
+                }
+            }
+
+            return true;
+        }
+
         internal static void TryFlushLastKnownEnemyWithGrenade(SoldierAI ai, Soldier soldier)
         {
             if (!VisionConfig.EnableLastKnownSuppression.Value || ai == null || soldier == null || soldier.Pointer == IntPtr.Zero)
@@ -676,44 +732,8 @@ namespace EasyRed2HumanAI
             if (fragItem == null || dist > soldier.GetGrenadeThrowRange(fragItem))
                 return;
 
-            // Ensure throw arc is not blocked by an interior ceiling/wall right in front of the thrower
-            Vector3 throwOrigin = myPos + Vector3.up * 1.45f;
-            Vector3 arcPeakTarget = lastInfo.LastSeenPos + Vector3.up * 1.60f;
-            Vector3 throwDir = (arcPeakTarget - throwOrigin).normalized;
-            if (AiCore.IsDirectionBlockedByEnvironment(throwOrigin, throwDir, Mathf.Min(dist * 0.50f, 6.5f), soldier.transform.root))
+            if (!IsSafeToThrowGrenadeAt(soldier, lastInfo.LastSeenPos, dist, 9.5f))
                 return;
-
-            // Ensure no friendly soldiers are within 9.5m of the target cover position
-            string myFaction = soldier.faction;
-            const float safeRadiusSq = 9.5f * 9.5f;
-            Soldier player = Soldier.CurrentControlledSoldierOrNull();
-            if (player != null && player.IsAlive && player.faction == myFaction &&
-                (player.transform.position - lastInfo.LastSeenPos).sqrMagnitude <= safeRadiusSq)
-            {
-                return;
-            }
-
-            var allSquads = Squad.AllSquads;
-            if (allSquads != null)
-            {
-                foreach (var kvp in allSquads)
-                {
-                    Squad sq = kvp.Value;
-                    if (sq == null || sq.units == null) continue;
-                    Soldier leader = sq.Leader;
-                    if (leader == null || leader.faction != myFaction) continue;
-                    if ((leader.transform.position - lastInfo.LastSeenPos).sqrMagnitude > 45f * 45f) continue;
-
-                    var units = sq.units;
-                    int c = units.Count;
-                    for (int i = 0; i < c; i++)
-                    {
-                        Soldier f = units[i];
-                        if (f != null && f.IsAlive && (f.transform.position - lastInfo.LastSeenPos).sqrMagnitude <= safeRadiusSq)
-                            return;
-                    }
-                }
-            }
 
             if (!AiCore.TryConsumeBotRpcBudget(0.45f))
                 return;
@@ -752,24 +772,42 @@ namespace EasyRed2HumanAI
                 return false;
 
             GenericGun heldGun = soldier.GetHeldGun();
-            if (heldGun == null || heldGun.GetCurrentAmmoCount() <= 2)
+            if (heldGun == null)
                 return false;
 
-            SoldierPersonality pers = GetPersonality(soldier);
-            bool isSuppressorRole = soldier.hasMg ||
-                                    soldier.IsGunner() ||
-                                    !heldGun.bolt_required ||
-                                    pers == SoldierPersonality.Gunner_Anchor ||
-                                    pers == SoldierPersonality.Gunner_Overwatch ||
-                                    pers == SoldierPersonality.Gunner_AssaultMG;
-
-            if (!isSuppressorRole)
+            int ammoLeft = heldGun.GetCurrentAmmoCount();
+            if (ammoLeft <= 3)
                 return false;
 
-            Vector3 aimPos = lastInfo.LastSeenPos + Vector3.up * 0.25f;
+            Vector3 aimPos = lastInfo.LastSeenPos + Vector3.up * 0.45f;
             float dist = Vector3.Distance(soldier.transform.position, aimPos);
             if (dist < 8.0f || dist > 135.0f || heldGun.DamageRange() < dist)
                 return false;
+
+            SoldierPersonality pers = GetPersonality(soldier);
+            bool isDedicatedGunner = soldier.hasMg ||
+                                     soldier.IsGunner() ||
+                                     pers == SoldierPersonality.Gunner_Anchor ||
+                                     pers == SoldierPersonality.Gunner_Overwatch ||
+                                     pers == SoldierPersonality.Gunner_AssaultMG;
+            bool isCloseAutoSuppressor = !isDedicatedGunner &&
+                                         !heldGun.bolt_required &&
+                                         ammoLeft >= 12 &&
+                                         dist <= 55.0f;
+
+            if (!isDedicatedGunner && !isCloseAutoSuppressor)
+                return false;
+
+            // Verify unobstructed sightline up to the enemy's cover edge (dist - 2.5m) so gunners
+            // never blind-fire into intermediate hills, walls, or buildings.
+            Vector3 gunPos = soldier.GunPosition();
+            Vector3 toAim = aimPos - gunPos;
+            float aimLen = toAim.magnitude;
+            if (aimLen > 3.5f)
+            {
+                if (AiCore.RaycastEnvironment(gunPos, toAim / aimLen, aimLen - 2.5f, soldier.transform.root, out _))
+                    return false;
+            }
 
             ai.distFromTarget = dist;
             ai.targetInWeaponRange = true;
@@ -786,6 +824,15 @@ namespace EasyRed2HumanAI
                 }
             }
             return true;
+        }
+
+        internal static void InvalidateWatchWindowCache(IntPtr soldierPtr)
+        {
+            if (soldierPtr != IntPtr.Zero)
+            {
+                _watchWindowCache.Remove(soldierPtr);
+                _threatSectorCache.Remove(soldierPtr);
+            }
         }
 
         // =====================================================================

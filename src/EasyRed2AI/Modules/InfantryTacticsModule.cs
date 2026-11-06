@@ -620,6 +620,13 @@ namespace EasyRed2HumanAI
             if (IsPositionShelteredByFrontCover(pos, threatDir, ignoreRoot))
                 return false;
 
+            // Never mistake the interior back wall of a room, bunker, or pillbox for an exposed exterior wall face
+            if (AiCore.HasLowCeilingOverhead(pos, 3.5f) ||
+                AiCore.IsDirectionBlockedByEnvironment(pos + Vector3.up * 0.65f, threatDir, 4.5f, ignoreRoot))
+            {
+                return false;
+            }
+
             Vector3 rearOrigin = pos + Vector3.up * 0.75f;
             if (Physics.Raycast(rearOrigin, -threatDir, out rearWallHit, 1.95f, AiCore.GetSolidEnvironmentMask(), QueryTriggerInteraction.Ignore))
             {
@@ -1207,6 +1214,7 @@ namespace EasyRed2HumanAI
                             if (fragItem != null &&
                                 __instance.distFromTarget <= soldier.GetGrenadeThrowRange(fragItem) &&
                                 UnityEngine.Random.Range(0, 100) > 60 &&
+                                IsSafeToThrowGrenadeAt(soldier, __instance.visibleTarget.GetCenterOfUnit(), __instance.distFromTarget, 9.0f) &&
                                 AiCore.TryConsumeBotRpcBudget(0.45f))
                             {
                                 soldier.Throw(fragItem, __instance.visibleTarget);
@@ -1214,6 +1222,7 @@ namespace EasyRed2HumanAI
                         }
                     }
 
+                    bool isEvadingArmor = false;
                     if (VisionConfig.PreventSmallArmsFireAtTanks.Value &&
                         __instance.visibleTarget != null &&
                         __instance.visibleTarget.IsWheeledVehicleOrTank())
@@ -1237,6 +1246,7 @@ namespace EasyRed2HumanAI
                                     __instance.visibleTarget = crewSpottable;
                                     soldier.CurrentVisibleTarget = crewSpottable;
                                     __instance.distFromTarget = Vector3.Distance(soldier.transform.position, exposedCrew.transform.position);
+                                    RecordAndBroadcastVisualContact(soldier, crewSpottable);
                                     if (!_nextTankDisciplineCountTime.TryGetValue(ptr, out float nextCount) || Time.time >= nextCount)
                                     {
                                         _nextTankDisciplineCountTime[ptr] = Time.time + 3.0f;
@@ -1246,30 +1256,28 @@ namespace EasyRed2HumanAI
                             }
                             else
                             {
-                                bool switchedToFootEnemy = false;
-                                if (soldier.isAtUnit)
+                                // Switch any rifleman, MG gunner, or AT unit away from an invulnerable tank
+                                // to visible enemy infantry advancing behind or beside the tank!
+                                if (TryFindVisibleFootEnemy(soldier, out Spottable altEnemy, out float altDist))
                                 {
-                                    soldier.isAtUnit = false;
-                                    Spottable altEnemy = soldier.GetBestVisibleEnemy(out float altDist);
-                                    soldier.isAtUnit = true;
-                                    if (altEnemy != null && !altEnemy.IsWheeledVehicleOrTank())
-                                    {
-                                        __instance.visibleTarget = altEnemy;
-                                        soldier.CurrentVisibleTarget = altEnemy;
-                                        __instance.distFromTarget = altDist;
-                                        GenericGun heldGun = soldier.GetHeldGun();
-                                        __instance.targetInWeaponRange = heldGun != null && heldGun.DamageRange() >= altDist;
-                                        switchedToFootEnemy = true;
-                                    }
+                                    __instance.visibleTarget = altEnemy;
+                                    soldier.CurrentVisibleTarget = altEnemy;
+                                    __instance.distFromTarget = altDist;
+                                    GenericGun heldGun = soldier.GetHeldGun();
+                                    __instance.targetInWeaponRange = heldGun != null && heldGun.DamageRange() >= altDist;
+                                    RecordAndBroadcastVisualContact(soldier, altEnemy);
                                 }
-
-                                if (!switchedToFootEnemy)
+                                else
                                 {
                                     __instance.targetInWeaponRange = false;
                                     soldier.SetGunTriggerPressed(false);
                                     _combatStanceHoldUntil[ptr] = Time.time + 6.0f;
                                     _combatCrouchLockUntil[ptr] = Time.time + 3.5f;
-                                    TryEvadeArmorToCover(__instance, soldier, targetVeh, __instance.distFromTarget);
+                                    isEvadingArmor = TryEvadeArmorToCover(__instance, soldier, targetVeh, __instance.distFromTarget);
+                                    if (isEvadingArmor)
+                                    {
+                                        __instance.visibleTarget = null;
+                                    }
                                     if (!_nextTankDisciplineCountTime.TryGetValue(ptr, out float nextCount) || Time.time >= nextCount)
                                     {
                                         _nextTankDisciplineCountTime[ptr] = Time.time + 3.0f;
@@ -1354,9 +1362,15 @@ namespace EasyRed2HumanAI
                         }
                     }
 
+                    bool isStaffingEmplacement = _assignedEmplacementUntil.TryGetValue(ptr, out float empUntil) &&
+                                                 Time.time < empUntil &&
+                                                 !soldier.IsOnVehicle();
+
                     if (VisionConfig.EnableSmartWallSideCover.Value &&
                         !isOnBridge &&
+                        !isEvadingArmor &&
                         !isRepairingVehicle &&
+                        !isStaffingEmplacement &&
                         !soldier.IsCharging() &&
                         !soldier.UsingBipod() &&
                         !soldier.IsBipodTransitioning())
@@ -1469,12 +1483,14 @@ namespace EasyRed2HumanAI
                         bool holdOverwatchFireNow = false;
                         if (VisionConfig.EnableBoundingOverwatch.Value &&
                             !isOnBridge &&
+                            !isEvadingArmor &&
+                            !isStaffingEmplacement &&
                             !soldier.IsCharging() &&
                             !inPointBlankMelee &&
                             !soldier.IsOnCover() &&
                             (soldier.transform.position - __instance.MoveDestination).sqrMagnitude > 4.5f * 4.5f &&
                             (suppression >= 10f ||
-                             (__instance.HasEnemyAndCanFireAtHim && dist >= 10f && dist <= 145f) ||
+                             (__instance.HasEnemyAndCanFireAtHim && dist >= 14f && dist <= 145f) ||
                              (HasActiveThreatSectorContact(soldier) && soldier.isAlerted)))
                         {
                             inBoundingOverwatch = true;
@@ -1482,7 +1498,7 @@ namespace EasyRed2HumanAI
                             float phase = (Time.time + cycleOffset) % 9.0f;
                             if (phase >= 5.2f &&
                                 __instance.HasEnemyAndCanFireAtHim &&
-                                dist >= 12f &&
+                                dist >= 18f &&
                                 dist <= 145f &&
                                 suppression < 42f &&
                                 __instance.visibleTarget != null)
@@ -1701,6 +1717,10 @@ namespace EasyRed2HumanAI
 
                     if (VisionConfig.EnableComradeLiberation.Value &&
                         suppression < maxLiberateSupp &&
+                        !isEvadingArmor &&
+                        !isRepairingVehicle &&
+                        !isStaffingEmplacement &&
+                        !inPointBlankMelee &&
                         !soldier.UsingBipod() &&
                         (!__instance.HasEnemyAndCanFireAtHim || dist > 28f || personality == SoldierPersonality.Medic_Heroic))
                     {
@@ -1763,7 +1783,7 @@ namespace EasyRed2HumanAI
                             AddCombatExperienceBonus(rescuer, 30f);
                         }
                     }
-                    else if (!rescuer.IsSquadLeader())
+                    else if (!rescuer.IsSquadLeader() && !ai.HasEnemyAndCanFireAtHim)
                     {
                         ai.MoveDirectlyToward(bestSurrendered.transform.position, 2.2f);
                     }
@@ -2378,7 +2398,9 @@ namespace EasyRed2HumanAI
                                 bool canPeekNow = (!_nextPeekAllowedTime.TryGetValue(ptr, out float nextPeek) || Time.time >= nextPeek) &&
                                                   (!_poseLockUntil.TryGetValue(ptr, out float poseLock) || Time.time >= poseLock);
                                 GetEffectivePeekParameters(soldier, vet01, out float maxPeekSupp, out _, out _);
+                                // Only stand up / sidestep to peek when engaging an actual visible target (never during blind suppressive fire)
                                 if (!isMoving &&
+                                    __instance.visibleTarget != null &&
                                     canPeekNow &&
                                     VisionConfig.EnableAutoPeekOverCover.Value &&
                                     soldier.GetSuppressionValue() < maxPeekSupp &&
@@ -2389,6 +2411,7 @@ namespace EasyRed2HumanAI
                                 {
                                     bool crouchClear = HasClearLineOfFireFromCrouch(soldier, __0, dist);
                                     bool standClear = !crouchClear && HasClearLineOfFireFromStanding(soldier, __0, dist);
+                                    bool canSidestep = !soldier.IsCharging() && !isOnBridge && !soldier.IsOnCover();
 
                                     if (soldier.m_pose == SoldierPose.Prone &&
                                         !HasClearLineOfFireFromProne(soldier, __0, dist))
@@ -2416,7 +2439,7 @@ namespace EasyRed2HumanAI
                                             }
                                             AutoPeeksTriggered++;
                                         }
-                                        else if (!soldier.IsCharging() && !isOnBridge)
+                                        else if (canSidestep)
                                         {
                                             TrySidestepWallObstruction(__instance, soldier, __0, dist);
                                         }
@@ -2437,12 +2460,12 @@ namespace EasyRed2HumanAI
                                             }
                                             AutoPeeksTriggered++;
                                         }
-                                        else if (!soldier.IsCharging() && !isOnBridge)
+                                        else if (canSidestep)
                                         {
                                             TrySidestepWallObstruction(__instance, soldier, __0, dist);
                                         }
                                     }
-                                    else if (soldier.m_pose == SoldierPose.Idle && !soldier.IsCharging() && !isOnBridge)
+                                    else if (soldier.m_pose == SoldierPose.Idle && canSidestep)
                                     {
                                         TrySidestepWallObstruction(__instance, soldier, __0, dist);
                                     }
@@ -2809,6 +2832,7 @@ namespace EasyRed2HumanAI
                                 {
                                     door.SetDoor(true);
                                     _nextDoorToggleTime[doorPtr] = now + 8.0f;
+                                    InvalidateWatchWindowCache(botPtr);
                                 }
                             }
                             else
@@ -2859,6 +2883,10 @@ namespace EasyRed2HumanAI
                             {
                                 door.SetDoor(false);
                                 _nextDoorToggleTime[doorPtr] = now + 10.0f;
+                                if (info.IsWindowShutter)
+                                {
+                                    InvalidateWatchWindowCache(botPtr);
+                                }
                                 DoorsStrategicallyClosedCount++;
                                 if (VisionConfig.DebugLogging.Value)
                                 {

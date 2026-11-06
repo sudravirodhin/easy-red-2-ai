@@ -352,7 +352,7 @@ namespace EasyRed2HumanAI
 
         private static void TryThrowNormalGrenadeAtVehicle(Soldier soldier, Vehicle targetVeh, float dist)
         {
-            if (!AiCore.IsLocallyOwnedBot(soldier) || targetVeh == null || soldier.inventory == null)
+            if (!AiCore.IsLocallyOwnedBot(soldier) || targetVeh == null || targetVeh.transform == null || soldier.inventory == null)
                 return;
 
             if (dist <= 7.5f || dist > 32f || soldier.isInBodyAnimation || soldier.isInHandsAnimation)
@@ -362,24 +362,87 @@ namespace EasyRed2HumanAI
             if (grenadeItem != null)
             {
                 float maxThrowRange = soldier.GetGrenadeThrowRange(grenadeItem);
-                if (dist <= maxThrowRange && UnityEngine.Random.Range(0, 100) > 65 && AiCore.TryConsumeBotRpcBudget(0.45f))
+                if (dist <= maxThrowRange &&
+                    UnityEngine.Random.Range(0, 100) > 65 &&
+                    IsSafeToThrowGrenadeAt(soldier, targetVeh.transform.position, dist, 8.5f) &&
+                    AiCore.TryConsumeBotRpcBudget(0.45f))
                 {
                     soldier.Throw(grenadeItem, targetVeh.Cast<Spottable>());
                 }
             }
         }
 
-        private static void TryEvadeArmorToCover(SoldierAI ai, Soldier soldier, Vehicle targetVeh, float dist)
+        internal static bool TryFindVisibleFootEnemy(Soldier shooter, out Spottable bestFootEnemy, out float bestFootDist)
+        {
+            bestFootEnemy = null;
+            bestFootDist = float.MaxValue;
+            if (shooter == null || shooter.transform == null)
+                return false;
+
+            GenericGun heldGun = shooter.GetHeldGun();
+            float maxWeaponDist = heldGun != null ? Mathf.Min(heldGun.DamageRange(), 185.0f) : 140.0f;
+            if (maxWeaponDist < 10.0f)
+                return false;
+
+            Vector3 myPos = shooter.transform.position;
+            string myFaction = shooter.faction;
+
+            // If this is an AT soldier, temporarily toggle isAtUnit off to query vanilla's octree
+            if (shooter.isAtUnit)
+            {
+                shooter.isAtUnit = false;
+                Spottable alt = shooter.GetBestVisibleEnemy(out float altDist);
+                shooter.isAtUnit = true;
+                if (alt != null && !alt.IsWheeledVehicleOrTank() && !alt.IsAirVehicle() && altDist <= maxWeaponDist)
+                {
+                    bestFootEnemy = alt;
+                    bestFootDist = altDist;
+                    return true;
+                }
+            }
+
+            // For any infantryman whose octree nearest-enemy query returned an invulnerable tank,
+            // check nearby enemy squads for a visible enemy foot soldier (e.g. infantry advancing with the tank!)
+            RefreshCombinedArmsIntelIfNeeded();
+            int clusterCount = _knownEnemyClusters.Count;
+            for (int i = 0; i < clusterCount; i++)
+            {
+                KnownEnemyCluster cluster = _knownEnemyClusters[i];
+                if (cluster.Faction == myFaction)
+                    continue;
+
+                for (int pass = 0; pass < 2; pass++)
+                {
+                    Spottable cand = pass == 0 ? cluster.PrimarySoldier : cluster.SecondarySoldier;
+                    if (cand == null || cand.Pointer == IntPtr.Zero)
+                        continue;
+
+                    float d = Vector3.Distance(myPos, cand.GetCenterOfUnit());
+                    if (d >= bestFootDist || d > maxWeaponDist)
+                        continue;
+
+                    if (shooter.CanSee(cand))
+                    {
+                        bestFootDist = d;
+                        bestFootEnemy = cand;
+                    }
+                }
+            }
+
+            return bestFootEnemy != null;
+        }
+
+        private static bool TryEvadeArmorToCover(SoldierAI ai, Soldier soldier, Vehicle targetVeh, float dist)
         {
             if (ai == null || !AiCore.IsLocallyOwnedBot(soldier) || targetVeh == null || targetVeh.transform == null)
-                return;
+                return false;
 
             if (dist > 85f || soldier.IsOnVehicle() || soldier.UsingBipod() || soldier.isInBodyAnimation)
-                return;
+                return false;
 
             // If the soldier carries an AT grenade and is within assault distance (<= 38m), let them close in to throw it
             if (dist <= 38f && soldier.inventory != null && soldier.inventory.FindItemOfType<VirtualATGrenade>() != null)
-                return;
+                return false;
 
             Vector3 myPos = soldier.transform.position;
             Vector3 toTank = targetVeh.transform.position - myPos;
@@ -392,7 +455,7 @@ namespace EasyRed2HumanAI
             {
                 if (!ai.IsMoving())
                     SetBotPose(ai, soldier, SoldierPose.Crouch);
-                return;
+                return false;
             }
 
             // 1. If standing on the exposed front face of a wall, duck around to the leeward side immediately
@@ -401,7 +464,7 @@ namespace EasyRed2HumanAI
                 SetBotPose(ai, soldier, SoldierPose.Idle);
                 ai.MoveDirectlyToward(behindWallPos, 1.2f);
                 AiCore.LogDebug("AntiArmor", $"{soldier.faction} rifleman scrambling behind wall to evade {targetVeh.name} at {dist:F0}m.", 6.0f);
-                return;
+                return true;
             }
 
             // 2. If assigned cover exists but the soldier isn't on it yet, sprint to that cover
@@ -411,7 +474,7 @@ namespace EasyRed2HumanAI
                 if (ai.IsMoving())
                 {
                     SetBotPose(ai, soldier, SoldierPose.Idle);
-                    return;
+                    return true;
                 }
             }
 
@@ -439,8 +502,11 @@ namespace EasyRed2HumanAI
                     SetBotPose(ai, soldier, SoldierPose.Idle);
                     ai.MoveDirectlyToward(retreatPos, 1.5f);
                     AiCore.LogDebug("AntiArmor", $"{soldier.faction} infantryman fleeing open ground from {targetVeh.name} ({dist:F0}m).", 6.0f);
+                    return true;
                 }
             }
+
+            return false;
         }
 
         // =====================================================================
@@ -1315,15 +1381,19 @@ namespace EasyRed2HumanAI
                 if (bestEnemyAir != null && plane.PilotGunHasAnyAmmo())
                 {
                     AIPlane.PlaneAIState state = plane.planeState;
-                    bool isGroundPassOrPatrol =
+                    Vector3 curPlanePos = plane.transform.position;
+                    Vector3 flyTarget = plane.flyTargetPosition;
+                    bool canSafelyBreakOff =
                         state == AIPlane.PlaneAIState.flyingAroundArea ||
                         state == AIPlane.PlaneAIState.preparingDive ||
-                        state == AIPlane.PlaneAIState.doingDive;
+                        (state == AIPlane.PlaneAIState.doingDive &&
+                         curPlanePos.y > flyTarget.y + 145.0f &&
+                         (curPlanePos - flyTarget).sqrMagnitude > 220.0f * 220.0f);
 
                     Spottable curAtk = plane.targetToAttack;
                     bool alreadyTargetingAir = curAtk != null && curAtk.Pointer != IntPtr.Zero && curAtk.IsAirVehicle();
 
-                    if (isGroundPassOrPatrol && !alreadyTargetingAir)
+                    if (canSafelyBreakOff && !alreadyTargetingAir)
                     {
                         plane.DoAttackTarget(bestEnemyAir);
                         RecordCombinedArmsAssist(
@@ -1432,6 +1502,11 @@ namespace EasyRed2HumanAI
                         Time.time,
                         "CombArmsAirSup",
                         $"{myFaction} aircraft detected enemy plane in airspace; prioritizing dogfight over ground attack.");
+                }
+                else
+                {
+                    // Never initiate ground attacks while enemy aircraft contest the airspace
+                    currentResult = null;
                 }
                 return;
             }
@@ -1890,6 +1965,20 @@ namespace EasyRed2HumanAI
                     if (!mainTurret.CanShoot360 && threatDir.sqrMagnitude > 0.01f && !mainTurret.IsPositionInDirection(threatDir))
                         continue;
 
+                    // Do not send soldiers to an emplacement that is already overrun at close range (< 22m)
+                    bool emplacementOverrun = false;
+                    for (int c = 0; c < _knownEnemyClusters.Count; c++)
+                    {
+                        if (_knownEnemyClusters[c].Faction != leader.faction &&
+                            (_knownEnemyClusters[c].Position - vehPos).sqrMagnitude <= 22.0f * 22.0f)
+                        {
+                            emplacementOverrun = true;
+                            break;
+                        }
+                    }
+                    if (emplacementOverrun)
+                        continue;
+
                     var units = sq.units;
                     int uCount = units.Count;
                     for (int uIdx = 0; uIdx < uCount; uIdx++)
@@ -1900,6 +1989,12 @@ namespace EasyRed2HumanAI
 
                         if (u.hasSyringe || u.IsRadioman() || u.isBleeding || u.HasSurrended() || u.dontLeaveVehicle)
                             continue;
+
+                        if (u.GetSuppressionValue() >= 30f ||
+                            (u.aiController != null && u.aiController.HasEnemyAndCanFireAtHim && u.aiController.distFromTarget < 28f))
+                        {
+                            continue;
+                        }
 
                         if (u.Params != null && (!u.Params.canMove || u.Params.neverLeaveVehicle))
                             continue;
