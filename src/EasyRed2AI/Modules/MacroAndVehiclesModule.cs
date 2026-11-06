@@ -605,14 +605,25 @@ namespace EasyRed2HumanAI
             public Spottable SecondarySoldier;
         }
 
+        private struct AirborneAircraftInfo
+        {
+            public string Faction;
+            public VehiclePlane Plane;
+            public Spottable Spottable;
+            public Vector3 Position;
+            public bool IsBomber;
+        }
+
         private static float _nextCombinedArmsIntelRefreshTime;
         private static readonly List<ActiveRadioSupportInfo> _activeRadioRequests = new List<ActiveRadioSupportInfo>(16);
         private static readonly List<KnownEnemyCluster> _knownEnemyClusters = new List<KnownEnemyCluster>(32);
+        private static readonly List<AirborneAircraftInfo> _airborneAircraft = new List<AirborneAircraftInfo>(8);
 
         public static void ClearCombinedArmsCaches()
         {
             _activeRadioRequests.Clear();
             _knownEnemyClusters.Clear();
+            _airborneAircraft.Clear();
             _nextCombinedArmsIntelRefreshTime = 0f;
             if (_nextVehicleSupportSteerTime.Count > 128)
                 _nextVehicleSupportSteerTime.Clear();
@@ -674,6 +685,7 @@ namespace EasyRed2HumanAI
             _nextCombinedArmsIntelRefreshTime = now + 1.0f;
             _activeRadioRequests.Clear();
             _knownEnemyClusters.Clear();
+            _airborneAircraft.Clear();
 
             var allSquads = Squad.AllSquads;
             if (allSquads == null || allSquads.Count == 0)
@@ -739,7 +751,34 @@ namespace EasyRed2HumanAI
 
                 Vehicle mountedVeh = refSoldier.IsOnVehicle() ? refSoldier.GetCurrentVehicle() : null;
                 if (mountedVeh != null && mountedVeh.IsAirVehicle())
+                {
+                    VehiclePlane vp = mountedVeh.TryCast<VehiclePlane>();
+                    if (vp != null && !vp.isGrounded && vp.CanFight() && vp.transform != null && _airborneAircraft.Count < 8)
+                    {
+                        bool alreadyAdded = false;
+                        for (int a = 0; a < _airborneAircraft.Count; a++)
+                        {
+                            if (_airborneAircraft[a].Plane != null && _airborneAircraft[a].Plane.Pointer == vp.Pointer)
+                            {
+                                alreadyAdded = true;
+                                break;
+                            }
+                        }
+
+                        if (!alreadyAdded)
+                        {
+                            _airborneAircraft.Add(new AirborneAircraftInfo
+                            {
+                                Faction = refSoldier.faction,
+                                Plane = vp,
+                                Spottable = vp.Cast<Spottable>(),
+                                Position = vp.transform.position,
+                                IsBomber = vp.planeType == PlaneType.Bomber
+                            });
+                        }
+                    }
                     continue;
+                }
 
                 string sqFaction = refSoldier.faction;
                 Vector3 sqPos = refSoldier.transform.position;
@@ -1200,29 +1239,105 @@ namespace EasyRed2HumanAI
             }
         }
 
+        private static Spottable FindBestAirborneEnemyAircraft(AIPlane plane, string myFaction, Vector3 planePos, out bool anyEnemyAirborne)
+        {
+            anyEnemyAirborne = false;
+            Spottable bestTarget = null;
+            float bestScore = -99999f;
+
+            IntPtr selfVehPtr = plane != null && plane.veh != null ? plane.veh.Pointer : IntPtr.Zero;
+            int count = _airborneAircraft.Count;
+            for (int i = 0; i < count; i++)
+            {
+                AirborneAircraftInfo info = _airborneAircraft[i];
+                if (info.Faction == myFaction ||
+                    info.Plane == null ||
+                    info.Plane.Pointer == IntPtr.Zero ||
+                    info.Plane.Pointer == selfVehPtr ||
+                    info.Spottable == null ||
+                    info.Spottable.Pointer == IntPtr.Zero)
+                {
+                    continue;
+                }
+
+                if (info.Plane.isGrounded || !info.Plane.CanFight())
+                    continue;
+
+                Vector3 targetPos = info.Plane.transform != null ? info.Plane.transform.position : info.Position;
+                float dist = Vector3.Distance(planePos, targetPos);
+                // Vanilla GetBestAircraftVisibleEnemy (0x180571E56) intended 1700m for fighters and 4000m for bombers,
+                // but accidentally truncated its PointOctree query to 850m. Restore full air-superiority detection range:
+                float maxAirDist = info.IsBomber ? 4000.0f : 2200.0f;
+                if (dist > maxAirDist)
+                    continue;
+
+                anyEnemyAirborne = true;
+                // Prioritize enemy fighters over bombers so fighters clear threats before hunting bombers
+                float score = (info.IsBomber ? 100.0f : 350.0f) - (dist * 0.25f);
+                if (score > bestScore)
+                {
+                    bestScore = score;
+                    bestTarget = info.Spottable;
+                }
+            }
+
+            return bestTarget;
+        }
+
         public static void TrySteerAircraftOrbitTowardKnownThreat(AIPlane plane)
         {
-            if (plane == null || plane.veh == null || plane.veh.Pointer == IntPtr.Zero)
+            if (plane == null || plane.veh == null || plane.veh.Pointer == IntPtr.Zero || plane.transform == null)
                 return;
 
-            if (plane.veh.PlayerIsInside() ||
-                plane.planeState != AIPlane.PlaneAIState.flyingAroundArea)
-            {
+            if (!AiCore.IsLocallyOwnedVehicle(plane.veh) || plane.veh.PlayerIsInside())
                 return;
-            }
 
             IntPtr vehPtr = plane.veh.Pointer;
             float now = Time.time;
             if (_nextPlaneOrbitSteerTime.TryGetValue(vehPtr, out float nextSteer) && now < nextSteer)
                 return;
 
-            _nextPlaneOrbitSteerTime[vehPtr] = now + 3.5f;
+            _nextPlaneOrbitSteerTime[vehPtr] = now + 2.5f;
 
             string myFaction = GetVehicleCrewFaction(plane.veh);
             if (string.IsNullOrEmpty(myFaction))
                 return;
 
             RefreshCombinedArmsIntelIfNeeded();
+
+            // Air Superiority First ("Clear Skies Only" Ground Support):
+            // If an enemy aircraft is airborne in the battle airspace, never steer patrol orbits toward ground targets.
+            // Furthermore, if our aircraft has forward pilot gun ammo and is either patrolling or locked into a ground
+            // dive pass (preparingDive / doingDive), immediately break off the ground pass and engage the enemy plane!
+            Spottable bestEnemyAir = FindBestAirborneEnemyAircraft(plane, myFaction, plane.transform.position, out bool anyEnemyAirborne);
+            if (anyEnemyAirborne)
+            {
+                if (bestEnemyAir != null && plane.PilotGunHasAnyAmmo())
+                {
+                    AIPlane.PlaneAIState state = plane.planeState;
+                    bool isGroundPassOrPatrol =
+                        state == AIPlane.PlaneAIState.flyingAroundArea ||
+                        state == AIPlane.PlaneAIState.preparingDive ||
+                        state == AIPlane.PlaneAIState.doingDive;
+
+                    Spottable curAtk = plane.targetToAttack;
+                    bool alreadyTargetingAir = curAtk != null && curAtk.Pointer != IntPtr.Zero && curAtk.IsAirVehicle();
+
+                    if (isGroundPassOrPatrol && !alreadyTargetingAir)
+                    {
+                        plane.DoAttackTarget(bestEnemyAir);
+                        RecordCombinedArmsAssist(
+                            vehPtr,
+                            now,
+                            "CombArmsAirSup",
+                            $"{myFaction} aircraft aborted ground pass/patrol to intercept airborne enemy aircraft.");
+                    }
+                }
+                return;
+            }
+
+            if (plane.planeState != AIPlane.PlaneAIState.flyingAroundArea)
+                return;
 
             Vector3 bestOrbitPos = Vector3.zero;
             float bestScore = -999f;
@@ -1299,10 +1414,30 @@ namespace EasyRed2HumanAI
                 return;
 
             RefreshCombinedArmsIntelIfNeeded();
-            if (_knownEnemyClusters.Count == 0)
-                return;
 
             Vector3 planePos = plane.transform.position;
+
+            // Air Superiority Gate ("Clear Skies Only" Ground Support):
+            // Fix vanilla's 850m PointOctree radius cap in GetBestAircraftVisibleEnemy (0x180571BC6) and enforce
+            // strict air superiority: if any enemy aircraft is airborne in the battle airspace, never assign
+            // ground CAS targets, and direct armed fighters/attack planes to dogfight the enemy aircraft first.
+            Spottable bestEnemyAir = FindBestAirborneEnemyAircraft(plane, myFaction, planePos, out bool anyEnemyAirborne);
+            if (anyEnemyAirborne)
+            {
+                if (bestEnemyAir != null && plane.PilotGunHasAnyAmmo())
+                {
+                    currentResult = bestEnemyAir;
+                    RecordCombinedArmsAssist(
+                        plane.veh.Pointer,
+                        Time.time,
+                        "CombArmsAirSup",
+                        $"{myFaction} aircraft detected enemy plane in airspace; prioritizing dogfight over ground attack.");
+                }
+                return;
+            }
+
+            if (_knownEnemyClusters.Count == 0)
+                return;
             Vector3 planeFwd = plane.transform.forward;
             Transform planeRoot = plane.transform.root;
 
