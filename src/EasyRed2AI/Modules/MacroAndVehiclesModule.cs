@@ -645,6 +645,12 @@ namespace EasyRed2HumanAI
         internal static readonly Dictionary<IntPtr, float> _nextApcCheckTime = new Dictionary<IntPtr, float>(64);
         internal static readonly Dictionary<IntPtr, float> _nextApcDismountCooldown = new Dictionary<IntPtr, float>(64);
         internal static readonly Dictionary<IntPtr, float> _nextTankStandoffCountTime = new Dictionary<IntPtr, float>(64);
+        internal static readonly Dictionary<IntPtr, Vector2> _cachedVehicleExtents = new Dictionary<IntPtr, Vector2>(64);
+        internal static readonly Dictionary<IntPtr, float> _nextVehiclePedestrianScanTime = new Dictionary<IntPtr, float>(64);
+        internal static readonly Dictionary<IntPtr, float> _vehicleYieldUntilTime = new Dictionary<IntPtr, float>(64);
+        internal static readonly Dictionary<IntPtr, float> _vehicleContinuousYieldStart = new Dictionary<IntPtr, float>(64);
+        internal static readonly Dictionary<IntPtr, float> _nextFriendlyStepAsideTime = new Dictionary<IntPtr, float>(128);
+        internal static readonly Dictionary<IntPtr, float> _nextFriendlyYieldCountTime = new Dictionary<IntPtr, float>(64);
         internal static readonly Dictionary<IntPtr, float> _nextVehicleSupportSteerTime = new Dictionary<IntPtr, float>(64);
         internal static readonly Dictionary<IntPtr, float> _nextPlaneOrbitSteerTime = new Dictionary<IntPtr, float>(32);
         internal static readonly Dictionary<IntPtr, float> _nextCombinedArmsAssistCountTime = new Dictionary<IntPtr, float>(64);
@@ -697,6 +703,15 @@ namespace EasyRed2HumanAI
                 _nextPlaneOrbitSteerTime.Clear();
             if (_nextCombinedArmsAssistCountTime.Count > 128)
                 _nextCombinedArmsAssistCountTime.Clear();
+            if (_cachedVehicleExtents.Count > 128)
+                _cachedVehicleExtents.Clear();
+            if (_nextVehiclePedestrianScanTime.Count > 128)
+            {
+                _nextVehiclePedestrianScanTime.Clear();
+                _vehicleYieldUntilTime.Clear();
+                _vehicleContinuousYieldStart.Clear();
+                _nextFriendlyYieldCountTime.Clear();
+            }
         }
 
         private static void RecordCombinedArmsAssist(IntPtr unitPtr, float now, string tag, string msg)
@@ -2146,9 +2161,337 @@ namespace EasyRed2HumanAI
             }
         }
 
+        // =====================================================================
+        // Friendly Infantry Right-of-Way & Anti-Roadkill
+        // =====================================================================
+        private static Vector2 GetCachedVehicleHalfExtents(Vehicle veh)
+        {
+            if (veh == null || veh.Pointer == IntPtr.Zero)
+                return new Vector2(1.65f, 3.10f);
+
+            IntPtr vehPtr = veh.Pointer;
+            if (_cachedVehicleExtents.TryGetValue(vehPtr, out Vector2 extents))
+                return extents;
+
+            extents = new Vector2(1.65f, 3.10f);
+            try
+            {
+                VehicleWithWheels wheeled = veh.TryCast<VehicleWithWheels>();
+                if (wheeled != null)
+                {
+                    Bounds b = wheeled.CalculateVehicleLocalBounds();
+                    extents.x = Mathf.Clamp(b.extents.x, 1.15f, 2.50f);
+                    extents.y = Mathf.Clamp(b.extents.z, 2.00f, 5.00f);
+                }
+            }
+            catch { }
+
+            _cachedVehicleExtents[vehPtr] = extents;
+            return extents;
+        }
+
+        private static void RecordFriendlyYieldOrSave(IntPtr vehPtr, float now, string reason)
+        {
+            if (!_nextFriendlyYieldCountTime.TryGetValue(vehPtr, out float nextCount) || now >= nextCount)
+            {
+                _nextFriendlyYieldCountTime[vehPtr] = now + 4.5f;
+                FriendlyRoadkillsPreventedCount++;
+                if (VisionConfig.DebugLogging.Value)
+                {
+                    AiCore.LogDebug("FriendlyRightOfWay", reason);
+                }
+            }
+        }
+
+        private static void TryNudgeFriendlySoldierAside(
+            Soldier s,
+            Vector3 vehPos,
+            Vector3 travelDir,
+            Vector3 vehRight,
+            float halfWidth,
+            float now,
+            bool immediateControllerPush)
+        {
+            if (s == null || s.Pointer == IntPtr.Zero || !s.IsAI() || !AiCore.IsLocallyOwnedBot(s) || s.transform == null)
+                return;
+
+            Vector3 sPos = s.transform.position;
+            Vector3 delta = sPos - vehPos;
+            float sideSign = Vector3.Dot(delta, vehRight) >= 0f ? 1f : -1f;
+            float stepDist = halfWidth + 2.35f;
+            int solidMask = AiCore.GetSolidEnvironmentMask();
+
+            Vector3 sideDir = vehRight * sideSign;
+            Vector3 candidatePos = sPos + sideDir * stepDist + travelDir * 0.70f;
+            bool primaryValid = !AiCore.IsDirectionBlockedByEnvironment(sPos + Vector3.up * 0.75f, sideDir, 2.6f, s.transform.root) &&
+                                Physics.Raycast(candidatePos + Vector3.up * 0.85f, Vector3.down, 2.65f, solidMask, QueryTriggerInteraction.Ignore);
+
+            if (!primaryValid)
+            {
+                sideSign = -sideSign;
+                sideDir = vehRight * sideSign;
+                candidatePos = sPos + sideDir * stepDist + travelDir * 0.70f;
+                primaryValid = !AiCore.IsDirectionBlockedByEnvironment(sPos + Vector3.up * 0.75f, sideDir, 2.6f, s.transform.root) &&
+                               Physics.Raycast(candidatePos + Vector3.up * 0.85f, Vector3.down, 2.65f, solidMask, QueryTriggerInteraction.Ignore);
+            }
+
+            if (immediateControllerPush && primaryValid)
+            {
+                CharacterController cc = s.m_controller;
+                if (cc != null && cc.enabled)
+                {
+                    cc.Move(sideDir * 0.38f);
+                }
+            }
+
+            if (_nextFriendlyStepAsideTime.TryGetValue(s.Pointer, out float nextNudge) && now < nextNudge)
+                return;
+
+            _nextFriendlyStepAsideTime[s.Pointer] = now + 1.15f;
+
+            if (!primaryValid || s.UsingBipod() || s.isInBodyAnimation || (s.Params != null && !s.Params.canMove))
+                return;
+
+            if (s.m_pose == SoldierPose.Prone)
+            {
+                s.SetPose(SoldierPose.Idle, false);
+            }
+
+            if (s.aiController != null)
+            {
+                s.aiController.MoveDirectlyToward(candidatePos, 1.15f);
+            }
+        }
+
+        private static void EvaluateFriendlySoldierInVehicleCorridor(
+            Soldier s,
+            string vehFaction,
+            Vector3 vehPos,
+            Vector3 travelDir,
+            Vector3 vehRight,
+            float halfWidth,
+            float minFwd,
+            float maxStepAsideFwd,
+            float maxBrakeFwd,
+            float stepAsideHalfWidth,
+            float brakeHalfWidth,
+            float now,
+            ref bool playerInBrakeCorridor,
+            ref bool aiInBrakeCorridor)
+        {
+            if (s == null || s.Pointer == IntPtr.Zero || !s.IsAlive || s.IsOnVehicle() || s.transform == null)
+                return;
+
+            if (string.IsNullOrEmpty(s.faction) || !ResourcesManager.IsSameFaction(vehFaction, s.faction))
+                return;
+
+            Vector3 sPos = s.transform.position;
+            Vector3 delta = sPos - vehPos;
+            if (Mathf.Abs(delta.y) > 3.2f)
+                return;
+
+            float fwdDist = Vector3.Dot(delta, travelDir);
+            if (fwdDist < minFwd || fwdDist > maxStepAsideFwd)
+                return;
+
+            float latAbs = Mathf.Abs(Vector3.Dot(delta, vehRight));
+            if (latAbs > stepAsideHalfWidth)
+                return;
+
+            // Protect friendly soldier from accidental low-speed contact while clearing the corridor
+            s.DisableHitByVehicleFor(1.5f);
+
+            if (s.IsAI())
+            {
+                TryNudgeFriendlySoldierAside(s, vehPos, travelDir, vehRight, halfWidth, now, false);
+            }
+
+            if (fwdDist <= maxBrakeFwd && latAbs <= brakeHalfWidth)
+            {
+                if (s.IsPlayer())
+                    playerInBrakeCorridor = true;
+                else
+                    aiInBrakeCorridor = true;
+            }
+        }
+
+        private static bool ShouldYieldToFriendlyInfantry(AIVehicle aiVeh, Vehicle veh, bool isReversing)
+        {
+            if (veh == null || veh.Pointer == IntPtr.Zero || veh.transform == null)
+                return false;
+
+            if (!AiCore.IsLocallyOwnedVehicle(veh) || veh.PlayerIsDriving())
+                return false;
+
+            IntPtr vehPtr = veh.Pointer;
+            float now = Time.time;
+
+            // Fast cached path between 0.18s spatial checks
+            if (_nextVehiclePedestrianScanTime.TryGetValue(vehPtr, out float nextScan) && now < nextScan)
+            {
+                return _vehicleYieldUntilTime.TryGetValue(vehPtr, out float yieldUntil) && now < yieldUntil;
+            }
+
+            _nextVehiclePedestrianScanTime[vehPtr] = now + 0.18f;
+
+            // Always hold brake if a squadmate is actively repairing the vehicle
+            if (aiVeh != null && aiVeh.squadInside != null && aiVeh.squadInside.SomeoneIsRepairing())
+            {
+                _vehicleYieldUntilTime[vehPtr] = now + 0.25f;
+                return true;
+            }
+
+            string vehFaction = GetVehicleCrewFaction(veh);
+            if (string.IsNullOrEmpty(vehFaction))
+                return false;
+
+            Transform tr = veh.transform;
+            Vector3 vehPos = tr.position;
+            Vector3 travelDir = isReversing ? -tr.forward : tr.forward;
+            travelDir.y = 0f;
+            if (travelDir.sqrMagnitude < 0.001f)
+                return false;
+            travelDir.Normalize();
+
+            Vector3 vehRight = tr.right;
+            vehRight.y = 0f;
+            vehRight = vehRight.sqrMagnitude > 0.001f ? vehRight.normalized : Vector3.right;
+
+            Vector2 extents = GetCachedVehicleHalfExtents(veh);
+            float halfWidth = extents.x;
+            float halfLength = extents.y;
+
+            float speedMs = 0f;
+            MovableVehicle mv = veh.TryCast<MovableVehicle>();
+            if (mv != null)
+                speedMs = Mathf.Abs(mv.GetCurrentSpeed());
+
+            float minFwd = Mathf.Max(0.85f, halfLength * 0.45f);
+            float maxStepAsideFwd = Mathf.Clamp(halfLength + 5.2f + speedMs * 0.65f, 5.5f, 11.0f);
+            float maxBrakeFwd = Mathf.Clamp(halfLength + 3.8f + speedMs * 0.55f, 4.5f, 9.0f);
+            float stepAsideHalfWidth = halfWidth + 1.45f;
+            float brakeHalfWidth = halfWidth + 0.70f;
+
+            bool playerInBrakeCorridor = false;
+            bool aiInBrakeCorridor = false;
+
+            Soldier player = Soldier.CurrentControlledSoldierOrNull();
+            if (player != null)
+            {
+                EvaluateFriendlySoldierInVehicleCorridor(
+                    player, vehFaction, vehPos, travelDir, vehRight,
+                    halfWidth, minFwd, maxStepAsideFwd, maxBrakeFwd, stepAsideHalfWidth, brakeHalfWidth,
+                    now, ref playerInBrakeCorridor, ref aiInBrakeCorridor);
+            }
+
+            Squad crewSquad = aiVeh != null ? aiVeh.squadInside : null;
+            if (crewSquad != null && crewSquad.units != null)
+            {
+                var crewUnits = crewSquad.units;
+                int crewCount = crewUnits.Count;
+                for (int i = 0; i < crewCount; i++)
+                {
+                    EvaluateFriendlySoldierInVehicleCorridor(
+                        crewUnits[i], vehFaction, vehPos, travelDir, vehRight,
+                        halfWidth, minFwd, maxStepAsideFwd, maxBrakeFwd, stepAsideHalfWidth, brakeHalfWidth,
+                        now, ref playerInBrakeCorridor, ref aiInBrakeCorridor);
+                }
+            }
+
+            var allSquads = Squad.AllSquads;
+            if (allSquads != null)
+            {
+                foreach (var kvp in allSquads)
+                {
+                    Squad sq = kvp.Value;
+                    if (sq == null || sq == crewSquad || sq.units == null)
+                        continue;
+
+                    Soldier leader = sq.Leader;
+                    if (leader == null || leader.transform == null || string.IsNullOrEmpty(leader.faction))
+                        continue;
+
+                    if (!ResourcesManager.IsSameFaction(vehFaction, leader.faction))
+                        continue;
+
+                    if ((leader.transform.position - vehPos).sqrMagnitude > 48f * 48f)
+                        continue;
+
+                    var units = sq.units;
+                    int unitCount = units.Count;
+                    for (int i = 0; i < unitCount; i++)
+                    {
+                        EvaluateFriendlySoldierInVehicleCorridor(
+                            units[i], vehFaction, vehPos, travelDir, vehRight,
+                            halfWidth, minFwd, maxStepAsideFwd, maxBrakeFwd, stepAsideHalfWidth, brakeHalfWidth,
+                            now, ref playerInBrakeCorridor, ref aiInBrakeCorridor);
+                    }
+                }
+            }
+
+            if (playerInBrakeCorridor || aiInBrakeCorridor)
+            {
+                if (!_vehicleContinuousYieldStart.TryGetValue(vehPtr, out float yieldStart))
+                {
+                    yieldStart = now;
+                    _vehicleContinuousYieldStart[vehPtr] = yieldStart;
+                }
+
+                // Always yield for the human player; yield up to 3.5s for AI infantry while they step aside
+                if (playerInBrakeCorridor || (now - yieldStart) <= 3.5f)
+                {
+                    _vehicleYieldUntilTime[vehPtr] = now + 0.24f;
+                    RecordFriendlyYieldOrSave(
+                        vehPtr,
+                        now,
+                        $"{vehFaction} vehicle yielded right-of-way to friendly {(playerInBrakeCorridor ? "player" : "infantry")} ({(isReversing ? "reverse" : "forward")}).");
+                    return true;
+                }
+            }
+            else
+            {
+                _vehicleContinuousYieldStart.Remove(vehPtr);
+                _vehicleYieldUntilTime.Remove(vehPtr);
+            }
+
+            return false;
+        }
+
         [HarmonyPatch(typeof(AIVehicle), nameof(AIVehicle.MovableVehicleRoutine))]
         public static class AIVehicle_MovableVehicleRoutine_Patch
         {
+            public static void Prefix(AIVehicle __instance)
+            {
+                try
+                {
+                    if (!VisionConfig.EnableMod.Value ||
+                        !VisionConfig.EnableFriendlyVehicleRightOfWay.Value ||
+                        __instance == null ||
+                        __instance.placingInUnstuck)
+                    {
+                        return;
+                    }
+
+                    Vehicle veh = __instance.veh;
+                    if (veh == null || veh.Pointer == IntPtr.Zero)
+                        return;
+
+                    bool isReversing = __instance.going_in_retro;
+                    if (!isReversing && (__instance.path == null || __instance.path.NodesCount <= 0 || __instance.stopToShoot))
+                        return;
+
+                    if (ShouldYieldToFriendlyInfantry(__instance, veh, isReversing))
+                    {
+                        // Setting resumeDriveTime uses AIVehicle.MovableVehicleRoutine's native pause branch:
+                        // it calls veh.HoldBrake() + veh.Move(Vector2.zero) and bypasses VehicleStuckCheck()!
+                        float pauseUntil = Time.time + 0.24f;
+                        if (__instance.resumeDriveTime < pauseUntil)
+                            __instance.resumeDriveTime = pauseUntil;
+                    }
+                }
+                catch { }
+            }
+
             public static void Postfix(AIVehicle __instance)
             {
                 try
@@ -2182,6 +2525,71 @@ namespace EasyRed2HumanAI
                     }
                 }
                 catch { }
+            }
+        }
+
+        [HarmonyPatch(typeof(VehicleWithWheels), nameof(VehicleWithWheels.OnTriggerEnter))]
+        public static class VehicleWithWheels_OnTriggerEnter_Patch
+        {
+            public static bool Prefix(VehicleWithWheels __instance, Collider __0)
+            {
+                try
+                {
+                    if (!VisionConfig.EnableMod.Value ||
+                        !VisionConfig.EnableFriendlyVehicleRightOfWay.Value ||
+                        __instance == null ||
+                        __0 == null)
+                    {
+                        return true;
+                    }
+
+                    GameObject go = __0.gameObject;
+                    if (go == null)
+                        return true;
+
+                    Soldier soldier = go.GetComponent<Soldier>();
+                    if (soldier == null || soldier.Pointer == IntPtr.Zero || !soldier.IsAlive)
+                        return true;
+
+                    string vehFaction = GetVehicleCrewFaction(__instance);
+                    if (string.IsNullOrEmpty(vehFaction) || string.IsNullOrEmpty(soldier.faction))
+                        return true;
+
+                    // Enemy soldiers still take full vanilla roadkill damage
+                    if (!ResourcesManager.IsSameFaction(vehFaction, soldier.faction))
+                        return true;
+
+                    // Friendly soldier: grant hit immunity and gently nudge AI bots clear of the hull/tracks
+                    soldier.DisableHitByVehicleFor(1.25f);
+
+                    float now = Time.time;
+                    if (soldier.IsAI() && __instance.transform != null)
+                    {
+                        Vector2 extents = GetCachedVehicleHalfExtents(__instance);
+                        Vector3 vehFwd = __instance.transform.forward;
+                        vehFwd.y = 0f;
+                        vehFwd = vehFwd.sqrMagnitude > 0.001f ? vehFwd.normalized : Vector3.forward;
+                        Vector3 vehRight = __instance.transform.right;
+                        vehRight.y = 0f;
+                        vehRight = vehRight.sqrMagnitude > 0.001f ? vehRight.normalized : Vector3.right;
+
+                        TryNudgeFriendlySoldierAside(soldier, __instance.transform.position, vehFwd, vehRight, extents.x, now, true);
+                    }
+
+                    // In vanilla VehicleWithWheels.OnTriggerEnter (0x18087C92B-0x18087C940), same-faction collisions
+                    // still deal 1000f lethal roadkill damage whenever soldier.IsPlayer() or veh.PlayerIsInside()!
+                    if (soldier.IsPlayer() || __instance.PlayerIsInside())
+                    {
+                        RecordFriendlyYieldOrSave(
+                            __instance.Pointer,
+                            now,
+                            $"Prevented friendly {vehFaction} vehicle from roadkilling friendly {(soldier.IsPlayer() ? "player" : "soldier")}.");
+                    }
+
+                    return false;
+                }
+                catch { }
+                return true;
             }
         }
 
@@ -2267,7 +2675,8 @@ namespace EasyRed2HumanAI
                     // 1. Close-Range Threat Reverse: back up using MoveTankRetro while keeping frontal armor toward the enemy
                     if (dist < reverseDist && Vector3.Angle(veh.transform.forward, toTarget) <= 75f)
                     {
-                        if (!AiCore.IsDirectionBlockedByEnvironment(vehPos + Vector3.up * 1.2f, -veh.transform.forward, 7.5f, veh.transform.root))
+                        if (!AiCore.IsDirectionBlockedByEnvironment(vehPos + Vector3.up * 1.2f, -veh.transform.forward, 7.5f, veh.transform.root) &&
+                            (!VisionConfig.EnableFriendlyVehicleRightOfWay.Value || !ShouldYieldToFriendlyInfantry(__instance, veh, true)))
                         {
                             __instance.ForceRetroFor(2.2f, AIVehicle.RetroBehaviour.backward);
                             __instance.MoveTankRetro();

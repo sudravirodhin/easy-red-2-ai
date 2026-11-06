@@ -69,7 +69,7 @@ namespace EasyRed2HumanAI
                                 $"[Battle Hardened] Vets:{VeteranAndTacticsPatches.ActiveVeteransCount} (Prom:{VeteranAndTacticsPatches.FieldPromotionsCount}) | " +
                                 $"Drops:{VeteranAndTacticsPatches.SelfPreservationDrops} (Indoor:{VeteranAndTacticsPatches.IndoorPronePreventedCount}) | " +
                                 $"Callouts:{VeteranAndTacticsPatches.LocalCalloutsSharedCount} | Supp:{VeteranAndTacticsPatches.SuppressiveEventsCount} | Bounds:{VeteranAndTacticsPatches.BoundingOverwatchHoldsCount} | " +
-                                $"Garrisons:{VeteranAndTacticsPatches.MacroGarrisonsAssignedCount} | Emplace:{VeteranAndTacticsPatches.StaticGunsStaffedCount} | APC:{VeteranAndTacticsPatches.SmartApcDismountsCount} | TankHold:{VeteranAndTacticsPatches.TankStandoffHoldsCount} | " +
+                                $"Garrisons:{VeteranAndTacticsPatches.MacroGarrisonsAssignedCount} | Emplace:{VeteranAndTacticsPatches.StaticGunsStaffedCount} | APC:{VeteranAndTacticsPatches.SmartApcDismountsCount} | TankHold:{VeteranAndTacticsPatches.TankStandoffHoldsCount} | RoadkillSaved:{VeteranAndTacticsPatches.FriendlyRoadkillsPreventedCount} | " +
                                 $"CombArms:{VeteranAndTacticsPatches.CombinedArmsPriorityAssistsCount} | Bridges:{VeteranAndTacticsPatches.BridgeCrossingsAssistedCount} | Surr:{VeteranAndTacticsPatches.ShellShockSurrendersCount}/{VeteranAndTacticsPatches.ComradesLiberated} | Ticks:{AiCore.TotalAdaptiveAiExtraTicks} | FFSaved:{VeteranAndTacticsPatches.FriendlyFirePrevented}",
                                 6.5f);
                         }
@@ -84,7 +84,7 @@ namespace EasyRed2HumanAI
                             $"Callouts:{VeteranAndTacticsPatches.LocalCalloutsSharedCount} | Supp:{VeteranAndTacticsPatches.SuppressiveEventsCount} | " +
                             $"Bounds:{VeteranAndTacticsPatches.BoundingOverwatchHoldsCount} | Garrisons:{VeteranAndTacticsPatches.MacroGarrisonsAssignedCount} | " +
                             $"Emplace:{VeteranAndTacticsPatches.StaticGunsStaffedCount} | APC:{VeteranAndTacticsPatches.SmartApcDismountsCount} | " +
-                            $"TankHold:{VeteranAndTacticsPatches.TankStandoffHoldsCount} | CombArms:{VeteranAndTacticsPatches.CombinedArmsPriorityAssistsCount} | " +
+                            $"TankHold:{VeteranAndTacticsPatches.TankStandoffHoldsCount} | RoadkillSaved:{VeteranAndTacticsPatches.FriendlyRoadkillsPreventedCount} | CombArms:{VeteranAndTacticsPatches.CombinedArmsPriorityAssistsCount} | " +
                             $"Bridges:{VeteranAndTacticsPatches.BridgeCrossingsAssistedCount} | Surr:{VeteranAndTacticsPatches.ShellShockSurrendersCount} (Lib:{VeteranAndTacticsPatches.ComradesLiberated}) | " +
                             $"WoodPen:{VeteranAndTacticsPatches.ThinCoverPenetrationsCount} | PlaneAudio:{VeteranAndTacticsPatches.PlaneAudioLoopsDesyncedCount} | Chutes:{VeteranAndTacticsPatches.ParachutesDriftedCount} | " +
                             $"Doors:{VeteranAndTacticsPatches.DoorsStrategicallyClosedCount} | Bipods:{VeteranAndTacticsPatches.BipodsDeployed} | WallBlk:{VeteranAndTacticsPatches.WallsBlocked} | " +
@@ -247,6 +247,7 @@ namespace EasyRed2HumanAI
                     VisionConfig.EnableCombinedArmsPrioritySupport,
                     VisionConfig.EnableSmartApcDismount,
                     VisionConfig.EnableTankStandoffAndReverse,
+                    VisionConfig.EnableFriendlyVehicleRightOfWay,
                     VisionConfig.PreventSmallArmsFireAtTanks,
                     VisionConfig.EnableSmartTankCrewRepair);
                 DrawToggleButton(colLeftX, ref yL, colW, rowH, "Objective Garrison & Counterattack Director", VisionConfig.EnableMacroObjectiveDirector);
@@ -254,6 +255,7 @@ namespace EasyRed2HumanAI
                 DrawToggleButton(colLeftX, ref yL, colW, rowH, "Combined-Arms Known Target Priority", VisionConfig.EnableCombinedArmsPrioritySupport);
                 DrawToggleButton(colLeftX, ref yL, colW, rowH, "Smart APC / Transport Dismount Under Fire", VisionConfig.EnableSmartApcDismount);
                 DrawToggleButton(colLeftX, ref yL, colW, rowH, "Tank Standoff & Reverse Discipline", VisionConfig.EnableTankStandoffAndReverse);
+                DrawToggleButton(colLeftX, ref yL, colW, rowH, "Friendly Infantry Right-of-Way (No Roadkill)", VisionConfig.EnableFriendlyVehicleRightOfWay);
                 DrawToggleButton(colLeftX, ref yL, colW, rowH, "Stop Small-Arms Fire at Tanks / Aim Crew", VisionConfig.PreventSmallArmsFireAtTanks);
                 DrawToggleButton(colLeftX, ref yL, colW, rowH, "Sheltered Leeward Tank Crew Repairs", VisionConfig.EnableSmartTankCrewRepair);
 
@@ -668,6 +670,7 @@ namespace EasyRed2HumanAI
             AiCore.PruneDict(_nextSurrenderCheckTime, alivePtrs);
             AiCore.PruneDict(_nextBotDoorCheckTime, alivePtrs);
             AiCore.PruneDict(_assignedEmplacementUntil, alivePtrs);
+            AiCore.PruneDict(_nextFriendlyStepAsideTime, alivePtrs);
             AiCore.PruneDict(_lastDamageByVictim, alivePtrs);
 
             AiCore.PruneSet(_bayonetCheckedSoldiers, alivePtrs);

@@ -73,6 +73,7 @@ namespace EasyRed2HumanAI
         public static ConfigEntry<bool> EnableProactiveEmplacementStaffing;
         public static ConfigEntry<bool> EnableSmartApcDismount;
         public static ConfigEntry<bool> EnableTankStandoffAndReverse;
+        public static ConfigEntry<bool> EnableFriendlyVehicleRightOfWay;
         public static ConfigEntry<bool> PreventSmallArmsFireAtTanks;
         public static ConfigEntry<bool> EnablePointBlankMelee;
         public static ConfigEntry<bool> EnableStrategicDoorDiscipline;
@@ -443,6 +444,12 @@ namespace EasyRed2HumanAI
                 "EnableTankStandoffAndReverse",
                 true,
                 "AI tanks with a clear main-gun line of sight hold practical standoff distance (scaled by Brawler/Support/Sniper crew personality) instead of driving into infantry AT-grenade range, and reverse (MoveTankRetro) when threats get too close.");
+
+            EnableFriendlyVehicleRightOfWay = config.Bind(
+                "6. Tactical Self-Preservation & Muzzle Discipline",
+                "EnableFriendlyVehicleRightOfWay",
+                true,
+                "Friendly Infantry Right-of-Way & Anti-Roadkill: AI tanks and wheeled vehicles yield/brake when friendly soldiers (player or AI) or mechanics are in their driving/reversing corridor, nudge friendly AI infantry to step aside off the tracks/road, and prevent friendly vehicles from roadkilling same-faction soldiers on contact.");
 
             PreventSmallArmsFireAtTanks = config.Bind(
                 "6. Tactical Self-Preservation & Muzzle Discipline",
