@@ -1,4 +1,5 @@
-# Easy Red 2 — Humanized AI & Veteran Tactics (`v0.5.0`)
+# Easy Red 2: Battle Hardened (`v0.5.0`)
+*Tactical AI, Veterancy, Personalities & Combined-Arms Overhaul*
 
 > [!IMPORTANT]
 > **Disclosure — Vibecoded Project:**
@@ -51,7 +52,7 @@ Included in `EasyRed2HumanAI-v0.5.0-with-BepInEx.zip` (and in the root of this r
 
 ## What's Different? (Original Systems & Zero-Spike Architecture)
 
-Alongside shared tactical realism goals (some inspired by [`Easy-Red-2-Realism-Overhaul`](https://github.com/AtlasActual/Easy-Red-2-Realism-Overhaul)), **`EasyRed2HumanAI`** is built from the ground up around **original progression, targeting, audio, and QoL systems** and a **"Less is More" zero-spike Co-op architecture**:
+Alongside shared tactical realism goals (some inspired by [`Easy-Red-2-Realism-Overhaul`](https://github.com/AtlasActual/Easy-Red-2-Realism-Overhaul)), **`Battle Hardened`** is built from the ground up around **original progression, targeting, audio, and QoL systems** and a **"Less is More" zero-spike Co-op architecture**:
 
 * **15-Minute Veteran Progression & 3D Shoulder Rank Promotions**: Surviving AI soldiers progress linearly over 15 minutes (`900s`) from Rookie to `[Vet I]`, `[Vet II]`, and `[Vet III ★]`, dynamically promoting in rank (`Pvt. → Cpl. → Sgt. → 1st Sgt.`), updating their **3D uniform shoulder rank decals** (`UpdateRanksDecal`), and displaying veterancy tags in the Squad Roster UI and 3D crosshair hover badges.
 * **30 Role-Based AI Personalities (10 Roles × 3 Archetypes)**: Every Infantry, Tank Crew, AA/Light Vehicle, and Aircraft Pilot bot receives one of 3 role-matched personalities (`[Spearhead]`, `[Breacher]`, `[Skirmisher]`, `[Deadeye]`, `[Stalker]`, `[Heroic]`, `[Triage]`, `[Brawler Crew]`, `[Ace]`, etc.) governing suppression grit, peek cadence, tank standoff distance, and combat habits.
@@ -71,7 +72,7 @@ Alongside shared tactical realism goals (some inspired by [`Easy-Red-2-Realism-O
 
 ### 1. Humanized Vision, Stance Stealth, Local Callouts & Last-Known Suppression ([`VisionAndMemoryModule.cs`](src/EasyRed2AI/Modules/VisionAndMemoryModule.cs))
 
-| Feature | Vanilla Behavior | Humanized AI (`v0.5.0`) |
+| Feature | Vanilla Behavior | Battle Hardened (`v0.5.0`) |
 | :--- | :--- | :--- |
 | **Stance Sight Ranges** | `220m` Standing, `50m` Crouching, `37m` Prone when unspotted — but jumps **all stances to a flat `300m`** the instant `IsEnemyAwareOfThisSquad` is true. | **150m Standing**, **80m Crouching**, **40m Prone**. Squad combat awareness applies only a **1.20x multiplier** (`48m` prone, `96m` crouched) so taking cover in grass/craters actually conceals you during firefights. |
 | **Individual Firing Reveal** | One soldier firing alerts the enemy to the entire squad's crouched/prone members out to `300m`. | Only the **specific soldier who fired** gets a temporary **+85m visibility penalty for 4.0 seconds** (muzzle flash, smoke, and gunshot sound). Silent squadmates stay hidden. |

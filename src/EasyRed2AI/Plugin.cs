@@ -10,7 +10,7 @@ namespace EasyRed2HumanAI
     public class Plugin : BasePlugin
     {
         public const string PluginGuid = "com.antigravity.easyred2.humanai";
-        public const string PluginName = "Easy Red 2 - Humanized AI & Veteran Tactics";
+        public const string PluginName = "Easy Red 2 - Battle Hardened";
         public const string PluginVersion = "0.5.0";
 
         internal static Plugin Instance;

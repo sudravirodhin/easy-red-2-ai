@@ -55,18 +55,18 @@ namespace EasyRed2HumanAI
                             string state = VisionConfig.EnableMod.Value
                                 ? $"ENABLED (Stand:{VisionConfig.StandingSightRange.Value}m, Crouch:{VisionConfig.CrouchingSightRange.Value}m, Prone:{VisionConfig.ProneSightRange.Value}m)"
                                 : "DISABLED (Vanilla AI)";
-                            ShowToast($"[HumanAI v{Plugin.PluginVersion}] Mod {state}");
+                            ShowToast($"[Battle Hardened v{Plugin.PluginVersion}] Mod {state}");
                         }
                         else if (input.GetKeyDown(KeyCode.F9))
                         {
                             Plugin.Instance.Config.Reload();
-                            ShowToast($"[HumanAI v{Plugin.PluginVersion}] Reloaded Config! Stand:{VisionConfig.StandingSightRange.Value}m | Crouch:{VisionConfig.CrouchingSightRange.Value}m | Prone:{VisionConfig.ProneSightRange.Value}m | Personalities:{VisionConfig.EnableRolePersonalities.Value}");
+                            ShowToast($"[Battle Hardened v{Plugin.PluginVersion}] Reloaded Config! Stand:{VisionConfig.StandingSightRange.Value}m | Crouch:{VisionConfig.CrouchingSightRange.Value}m | Prone:{VisionConfig.ProneSightRange.Value}m | Personalities:{VisionConfig.EnableRolePersonalities.Value}");
                         }
                         else if (input.GetKeyDown(KeyCode.F10))
                         {
                             VeteranAndTacticsPatches.CleanupDictionaries();
                             ShowToast(
-                                $"[HumanAI Stats] Vets:{VeteranAndTacticsPatches.ActiveVeteransCount} (Prom:{VeteranAndTacticsPatches.FieldPromotionsCount}) | " +
+                                $"[Battle Hardened] Vets:{VeteranAndTacticsPatches.ActiveVeteransCount} (Prom:{VeteranAndTacticsPatches.FieldPromotionsCount}) | " +
                                 $"Drops:{VeteranAndTacticsPatches.SelfPreservationDrops} (Indoor:{VeteranAndTacticsPatches.IndoorPronePreventedCount}) | " +
                                 $"Callouts:{VeteranAndTacticsPatches.LocalCalloutsSharedCount} | Supp:{VeteranAndTacticsPatches.SuppressiveEventsCount} | Bounds:{VeteranAndTacticsPatches.BoundingOverwatchHoldsCount} | " +
                                 $"Garrisons:{VeteranAndTacticsPatches.MacroGarrisonsAssignedCount} | Emplace:{VeteranAndTacticsPatches.StaticGunsStaffedCount} | APC:{VeteranAndTacticsPatches.SmartApcDismountsCount} | TankHold:{VeteranAndTacticsPatches.TankStandoffHoldsCount} | " +
@@ -206,7 +206,7 @@ namespace EasyRed2HumanAI
 
                 GUI.color = new Color(1.0f, 0.88f, 0.35f, 1.0f);
                 GUI.Label(new Rect(panelX + 20f, panelY + 10f, panelW - 40f, 22f),
-                    $"Easy Red 2 — Humanized AI & Veteran Tactics v{Plugin.PluginVersion}  |  Feature Bundles (F6 to Close)");
+                    $"Easy Red 2: Battle Hardened v{Plugin.PluginVersion}  |  Feature Bundles (F6 to Close)");
 
                 GUI.color = new Color(0.75f, 0.78f, 0.82f, 1.0f);
                 GUI.Label(new Rect(panelX + 20f, panelY + 29f, panelW - 40f, 20f),
@@ -338,14 +338,14 @@ namespace EasyRed2HumanAI
                 if (GUI.Button(new Rect(panelX + 20f, bottomY, 220f, 26f), "Reload .cfg from Disk (F9)"))
                 {
                     Plugin.Instance.Config.Reload();
-                    ShowToast($"[HumanAI v{Plugin.PluginVersion}] Reloaded configuration from disk!");
+                    ShowToast($"[Battle Hardened v{Plugin.PluginVersion}] Reloaded configuration from disk!");
                 }
 
                 GUI.color = new Color(0.85f, 1.0f, 0.85f, 1.0f);
                 if (GUI.Button(new Rect(panelX + 260f, bottomY, 220f, 26f), "Save to .cfg File"))
                 {
                     Plugin.Instance.Config.Save();
-                    ShowToast($"[HumanAI v{Plugin.PluginVersion}] Saved configuration to com.antigravity.easyred2.humanai.cfg!");
+                    ShowToast($"[Battle Hardened v{Plugin.PluginVersion}] Saved configuration to com.antigravity.easyred2.humanai.cfg!");
                 }
 
                 GUI.color = new Color(1.0f, 0.80f, 0.80f, 1.0f);
