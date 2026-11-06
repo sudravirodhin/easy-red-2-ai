@@ -74,6 +74,7 @@ namespace EasyRed2HumanAI
         public static ConfigEntry<bool> EnableTankStandoffAndReverse;
         public static ConfigEntry<bool> PreventSmallArmsFireAtTanks;
         public static ConfigEntry<bool> EnablePointBlankMelee;
+        public static ConfigEntry<bool> EnableStrategicDoorDiscipline;
 
         // 7. Phase 3: Role-Based AI Personalities (3 Archetypes per Infantry & Vehicle Role)
         public static ConfigEntry<bool> EnableRolePersonalities;
@@ -444,6 +445,12 @@ namespace EasyRed2HumanAI
                 "EnablePointBlankMelee",
                 true,
                 "In point-blank CQB (<= 3.8m with bayonet, <= 2.5m with any weapon, or <= 5.0m when empty/reloading/bolt-cycling), bots automatically fix/unfold bayonets, stand up, close distance, draw knives when empty, and execute bayonet stabs, melee slashes, and rifle butt-strokes instead of crouched point-blank mag-dumping.");
+
+            EnableStrategicDoorDiscipline = config.Bind(
+                "6. Tactical Self-Preservation & Muzzle Discipline",
+                "EnableStrategicDoorDiscipline",
+                true,
+                "Strategic Door & Window Shutter Discipline: prevents indoor bots from accidentally popping open closed window shutters and side doors as they walk past, closes doors behind advancing/garrisoning troops once squadmates are clear, and pulls window shutters closed when heavily suppressed, reloading, or bandaging.");
 
             // 7. AI Role Personalities (3 Archetypes per Infantry & Vehicle Role)
             EnableRolePersonalities = config.Bind(

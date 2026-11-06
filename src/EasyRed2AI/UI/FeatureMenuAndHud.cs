@@ -75,7 +75,7 @@ namespace EasyRed2HumanAI
                         }
                     }
 
-                    if (VisionConfig.DebugLogging.Value)
+                        if (VisionConfig.DebugLogging.Value)
                     {
                         AiCore.LogDebug(
                             "Heartbeat",
@@ -86,7 +86,7 @@ namespace EasyRed2HumanAI
                             $"Emplace:{VeteranAndTacticsPatches.StaticGunsStaffedCount} | APC:{VeteranAndTacticsPatches.SmartApcDismountsCount} | " +
                             $"TankHold:{VeteranAndTacticsPatches.TankStandoffHoldsCount} | WoodPen:{VeteranAndTacticsPatches.ThinCoverPenetrationsCount} | " +
                             $"PlaneAudio:{VeteranAndTacticsPatches.PlaneAudioLoopsDesyncedCount} | Chutes:{VeteranAndTacticsPatches.ParachutesDriftedCount} | " +
-                            $"Bipods:{VeteranAndTacticsPatches.BipodsDeployed} | WallBlk:{VeteranAndTacticsPatches.WallsBlocked} | " +
+                            $"Doors:{VeteranAndTacticsPatches.DoorsStrategicallyClosedCount} | Bipods:{VeteranAndTacticsPatches.BipodsDeployed} | WallBlk:{VeteranAndTacticsPatches.WallsBlocked} | " +
                             $"Melee:{VeteranAndTacticsPatches.MeleeAttacksTriggered} | TankBlk:{VeteranAndTacticsPatches.UselessTankFirePrevented} (Crew:{VeteranAndTacticsPatches.ExposedCrewTargeted}) | " +
                             $"FFSaved:{VeteranAndTacticsPatches.FriendlyFirePrevented} | Repairs:{VeteranAndTacticsPatches.ShelteredRepairsCount}",
                             15.0f);
@@ -197,7 +197,7 @@ namespace EasyRed2HumanAI
             private static void DrawConfigMenu()
             {
                 float panelW = 780f;
-                float panelH = 738f;
+                float panelH = 758f;
                 float panelX = (Screen.width - panelW) * 0.5f;
                 float panelY = (Screen.height - panelH) * 0.5f;
 
@@ -281,6 +281,7 @@ namespace EasyRed2HumanAI
                 DrawSectionHeaderWithBundle(colRightX, ref yR, colW, "Bundle 2: Infantry Combat, Stance & Cover",
                     VisionConfig.EnableSelfPreservationStance,
                     VisionConfig.EnableIndoorCeilingPronePrevention,
+                    VisionConfig.EnableStrategicDoorDiscipline,
                     VisionConfig.EnableBoundingOverwatch,
                     VisionConfig.EnforceStandingWhenOutOfCombat,
                     VisionConfig.NeverShootStandingInOpen,
@@ -296,6 +297,7 @@ namespace EasyRed2HumanAI
                     VisionConfig.EnableComradeLiberation);
                 DrawToggleButton(colRightX, ref yR, colW, rowH, "Self-Preservation Stances", VisionConfig.EnableSelfPreservationStance);
                 DrawToggleButton(colRightX, ref yR, colW, rowH, "Indoor Ceiling Prone Prevention", VisionConfig.EnableIndoorCeilingPronePrevention);
+                DrawToggleButton(colRightX, ref yR, colW, rowH, "Strategic Door & Shutter Discipline", VisionConfig.EnableStrategicDoorDiscipline);
                 DrawToggleButton(colRightX, ref yR, colW, rowH, "Attacker Bounding Overwatch", VisionConfig.EnableBoundingOverwatch);
                 DrawToggleButton(colRightX, ref yR, colW, rowH, "Enforce Standing Out of Combat", VisionConfig.EnforceStandingWhenOutOfCombat);
                 DrawToggleButton(colRightX, ref yR, colW, rowH, "Never Shoot Standing in Open", VisionConfig.NeverShootStandingInOpen);
@@ -653,6 +655,7 @@ namespace EasyRed2HumanAI
             AiCore.PruneDict(_nextSuppressiveBurstCountTime, alivePtrs);
             AiCore.PruneDict(_nextIndoorCeilingCountTime, alivePtrs);
             AiCore.PruneDict(_nextBoundingHoldCountTime, alivePtrs);
+            AiCore.PruneDict(_nextBotDoorCheckTime, alivePtrs);
             AiCore.PruneDict(_assignedEmplacementUntil, alivePtrs);
             AiCore.PruneDict(_lastDamageByVictim, alivePtrs);
 
@@ -665,6 +668,7 @@ namespace EasyRed2HumanAI
                 _coverExposureCache.Clear();
                 AiCore.ClearSpatialCaches();
                 ClearBallisticsCaches();
+                ClearDoorCaches();
             }
 
             if (_repairTaskStartTime.Count > 0)

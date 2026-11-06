@@ -36,6 +36,26 @@ namespace EasyRed2HumanAI
         private static readonly HashSet<IntPtr> _bayonetCheckedSoldiers = new HashSet<IntPtr>();
         private static readonly Dictionary<long, bool> _coverExposureCache = new Dictionary<long, bool>(1024);
 
+        private struct CachedDoorInfo
+        {
+            public InteragibleDoor Door;
+            public IntPtr RootPtr;
+            public bool IsWindowShutter;
+        }
+
+        private static readonly Dictionary<IntPtr, CachedDoorInfo> _colliderDoorCache = new Dictionary<IntPtr, CachedDoorInfo>(256);
+        private static readonly Dictionary<IntPtr, float> _nextDoorToggleTime = new Dictionary<IntPtr, float>(128);
+        private static readonly Dictionary<IntPtr, float> _nextBotDoorCheckTime = new Dictionary<IntPtr, float>(256);
+        public static int DoorsStrategicallyClosedCount { get; private set; }
+
+        public static void ClearDoorCaches()
+        {
+            if (_colliderDoorCache.Count > 512)
+                _colliderDoorCache.Clear();
+            if (_nextDoorToggleTime.Count > 256)
+                _nextDoorToggleTime.Clear();
+        }
+
         // =====================================================================
         // Muzzle Obstruction, Friendly Fire & Anti-Stacking Helpers
         // =====================================================================
@@ -2307,6 +2327,247 @@ namespace EasyRed2HumanAI
                     }
                 }
                 catch { }
+            }
+        }
+
+        // =====================================================================
+        // Strategic Door & Window Shutter Discipline (Soldier.CheckAndOpenDoor)
+        // =====================================================================
+        private static bool IsAnySquadmateApproachingDoor(Squad squad, Soldier self, Vector3 doorPos)
+        {
+            if (squad == null || squad.units == null)
+                return false;
+
+            var units = squad.units;
+            int count = units.Count;
+            for (int i = 0; i < count; i++)
+            {
+                Soldier ally = units[i];
+                if (ally == null || !ally.IsAlive || ally.Pointer == self.Pointer || ally.transform == null)
+                    continue;
+
+                Vector3 allyPos = ally.transform.position;
+                Vector3 toDoor = doorPos - allyPos;
+                toDoor.y = 0f;
+                float dSq = toDoor.sqrMagnitude;
+                if (dSq <= 2.25f)
+                    return true;
+
+                SoldierAI allyAi = ally.aiController;
+                if (dSq <= 16.0f && allyAi != null && allyAi.moveCharacter)
+                {
+                    Vector3 allyMove = allyAi.MoveDestination - allyPos;
+                    allyMove.y = 0f;
+                    if (allyMove.sqrMagnitude > 0.04f && Vector3.Dot(allyMove.normalized, toDoor.normalized) > 0.25f)
+                        return true;
+                }
+            }
+
+            return false;
+        }
+
+        [HarmonyPatch(typeof(Soldier), nameof(Soldier.CheckAndOpenDoor))]
+        public static class Soldier_CheckAndOpenDoor_Patch
+        {
+            public static bool Prefix(Soldier __instance, Il2CppInterop.Runtime.InteropTypes.Arrays.Il2CppReferenceArray<Collider> __0)
+            {
+                try
+                {
+                    if (!VisionConfig.EnableMod.Value ||
+                        !VisionConfig.EnableStrategicDoorDiscipline.Value ||
+                        __instance == null ||
+                        __0 == null)
+                    {
+                        return true;
+                    }
+
+                    if (!AiCore.IsLocallyOwnedBot(__instance))
+                        return true;
+
+                    int len = __0.Length;
+                    if (len == 0)
+                        return false;
+
+                    IntPtr botPtr = __instance.Pointer;
+                    float now = Time.time;
+
+                    if (_nextBotDoorCheckTime.TryGetValue(botPtr, out float nextBotCheck) && now < nextBotCheck)
+                        return false;
+
+                    _nextBotDoorCheckTime[botPtr] = now + 0.30f;
+
+                    Transform botTransform = __instance.transform;
+                    if (botTransform == null)
+                        return false;
+
+                    Vector3 botPos = botTransform.position;
+                    Vector3 botFwd = botTransform.forward;
+                    botFwd.y = 0f;
+                    if (botFwd.sqrMagnitude > 0.001f)
+                        botFwd.Normalize();
+
+                    Transform botRoot = botTransform.root;
+                    IntPtr botRootPtr = botRoot != null ? botRoot.Pointer : IntPtr.Zero;
+
+                    SoldierAI ai = __instance.aiController;
+                    bool isMoving = ai != null && ai.moveCharacter;
+                    Vector3 moveDir = botFwd;
+                    if (isMoving && ai != null)
+                    {
+                        Vector3 toDest = ai.MoveDestination - botPos;
+                        toDest.y = 0f;
+                        if (toDest.sqrMagnitude > 0.04f)
+                            moveDir = toDest.normalized;
+                    }
+
+                    bool isVulnerable = __instance.GetSuppressionValue() >= 32f ||
+                                        __instance.IsReloading ||
+                                        __instance.isBleeding;
+
+                    Squad squad = __instance.joinedSquad;
+                    Vector3 threatDir = GetEffectiveThreatDirection(__instance, squad, botPos, botFwd);
+
+                    for (int i = 0; i < len; i++)
+                    {
+                        Collider col = __0[i];
+                        if (col == null || col.Pointer == IntPtr.Zero)
+                            continue;
+
+                        IntPtr colPtr = col.Pointer;
+                        if (!_colliderDoorCache.TryGetValue(colPtr, out CachedDoorInfo info))
+                        {
+                            InteragibleDoor resolvedDoor = null;
+                            InteragibleDoorAdditionalInteractor addInt = col.GetComponent<InteragibleDoorAdditionalInteractor>();
+                            if (addInt != null && addInt.connectedDoor != null)
+                            {
+                                resolvedDoor = addInt.connectedDoor;
+                            }
+                            else
+                            {
+                                resolvedDoor = col.GetComponent<InteragibleDoor>();
+                            }
+
+                            IntPtr rPtr = IntPtr.Zero;
+                            bool isShutter = false;
+                            if (resolvedDoor != null && resolvedDoor.transform != null)
+                            {
+                                Transform dRoot = resolvedDoor.transform.root;
+                                if (dRoot != null)
+                                    rPtr = dRoot.Pointer;
+
+                                Bounds b = col.bounds;
+                                isShutter = (b.min.y - botPos.y) > 0.45f || (b.size.y > 0.05f && b.size.y < 1.35f);
+                            }
+
+                            info = new CachedDoorInfo
+                            {
+                                Door = resolvedDoor,
+                                RootPtr = rPtr,
+                                IsWindowShutter = isShutter
+                            };
+                            _colliderDoorCache[colPtr] = info;
+                        }
+
+                        InteragibleDoor door = info.Door;
+                        if (door == null || door.Pointer == IntPtr.Zero || !door.interactable)
+                            continue;
+
+                        if (info.RootPtr != IntPtr.Zero && info.RootPtr == botRootPtr)
+                            continue;
+
+                        Transform doorTr = door.transform;
+                        if (doorTr == null)
+                            continue;
+
+                        Vector3 doorPos = doorTr.position;
+                        Vector3 toDoor = doorPos - botPos;
+                        toDoor.y = 0f;
+                        float distSq = toDoor.sqrMagnitude;
+                        Vector3 toDoorDir = distSq > 0.001f ? toDoor / Mathf.Sqrt(distSq) : botFwd;
+
+                        IntPtr doorPtr = door.Pointer;
+                        bool onCooldown = _nextDoorToggleTime.TryGetValue(doorPtr, out float nextToggle) && now < nextToggle;
+
+                        if (!door.isOpen)
+                        {
+                            if (info.IsWindowShutter)
+                            {
+                                if (!onCooldown &&
+                                    !isMoving &&
+                                    !isVulnerable &&
+                                    distSq <= 4.0f &&
+                                    threatDir.sqrMagnitude > 0.01f &&
+                                    Vector3.Dot(toDoorDir, threatDir) > 0.40f &&
+                                    AiCore.TryConsumeBotRpcBudget(now))
+                                {
+                                    door.SetDoor(true);
+                                    _nextDoorToggleTime[doorPtr] = now + 8.0f;
+                                }
+                            }
+                            else
+                            {
+                                bool walkingThrough = isMoving && Vector3.Dot(moveDir, toDoorDir) > 0.20f;
+                                bool facingClose = distSq <= 1.96f && Vector3.Dot(botFwd, toDoorDir) > 0.35f;
+                                if (walkingThrough || facingClose)
+                                {
+                                    door.SetDoor(true);
+                                    _nextDoorToggleTime[doorPtr] = now + 3.5f;
+                                }
+                            }
+                        }
+                        else if (!onCooldown)
+                        {
+                            bool shouldClose = false;
+
+                            if (info.IsWindowShutter)
+                            {
+                                if (isVulnerable &&
+                                    distSq <= 6.25f &&
+                                    (threatDir.sqrMagnitude < 0.01f || Vector3.Dot(toDoorDir, threatDir) > 0.15f))
+                                {
+                                    shouldClose = true;
+                                }
+                            }
+                            else
+                            {
+                                bool passedThroughDoor = isMoving &&
+                                                         distSq >= 1.44f &&
+                                                         distSq <= 7.84f &&
+                                                         Vector3.Dot(moveDir, toDoorDir) < -0.35f;
+
+                                bool exposedIndoorDoor = !isMoving &&
+                                                         isVulnerable &&
+                                                         distSq <= 6.25f &&
+                                                         threatDir.sqrMagnitude > 0.01f &&
+                                                         Vector3.Dot(toDoorDir, threatDir) > 0.30f;
+
+                                if ((passedThroughDoor || exposedIndoorDoor) &&
+                                    !IsAnySquadmateApproachingDoor(squad, __instance, doorPos))
+                                {
+                                    shouldClose = true;
+                                }
+                            }
+
+                            if (shouldClose && AiCore.TryConsumeBotRpcBudget(now))
+                            {
+                                door.SetDoor(false);
+                                _nextDoorToggleTime[doorPtr] = now + 10.0f;
+                                DoorsStrategicallyClosedCount++;
+                                if (VisionConfig.DebugLogging.Value)
+                                {
+                                    string kind = info.IsWindowShutter ? "window shutter" : "door";
+                                    AiCore.LogDebug("DoorDiscipline", $"{__instance.faction} soldier strategically closed {kind} for cover/concealment.");
+                                }
+                            }
+                        }
+                    }
+
+                    return false;
+                }
+                catch
+                {
+                    return true;
+                }
             }
         }
     }

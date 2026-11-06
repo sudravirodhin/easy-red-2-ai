@@ -100,6 +100,16 @@ This document explains **what vanilla *Easy Red 2* (Game Build `921`, `GameAssem
 * **Our Justification & Fix ([`TryEnsureBayonetMounted`](../src/EasyRed2AI/Modules/InfantryTacticsModule.cs#L783-L806) & [`IsEngagedInPointBlankMelee`](../src/EasyRed2AI/Modules/InfantryTacticsModule.cs#L808-L892))**:
   * Mounts integrated bayonets once per soldier via `integratedBayonet.SetMounted(true)` (zero `SyncSoldierEquipment` RPC burst), stands bots up within `2.5m–3.8m` (`5.0m` when reloading/empty), closes distance (`MoveDirectlyToward`), draws knives when empty (`ToggleInventoryKnife`), and executes bayonet stabs/butt-strokes (`Soldier.Melee()`).
 
+### 2.6. Strategic Door & Window Shutter Discipline (`Soldier.CheckAndOpenDoor`)
+* **What Vanilla Did**:
+  * In `Soldier.CheckAndOpenDoor` (`0x180743970`), called from `CheckInteractionAround` / `CheckInteractionInFront` / `CheckInteractionInWalkRange`, vanilla uncachedly called `GetComponent<InteragibleDoor>()` and `GetComponent<InteragibleDoorAdditionalInteractor>()` on every collider in range and unconditionally called `door.SetDoor(true)` whenever `!door.isOpen`. Bots popped open every closed window shutter and side door they walked near and **never** closed a single door or shutter (`SetDoor(false)` was never called by AI).
+* **Why It Needed Changing**:
+  * Indoor defenders inadvertently exposed themselves by popping open closed window shutters along walls they were merely walking past, left entry doors wide open behind their squad, and never pulled shutters closed when pinned down, reloading, or bandaging.
+* **Our Justification & Fix ([`Soldier_CheckAndOpenDoor_Patch`](../src/EasyRed2AI/Modules/InfantryTacticsModule.cs#L2400-L2565))**:
+  * Piggybacks on the `Collider[]` array already passed into `Soldier.CheckAndOpenDoor` (zero extra `Physics.OverlapSphere` queries), throttles checks per bot to `0.30s`, and caches `Collider.Pointer -> CachedDoorInfo` (`_colliderDoorCache`) so `GetComponent` and collider bounds classification (`IsWindowShutter`: `b.min.y - botPos.y > 0.45f || b.size.y < 1.35f`) run only once per collider.
+  * **Doors**: Opens a closed door only if it actually lies in the bot's movement direction (`dot > 0.38f`), and closes an open door behind the bot (`dot < -0.20f`) once no squadmate is approaching within `4.5m` (`IsAnySquadmateApproachingDoor`), or when defending near a doorway under heavy suppression (`>= 25f`) or bleeding.
+  * **Window Shutters**: Stops walking bots from accidentally popping open closed shutters (`dot <= 0.50f` while moving is ignored); stationary defenders only open a shutter if it faces their active target or threat-sector gaze (`dot > 0.45f`), and actively pull open shutters **closed** (`SetDoor(false)`) when heavily suppressed (`>= 32f`), bleeding, or reloading (`reloadingTime > 0.1f`)—which switches `InteragibleDoorAdditionalInteractor.SetDoorLayer` back to the solid obstacle layer and physically blocks enemy `Creature.CanSee` linecasts.
+
 ---
 
 ## 3. Macro Objectives, Emplacements, APCs & Armor ([`MacroAndVehiclesModule.cs`](../src/EasyRed2AI/Modules/MacroAndVehiclesModule.cs))

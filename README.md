@@ -128,6 +128,8 @@ Instead of every bot using identical suppression thresholds, peeking rhythms, an
   * Wounded soldiers sprint to nearby cover before bandaging; repairing tank crews route around the hull to crouch on the sheltered side opposite enemy fire.
 * **Point-Blank Bayonet/Melee CQB (`EnablePointBlankMelee`), Muzzle Discipline, Auto-Peek & Bipod Mounting**:
   * Automatic Co-op-safe bayonet fixing (`integratedBayonet.SetMounted(true)`), CQB lunging/knife-drawing/butt-strokes within `2.5m–3.8m`, dual barrel-height (`spine` + `heldGun`) wall-shooting prevention and auto-peek (`Prone → Crouch → Stand` + lateral corner sidestep), active MG bipod mounting (`BipodCheck(true)`), friendly-fire hold-fire cones (`5.0°–6.5°`), `2.4m` anti-stacking spacing, wall vaulting, and surrendered comrade liberation.
+* **Strategic Door & Window Shutter Discipline (`EnableStrategicDoorDiscipline`)**:
+  * Prevents bots from mindlessly popping open closed window shutters and side doors simply by walking past them (`Soldier.CheckAndOpenDoor`), automatically closes doors behind bots once they and any trailing squadmates have passed through, and pulls open window shutters closed when heavily suppressed, reloading, or bandaging to block enemy line of sight (`SetDoorLayer`).
 
 ---
 
