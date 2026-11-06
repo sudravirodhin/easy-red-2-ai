@@ -8,6 +8,7 @@ namespace EasyRed2HumanAI
         public static ConfigEntry<bool> DebugLogging;
         public static ConfigEntry<bool> EnableDeathScreenAttribution;
         public static ConfigEntry<bool> EnableQuickTapSpot;
+        public static ConfigEntry<bool> EnableExtendedRoomNames;
 
         // 1. Infantry Sight & Stance
         public static ConfigEntry<float> StandingSightRange;
@@ -63,6 +64,14 @@ namespace EasyRed2HumanAI
         public static ConfigEntry<bool> EnableSmartTankCrewRepair;
         public static ConfigEntry<bool> EnableSmartWallSideCover;
         public static ConfigEntry<bool> EnableThreatSectorConcentration;
+        public static ConfigEntry<bool> EnableLocalContactCallouts;
+        public static ConfigEntry<bool> EnableLastKnownSuppression;
+        public static ConfigEntry<bool> EnableIndoorCeilingPronePrevention;
+        public static ConfigEntry<bool> EnableBoundingOverwatch;
+        public static ConfigEntry<bool> EnableMacroObjectiveDirector;
+        public static ConfigEntry<bool> EnableProactiveEmplacementStaffing;
+        public static ConfigEntry<bool> EnableSmartApcDismount;
+        public static ConfigEntry<bool> EnableTankStandoffAndReverse;
         public static ConfigEntry<bool> PreventSmallArmsFireAtTanks;
         public static ConfigEntry<bool> EnablePointBlankMelee;
 
@@ -73,6 +82,12 @@ namespace EasyRed2HumanAI
         public static ConfigEntry<bool> VeterancyCuresSkittishness;
         public static ConfigEntry<bool> ShowPersonalityInSquadRoster;
         public static ConfigEntry<bool> ShowPersonalityOnDeathScreen;
+
+        // 8. Phase 4: Ballistics, Plane Audio De-Throbber & Battlefield Immersion
+        public static ConfigEntry<bool> EnablePlaneAudioSmoothing;
+        public static ConfigEntry<bool> EnableThinCoverBulletPenetration;
+        public static ConfigEntry<bool> EnableParachuteWindDrift;
+        public static ConfigEntry<bool> EnableSpectatorHudRetention;
 
         public static void Init(ConfigFile config)
         {
@@ -99,6 +114,12 @@ namespace EasyRed2HumanAI
                 "EnableQuickTapSpot",
                 true,
                 "QoL: Short-pressing your configured Squad Orders keybind (GameInput.OrdersMenu, default Tab) spots in your look direction (PlayerController.TrySpotInLookDirection), even as a Squad Leader or Radioman, while holding the key still opens the radial Squad Orders wheel.");
+
+            EnableExtendedRoomNames = config.Bind(
+                "0. General",
+                "EnableExtendedRoomNames",
+                true,
+                "QoL: Lift vanilla's 8-character multiplayer room name cap up to 64 characters when hosting or searching for servers.");
 
             // 1. Infantry Sight & Stance
             StandingSightRange = config.Bind(
@@ -364,6 +385,54 @@ namespace EasyRed2HumanAI
                 true,
                 "Stationary defenders and overwatch troops orient their gaze toward known enemy contact sectors (spotted/loud/aware squads) and spot targets along their watched sector faster, while leaving quiet unspotted flanks open to flanking maneuvers.");
 
+            EnableLocalContactCallouts = config.Bind(
+                "6. Tactical Self-Preservation & Muzzle Discipline",
+                "EnableLocalContactCallouts",
+                true,
+                "When a soldier visually spots an enemy, share that enemy's last-known contact position with nearby friendly bots within 15m so nearby squadmates orient their gaze toward the threat sector without granting X-ray wallhacks.");
+
+            EnableLastKnownSuppression = config.Bind(
+                "6. Tactical Self-Preservation & Muzzle Discipline",
+                "EnableLastKnownSuppression",
+                true,
+                "When a confirmed enemy ducks behind cover, stationary Machine Gunners / automatic riflemen fire a short suppressive burst at the last-known cover edge and nearby infantry within range can flush the cover with a fragmentation grenade.");
+
+            EnableIndoorCeilingPronePrevention = config.Bind(
+                "6. Tactical Self-Preservation & Muzzle Discipline",
+                "EnableIndoorCeilingPronePrevention",
+                true,
+                "Prevent soldiers inside buildings, bunkers, and pillboxes (where a low ceiling is overhead) from dropping Prone under windowsills or stairs, keeping them in a functional Crouch fighting stance.");
+
+            EnableBoundingOverwatch = config.Bind(
+                "6. Tactical Self-Preservation & Muzzle Discipline",
+                "EnableBoundingOverwatch",
+                true,
+                "Attacking infantry advancing under suppression execute staggered 5-second crouched bounds alternated with 4-second overwatch firing pauses so half the squad provides covering fire while the other half advances.");
+
+            EnableMacroObjectiveDirector = config.Bind(
+                "6. Tactical Self-Preservation & Muzzle Discipline",
+                "EnableMacroObjectiveDirector",
+                true,
+                "6.0s MasterClient Macro Director: keeps ~20% of autonomous squads garrisoning newly captured objectives (prioritizing contested/threatened points) while directing remaining squads to attack or counterattack uncaptured objectives.");
+
+            EnableProactiveEmplacementStaffing = config.Bind(
+                "6. Tactical Self-Preservation & Muzzle Discipline",
+                "EnableProactiveEmplacementStaffing",
+                true,
+                "Defending and garrisoning squads proactively assign an available rifleman/gunner to crew nearby empty static weapons (MG tripods, bunker MGs, AT guns, AA guns) or parked armed halftracks facing the threat sector.");
+
+            EnableSmartApcDismount = config.Bind(
+                "6. Tactical Self-Preservation & Muzzle Discipline",
+                "EnableSmartApcDismount",
+                true,
+                "Infantry riding in AI-driven APCs, halftracks, and trucks dismount immediately when the transport is suppressed, takes hull damage under fire, or comes within 48m of enemy AT/infantry threats rather than riding into point-blank destruction.");
+
+            EnableTankStandoffAndReverse = config.Bind(
+                "6. Tactical Self-Preservation & Muzzle Discipline",
+                "EnableTankStandoffAndReverse",
+                true,
+                "AI tanks with a clear main-gun line of sight hold practical standoff distance (scaled by Brawler/Support/Sniper crew personality) instead of driving into infantry AT-grenade range, and reverse (MoveTankRetro) when threats get too close.");
+
             PreventSmallArmsFireAtTanks = config.Bind(
                 "6. Tactical Self-Preservation & Muzzle Discipline",
                 "PreventSmallArmsFireAtTanks",
@@ -412,6 +481,41 @@ namespace EasyRed2HumanAI
                 "ShowPersonalityOnDeathScreen",
                 true,
                 "Include the attacker's personality archetype on the Death Screen obituary banner.");
+
+            // 8. Ballistics, Plane Audio De-Throbber & Battlefield Immersion
+            EnablePlaneAudioSmoothing = config.Bind(
+                "8. Ballistics & Immersion",
+                "EnablePlaneAudioSmoothing",
+                true,
+                "Client-side Plane Engine Loop De-Throbber: desynchronizes aircraft loop start times across near/far audio clips, clamps Doppler pitch spikes (<= 0.22), and low-pass smooths engine pitch transitions to eliminate repetitive flyby throbbing.");
+
+            EnableThinCoverBulletPenetration = config.Bind(
+                "8. Ballistics & Immersion",
+                "EnableThinCoverBulletPenetration",
+                true,
+                "Material-aware thin-cover bullet penetration: allows full-power rifle, MG, and high-caliber rounds to penetrate thin wooden fences, doors, shutters, and light planks once with reduced velocity while solid terrain, masonry, and armor still stop rounds.");
+
+            EnableParachuteWindDrift = config.Bind(
+                "8. Ballistics & Immersion",
+                "EnableParachuteWindDrift",
+                true,
+                "Airborne parachute realism: softens paratrooper vertical descent speed by ~25% and adds smooth high-altitude canopy wind drift that tapers off before landing.");
+
+            EnableSpectatorHudRetention = config.Bind(
+                "8. Ballistics & Immersion",
+                "EnableSpectatorHudRetention",
+                true,
+                "Keep tactical HUD and 3D unit markers visible when entering Free/Spectator Camera (F) until you explicitly press the Cinematic Camera Hide/Show GUI toggle.");
+        }
+
+        public static void SetBundleEntries(bool state, params ConfigEntry<bool>[] entries)
+        {
+            if (entries == null) return;
+            for (int i = 0; i < entries.Length; i++)
+            {
+                if (entries[i] != null)
+                    entries[i].Value = state;
+            }
         }
     }
 }

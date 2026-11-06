@@ -12,7 +12,8 @@ GEMINI.md
 
 # Local Toolchains, Backups & Reverse-Engineering Dumps
 backups/
-docs/
+docs/*
+!docs/design-and-justifications.md
 tools/
 
 # Build Outputs & IDE Artifacts

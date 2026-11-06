@@ -112,32 +112,39 @@ if (Test-Path (Join-Path $workspace "tools\bepinex\extracted")) {
 }
 
 Write-Host "[1/2] Compiling EasyRed2HumanAI.dll..." -ForegroundColor Cyan
-dotnet $csc /nologo /target:library /optimize+ /nostdlib `
-    /r:"$dotnetDir\System.Private.CoreLib.dll" `
-    /r:"$dotnetDir\System.Runtime.dll" `
-    /r:"$dotnetDir\System.Collections.dll" `
-    /r:"$dotnetDir\netstandard.dll" `
-    /r:"$coreDir\BepInEx.Core.dll" `
-    /r:"$coreDir\BepInEx.Unity.Common.dll" `
-    /r:"$coreDir\BepInEx.Unity.IL2CPP.dll" `
-    /r:"$coreDir\0Harmony.dll" `
-    /r:"$coreDir\Il2CppInterop.Runtime.dll" `
-    /r:"$interopDir\Il2Cppmscorlib.dll" `
-    /r:"$interopDir\UnityEngine.CoreModule.dll" `
-    /r:"$interopDir\UnityEngine.AnimationModule.dll" `
-    /r:"$interopDir\UnityEngine.PhysicsModule.dll" `
-    /r:"$interopDir\UnityEngine.IMGUIModule.dll" `
-    /r:"$interopDir\UnityEngine.InputLegacyModule.dll" `
-    /r:"$interopDir\UnityEngine.TextRenderingModule.dll" `
-    /r:"$interopDir\UnityEngine.UI.dll" `
-    /r:"$interopDir\UnityEngine.UIModule.dll" `
-    /r:"$interopDir\PhotonUnityNetworking.dll" `
-    /r:"$interopDir\Assembly-CSharp.dll" `
-    /out:"$buildDir\EasyRed2HumanAI.dll" `
-    "$workspace\src\EasyRed2AI\Plugin.cs" `
-    "$workspace\src\EasyRed2AI\VisionConfig.cs" `
-    "$workspace\src\EasyRed2AI\VisionPatches.cs" `
-    "$workspace\src\EasyRed2AI\VeteranAndTacticsPatches.cs"
+$sourceFiles = Get-ChildItem -Path "$workspace\src\EasyRed2AI" -Filter "*.cs" -Recurse | Select-Object -ExpandProperty FullName
+$cscArgs = @(
+    $csc,
+    "/nologo",
+    "/target:library",
+    "/optimize+",
+    "/nostdlib",
+    "/r:$dotnetDir\System.Private.CoreLib.dll",
+    "/r:$dotnetDir\System.Runtime.dll",
+    "/r:$dotnetDir\System.Collections.dll",
+    "/r:$dotnetDir\netstandard.dll",
+    "/r:$coreDir\BepInEx.Core.dll",
+    "/r:$coreDir\BepInEx.Unity.Common.dll",
+    "/r:$coreDir\BepInEx.Unity.IL2CPP.dll",
+    "/r:$coreDir\0Harmony.dll",
+    "/r:$coreDir\Il2CppInterop.Runtime.dll",
+    "/r:$interopDir\Il2Cppmscorlib.dll",
+    "/r:$interopDir\UnityEngine.CoreModule.dll",
+    "/r:$interopDir\UnityEngine.AudioModule.dll",
+    "/r:$interopDir\UnityEngine.AnimationModule.dll",
+    "/r:$interopDir\UnityEngine.PhysicsModule.dll",
+    "/r:$interopDir\UnityEngine.TerrainPhysicsModule.dll",
+    "/r:$interopDir\UnityEngine.IMGUIModule.dll",
+    "/r:$interopDir\UnityEngine.InputLegacyModule.dll",
+    "/r:$interopDir\UnityEngine.TextRenderingModule.dll",
+    "/r:$interopDir\UnityEngine.UI.dll",
+    "/r:$interopDir\UnityEngine.UIModule.dll",
+    "/r:$interopDir\PhotonUnityNetworking.dll",
+    "/r:$interopDir\Assembly-CSharp.dll",
+    "/out:$buildDir\EasyRed2HumanAI.dll"
+) + $sourceFiles
+
+& dotnet $cscArgs
 
 if ($LASTEXITCODE -ne 0) {
     throw "Compilation failed with exit code $LASTEXITCODE"
