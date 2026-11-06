@@ -29,6 +29,7 @@ namespace EasyRed2HumanAI
 
         private struct ParachuteDriftState
         {
+            public Vector3 BeforeMoveDownPos;
             public float NextGroundCheckTime;
             public bool IsHighAboveGround;
             public float PhaseSeed;
@@ -293,15 +294,7 @@ namespace EasyRed2HumanAI
         [HarmonyPatch(typeof(VehicleParachute), nameof(VehicleParachute.MoveDown))]
         public static class VehicleParachute_MoveDown_Patch
         {
-            public static void Prefix(VehicleParachute __instance, out Vector3 __state)
-            {
-                if (__instance != null && __instance.transform != null)
-                    __state = __instance.transform.position;
-                else
-                    __state = Vector3.zero;
-            }
-
-            public static void Postfix(VehicleParachute __instance, Vector3 __state)
+            public static void Prefix(VehicleParachute __instance)
             {
                 try
                 {
@@ -311,14 +304,7 @@ namespace EasyRed2HumanAI
                     if (__instance == null || __instance.Pointer == IntPtr.Zero || __instance.transform == null)
                         return;
 
-                    if (__state.sqrMagnitude < 0.001f)
-                        return;
-
-                    if (!AiCore.IsLocallyOwnedVehicle(__instance))
-                        return;
-
                     IntPtr ptr = __instance.Pointer;
-                    float now = Time.time;
                     if (!_parachuteDriftStates.TryGetValue(ptr, out ParachuteDriftState state))
                     {
                         uint h = (uint)ptr.ToInt64();
@@ -332,9 +318,36 @@ namespace EasyRed2HumanAI
                         ParachutesDriftedCount++;
                     }
 
+                    state.BeforeMoveDownPos = __instance.transform.position;
+                    _parachuteDriftStates[ptr] = state;
+                }
+                catch { }
+            }
+
+            public static void Postfix(VehicleParachute __instance)
+            {
+                try
+                {
+                    if (!VisionConfig.EnableMod.Value || !VisionConfig.EnableParachuteWindDrift.Value)
+                        return;
+
+                    if (__instance == null || __instance.Pointer == IntPtr.Zero || __instance.transform == null)
+                        return;
+
+                    if (!AiCore.IsLocallyOwnedVehicle(__instance))
+                        return;
+
+                    IntPtr ptr = __instance.Pointer;
+                    if (!_parachuteDriftStates.TryGetValue(ptr, out ParachuteDriftState state))
+                        return;
+
+                    if (state.BeforeMoveDownPos.sqrMagnitude < 0.001f)
+                        return;
+
+                    float now = Time.time;
                     Transform tr = __instance.transform;
                     Vector3 posAfter = tr.position;
-                    Vector3 delta = posAfter - __state;
+                    Vector3 delta = posAfter - state.BeforeMoveDownPos;
 
                     if (now >= state.NextGroundCheckTime)
                     {
@@ -410,19 +423,6 @@ namespace EasyRed2HumanAI
 
         [HarmonyPatch(typeof(CinematicCameraGUI), nameof(CinematicCameraGUI.EnableCinematicCamera))]
         public static class CinematicCameraGUI_EnableCinematicCamera_Patch
-        {
-            public static void Postfix()
-            {
-                try
-                {
-                    MaintainSpectatorHudVisibility();
-                }
-                catch { }
-            }
-        }
-
-        [HarmonyPatch(typeof(CinematicCameraGUI), nameof(CinematicCameraGUI.HideShowGUI))]
-        public static class CinematicCameraGUI_HideShowGUI_Patch
         {
             public static void Postfix()
             {

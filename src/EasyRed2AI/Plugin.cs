@@ -82,7 +82,6 @@ namespace EasyRed2HumanAI
             SafePatch(typeof(VeteranAndTacticsPatches.BulletInstance_OnHit_Patch));
             SafePatch(typeof(VeteranAndTacticsPatches.VehicleParachute_MoveDown_Patch));
             SafePatch(typeof(VeteranAndTacticsPatches.CinematicCameraGUI_EnableCinematicCamera_Patch));
-            SafePatch(typeof(VeteranAndTacticsPatches.CinematicCameraGUI_HideShowGUI_Patch));
 
             Log.LogInfo($"{PluginName} v{PluginVersion} loaded! (Hotkeys: F6 Config Menu, F8 Toggle ON/OFF, F9 Reload Config, F10 Show Live Stats)");
             Log.LogInfo($"Sight Ranges -> Standing: {VisionConfig.StandingSightRange.Value}m | Crouching: {VisionConfig.CrouchingSightRange.Value}m | Prone: {VisionConfig.ProneSightRange.Value}m | MaxOpticZoom: {VisionConfig.MaxOpticZoomMultiplier.Value}x");

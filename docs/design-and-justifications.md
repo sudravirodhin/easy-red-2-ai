@@ -125,8 +125,8 @@ This document explains **what vanilla *Easy Red 2* (Game Build `921`, `GameAssem
   * AI-driven APCs, halftracks, and trucks drove straight into enemy tanks, AT guns, and entrenched infantry before stopping to unload passengers, getting the entire embarked squad blown up inside the transport.
 * **Why It Needed Changing**:
   * Mechanized infantry transports acted like suicide taxis instead of dismounting troops at the edge of the danger zone.
-* **Our Justification & Fix ([`TryDismountTransportUnderThreat`](../src/EasyRed2AI/Modules/MacroAndVehiclesModule.cs#L860-L980))**:
-  * Hooks `AIVehicle.MovableVehicleRoutine` and `Vehicle.OnVehicleSuppressed` on pure transports (`VehicleHasNoTurrets` or transport halftracks carrying passengers) and immediately dismounts embarked passengers (`LeaveVehicle` + `SendUnitsToCovers`) when suppressed, damaged under fire (`HullLife < MaxHullLife * 0.92f`), or within `48m` of an enemy tank/AT gun/squad.
+* **Our Justification & Fix ([`TryDismountTransportUnderThreat`](../src/EasyRed2AI/Modules/MacroAndVehiclesModule.cs#L1011-L1113))**:
+  * Hooks `AIVehicle.MovableVehicleRoutine` (`SomeoneIsSuppressed()`) and `VehicleWithWheels.OnVehicleSuppressed` on pure transports (`VehicleHasNoTurrets` or transport halftracks carrying passengers) and immediately dismounts embarked passengers (`DropInfantry` + `OrderLeaveVehicle`) when suppressed, damaged under fire, or within `48m` of an enemy tank/AT gun/squad.
 
 ### 3.4. Tank Standoff & Reverse Discipline (`AIVehicle.MoveTowardCurrentNodeTank`)
 * **What Vanilla Did**:

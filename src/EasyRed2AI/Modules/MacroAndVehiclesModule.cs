@@ -1062,6 +1062,7 @@ namespace EasyRed2HumanAI
 
             bool shouldDismount = forcedBySuppression ||
                                   (aiVeh != null && aiVeh.hasEnemyTank) ||
+                                  (aiVeh != null && aiVeh.SomeoneIsSuppressed()) ||
                                   (aiVeh != null && aiVeh.hasEnemy && veh.GetDamage() > 0);
 
             if (!shouldDismount && !string.IsNullOrEmpty(faction))
@@ -1141,10 +1142,14 @@ namespace EasyRed2HumanAI
             }
         }
 
-        [HarmonyPatch(typeof(Vehicle), nameof(Vehicle.OnVehicleSuppressed))]
+        // NOTE: Never patch base Vehicle.OnVehicleSuppressed (0x180269ea0) because it is an
+        // empty 3-byte `ret 0` virtual stub folded by IL2CPP ICF across 1,239 methods!
+        // VehicleWithWheels.OnVehicleSuppressed (0x18087cae0) is a unique 54-byte method,
+        // and tracked/halftrack APCs are covered via aiVeh.SomeoneIsSuppressed() above.
+        [HarmonyPatch(typeof(VehicleWithWheels), nameof(VehicleWithWheels.OnVehicleSuppressed))]
         public static class Vehicle_OnVehicleSuppressed_Patch
         {
-            public static void Postfix(Vehicle __instance)
+            public static void Postfix(VehicleWithWheels __instance)
             {
                 try
                 {
