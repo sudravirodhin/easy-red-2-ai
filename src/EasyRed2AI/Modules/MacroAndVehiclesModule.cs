@@ -467,10 +467,9 @@ namespace EasyRed2HumanAI
                 return true;
             }
 
-            // 2. If assigned cover exists but the soldier isn't on it yet, sprint to that cover
-            if (!soldier.IsOnCover() && soldier.HasDestinationAssigned)
+            // 2. Search for local cover around the soldier's current position (or assigned cover)
+            if (!soldier.IsOnCover() && TrySeekNearbyCover(ai, soldier))
             {
-                soldier.TryToGetToActualCover();
                 if (ai.IsMoving())
                 {
                     SetBotPose(ai, soldier, SoldierPose.Idle, true);
@@ -2104,7 +2103,9 @@ namespace EasyRed2HumanAI
                 if (veh == null || veh.Pointer == IntPtr.Zero || veh.transform == null)
                     continue;
 
-                if (!AiCore.IsLocallyOwnedVehicle(veh) || !veh.CanFight() || veh.IsAirVehicle() || veh.PlayerIsInside())
+                // Note: Vehicle.CanFight() (0x18085B7E0) returns false whenever a vehicle/emplacement is empty!
+                // Check !IsDisabled() && !IsCoverDestroyed() instead so empty MG tripods, bunker MGs, AT guns, and AA guns are staffed.
+                if (!AiCore.IsLocallyOwnedVehicle(veh) || veh.IsDisabled() || veh.IsCoverDestroyed() || veh.IsAirVehicle() || veh.PlayerIsInside())
                     continue;
 
                 bool isStaticGun = veh.TryCast<MovableVehicle>() == null;
@@ -2116,9 +2117,11 @@ namespace EasyRed2HumanAI
                 if (mainTurret == null || mainTurret.WeaponsCount() <= 0 || mainTurret.GetSittedUnit(veh) != null)
                     continue;
 
+                IntPtr vehPtr = veh.Pointer;
                 Vector3 vehPos = veh.transform.position;
                 Soldier bestCandidate = null;
                 float bestDistSq = 45.0f * 45.0f;
+                bool alreadyClaimedByInboundBot = false;
 
                 foreach (var kvp in allSquads)
                 {
@@ -2132,6 +2135,20 @@ namespace EasyRed2HumanAI
 
                     if ((leader.transform.position - vehPos).sqrMagnitude > 60.0f * 60.0f)
                         continue;
+
+                    var units = sq.units;
+                    int uCount = units.Count;
+                    for (int uIdx = 0; uIdx < uCount; uIdx++)
+                    {
+                        Soldier u = units[uIdx];
+                        if (u != null && u.IsAlive && u.targetDestination != null && u.targetDestination.Pointer == vehPtr)
+                        {
+                            alreadyClaimedByInboundBot = true;
+                            break;
+                        }
+                    }
+                    if (alreadyClaimedByInboundBot)
+                        break;
 
                     // Verify the turret can aim toward the squad's threat sector
                     Vector3 threatDir = GetEffectiveThreatDirection(leader, sq, vehPos, veh.transform.forward);
@@ -2152,8 +2169,6 @@ namespace EasyRed2HumanAI
                     if (emplacementOverrun)
                         continue;
 
-                    var units = sq.units;
-                    int uCount = units.Count;
                     for (int uIdx = 0; uIdx < uCount; uIdx++)
                     {
                         Soldier u = units[uIdx];
@@ -2184,6 +2199,9 @@ namespace EasyRed2HumanAI
                     }
                 }
 
+                if (alreadyClaimedByInboundBot)
+                    continue;
+
                 if (bestCandidate != null)
                 {
                     _assignedEmplacementUntil[bestCandidate.Pointer] = now + 24.0f;
@@ -2192,13 +2210,41 @@ namespace EasyRed2HumanAI
                     {
                         SetBotPose(bestCandidate.aiController, bestCandidate, SoldierPose.Idle, true);
                     }
-                    bestCandidate.CoverPosition(veh.Cast<AiDestination>());
+                    AiDestination vehDest = veh.Cast<AiDestination>();
+                    bestCandidate.CoverPosition(vehDest);
                     StaticGunsStaffedCount++;
                     if (VisionConfig.DebugLogging.Value)
                     {
                         AiCore.LogDebug("Emplacement", $"{bestCandidate.faction} soldier assigned to crew empty emplacement/turret ({Mathf.Sqrt(bestDistSq):F0}m away).");
                     }
                 }
+            }
+        }
+
+        [HarmonyPatch(typeof(Squad), nameof(Squad.UnitCanChangeCover))]
+        public static class Squad_UnitCanChangeCover_Patch
+        {
+            public static void Postfix(Soldier __0, ref bool __result)
+            {
+                try
+                {
+                    if (!__result || !VisionConfig.EnableMod.Value || __0 == null)
+                        return;
+
+                    IntPtr ptr = __0.Pointer;
+                    float now = Time.time;
+                    if (_assignedEmplacementUntil.TryGetValue(ptr, out float empUntil) && now < empUntil)
+                    {
+                        __result = false;
+                        return;
+                    }
+
+                    if (_localCoverProtectedUntil.TryGetValue(ptr, out float covUntil) && now < covUntil)
+                    {
+                        __result = false;
+                    }
+                }
+                catch { }
             }
         }
 

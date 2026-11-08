@@ -670,6 +670,8 @@ namespace EasyRed2HumanAI
             AiCore.PruneDict(_nextBoundingHoldCountTime, alivePtrs);
             AiCore.PruneDict(_nextBridgeAssistCountTime, alivePtrs);
             AiCore.PruneDict(_nextSurrenderCheckTime, alivePtrs);
+            AiCore.PruneDict(_nextLocalCoverSeekTime, alivePtrs);
+            AiCore.PruneDict(_localCoverProtectedUntil, alivePtrs);
             AiCore.PruneDict(_nextBotDoorCheckTime, alivePtrs);
             AiCore.PruneDict(_assignedEmplacementUntil, alivePtrs);
             AiCore.PruneDict(_nextFriendlyStepAsideTime, alivePtrs);

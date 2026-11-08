@@ -37,6 +37,8 @@ namespace EasyRed2HumanAI
         private static readonly Dictionary<IntPtr, float> _nextBoundingHoldCountTime = new Dictionary<IntPtr, float>(256);
         private static readonly Dictionary<IntPtr, float> _nextBridgeAssistCountTime = new Dictionary<IntPtr, float>(256);
         private static readonly Dictionary<IntPtr, float> _nextSurrenderCheckTime = new Dictionary<IntPtr, float>(256);
+        private static readonly Dictionary<IntPtr, float> _nextLocalCoverSeekTime = new Dictionary<IntPtr, float>(256);
+        private static readonly Dictionary<IntPtr, float> _localCoverProtectedUntil = new Dictionary<IntPtr, float>(256);
         private static readonly HashSet<IntPtr> _bayonetCheckedSoldiers = new HashSet<IntPtr>();
         private static readonly Dictionary<long, bool> _coverExposureCache = new Dictionary<long, bool>(1024);
 
@@ -129,9 +131,10 @@ namespace EasyRed2HumanAI
             return false;
         }
 
-        private static bool IsFriendlyInLineOfFire(Soldier shooter, Vector3 targetPos, float distToTarget, float vet01, out Vector3 sidestepDir)
+        private static bool IsFriendlyInLineOfFire(Soldier shooter, Vector3 targetPos, float distToTarget, float vet01, out Vector3 sidestepDir, out Soldier blockingFriend)
         {
             sidestepDir = Vector3.zero;
+            blockingFriend = null;
             if (distToTarget <= 1.8f)
                 return false;
 
@@ -152,7 +155,10 @@ namespace EasyRed2HumanAI
             if (player != null && player.IsAlive && player.Pointer != myPtr && player.faction == myFaction)
             {
                 if (CheckSingleFriendlyInCone(gunPos, fireDir, maxCheckDist, allowedConeDeg, corridorWidth, shooter, player, out sidestepDir))
+                {
+                    blockingFriend = player;
                     return true;
+                }
             }
 
             Squad mySquad = shooter.joinedSquad;
@@ -165,7 +171,10 @@ namespace EasyRed2HumanAI
                     Soldier f = units[i];
                     if (f == null || !f.IsAlive || f.Pointer == myPtr) continue;
                     if (CheckSingleFriendlyInCone(gunPos, fireDir, maxCheckDist, allowedConeDeg, corridorWidth, shooter, f, out sidestepDir))
+                    {
+                        blockingFriend = f;
                         return true;
+                    }
                 }
             }
 
@@ -189,7 +198,10 @@ namespace EasyRed2HumanAI
                         Soldier f = units[i];
                         if (f == null || !f.IsAlive || f.Pointer == myPtr) continue;
                         if (CheckSingleFriendlyInCone(gunPos, fireDir, maxCheckDist, allowedConeDeg, corridorWidth, shooter, f, out sidestepDir))
+                        {
+                            blockingFriend = f;
                             return true;
+                        }
                     }
                 }
             }
@@ -229,6 +241,73 @@ namespace EasyRed2HumanAI
                 return true;
             }
             return false;
+        }
+
+        private static void TryNudgeFriendlyOutOfFireCone(Soldier shooter, Soldier friend, Vector3 targetPos)
+        {
+            if (shooter == null ||
+                friend == null ||
+                !AiCore.IsLocallyOwnedBot(friend) ||
+                friend.IsOnVehicle() ||
+                friend.UsingBipod() ||
+                friend.isInBodyAnimation ||
+                friend.IsCharging() ||
+                friend.transform == null ||
+                shooter.transform == null)
+            {
+                return;
+            }
+
+            Vector3 gunPos = shooter.GunPosition();
+            Vector3 friendPos = friend.transform.position;
+            Vector3 toFriend = friendPos - gunPos;
+            toFriend.y = 0f;
+            float distSq = toFriend.sqrMagnitude;
+            if (distSq > 14.0f * 14.0f || distSq < 0.04f)
+                return;
+
+            IntPtr friendPtr = friend.Pointer;
+            float now = Time.time;
+            if (_nextFriendlyStepAsideTime.TryGetValue(friendPtr, out float nextStep) && now < nextStep)
+                return;
+
+            _nextFriendlyStepAsideTime[friendPtr] = now + 1.8f;
+
+            SoldierAI friendAi = friend.aiController;
+            // If standing right in front of the shooter (<= 6.5m), duck into a crouch so the gunner can fire over them immediately
+            if (distSq <= 6.5f * 6.5f && friend.m_pose == SoldierPose.Idle && friendAi != null)
+            {
+                SetBotPose(friendAi, friend, SoldierPose.Crouch);
+            }
+
+            if (friendAi == null || friend.IsOnCover())
+                return;
+
+            Vector3 fireDir = targetPos - gunPos;
+            fireDir.y = 0f;
+            fireDir = fireDir.sqrMagnitude > 0.001f ? fireDir.normalized : shooter.transform.forward;
+            Vector3 right = new Vector3(fireDir.z, 0f, -fireDir.x);
+            float side = Vector3.Dot(toFriend, right);
+            Vector3 clearDir = side >= 0f ? right : -right;
+
+            Transform friendRoot = friend.transform.root;
+            Vector3 stepDir = clearDir;
+            if (AiCore.RaycastEnvironment(friendPos + Vector3.up * 0.5f, stepDir, 2.0f, friendRoot, out _))
+            {
+                stepDir = -clearDir;
+                if (AiCore.RaycastEnvironment(friendPos + Vector3.up * 0.5f, stepDir, 2.0f, friendRoot, out _))
+                    return;
+            }
+
+            if (!friendAi.IsMoving())
+            {
+                friendAi.MoveDestination = friendPos + stepDir * 1.85f;
+                friendAi.moveCharacter = true;
+            }
+            else if ((friendAi.MoveDestination - friendPos).sqrMagnitude <= 9.0f * 9.0f)
+            {
+                friendAi.MoveDestination += stepDir * 1.65f;
+            }
         }
 
         private static bool TryGetAntiStackPush(Soldier shooter, out Vector3 pushDir)
@@ -401,11 +480,66 @@ namespace EasyRed2HumanAI
 
         private static bool TrySeekNearbyCover(SoldierAI ai, Soldier soldier)
         {
-            if (ai == null || soldier == null || soldier.IsOnVehicle())
+            if (ai == null || soldier == null || soldier.IsOnVehicle() || soldier.transform == null)
                 return false;
 
             if (soldier.IsOnCover())
                 return true;
+
+            IntPtr ptr = soldier.Pointer;
+            float now = Time.time;
+            if (!_nextLocalCoverSeekTime.TryGetValue(ptr, out float nextSeek) || now >= nextSeek)
+            {
+                _nextLocalCoverSeekTime[ptr] = now + 1.5f;
+
+                var octree = CoverManager.staticCovers;
+                if (octree != null)
+                {
+                    Vector3 myPos = soldier.transform.position;
+                    Vector3 threatDir = GetEffectiveThreatDirection(soldier, soldier.joinedSquad, myPos, soldier.transform.forward);
+                    var nearby = octree.GetNearby(myPos, 13.5f);
+                    if (nearby != null && nearby.Length > 0)
+                    {
+                        var unreachable = soldier.nonReachableCovers;
+                        CombatCover bestCover = null;
+                        float bestDistSq = float.MaxValue;
+                        int count = nearby.Length;
+                        for (int i = 0; i < count; i++)
+                        {
+                            AiDestination dest = nearby[i];
+                            if (dest == null || dest.Pointer == IntPtr.Zero)
+                                continue;
+                            if (unreachable != null && unreachable.Contains(dest))
+                                continue;
+
+                            CombatCover cc = dest.TryCast<CombatCover>();
+                            if (cc == null)
+                                continue;
+
+                            Vector3 covPos = cc.GetCoverPosition();
+                            if (Mathf.Abs(covPos.y - myPos.y) > 2.4f)
+                                continue;
+
+                            float dSq = (covPos - myPos).sqrMagnitude;
+                            if (dSq >= bestDistSq)
+                                continue;
+
+                            if (!cc.IsCoverAvailable(threatDir, soldier.faction))
+                                continue;
+
+                            bestDistSq = dSq;
+                            bestCover = cc;
+                        }
+
+                        if (bestCover != null)
+                        {
+                            _localCoverProtectedUntil[ptr] = now + 7.5f;
+                            soldier.CoverPosition(bestCover.Cast<AiDestination>());
+                            return true;
+                        }
+                    }
+                }
+            }
 
             if (soldier.HasDestinationAssigned)
             {
@@ -1501,9 +1635,22 @@ namespace EasyRed2HumanAI
                                              soldier.joinedSquad.Leader != null &&
                                              soldier.joinedSquad.Leader.m_pose > SoldierPose.Idle;
 
-                        if (isOnBridge && __instance.HasEnemyAndCanFireAtHim)
+                        if ((isOnBridge || dist <= 60f) && __instance.HasEnemyAndCanFireAtHim)
                         {
                             __instance.moveLookingTarget = true;
+                        }
+
+                        // If caught moving in the open under MG/rifle suppression (> 8.5m from destination), seek nearby local cover within 13.5m
+                        if (suppression >= 20f &&
+                            !soldier.IsOnCover() &&
+                            !isEvadingArmor &&
+                            !isStaffingEmplacement &&
+                            !soldier.IsCharging() &&
+                            !inPointBlankMelee &&
+                            !isOnBridge &&
+                            (soldier.transform.position - __instance.MoveDestination).sqrMagnitude > 8.5f * 8.5f)
+                        {
+                            TrySeekNearbyCover(__instance, soldier);
                         }
 
                         // Attacker Bounding Overwatch: staggered 5.2s bounds alternated with 3.8s crouched overwatch firing holds
@@ -1594,10 +1741,12 @@ namespace EasyRed2HumanAI
                         }
                         else if (VisionConfig.EnforceStandingWhenOutOfCombat.Value)
                         {
-                            bool shouldBoundCrouched = inBoundingOverwatch && suppression >= 26f;
+                            bool shouldBoundCrouched = (inBoundingOverwatch && suppression >= 10f) ||
+                                                       suppression >= 12f ||
+                                                       (__instance.HasEnemyAndCanFireAtHim && dist <= 75f);
                             if (soldier.m_pose == SoldierPose.Prone || __instance.actualPose == SoldierPose.Prone)
                             {
-                                SoldierPose liftPose = (inCombatCrouchLock || suppression >= 28f || stealthCrouch || shouldBoundCrouched)
+                                SoldierPose liftPose = (inCombatCrouchLock || suppression >= 12f || stealthCrouch || shouldBoundCrouched)
                                     ? SoldierPose.Crouch
                                     : SoldierPose.Idle;
                                 SetBotPose(__instance, soldier, liftPose, true);
@@ -1606,7 +1755,7 @@ namespace EasyRed2HumanAI
                             {
                                 SetBotPose(__instance, soldier, SoldierPose.Crouch);
                             }
-                            else if (!inCombatCrouchLock && suppression < 28f && !stealthCrouch)
+                            else if (!inCombatCrouchLock && suppression < 12f && !stealthCrouch)
                             {
                                 SetBotPose(__instance, soldier, SoldierPose.Idle, true);
                             }
@@ -1703,20 +1852,32 @@ namespace EasyRed2HumanAI
                             SquadTask currentTask = soldier.joinedSquad != null ? soldier.joinedSquad.currentTask : null;
                             bool inObjectiveZone = currentTask != null && currentTask.IsInsideTaskArea(soldier.transform.position, 1.15f);
                             bool isSquadAlerted = soldier.isAlerted || (soldier.joinedSquad != null && soldier.joinedSquad.IsEnemyAwareOfThisSquad);
-                            Vector3 threatDir = GetEffectiveThreatDirection(soldier, soldier.joinedSquad, soldier.transform.position, soldier.transform.forward);
+                            Vector3 myPos = soldier.transform.position;
+                            Transform myRoot = soldier.transform.root;
+                            Vector3 threatDir = GetEffectiveThreatDirection(soldier, soldier.joinedSquad, myPos, soldier.transform.forward);
                             bool isShelteredByWall = VisionConfig.EnableSmartWallSideCover.Value &&
-                                                     IsPositionShelteredByFrontCover(soldier.transform.position, threatDir, soldier.transform.root);
+                                                     IsPositionShelteredByFrontCover(myPos, threatDir, myRoot);
                             bool hasMortar = __instance.HeldMortar != null;
 
                             bool holdDefensiveCrouch = onActualCombatCover || inObjectiveZone || isShelteredByWall || isSquadAlerted;
-                            bool coverRequiresStanding = onActualCombatCover &&
-                                                         activeCover != null &&
-                                                         activeCover.GetCoverPose() == SoldierPose.Idle &&
-                                                         !inCombatHold &&
-                                                         suppression < 8f &&
-                                                         !isSquadAlerted;
+                            Vector3 lookFwd = soldier.transform.forward;
+                            lookFwd.y = 0f;
+                            lookFwd = lookFwd.sqrMagnitude > 0.001f ? lookFwd.normalized : threatDir;
+                            bool windowSillRequiresStanding =
+                                (onActualCombatCover && activeCover != null && activeCover.GetCoverPose() == SoldierPose.Idle) ||
+                                (AiCore.RaycastEnvironment(myPos + Vector3.up * 0.78f, lookFwd, 2.2f, myRoot, out _) &&
+                                 !AiCore.RaycastEnvironment(myPos + Vector3.up * 1.28f, lookFwd, 6.0f, myRoot, out _));
 
-                            if ((!holdDefensiveCrouch || coverRequiresStanding) && !inCombatHold && suppression < 8f && !stealthCrouch && !hasMortar)
+                            bool canStandAtWindow = windowSillRequiresStanding &&
+                                                    suppression < duckBackSupp &&
+                                                    !soldier.IsReloading &&
+                                                    !soldier.isBleeding;
+
+                            if (canStandAtWindow && !stealthCrouch && !hasMortar)
+                            {
+                                SetBotPose(__instance, soldier, SoldierPose.Idle);
+                            }
+                            else if (!holdDefensiveCrouch && !inCombatHold && suppression < 8f && !stealthCrouch && !hasMortar)
                             {
                                 SetBotPose(__instance, soldier, SoldierPose.Idle);
                             }
@@ -2569,10 +2730,14 @@ namespace EasyRed2HumanAI
                         if (!_nextFFCheckTime.TryGetValue(ptr, out float nextFF) || Time.time >= nextFF)
                         {
                             _nextFFCheckTime[ptr] = Time.time + 0.25f;
-                            if (IsFriendlyInLineOfFire(soldier, __0, dist, vet01, out _))
+                            if (IsFriendlyInLineOfFire(soldier, __0, dist, vet01, out _, out Soldier blockingFriend))
                             {
                                 _ffBlockedUntil[ptr] = Time.time + 0.30f;
                                 FriendlyFirePrevented++;
+                                if (blockingFriend != null)
+                                {
+                                    TryNudgeFriendlyOutOfFireCone(soldier, blockingFriend, __0);
+                                }
                             }
                         }
 
@@ -2847,9 +3012,13 @@ namespace EasyRed2HumanAI
                             moveDir = toDest.normalized;
                     }
 
-                    bool isVulnerable = __instance.GetSuppressionValue() >= 32f ||
-                                        __instance.IsReloading ||
-                                        __instance.isBleeding;
+                    float curSupp = __instance.GetSuppressionValue();
+                    bool isDoorVulnerable = curSupp >= 32f ||
+                                            __instance.IsReloading ||
+                                            __instance.isBleeding;
+                    // Never close window shutters just because a soldier is reloading or lightly suppressed;
+                    // only close shutters under severe suppression (>= 78) or while bleeding out.
+                    bool isShutterVulnerable = curSupp >= 78f || __instance.isBleeding;
 
                     Squad squad = __instance.joinedSquad;
                     Vector3 threatDir = GetEffectiveThreatDirection(__instance, squad, botPos, botFwd);
@@ -2883,7 +3052,7 @@ namespace EasyRed2HumanAI
                                     rPtr = dRoot.Pointer;
 
                                 Bounds b = col.bounds;
-                                isShutter = (b.min.y - botPos.y) > 0.45f || (b.size.y > 0.05f && b.size.y < 1.35f);
+                                isShutter = b.size.y > 0.05f && b.size.y < 1.42f;
                             }
 
                             info = new CachedDoorInfo
@@ -2920,15 +3089,12 @@ namespace EasyRed2HumanAI
                             if (info.IsWindowShutter)
                             {
                                 if (!onCooldown &&
-                                    !isMoving &&
-                                    !isVulnerable &&
-                                    distSq <= 4.0f &&
-                                    threatDir.sqrMagnitude > 0.01f &&
-                                    Vector3.Dot(toDoorDir, threatDir) > 0.40f &&
-                                    AiCore.TryConsumeBotRpcBudget(0.35f))
+                                    !isShutterVulnerable &&
+                                    distSq <= 6.76f &&
+                                    AiCore.TryConsumeBotRpcBudget(0.25f))
                                 {
                                     door.SetDoor(true);
-                                    _nextDoorToggleTime[doorPtr] = now + 8.0f;
+                                    _nextDoorToggleTime[doorPtr] = now + 3.5f;
                                     InvalidateWatchWindowCache(botPtr);
                                 }
                             }
@@ -2949,8 +3115,9 @@ namespace EasyRed2HumanAI
 
                             if (info.IsWindowShutter)
                             {
-                                if (isVulnerable &&
-                                    distSq <= 6.25f &&
+                                if (!isMoving &&
+                                    isShutterVulnerable &&
+                                    distSq <= 5.76f &&
                                     (threatDir.sqrMagnitude < 0.01f || Vector3.Dot(toDoorDir, threatDir) > 0.15f))
                                 {
                                     shouldClose = true;
@@ -2964,7 +3131,7 @@ namespace EasyRed2HumanAI
                                                          Vector3.Dot(moveDir, toDoorDir) < -0.35f;
 
                                 bool exposedIndoorDoor = !isMoving &&
-                                                         isVulnerable &&
+                                                         isDoorVulnerable &&
                                                          distSq <= 6.25f &&
                                                          threatDir.sqrMagnitude > 0.01f &&
                                                          Vector3.Dot(toDoorDir, threatDir) > 0.30f;
@@ -2979,7 +3146,7 @@ namespace EasyRed2HumanAI
                             if (shouldClose && AiCore.TryConsumeBotRpcBudget(0.35f))
                             {
                                 door.SetDoor(false);
-                                _nextDoorToggleTime[doorPtr] = now + 10.0f;
+                                _nextDoorToggleTime[doorPtr] = now + (info.IsWindowShutter ? 4.0f : 10.0f);
                                 if (info.IsWindowShutter)
                                 {
                                     InvalidateWatchWindowCache(botPtr);

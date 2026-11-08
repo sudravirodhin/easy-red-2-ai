@@ -363,7 +363,7 @@ namespace EasyRed2HumanAI
                 if (_isRunningExtraTicks)
                     return;
 
-                if (!VisionConfig.EnableMod.Value || !VisionConfig.EnableAdaptiveAiTickScaling.Value)
+                if (!VisionConfig.EnableMod.Value || !VisionConfig.EnableAdaptiveAiTickScaling.Value || Time.timeScale <= 0.01f)
                     return;
 
                 // Frame-time guard: never add extra ticks on frames slower than 25ms (< 40 FPS)

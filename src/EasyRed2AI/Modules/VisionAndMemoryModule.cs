@@ -636,13 +636,23 @@ namespace EasyRed2HumanAI
 
             Vector3 myPos = thrower.transform.position;
 
+            // Never throw grenades from indoors beneath a low ceiling (high risk of bouncing off window lintel/ceiling)
+            if (AiCore.HasLowCeilingOverhead(myPos, 3.2f))
+                return false;
+
             // 1. Ensure throw arc is not blocked by an interior ceiling, window frame, or wall right in front of the thrower
             Vector3 throwOrigin = myPos + Vector3.up * 1.45f;
-            Vector3 arcPeakTarget = targetPos + Vector3.up * 1.60f;
+            Vector3 arcPeakTarget = targetPos + Vector3.up * 1.85f;
             Vector3 toArc = arcPeakTarget - throwOrigin;
             if (toArc.sqrMagnitude > 0.04f)
             {
-                if (AiCore.IsDirectionBlockedByEnvironment(throwOrigin, toArc.normalized, Mathf.Min(dist * 0.50f, 6.5f), thrower.transform.root))
+                Vector3 arcDir = toArc.normalized;
+                float checkLen = Mathf.Min(dist * 0.55f, 7.0f);
+                if (AiCore.IsDirectionBlockedByEnvironment(throwOrigin, arcDir, checkLen, thrower.transform.root))
+                    return false;
+
+                Vector3 highArcDir = (arcDir + Vector3.up * 0.32f).normalized;
+                if (AiCore.IsDirectionBlockedByEnvironment(throwOrigin, highArcDir, Mathf.Min(checkLen, 4.5f), thrower.transform.root))
                     return false;
             }
 
@@ -758,8 +768,18 @@ namespace EasyRed2HumanAI
 
             float now = Time.time;
             float elapsed = now - lastInfo.LastSeenTime;
-            if (elapsed < 0.08f || elapsed > 2.25f)
+            if (elapsed < 0.08f)
                 return false;
+
+            if (elapsed > 2.25f)
+            {
+                if (elapsed < 2.65f)
+                {
+                    ai.shotFiresEnd = 0f;
+                    soldier.SetGunTriggerPressed(false);
+                }
+                return false;
+            }
 
             if (lastInfo.Target == null || lastInfo.Target.Pointer == IntPtr.Zero)
                 return false;
@@ -1355,6 +1375,27 @@ namespace EasyRed2HumanAI
                     if (TryGetKnownThreatSectorDirection(soldier, out Vector3 watchDir, out _) &&
                         watchDir.sqrMagnitude > 0.01f)
                     {
+                        // If stationed on a directional CombatCover (e.g. window or bunker aperture), keep gaze within
+                        // the cover's look cone so the soldier never turns sideways to stare at an interior room wall.
+                        if (soldier.IsOnCover() && soldier.targetDestination != null)
+                        {
+                            CombatCover activeCover = soldier.targetDestination.TryCast<CombatCover>();
+                            if (activeCover != null && activeCover.localLookAngleWideness < 145f)
+                            {
+                                Vector3 coverFwd = activeCover.GetLookRotation() * Vector3.forward;
+                                coverFwd.y = 0f;
+                                if (coverFwd.sqrMagnitude > 0.01f)
+                                {
+                                    coverFwd.Normalize();
+                                    float maxHalfArc = Mathf.Clamp(activeCover.localLookAngleWideness * 0.5f, 22f, 52f);
+                                    if (Vector3.Angle(coverFwd, watchDir) > maxHalfArc)
+                                    {
+                                        watchDir = Vector3.RotateTowards(coverFwd, watchDir, maxHalfArc * Mathf.Deg2Rad, 0f).normalized;
+                                    }
+                                }
+                            }
+                        }
+
                         float angle = soldier.AngleToDirection(watchDir);
                         if (_isTurningToWatchSector.Contains(ptr))
                         {
