@@ -1114,6 +1114,13 @@ namespace EasyRed2HumanAI
 
                 TeamNetAnvilHammerCount++;
                 GoapPlansExecutedCount++;
+                if (VisionConfig.DebugLogging.Value)
+                {
+                    AiCore.LogDebug(
+                        "TeamNetPincer",
+                        $"{leader.faction} squad '{sq.squadName}' executing objective pincer (latBias:{latBias:F2}, dist:{distToTask:F0}m).",
+                        4.0f);
+                }
             }
         }
 
@@ -1962,6 +1969,13 @@ namespace EasyRed2HumanAI
                                 GoapSmokeScreensCount++;
                                 GoapPlansExecutedCount++;
                                 TrySayTacticalVoice(soldier, sq, VoiceManager.VoiceClip.keepYourHeadDown, 0.1f);
+                                if (VisionConfig.DebugLogging.Value)
+                                {
+                                    AiCore.LogDebug(
+                                        "GoapSmoke",
+                                        $"{soldier.faction} {GetPersonality(soldier)} threw GOAP smoke screen ({dToThreat:F0}m, nextStep:{plan.Step1}).",
+                                        3.0f);
+                                }
                                 if (plan.StepCount > 1)
                                     plan.StepIndex = 1;
                             }
@@ -2165,6 +2179,13 @@ namespace EasyRed2HumanAI
                     if (bestSquad.units != null && bestSquad.units.Count < 10 && bestSquad.AddIfNotInSquad(self))
                     {
                         GoapPlansExecutedCount++;
+                        if (VisionConfig.DebugLogging.Value)
+                        {
+                            AiCore.LogDebug(
+                                "GoapMerge",
+                                $"{myFaction} lone survivor / bailed crewman merged into friendly squad '{bestSquad.squadName}'.",
+                                3.0f);
+                        }
                         return true;
                     }
                 }

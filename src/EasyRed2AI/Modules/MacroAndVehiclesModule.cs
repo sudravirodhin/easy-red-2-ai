@@ -1186,6 +1186,14 @@ namespace EasyRed2HumanAI
 
                         if (!canShellBuildingFacade)
                             continue;
+
+                        if (VisionConfig.DebugLogging.Value)
+                        {
+                            AiCore.LogDebug(
+                                "BuildingHE",
+                                $"{myFaction} {caliber:F0}mm HE turret targeting building facade to flush indoor enemy ({dist:F0}m).",
+                                5.0f);
+                        }
                     }
 
                     bestScore = candScore;
