@@ -80,6 +80,10 @@ namespace EasyRed2HumanAI
         public static ConfigEntry<bool> EnableCombinedArmsPrioritySupport;
         public static ConfigEntry<bool> EnableBridgeCrossingDiscipline;
         public static ConfigEntry<bool> EnableShellShockSurrender;
+        public static ConfigEntry<bool> EnableTacticalGoapPlanner;
+        public static ConfigEntry<bool> EnableRadiomanIntelNet;
+        public static ConfigEntry<bool> EnableTacticalVoiceCallouts;
+        public static ConfigEntry<bool> EnableFactionNetDoctrines;
 
         // 7. Phase 3: Role-Based AI Personalities (3 Archetypes per Infantry & Vehicle Role)
         public static ConfigEntry<bool> EnableRolePersonalities;
@@ -486,6 +490,30 @@ namespace EasyRed2HumanAI
                 "EnableShellShockSurrender",
                 true,
                 "Shell-Shocked & Skittish Dynamic Surrender: isolated, heavily suppressed/shell-shocked Skittish ([Cautious] / [Triage]) or green rookie soldiers who are overrun at close range (<= 18m) with no inspiring Squad Leader nearby can dynamically surrender (SurrenderSynched), and can later be liberated by friendly counterattacks.");
+
+            EnableTacticalGoapPlanner = config.Bind(
+                "6. Tactical Self-Preservation & Muzzle Discipline",
+                "EnableTacticalGoapPlanner",
+                true,
+                "F.E.A.R.-Style 3-Tier Bitmask GOAP Planner & Squad Blackboard: coordinates Individual -> Squad -> Team fire-and-maneuver (Suppressors pin enemy positions on the Squad Blackboard to unlock lateral Flanker bounds, Smoke-Screen advances, and Grenade breaches).");
+
+            EnableRadiomanIntelNet = config.Bind(
+                "6. Tactical Self-Preservation & Muzzle Discipline",
+                "EnableRadiomanIntelNet",
+                true,
+                "Radioman-Gated Team Intel & Combined-Arms Net: squads only broadcast distant enemy contacts/armor sightings to friendly Tanks, CAS Aircraft, Artillery, and HQ Reserve Squads if they have an alive Radioman within 30m of their Squad Leader or are within 45m voice/visual contact of friendly forces.");
+
+            EnableTacticalVoiceCallouts = config.Bind(
+                "6. Tactical Self-Preservation & Muzzle Discipline",
+                "EnableTacticalVoiceCallouts",
+                true,
+                "Audible GOAP Plan Voice Callouts: soldiers audibly announce coordinated plan transitions in their native faction voice ('Covering fire!', 'I'm moving!', 'Grenade!', 'Radioman is dead!', 'I'll take his seat!').");
+
+            EnableFactionNetDoctrines = config.Bind(
+                "6. Tactical Self-Preservation & Muzzle Discipline",
+                "EnableFactionNetDoctrines",
+                true,
+                "Nation-Specific Team Net & GOAP Doctrines: gives all 20 Easy Red 2 factions (USA, Germany, USSR, UK, Japan, France, Italy, Poland, China, Finland, Mongolia, Manchukuo, Canada, Australia, New Zealand, India, Gurkha, Greece, Romania, Hungary + balanced default fallback) historically authentic radio net, flanking, emplacement, and GOAP cost habits.");
 
             // 7. AI Role Personalities (3 Archetypes per Infantry & Vehicle Role)
             EnableRolePersonalities = config.Bind(

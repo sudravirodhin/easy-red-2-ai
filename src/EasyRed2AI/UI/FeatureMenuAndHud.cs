@@ -67,24 +67,25 @@ namespace EasyRed2HumanAI
                             VeteranAndTacticsPatches.CleanupDictionaries();
                             ShowToast(
                                 $"[Battle Hardened] Vets:{VeteranAndTacticsPatches.ActiveVeteransCount} (Prom:{VeteranAndTacticsPatches.FieldPromotionsCount}) | " +
-                                $"Drops:{VeteranAndTacticsPatches.SelfPreservationDrops} (Indoor:{VeteranAndTacticsPatches.IndoorPronePreventedCount}) | " +
-                                $"Callouts:{VeteranAndTacticsPatches.LocalCalloutsSharedCount} | Supp:{VeteranAndTacticsPatches.SuppressiveEventsCount} | Bounds:{VeteranAndTacticsPatches.BoundingOverwatchHoldsCount} | " +
-                                $"Garrisons:{VeteranAndTacticsPatches.MacroGarrisonsAssignedCount} | Emplace:{VeteranAndTacticsPatches.StaticGunsStaffedCount} | APC:{VeteranAndTacticsPatches.SmartApcDismountsCount} | TankHold:{VeteranAndTacticsPatches.TankStandoffHoldsCount} | RoadkillSaved:{VeteranAndTacticsPatches.FriendlyRoadkillsPreventedCount} | " +
-                                $"CombArms:{VeteranAndTacticsPatches.CombinedArmsPriorityAssistsCount} | Bridges:{VeteranAndTacticsPatches.BridgeCrossingsAssistedCount} | Surr:{VeteranAndTacticsPatches.ShellShockSurrendersCount}/{VeteranAndTacticsPatches.ComradesLiberated} | Ticks:{AiCore.TotalAdaptiveAiExtraTicks} | FFSaved:{VeteranAndTacticsPatches.FriendlyFirePrevented}",
+                                $"GOAP:{VeteranAndTacticsPatches.GoapPlansExecutedCount} (Anvil:{VeteranAndTacticsPatches.TeamNetAnvilHammerCount} Flank:{VeteranAndTacticsPatches.GoapPinAndFlankCount} Smoke:{VeteranAndTacticsPatches.GoapSmokeScreensCount} RadioCut:{VeteranAndTacticsPatches.RadioNetCutoffsCount}) | " +
+                                $"Drops:{VeteranAndTacticsPatches.SelfPreservationDrops} | Callouts:{VeteranAndTacticsPatches.LocalCalloutsSharedCount} | Supp:{VeteranAndTacticsPatches.SuppressiveEventsCount} | Bounds:{VeteranAndTacticsPatches.BoundingOverwatchHoldsCount} | " +
+                                $"Garrisons:{VeteranAndTacticsPatches.MacroGarrisonsAssignedCount} | Emplace:{VeteranAndTacticsPatches.StaticGunsStaffedCount} | APC:{VeteranAndTacticsPatches.SmartApcDismountsCount} | TankHold:{VeteranAndTacticsPatches.TankStandoffHoldsCount} | " +
+                                $"CombArms:{VeteranAndTacticsPatches.CombinedArmsPriorityAssistsCount} (Kamikaze:{VeteranAndTacticsPatches.KamikazeDivesTriggeredCount}) | Surr:{VeteranAndTacticsPatches.ShellShockSurrendersCount}/{VeteranAndTacticsPatches.ComradesLiberated} | Ticks:{AiCore.TotalAdaptiveAiExtraTicks} | FFSaved:{VeteranAndTacticsPatches.FriendlyFirePrevented}",
                                 6.5f);
                         }
                     }
 
-                        if (VisionConfig.DebugLogging.Value)
+                    if (VisionConfig.DebugLogging.Value)
                     {
                         AiCore.LogDebug(
                             "Heartbeat",
                             $"Vets:{VeteranAndTacticsPatches.ActiveVeteransCount} (Prom:{VeteranAndTacticsPatches.FieldPromotionsCount}) | " +
+                            $"GOAP:{VeteranAndTacticsPatches.GoapPlansExecutedCount} (Anvil:{VeteranAndTacticsPatches.TeamNetAnvilHammerCount} PinFlank:{VeteranAndTacticsPatches.GoapPinAndFlankCount} Smoke:{VeteranAndTacticsPatches.GoapSmokeScreensCount} RadioCut:{VeteranAndTacticsPatches.RadioNetCutoffsCount}) | " +
                             $"Drops:{VeteranAndTacticsPatches.SelfPreservationDrops} | IndoorCrouch:{VeteranAndTacticsPatches.IndoorPronePreventedCount} | " +
                             $"Callouts:{VeteranAndTacticsPatches.LocalCalloutsSharedCount} | Supp:{VeteranAndTacticsPatches.SuppressiveEventsCount} | " +
                             $"Bounds:{VeteranAndTacticsPatches.BoundingOverwatchHoldsCount} | Garrisons:{VeteranAndTacticsPatches.MacroGarrisonsAssignedCount} | " +
                             $"Emplace:{VeteranAndTacticsPatches.StaticGunsStaffedCount} | APC:{VeteranAndTacticsPatches.SmartApcDismountsCount} | " +
-                            $"TankHold:{VeteranAndTacticsPatches.TankStandoffHoldsCount} | RoadkillSaved:{VeteranAndTacticsPatches.FriendlyRoadkillsPreventedCount} | CombArms:{VeteranAndTacticsPatches.CombinedArmsPriorityAssistsCount} | " +
+                            $"TankHold:{VeteranAndTacticsPatches.TankStandoffHoldsCount} | RoadkillSaved:{VeteranAndTacticsPatches.FriendlyRoadkillsPreventedCount} | CombArms:{VeteranAndTacticsPatches.CombinedArmsPriorityAssistsCount} (Kamikaze:{VeteranAndTacticsPatches.KamikazeDivesTriggeredCount}) | " +
                             $"Bridges:{VeteranAndTacticsPatches.BridgeCrossingsAssistedCount} | Surr:{VeteranAndTacticsPatches.ShellShockSurrendersCount} (Lib:{VeteranAndTacticsPatches.ComradesLiberated}) | " +
                             $"WoodPen:{VeteranAndTacticsPatches.ThinCoverPenetrationsCount} | PlaneAudio:{VeteranAndTacticsPatches.PlaneAudioLoopsDesyncedCount} | Chutes:{VeteranAndTacticsPatches.ParachutesDriftedCount} | " +
                             $"Doors:{VeteranAndTacticsPatches.DoorsStrategicallyClosedCount} | Bipods:{VeteranAndTacticsPatches.BipodsDeployed} | WallBlk:{VeteranAndTacticsPatches.WallsBlocked} | " +
@@ -198,7 +199,7 @@ namespace EasyRed2HumanAI
             private static void DrawConfigMenu()
             {
                 float panelW = 780f;
-                float panelH = 796f;
+                float panelH = 838f;
                 float panelX = (Screen.width - panelW) * 0.5f;
                 float panelY = (Screen.height - panelH) * 0.5f;
 
@@ -241,7 +242,9 @@ namespace EasyRed2HumanAI
                 DrawToggleButton(colLeftX, ref yL, colW, rowH, "Limit Aircraft Infantry Spotting", VisionConfig.LimitAircraftInfantrySpotting);
 
                 yL += 4f;
-                DrawSectionHeaderWithBundle(colLeftX, ref yL, colW, "Bundle 3: Macro, Emplacements & Armor",
+                DrawSectionHeaderWithBundle(colLeftX, ref yL, colW, "Bundle 3: Macro, Radio Net & Armor",
+                    VisionConfig.EnableRadiomanIntelNet,
+                    VisionConfig.EnableFactionNetDoctrines,
                     VisionConfig.EnableMacroObjectiveDirector,
                     VisionConfig.EnableProactiveEmplacementStaffing,
                     VisionConfig.EnableCombinedArmsPrioritySupport,
@@ -250,6 +253,8 @@ namespace EasyRed2HumanAI
                     VisionConfig.EnableFriendlyVehicleRightOfWay,
                     VisionConfig.PreventSmallArmsFireAtTanks,
                     VisionConfig.EnableSmartTankCrewRepair);
+                DrawToggleButton(colLeftX, ref yL, colW, rowH, "Radioman-Gated Team Intel Net", VisionConfig.EnableRadiomanIntelNet);
+                DrawToggleButton(colLeftX, ref yL, colW, rowH, "20-Nation Historical Command Doctrines", VisionConfig.EnableFactionNetDoctrines);
                 DrawToggleButton(colLeftX, ref yL, colW, rowH, "Objective Garrison & Counterattack Director", VisionConfig.EnableMacroObjectiveDirector);
                 DrawToggleButton(colLeftX, ref yL, colW, rowH, "Proactive Static Gun & Halftrack Staffing", VisionConfig.EnableProactiveEmplacementStaffing);
                 DrawToggleButton(colLeftX, ref yL, colW, rowH, "Combined-Arms Known Target Priority", VisionConfig.EnableCombinedArmsPrioritySupport);
@@ -285,7 +290,9 @@ namespace EasyRed2HumanAI
 
                 // Right Column: Bundle 2 (Infantry Combat & Cover) & Bundle 5 (QoL & Diagnostics)
                 float yR = startY;
-                DrawSectionHeaderWithBundle(colRightX, ref yR, colW, "Bundle 2: Infantry Combat, Stance & Cover",
+                DrawSectionHeaderWithBundle(colRightX, ref yR, colW, "Bundle 2: GOAP, Infantry Combat & Cover",
+                    VisionConfig.EnableTacticalGoapPlanner,
+                    VisionConfig.EnableTacticalVoiceCallouts,
                     VisionConfig.EnableSelfPreservationStance,
                     VisionConfig.EnableIndoorCeilingPronePrevention,
                     VisionConfig.EnableStrategicDoorDiscipline,
@@ -304,6 +311,8 @@ namespace EasyRed2HumanAI
                     VisionConfig.EnableWallVaulting,
                     VisionConfig.EnableShellShockSurrender,
                     VisionConfig.EnableComradeLiberation);
+                DrawToggleButton(colRightX, ref yR, colW, rowH, "3-Tier GOAP Planner & Squad Blackboard", VisionConfig.EnableTacticalGoapPlanner);
+                DrawToggleButton(colRightX, ref yR, colW, rowH, "Audible GOAP Plan Voice Callouts", VisionConfig.EnableTacticalVoiceCallouts);
                 DrawToggleButton(colRightX, ref yR, colW, rowH, "Self-Preservation Stances", VisionConfig.EnableSelfPreservationStance);
                 DrawToggleButton(colRightX, ref yR, colW, rowH, "Indoor Ceiling Prone Prevention", VisionConfig.EnableIndoorCeilingPronePrevention);
                 DrawToggleButton(colRightX, ref yR, colW, rowH, "Strategic Door & Shutter Discipline", VisionConfig.EnableStrategicDoorDiscipline);
@@ -675,6 +684,7 @@ namespace EasyRed2HumanAI
             AiCore.PruneDict(_nextBotDoorCheckTime, alivePtrs);
             AiCore.PruneDict(_assignedEmplacementUntil, alivePtrs);
             AiCore.PruneDict(_nextFriendlyStepAsideTime, alivePtrs);
+            AiCore.PruneDict(_botGoapPlans, alivePtrs);
             AiCore.PruneDict(_lastDamageByVictim, alivePtrs);
 
             AiCore.PruneSet(_bayonetCheckedSoldiers, alivePtrs);
@@ -688,6 +698,7 @@ namespace EasyRed2HumanAI
                 ClearBallisticsCaches();
                 ClearDoorCaches();
                 ClearCombinedArmsCaches();
+                ClearGoapCaches();
             }
 
             if (_repairTaskStartTime.Count > 0)

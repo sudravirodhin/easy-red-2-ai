@@ -303,6 +303,7 @@ namespace EasyRed2HumanAI
             {
                 friendAi.MoveDestination = friendPos + stepDir * 1.85f;
                 friendAi.moveCharacter = true;
+                TrySayTacticalVoice(friend, friend.joinedSquad, VoiceManager.VoiceClip.watchYourFire, 0.05f);
             }
             else if ((friendAi.MoveDestination - friendPos).sqrMagnitude <= 9.0f * 9.0f)
             {
@@ -1521,6 +1522,23 @@ namespace EasyRed2HumanAI
                                                  Time.time < empUntil &&
                                                  !soldier.IsOnVehicle();
 
+                    // Execute 3-Tier Bitmask GOAP Planner & Squad Blackboard (Pin/Flank/Smoke/Overwatch/Rescue)
+                    if (VisionConfig.EnableTacticalGoapPlanner.Value && !isRepairingVehicle)
+                    {
+                        ExecuteSoldierGoapTick(
+                            __instance,
+                            soldier,
+                            personality,
+                            vet01,
+                            suppression,
+                            dist,
+                            isGunner,
+                            isOnBridge,
+                            inPointBlankMelee,
+                            isEvadingArmor,
+                            isStaffingEmplacement);
+                    }
+
                     if (VisionConfig.EnableSmartWallSideCover.Value &&
                         !isOnBridge &&
                         !isEvadingArmor &&
@@ -1554,7 +1572,8 @@ namespace EasyRed2HumanAI
                                     _nextWallSideCheckTime[ptr] = Time.time + 3.5f;
                                     WallSideRepositionsCount++;
                                 }
-                                else if (!__instance.IsMoving() &&
+                                else if (!VisionConfig.EnableTacticalGoapPlanner.Value &&
+                                         !__instance.IsMoving() &&
                                          IsPositionOnExposedSideOfWall(soldier.transform.position, threatDir, soldier.transform.root, out _))
                                 {
                                     if (soldier.joinedSquad != null)
@@ -1653,10 +1672,12 @@ namespace EasyRed2HumanAI
                             TrySeekNearbyCover(__instance, soldier);
                         }
 
-                        // Attacker Bounding Overwatch: staggered 5.2s bounds alternated with 3.8s crouched overwatch firing holds
+                        // Attacker Bounding Overwatch: state-driven via GOAP when EnableTacticalGoapPlanner is active,
+                        // or fallback staggered cycle when GOAP is toggled off
                         bool inBoundingOverwatch = false;
                         bool holdOverwatchFireNow = false;
                         if (VisionConfig.EnableBoundingOverwatch.Value &&
+                            !VisionConfig.EnableTacticalGoapPlanner.Value &&
                             !isOnBridge &&
                             !isEvadingArmor &&
                             !isStaffingEmplacement &&
@@ -1928,6 +1949,7 @@ namespace EasyRed2HumanAI
                         : ((personality == SoldierPersonality.Rifleman_Cautious || personality == SoldierPersonality.Medic_Triage) ? 16f : 35f);
 
                     if (VisionConfig.EnableComradeLiberation.Value &&
+                        !VisionConfig.EnableTacticalGoapPlanner.Value &&
                         suppression < maxLiberateSupp &&
                         !isEvadingArmor &&
                         !isRepairingVehicle &&

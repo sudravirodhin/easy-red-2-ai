@@ -1,5 +1,5 @@
-# Easy Red 2: Battle Hardened (`v0.5.3`)
-*Tactical AI, Veterancy, Personalities & Combined-Arms Overhaul*
+# Easy Red 2: Battle Hardened (`v0.6.0`)
+*3-Tier Tactical GOAP, Squad Blackboard, Radioman Intel Net, Veterancy, Personalities & Combined-Arms Overhaul*
 
 > [!IMPORTANT]
 > **Disclosure — Vibecoded Project:**
@@ -27,22 +27,22 @@ A comprehensive **BepInEx 6 (IL2CPP)** AI, combined-arms, and fairness overhaul 
 
 Download your preferred package from the **[Releases](https://github.com/sudravirodhin/easy-red-2-ai/releases)** page:
 
-### Option A: With BepInEx Included (`EasyRed2HumanAI-v0.5.3-with-BepInEx.zip`) — *Recommended for Fresh Installs*
+### Option A: With BepInEx Included (`EasyRed2HumanAI-v0.6.0-with-BepInEx.zip`) — *Recommended for Fresh Installs*
 Includes **[BepInEx 6.0.0-be.791 (Unity.IL2CPP-win-x64)](https://builds.bepinex.dev/projects/bepinex_be)**, the `.NET 6` runtime, Unity `2022.3.62` base libraries, pre-generated IL2CPP `interop` assemblies for Easy Red 2 Build `921`, and `EasyRed2HumanAI.dll` (with no other third-party mods).
 1. Open your **Easy Red 2** installation folder (e.g. `Steam\steamapps\common\Easy Red 2`, where `Easy Red 2.exe` is located).
-2. Extract all contents of `EasyRed2HumanAI-v0.5.3-with-BepInEx.zip` directly into the `Easy Red 2` folder.
+2. Extract all contents of `EasyRed2HumanAI-v0.6.0-with-BepInEx.zip` directly into the `Easy Red 2` folder.
 3. Launch the game!
 
-### Option B: Without BepInEx / Plugin Only (`EasyRed2HumanAI-v0.5.3-PluginOnly.zip` or `EasyRed2HumanAI.dll`)
+### Option B: Without BepInEx / Plugin Only (`EasyRed2HumanAI-v0.6.0-PluginOnly.zip` or `EasyRed2HumanAI.dll`)
 For users who already have **[BepInEx 6 Bleeding Edge (`BepInEx-Unity.IL2CPP-win-x64`)](https://builds.bepinex.dev/projects/bepinex_be)** installed:
-1. Download `EasyRed2HumanAI-v0.5.3-PluginOnly.zip` (or `EasyRed2HumanAI.dll` directly).
+1. Download `EasyRed2HumanAI-v0.6.0-PluginOnly.zip` (or `EasyRed2HumanAI.dll` directly).
 2. Place `EasyRed2HumanAI.dll` into:
    ```text
    Easy Red 2\BepInEx\plugins\EasyRed2HumanAI.dll
    ```
 
 ### Switching to Vanilla or Uninstalling (`Uninstall-BepInEx-Mod.bat`)
-Included in `EasyRed2HumanAI-v0.5.3-with-BepInEx.zip` (and in the root of this repository) is **[`Uninstall-BepInEx-Mod.bat`](Uninstall-BepInEx-Mod.bat)**. Double-click it inside your `Easy Red 2` folder when the game is closed to:
+Included in `EasyRed2HumanAI-v0.6.0-with-BepInEx.zip` (and in the root of this repository) is **[`Uninstall-BepInEx-Mod.bat`](Uninstall-BepInEx-Mod.bat)**. Double-click it inside your `Easy Red 2` folder when the game is closed to:
 * **`[1] Play Vanilla Temporarily`**: Moves `BepInEx`, `dotnet`, and `winhttp.dll` into `_BepInEx_Disabled_Backup\` so the game runs 100% pure vanilla without losing your configs or other plugins.
 * **`[2] Restore Modded Game`**: Moves everything back from `_BepInEx_Disabled_Backup\` in one click.
 * **`[3] Uninstall Completely`**: Permanently deletes `BepInEx`, `dotnet`, `winhttp.dll`, `doorstop_config.ini`, `.doorstop_version`, and `changelog.txt`.
@@ -54,6 +54,11 @@ Included in `EasyRed2HumanAI-v0.5.3-with-BepInEx.zip` (and in the root of this r
 
 Alongside shared tactical realism goals (some inspired by [`Easy-Red-2-Realism-Overhaul`](https://github.com/AtlasActual/Easy-Red-2-Realism-Overhaul)), **`Battle Hardened`** is built from the ground up around **original progression, targeting, audio, and QoL systems** and a **"Less is More" zero-spike Co-op architecture**:
 
+* **F.E.A.R.-Style 3-Tier Bitmask GOAP, Squad Blackboard, Radioman Lifeline & 20-Nation Historical Doctrines ([`GoapAndBlackboardModule.cs`](src/EasyRed2AI/Modules/GoapAndBlackboardModule.cs))**:
+  * **Tier 1 (Individual 32-Bit `uint` GOAP Brain + Radioman Self-Preservation & Bailed-Out Crew Merging)**: Each bot chains 1–2 action steps (`SeekEmergencyCover → BandageInCover`, `ThrowSmokeScreen → MoveToFlankCover`, `MoveToFlankCover → FlushThreatWithFrag`, `MaintainRadioLinkWithLeader`, `LoneWolfLinkUpOrAmbush`) using zero-allocation bitwise precondition/effect matching weighted by its **Role + Personality + Faction Doctrine**. **Radiomen** prioritize self-preservation (`>= 12f` suppression threshold), refuse exposed flanking/breaching slots, and tether behind their Squad Leader (`MaintainRadioLinkWithLeader`) to keep the squad's radio link alive. Bailed-out vehicle crews (`sq.IsVehicleCrew` on foot) and lone survivors (`IsEntirelyAlone`) either re-crew nearby empty tanks/static guns or retreat and **merge directly into the nearest friendly infantry squad** (`Squad.AddIfNotInSquad`).
+  * **Tier 2 (Squad Leader Directives & Tactical Blackboard)**: Computed once per squad (`0.60s`), assigning complementary **Suppressor (`1–2`)**, **Left/Right Flanker (`20°–75°` outside threat cone)**, **Breacher**, and **Rescuer** slots so gunners pin the enemy first to unlock lateral flanking bounds and state-driven bounding overwatch—accompanied by native faction voice callouts (*"Covering fire!"*, *"I'm moving!"*, *"Grenade!"*, *"Watch your fire!"*, *"I'll take his seat!"*).
+  * **Tier 3 (Radioman-Gated Team Intel Net, Player-Anvil Support & Multi-Squad "Anvil & Hammer" Coordinator)**: Squads only connect to the **Team Net** (broadcasting unmarked contacts to Tanks, CAS Aircraft, On-Map Artillery, and HQ Reserves) if they have an **alive Radioman within `32m` of their Squad Leader** (or are within `36m–55m` relay range of a friendly ground vehicle/radio squad). Specialized squads without a Radioman receive **one initial HQ Spawn Briefing** and then navigate toward the nearest friendly radio hub to reconnect. Every `6.0s`, the Team Net GOAP Coordinator pairs **Radio-Connected squads and tanks** into multi-squad **Anvil & Hammer** maneuvers (`Squad.TryAssignRadioOrder` + `Squad.AttackFromSide`)—and if the **Human Player's Squad** is connected to the Radio Net and pinned in a firefight, the Team Net treats the Player's Squad as the **Anvil** and dispatches a nearby AI **Hammer** squad to flank the enemy pinning you!
+  * **20-Nation Historical Command Doctrines (`EnableFactionNetDoctrines`) & Imperial Japanese *Tokkōtai* Easter Egg**: Precomputed `O(1)` cached [`FactionCommandProfile`](src/EasyRed2AI/Modules/GoapAndBlackboardModule.cs#L286-L590) weights across all 20 Easy Red 2 factions (`Germany`, `Finland`, `UnitedStates`, `UnitedStates_Afrikan`, `England`, `Canada`, `Australia`, `NewZealand`, `India`, `Gurkha`, `France`, `Poland`, `Greece`, `Ussr`, `Mongolia`, `China`, `Japan`, `Manchukuo`, `Italy`, `Romania`, `Hungary`, plus a balanced default fallback) govern radio relay ranges, decentralized local flanking when cut off from HQ (*Auftragstaktik* / *Motti* vs. centralized *Bataille Conduite*), objective garrison ratios, emplacement staffing, and individual GOAP action costs—complete with an authentic **Imperial Japanese Kamikaze (*Tokkōtai* / *Shinten Seikūtai*) Aircraft Easter Egg** when Japanese planes are crippled (`>= 45` damage) or out of all bombs and forward gun ammo.
 * **15-Minute Veteran Progression & 3D Shoulder Rank Promotions**: Surviving AI soldiers progress linearly over 15 minutes (`900s`) from Rookie to `[Vet I]`, `[Vet II]`, and `[Vet III ★]`, dynamically promoting in rank (`Pvt. → Cpl. → Sgt. → 1st Sgt.`), updating their **3D uniform shoulder rank decals** (`UpdateRanksDecal`), and displaying veterancy tags in the Squad Roster UI and 3D crosshair hover badges.
 * **30 Role-Based AI Personalities (10 Roles × 3 Archetypes)**: Every Infantry, Tank Crew, AA/Light Vehicle, and Aircraft Pilot bot receives one of 3 role-matched personalities (`[Spearhead]`, `[Breacher]`, `[Skirmisher]`, `[Deadeye]`, `[Stalker]`, `[Heroic]`, `[Triage]`, `[Brawler Crew]`, `[Ace]`, etc.) governing suppression grit, peek cadence, tank standoff distance, and combat habits.
 * **Death Screen Kill Attribution & Soldier Age Obituary**: Instant full-opacity obituary on the native `DeathPanel` showing **Cause of Death / Weapon / Ordnance** (including artillery calibers, mortar shells, bombs, rockets, and vehicle weapons + `[FRIENDLY FIRE]` / `[SELF-INFLICTED]`), **Hit Zone (`Headshot (Helmet)`, `Direct Blast`, `Shrapnel (Torso)`, etc.) + Distance (`42m`)**, and the fallen soldier's calculated **Age at death (`1925 - 1944 (Age 19)`)**.
@@ -72,7 +77,7 @@ Alongside shared tactical realism goals (some inspired by [`Easy-Red-2-Realism-O
 
 ### 1. Humanized Vision, Stance Stealth, Local Callouts & Last-Known Suppression ([`VisionAndMemoryModule.cs`](src/EasyRed2AI/Modules/VisionAndMemoryModule.cs))
 
-| Feature | Vanilla Behavior | Battle Hardened (`v0.5.3`) |
+| Feature | Vanilla Behavior | Battle Hardened (`v0.6.0`) |
 | :--- | :--- | :--- |
 | **Stance Sight Ranges** | `220m` Standing, `50m` Crouching, `37m` Prone when unspotted — but jumps **all stances to a flat `300m`** the instant `IsEnemyAwareOfThisSquad` is true. | **150m Standing**, **80m Crouching**, **40m Prone**. Squad combat awareness applies only a **1.20x multiplier** (`48m` prone, `96m` crouched) so taking cover in grass/craters actually conceals you during firefights. |
 | **Individual Firing Reveal** | One soldier firing alerts the enemy to the entire squad's crouched/prone members out to `300m`. | Only the **specific soldier who fired** gets a temporary **+85m visibility penalty for 4.0 seconds** (muzzle flash, smoke, and gunshot sound). Silent squadmates stay hidden. |
@@ -141,12 +146,12 @@ Instead of every bot using identical suppression thresholds, peeking rhythms, an
 
 * **Macro Objective Garrison & Counterattack Director (`EnableMacroObjectiveDirector`)**:
   * Lightweight `6.0s` MasterClient director that assigns **~20% of autonomous friendly squads** to garrison newly captured objectives (prioritizing contested or frontline-threatened points via `Squad_TaskCanStillAttract_Patch`) while directing the remaining squads to attack or counterattack uncaptured objectives.
-* **Proactive Static Gun & Armed Halftrack Staffing (`EnableProactiveEmplacementStaffing`)**:
-  * Defending and garrisoning squads automatically assign an available rifleman/gunner to crew nearby empty static weapons (`MG tripods`, `bunker MGs`, `AT guns`, `AA guns`) or parked armed halftracks within `42m` that face the active enemy threat sector.
-* **Combined-Arms Known Target Priority Support (`EnableCombinedArmsPrioritySupport`)**:
-  * **Turrets & Emplacements (`TurretAI.RefreshTargets`)**: Prioritizes **Marked/Spotted enemy squads (`isMarked` / `isHalfMarked` / `isMarkedPinPoint`)**, **Active Friendly Radio Support Requests (`RadioRequestActiveAndConfirmed`)**, and **enemy squads actively engaging friendly infantry (`IsEnemyAwareOfThisSquad`)** over random lone unspotted targets, and allows HE-capable turrets to answer friendly radio support requests even when a distant unmarked soldier is visible.
-  * **Tanks & Combat Vehicles (`AIVehicle.MovableVehicleRoutine`)**: Steers `setVehicleDestination` toward standoff overwatch positions facing known/marked enemy squads or friendly `tankSupport` radio requests inside the objective radius (`rerollDestination = false`) instead of wandering to random points via `RandomPointInCircleXZ`.
-  * **Air Superiority First & CAS Aircraft (`AIPlane.Update` & `AIPlane.GetBestAircraftVisibleEnemy`)**: Enforces **"Clear Skies Only" Ground Support**—restoring full air-to-air detection (`2200m` fighters / `4000m` bombers vs. vanilla's `850m` octree cap) and immediately aborting ground dive passes (`DoAttackTarget` -> `targetingPlane`) whenever an enemy aircraft is airborne in the battle airspace. Only once the skies are clear do aircraft shift patrol orbits (`SetFlyAroundPos`) toward active friendly radio requests and Marked/Known enemy squads for CAS runs.
+* **Proactive Static Gun, Artillery & Abandoned Tank Re-Crewing (`EnableProactiveEmplacementStaffing`)**:
+  * Defending and garrisoning squads automatically assign an available rifleman/gunner to crew nearby empty static weapons (`MG tripods`, `bunker MGs`, `AT guns`, `AA guns`, `field artillery`) or parked armed halftracks within `42m` that face the active enemy threat sector—while **bailed-out vehicle crews (`sq.IsVehicleCrew`)** actively seek out and board nearby empty tanks/vehicles (`<= 85m`) or static guns/artillery (`<= 75m`) to get back into the fight.
+* **Combined-Arms Known Target Priority Support & Tank Building Demolition (`EnableCombinedArmsPrioritySupport`)**:
+  * **Turrets, On-Map Artillery & HE Building Demolition (`TurretAI.RefreshTargets`)**: Prioritizes **Marked/Spotted enemy squads (`isMarked` / `isHalfMarked` / `isMarkedPinPoint`)**, **Active Friendly Radio Support Requests (`RadioRequestActiveAndConfirmed`)**, and **enemy squads actively engaging friendly infantry (`IsEnemyAwareOfThisSquad`)** over random lone unspotted targets; allows idle on-map HE field guns/howitzers to answer friendly radio support requests (`FindBestArtilleryRequest`); and enables **HE-equipped tanks/cannons (`>= 37mm`) to shell the exterior facade of buildings (`CanTankShellIndoorTargetFacade`)** when known enemies hide inside behind closed window shutters or walls.
+  * **Tanks & Combat Vehicles (`AIVehicle.MovableVehicleRoutine`)**: Steers `setVehicleDestination` toward standoff overwatch positions facing known/marked enemy squads or friendly `tankSupport` requests inside the objective radius (`rerollDestination = false`) instead of wandering to random points via `RandomPointInCircleXZ`.
+  * **Air Superiority First, Aerial Recon & CAS Aircraft (`AIPlane.Update` & `AIPlane.GetBestAircraftVisibleEnemy`)**: Enforces **"Clear Skies Only" Ground Support**—restoring full air-to-air detection (`2200m` fighters / `4000m` bombers vs. vanilla's `850m` octree cap) and immediately aborting ground dive passes (`DoAttackTarget` -> `targetingPlane`) whenever an enemy aircraft is airborne in the battle airspace. Airborne planes also act as aerial observers reporting spotted enemy ground vehicles (`<= 650m`) to the Team Net, and Imperial Japanese aircraft execute final ***Tokkōtai* Kamikaze dives** when crippled (`>= 45` damage) or out of all bombs and forward gun ammo.
 * **Smart APC / Transport Dismount Under Fire (`EnableSmartApcDismount`)**:
   * Infantry riding in AI-driven APCs, halftracks, and trucks dismount immediately (`LeaveVehicle` + `SendUnitsToCovers`) when the transport is suppressed, takes hull/engine damage under fire, or comes within `48m` of an enemy tank/AT gun/squad—preventing entire squads from riding into point-blank destruction.
 * **Tank Standoff & Reverse Discipline (`EnableTankStandoffAndReverse`)**:

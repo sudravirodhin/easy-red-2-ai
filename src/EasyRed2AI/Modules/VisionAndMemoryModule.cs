@@ -751,6 +751,7 @@ namespace EasyRed2HumanAI
             _nextSuppressiveGrenadeTime[ptr] = now + 14.0f;
             soldier.Throw(fragItem, lastInfo.Target);
             SuppressiveEventsCount++;
+            VeteranAndTacticsPatches.TrySayTacticalVoice(soldier, soldier.joinedSquad, VoiceManager.VoiceClip.granade, 0.05f);
             if (VisionConfig.DebugLogging.Value)
             {
                 AiCore.LogDebug("LastKnownGrenade", $"{soldier.faction} soldier threw frag grenade at last-known enemy cover ({dist:F0}m).");

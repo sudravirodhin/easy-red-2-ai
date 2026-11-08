@@ -607,6 +607,11 @@ namespace EasyRed2HumanAI
                         return;
                     }
 
+                    // Easter Egg: Imperial Japanese Tokkōtai (Kamikaze) terminal dive when crippled or out of ordnance/ammo
+                    TryExecuteJapaneseKamikazeDive(__instance, false);
+                    if (IsJapaneseKamikazeActive(__instance))
+                        return;
+
                     if (VisionConfig.EnableCombinedArmsPrioritySupport.Value)
                     {
                         TrySteerAircraftOrbitTowardKnownThreat(__instance);
@@ -637,6 +642,70 @@ namespace EasyRed2HumanAI
                     }
                 }
                 catch { }
+            }
+
+            public static void Postfix(AIPlane __instance)
+            {
+                try
+                {
+                    if (IsJapaneseKamikazeActive(__instance))
+                    {
+                        TryExecuteJapaneseKamikazeDive(__instance, true);
+                    }
+                }
+                catch { }
+            }
+        }
+
+        [HarmonyPatch(typeof(AIPlane), nameof(AIPlane.ExitDive))]
+        public static class AIPlane_ExitDive_Patch
+        {
+            public static bool Prefix(AIPlane __instance)
+            {
+                try
+                {
+                    if (IsJapaneseKamikazeActive(__instance) &&
+                        IsSpottableTargetValid(__instance.targetToAttack))
+                    {
+                        return false;
+                    }
+                }
+                catch { }
+                return true;
+            }
+        }
+
+        [HarmonyPatch(typeof(AIPlane), nameof(AIPlane.NeedRefill))]
+        public static class AIPlane_NeedRefill_Patch
+        {
+            public static void Postfix(AIPlane __instance, ref bool __result)
+            {
+                try
+                {
+                    if (__result && IsJapaneseKamikazeActive(__instance))
+                    {
+                        __result = false;
+                    }
+                }
+                catch { }
+            }
+        }
+
+        [HarmonyPatch(typeof(AIPlane), nameof(AIPlane.RetreatCrew))]
+        public static class AIPlane_RetreatCrew_Patch
+        {
+            public static bool Prefix(AIPlane __instance)
+            {
+                try
+                {
+                    // Prevent Japanese Kamikaze pilots from bailing out with a parachute mid-air when their plane catches fire
+                    if (IsJapaneseKamikazeActive(__instance))
+                    {
+                        return false;
+                    }
+                }
+                catch { }
+                return true;
             }
         }
     }
