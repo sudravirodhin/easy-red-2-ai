@@ -644,6 +644,8 @@ namespace EasyRed2HumanAI
             AiCore.PruneDict(_nextAntiStackTime, alivePtrs);
             AiCore.PruneDict(_nextVaultCheckTime, alivePtrs);
             AiCore.PruneDict(_nextLiberateCheckTime, alivePtrs);
+            AiCore.PruneDict(_liberateMoveStartTime, alivePtrs);
+            AiCore.PruneDict(_liberateMoveCooldownUntil, alivePtrs);
             AiCore.PruneDict(_bleedCoverDeadline, alivePtrs);
             AiCore.PruneDict(_nextBipodSeekTime, alivePtrs);
             AiCore.PruneDict(_nextBipodDeployCheckTime, alivePtrs);

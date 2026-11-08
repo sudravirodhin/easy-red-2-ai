@@ -1661,7 +1661,8 @@ namespace EasyRed2HumanAI
                 MissionObjective obj = rawObjectives[i];
                 if (obj == null || obj.Pointer == IntPtr.Zero || obj.gameObject == null || !obj.gameObject.activeInHierarchy)
                     continue;
-                if (obj.missionTask != null && !obj.missionTask.IsTaskEnabled())
+                MissionTask task = obj.missionTask;
+                if (task == null || task.Pointer == IntPtr.Zero || !task.IsTaskEnabled())
                     continue;
                 activeObjectives.Add(obj);
             }
@@ -1724,14 +1725,34 @@ namespace EasyRed2HumanAI
                 for (int i = 0; i < activeObjectives.Count; i++)
                 {
                     MissionObjective obj = activeObjectives[i];
+                    MissionTask task = obj.missionTask;
                     string secFaction = obj.GetSecuredFaction();
-                    if (secFaction == faction)
+                    if (task.TryCast<MissionTaskPushFrontline>() != null)
                     {
-                        heldObjectives.Add(obj);
+                        if (secFaction == faction)
+                        {
+                            heldObjectives.Add(obj);
+                        }
+                        else if (obj.CanAttractFaction(faction))
+                        {
+                            unheldObjectives.Add(obj);
+                        }
                     }
-                    else if (obj.CanAttractFaction(faction))
+                    else
                     {
-                        unheldObjectives.Add(obj);
+                        // Standard Invasion mode: GetSecuredFaction() always returns InvadersFaction;
+                        // while !IsSecured(), the point is held by the Defenders (secFaction != faction) and attacked by Invaders.
+                        if (!obj.IsSecured())
+                        {
+                            if (!string.IsNullOrEmpty(secFaction) && secFaction != faction)
+                            {
+                                heldObjectives.Add(obj);
+                            }
+                            else if (obj.CanAttractFaction(faction))
+                            {
+                                unheldObjectives.Add(obj);
+                            }
+                        }
                     }
                 }
 
@@ -1757,6 +1778,7 @@ namespace EasyRed2HumanAI
                     for (int g = 0; g < targetGarrisonCount; g++)
                     {
                         MissionObjective heldObj = heldObjectives[g % heldObjectives.Count];
+                        IntPtr heldTaskPtr = heldObj.missionTask.Pointer;
                         Vector3 objPos = heldObj.GetTaskPosition();
                         Squad bestSquad = null;
                         float bestScore = float.MaxValue;
@@ -1769,8 +1791,8 @@ namespace EasyRed2HumanAI
 
                             float dSq = (cand.Leader.transform.position - objPos).sqrMagnitude;
                             // Continuity bonus if this squad is already garrisoning this objective
-                            if (_garrisonAssignedObjectiveBySquad.TryGetValue(cand.Pointer, out IntPtr curObjPtr) &&
-                                curObjPtr == heldObj.Pointer)
+                            if (_garrisonAssignedObjectiveBySquad.TryGetValue(cand.Pointer, out IntPtr curTaskPtr) &&
+                                curTaskPtr == heldTaskPtr)
                             {
                                 dSq *= 0.45f;
                             }
@@ -1785,13 +1807,13 @@ namespace EasyRed2HumanAI
                         if (bestSquad != null)
                         {
                             assignedGarrisonSquads.Add(bestSquad.Pointer);
-                            bool isNewGarrison = !_garrisonAssignedObjectiveBySquad.TryGetValue(bestSquad.Pointer, out IntPtr prevPtr) ||
-                                                 prevPtr != heldObj.Pointer;
-                            _garrisonAssignedObjectiveBySquad[bestSquad.Pointer] = heldObj.Pointer;
+                            bool isNewGarrison = !_garrisonAssignedObjectiveBySquad.TryGetValue(bestSquad.Pointer, out IntPtr prevTaskPtr) ||
+                                                 prevTaskPtr != heldTaskPtr;
+                            _garrisonAssignedObjectiveBySquad[bestSquad.Pointer] = heldTaskPtr;
 
-                            if (isNewGarrison || bestSquad.currentTask == null || bestSquad.currentTask.Pointer != heldObj.Pointer)
+                            if (isNewGarrison || bestSquad.currentTask == null || bestSquad.currentTask.Pointer != heldTaskPtr)
                             {
-                                bestSquad.currentTask = heldObj.Cast<SquadTask>();
+                                bestSquad.currentTask = heldObj.missionTask.Cast<SquadTask>();
                                 bestSquad.Leader_OrderAttackCurrentTask(bestSquad.Leader);
                                 if (isNewGarrison)
                                 {
@@ -1819,7 +1841,7 @@ namespace EasyRed2HumanAI
                         {
                             for (int h = 0; h < heldObjectives.Count; h++)
                             {
-                                if (sq.currentTask.Pointer == heldObjectives[h].Pointer)
+                                if (sq.currentTask.Pointer == heldObjectives[h].missionTask.Pointer)
                                 {
                                     needsAttackReassign = true;
                                     break;
@@ -1830,9 +1852,9 @@ namespace EasyRed2HumanAI
                         if (needsAttackReassign)
                         {
                             MissionObjective bestUnheld = GetClosestObjectiveToPosition(sq.Leader.transform.position, unheldObjectives);
-                            if (bestUnheld != null)
+                            if (bestUnheld != null && bestUnheld.missionTask != null)
                             {
-                                sq.currentTask = bestUnheld.Cast<SquadTask>();
+                                sq.currentTask = bestUnheld.missionTask.Cast<SquadTask>();
                                 sq.Leader_OrderAttackCurrentTask(sq.Leader);
                                 if (VisionConfig.DebugLogging.Value)
                                 {
@@ -1844,45 +1866,136 @@ namespace EasyRed2HumanAI
                 }
                 else if (heldObjectives.Count > 1 && unheldObjectives.Count == 0 && eligibleSquads.Count >= 2)
                 {
-                    // Pure defense across multiple held objectives: ensure threatened held objectives have at least 1 defending squad
+                    // Pure defense across multiple held objectives (e.g., Invasion Defenders):
+                    // Clear any stale garrison overrides so captured objectives never remain pinned in TaskCanStillAttract,
+                    // and reassign any squad whose currentTask is null or no longer in heldObjectives.
+                    for (int sIdx = 0; sIdx < eligibleSquads.Count; sIdx++)
+                    {
+                        Squad sq = eligibleSquads[sIdx];
+                        _garrisonAssignedObjectiveBySquad.Remove(sq.Pointer);
+
+                        bool onActiveHeld = false;
+                        if (sq.currentTask != null)
+                        {
+                            IntPtr curPtr = sq.currentTask.Pointer;
+                            for (int h = 0; h < heldObjectives.Count; h++)
+                            {
+                                if (heldObjectives[h].missionTask.Pointer == curPtr)
+                                {
+                                    onActiveHeld = true;
+                                    break;
+                                }
+                            }
+                        }
+
+                        if (!onActiveHeld)
+                        {
+                            MissionObjective closestHeld = GetClosestObjectiveToPosition(sq.Leader.transform.position, heldObjectives);
+                            if (closestHeld != null && closestHeld.missionTask != null)
+                            {
+                                sq.currentTask = closestHeld.missionTask.Cast<SquadTask>();
+                                sq.Leader_OrderAttackCurrentTask(sq.Leader);
+                            }
+                        }
+                    }
+
+                    // Vanilla assigns defenders via GetRandomNonSecuredMissionObjective() once at spawn and never rebalances.
+                    // Sort held objectives so the most threatened objective is index 0.
+                    heldObjectives.Sort((a, b) =>
+                    {
+                        float dA = GetClosestEnemyDistanceSqToPoint(a.GetTaskPosition(), faction, allEnemyLeaderPositions);
+                        float dB = GetClosestEnemyDistanceSqToPoint(b.GetTaskPosition(), faction, allEnemyLeaderPositions);
+                        return dA.CompareTo(dB);
+                    });
+
+                    // 1) Ensure any threatened held objective (enemy within 165m) has at least 1 defending squad
                     for (int h = 0; h < heldObjectives.Count; h++)
                     {
                         MissionObjective heldObj = heldObjectives[h];
+                        IntPtr heldTaskPtr = heldObj.missionTask.Pointer;
                         Vector3 objPos = heldObj.GetTaskPosition();
                         float closestEnemySq = GetClosestEnemyDistanceSqToPoint(objPos, faction, allEnemyLeaderPositions);
-                        if (closestEnemySq > 140f * 140f)
+                        if (closestEnemySq > 165f * 165f)
                             continue;
 
                         bool hasDefenderAssigned = false;
-                        Squad nearestReserve = null;
-                        float nearestReserveDistSq = float.MaxValue;
-
                         for (int sIdx = 0; sIdx < eligibleSquads.Count; sIdx++)
                         {
                             Squad sq = eligibleSquads[sIdx];
-                            if (sq.currentTask != null && sq.currentTask.Pointer == heldObj.Pointer)
+                            if (sq.currentTask != null && sq.currentTask.Pointer == heldTaskPtr)
                             {
                                 hasDefenderAssigned = true;
                                 break;
                             }
-
-                            float dSq = (sq.Leader.transform.position - objPos).sqrMagnitude;
-                            if (dSq < nearestReserveDistSq)
-                            {
-                                nearestReserveDistSq = dSq;
-                                nearestReserve = sq;
-                            }
                         }
 
-                        if (!hasDefenderAssigned && nearestReserve != null)
+                        if (!hasDefenderAssigned)
                         {
-                            _garrisonAssignedObjectiveBySquad[nearestReserve.Pointer] = heldObj.Pointer;
-                            nearestReserve.currentTask = heldObj.Cast<SquadTask>();
-                            nearestReserve.Leader_OrderAttackCurrentTask(nearestReserve.Leader);
-                            MacroGarrisonsAssignedCount++;
-                            if (VisionConfig.DebugLogging.Value)
+                            Squad bestReserve = PickBestReserveDefenderSquad(eligibleSquads, heldObjectives, heldTaskPtr, objPos);
+                            if (bestReserve != null)
                             {
-                                AiCore.LogDebug("MacroDirector", $"{faction} reserve squad '{nearestReserve.squadName}' shifted to defend threatened objective '{heldObj.GetDisplayName()}'.");
+                                if (!heldObj.CanAttractFaction(faction))
+                                    _garrisonAssignedObjectiveBySquad[bestReserve.Pointer] = heldTaskPtr;
+                                bestReserve.currentTask = heldObj.missionTask.Cast<SquadTask>();
+                                bestReserve.Leader_OrderAttackCurrentTask(bestReserve.Leader);
+                                MacroGarrisonsAssignedCount++;
+                                if (VisionConfig.DebugLogging.Value)
+                                {
+                                    AiCore.LogDebug("MacroDirector", $"{faction} reserve squad '{bestReserve.squadName}' shifted to defend threatened objective '{heldObj.GetDisplayName()}'.");
+                                }
+                            }
+                        }
+                    }
+
+                    // 2) If the primary threatened objective (enemy within 155m) is under heavy attack while an unthreatened
+                    //    secondary objective (no enemy within 175m) has 2+ squads sitting idle, shift 1 excess squad per tick
+                    //    (always leaving at least 1 sentry squad on each secondary objective).
+                    MissionObjective primaryThreatObj = heldObjectives[0];
+                    float primaryThreatSq = GetClosestEnemyDistanceSqToPoint(primaryThreatObj.GetTaskPosition(), faction, allEnemyLeaderPositions);
+                    if (primaryThreatSq <= 155f * 155f)
+                    {
+                        IntPtr primaryTaskPtr = primaryThreatObj.missionTask.Pointer;
+                        Vector3 primaryPos = primaryThreatObj.GetTaskPosition();
+
+                        for (int h = heldObjectives.Count - 1; h >= 1; h--)
+                        {
+                            MissionObjective quietObj = heldObjectives[h];
+                            float quietEnemySq = GetClosestEnemyDistanceSqToPoint(quietObj.GetTaskPosition(), faction, allEnemyLeaderPositions);
+                            if (quietEnemySq <= 175f * 175f)
+                                continue;
+
+                            IntPtr quietTaskPtr = quietObj.missionTask.Pointer;
+                            int quietSquadCount = 0;
+                            Squad closestExcessSquad = null;
+                            float closestExcessDistSq = float.MaxValue;
+
+                            for (int sIdx = 0; sIdx < eligibleSquads.Count; sIdx++)
+                            {
+                                Squad sq = eligibleSquads[sIdx];
+                                if (sq.currentTask != null && sq.currentTask.Pointer == quietTaskPtr)
+                                {
+                                    quietSquadCount++;
+                                    float dSq = (sq.Leader.transform.position - primaryPos).sqrMagnitude;
+                                    if (dSq < closestExcessDistSq)
+                                    {
+                                        closestExcessDistSq = dSq;
+                                        closestExcessSquad = sq;
+                                    }
+                                }
+                            }
+
+                            if (quietSquadCount >= 2 && closestExcessSquad != null)
+                            {
+                                if (!primaryThreatObj.CanAttractFaction(faction))
+                                    _garrisonAssignedObjectiveBySquad[closestExcessSquad.Pointer] = primaryTaskPtr;
+                                closestExcessSquad.currentTask = primaryThreatObj.missionTask.Cast<SquadTask>();
+                                closestExcessSquad.Leader_OrderAttackCurrentTask(closestExcessSquad.Leader);
+                                MacroGarrisonsAssignedCount++;
+                                if (VisionConfig.DebugLogging.Value)
+                                {
+                                    AiCore.LogDebug("MacroDirector", $"{faction} excess defender squad '{closestExcessSquad.squadName}' shifted from quiet '{quietObj.GetDisplayName()}' to reinforce '{primaryThreatObj.GetDisplayName()}'.");
+                                }
+                                break;
                             }
                         }
                     }
@@ -1895,6 +2008,51 @@ namespace EasyRed2HumanAI
                     }
                 }
             }
+        }
+
+        private static Squad PickBestReserveDefenderSquad(
+            List<Squad> eligibleSquads,
+            List<MissionObjective> heldObjectives,
+            IntPtr targetTaskPtr,
+            Vector3 targetPos)
+        {
+            Squad bestSquad = null;
+            float bestScore = float.MaxValue;
+
+            for (int sIdx = 0; sIdx < eligibleSquads.Count; sIdx++)
+            {
+                Squad cand = eligibleSquads[sIdx];
+                if (cand.currentTask != null && cand.currentTask.Pointer == targetTaskPtr)
+                    continue;
+
+                int sameTaskCount = 0;
+                if (cand.currentTask != null)
+                {
+                    IntPtr curPtr = cand.currentTask.Pointer;
+                    for (int j = 0; j < eligibleSquads.Count; j++)
+                    {
+                        Squad other = eligibleSquads[j];
+                        if (other.currentTask != null && other.currentTask.Pointer == curPtr)
+                            sameTaskCount++;
+                    }
+                }
+
+                float dSq = (cand.Leader.transform.position - targetPos).sqrMagnitude;
+                // Strongly prefer pulling a squad from an objective that already has 2+ squads (or an unassigned squad)
+                // so we don't strip the last defender from another objective unless necessary.
+                if (cand.currentTask != null && sameTaskCount <= 1)
+                {
+                    dSq *= 4.0f;
+                }
+
+                if (dSq < bestScore)
+                {
+                    bestScore = dSq;
+                    bestSquad = cand;
+                }
+            }
+
+            return bestSquad;
         }
 
         private static float GetClosestEnemyDistanceSqToPoint(

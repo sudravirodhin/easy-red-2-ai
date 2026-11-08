@@ -115,8 +115,25 @@ namespace EasyRed2HumanAI
                     if (src.dopplerLevel > 0.22f)
                         src.dopplerLevel = 0.22f;
 
-                    // Low-pass filter engine pitch transitions & apply subtle per-plane harmonic detune
-                    float targetPitch = Mathf.Clamp(src.pitch + state.PitchDetune, 0.78f, 1.22f);
+                    // Break up the rigid metronome cadence of short engine_move loops at constant throttle:
+                    // 1. Climb/dive vertical-velocity load (climbing lags RPM slightly; diving winds up prop RPM)
+                    // 2. Bank-angle aerodynamic load
+                    // 3. Incommensurate dual-sine governor micro-drift so consecutive loop wraps never fall on identical cadence
+                    float flightLoadPitch = 0f;
+                    Rigidbody rb = __instance.rb;
+                    if (rb != null)
+                    {
+                        float vy = rb.velocity.y;
+                        flightLoadPitch += Mathf.Clamp(-vy * 0.0022f, -0.045f, 0.055f);
+                    }
+                    flightLoadPitch += Mathf.Clamp(Mathf.Abs(__instance.rollAngle) * 0.0004f, 0f, 0.02f);
+
+                    float t = Time.unscaledTime;
+                    float phase = state.PhaseOffset * 6.283185f;
+                    float rpmDrift = Mathf.Sin(t * 1.37f + phase) * 0.015f + Mathf.Sin(t * 3.11f + phase * 1.7f) * 0.010f;
+
+                    // Low-pass filter engine pitch transitions & apply per-plane harmonic detune + flight load
+                    float targetPitch = Mathf.Clamp(src.pitch + state.PitchDetune + flightLoadPitch + rpmDrift, 0.76f, 1.24f);
                     float dt = Mathf.Clamp(Time.deltaTime, 0.001f, 0.1f);
                     state.SmoothedPitch = Mathf.Lerp(state.SmoothedPitch, targetPitch, dt * 4.8f);
                     src.pitch = state.SmoothedPitch;

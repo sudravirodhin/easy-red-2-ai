@@ -1105,9 +1105,7 @@ namespace EasyRed2HumanAI
             Vector3 myPos = soldier.transform.position;
             string myFaction = soldier.faction;
             Squad mySquad = soldier.joinedSquad;
-            MissionObjective myObj = (mySquad != null && mySquad.currentTask != null)
-                ? mySquad.currentTask.TryCast<MissionObjective>()
-                : null;
+            SquadTask myTask = mySquad != null ? mySquad.currentTask : null;
 
             int contactCount = 0;
             Vector3 c0 = Vector3.zero, c1 = Vector3.zero, c2 = Vector3.zero, c3 = Vector3.zero;
@@ -1214,9 +1212,9 @@ namespace EasyRed2HumanAI
                         }
                     }
 
-                    if (!isKnownContact && myObj != null && dSq <= 55f * 55f)
+                    if (!isKnownContact && myTask != null && dSq <= 55f * 55f)
                     {
-                        if (enemyRef.PositionIsInsideValidConquerZone(enemyRef.transform.position, myObj))
+                        if (myTask.IsInsideTaskArea(enemyRef.transform.position, 1.05f))
                         {
                             isKnownContact = true;
                         }

@@ -21,6 +21,8 @@ namespace EasyRed2HumanAI
         private static readonly Dictionary<IntPtr, float> _nextAntiStackTime = new Dictionary<IntPtr, float>(256);
         private static readonly Dictionary<IntPtr, float> _nextVaultCheckTime = new Dictionary<IntPtr, float>(256);
         private static readonly Dictionary<IntPtr, float> _nextLiberateCheckTime = new Dictionary<IntPtr, float>(256);
+        private static readonly Dictionary<IntPtr, float> _liberateMoveStartTime = new Dictionary<IntPtr, float>(128);
+        private static readonly Dictionary<IntPtr, float> _liberateMoveCooldownUntil = new Dictionary<IntPtr, float>(128);
         private static readonly Dictionary<IntPtr, float> _bleedCoverDeadline = new Dictionary<IntPtr, float>(128);
         private static readonly Dictionary<IntPtr, float> _nextBipodSeekTime = new Dictionary<IntPtr, float>(128);
         private static readonly Dictionary<IntPtr, float> _nextBipodDeployCheckTime = new Dictionary<IntPtr, float>(128);
@@ -56,6 +58,10 @@ namespace EasyRed2HumanAI
                 _colliderDoorCache.Clear();
             if (_nextDoorToggleTime.Count > 256)
                 _nextDoorToggleTime.Clear();
+            if (_liberateMoveStartTime.Count > 256)
+                _liberateMoveStartTime.Clear();
+            if (_liberateMoveCooldownUntil.Count > 256)
+                _liberateMoveCooldownUntil.Clear();
         }
 
         // =====================================================================
@@ -1694,10 +1700,8 @@ namespace EasyRed2HumanAI
                                 : null;
                             bool onActualCombatCover = soldier.IsOnCover() ||
                                                        (activeCover != null && (soldier.transform.position - activeCover.GetCoverPosition()).sqrMagnitude <= 3.2f * 3.2f);
-                            MissionObjective currentObj = (soldier.joinedSquad != null && soldier.joinedSquad.currentTask != null)
-                                ? soldier.joinedSquad.currentTask.TryCast<MissionObjective>()
-                                : null;
-                            bool inObjectiveZone = currentObj != null && soldier.PositionIsInsideValidConquerZone(soldier.transform.position, currentObj);
+                            SquadTask currentTask = soldier.joinedSquad != null ? soldier.joinedSquad.currentTask : null;
+                            bool inObjectiveZone = currentTask != null && currentTask.IsInsideTaskArea(soldier.transform.position, 1.15f);
                             bool isSquadAlerted = soldier.isAlerted || (soldier.joinedSquad != null && soldier.joinedSquad.IsEnemyAwareOfThisSquad);
                             Vector3 threatDir = GetEffectiveThreatDirection(soldier, soldier.joinedSquad, soldier.transform.position, soldier.transform.forward);
                             bool isShelteredByWall = VisionConfig.EnableSmartWallSideCover.Value &&
@@ -1720,10 +1724,12 @@ namespace EasyRed2HumanAI
                                      (inCombatHold || isGunner || suppression >= proneSuppThreshold * 0.45f) &&
                                      (!_noProneUntil.TryGetValue(ptr, out float noProneHold) || Time.time >= noProneHold))
                             {
+                                __instance.pose = SoldierPose.Prone;
                                 __instance.actualPose = SoldierPose.Prone;
                             }
                             else if (suppression < 35f && !stealthCrouch && !hasMortar)
                             {
+                                __instance.pose = SoldierPose.Crouch;
                                 if (__instance.actualPose != SoldierPose.Crouch || soldier.m_pose != SoldierPose.Crouch)
                                 {
                                     SetBotPose(__instance, soldier, SoldierPose.Crouch);
@@ -1784,6 +1790,7 @@ namespace EasyRed2HumanAI
                 var allSquads = Squad.AllSquads;
                 if (allSquads == null) return;
 
+                IntPtr rescuerPtr = rescuer.Pointer;
                 string myFaction = rescuer.faction;
                 Vector3 myPos = rescuer.transform.position;
                 float searchRadius = VisionConfig.LiberateSearchRadius.Value;
@@ -1804,10 +1811,15 @@ namespace EasyRed2HumanAI
                     for (int i = 0; i < c; i++)
                     {
                         Soldier f = units[i];
-                        if (f == null || !f.IsAlive || f.Pointer == rescuer.Pointer) continue;
-                        if (f.faction != myFaction || !f.HasSurrended()) continue;
+                        if (f == null || !f.IsAlive || f.Pointer == rescuerPtr) continue;
+                        if (f.faction != myFaction || !f.HasSurrended() || f.transform == null) continue;
 
-                        float dSq = (f.transform.position - myPos).sqrMagnitude;
+                        Vector3 fPos = f.transform.position;
+                        // Ignore surrendered teammates on a different building floor or cliff level
+                        if (Mathf.Abs(fPos.y - myPos.y) > 2.4f)
+                            continue;
+
+                        float dSq = (fPos - myPos).sqrMagnitude;
                         if (dSq < bestDistSq)
                         {
                             bestDistSq = dSq;
@@ -1820,6 +1832,7 @@ namespace EasyRed2HumanAI
                 {
                     if (bestDistSq <= 3.8f * 3.8f)
                     {
+                        _liberateMoveStartTime.Remove(rescuerPtr);
                         if (AiCore.TryConsumeBotRpcBudget(0.45f))
                         {
                             string sqId = rescuer.joinedSquad != null ? rescuer.joinedSquad.InstanceID.ToString() : "";
@@ -1828,10 +1841,34 @@ namespace EasyRed2HumanAI
                             AddCombatExperienceBonus(rescuer, 30f);
                         }
                     }
-                    else if (!rescuer.IsSquadLeader() && !ai.HasEnemyAndCanFireAtHim)
+                    else if (bestDistSq <= 9.5f * 9.5f &&
+                             !rescuer.IsSquadLeader() &&
+                             !rescuer.IsOnCover() &&
+                             !ai.HasEnemyAndCanFireAtHim)
                     {
-                        ai.MoveDirectlyToward(bestSurrendered.transform.position, 2.2f);
+                        float now = Time.time;
+                        if (_liberateMoveCooldownUntil.TryGetValue(rescuerPtr, out float cooldownUntil) && now < cooldownUntil)
+                            return;
+
+                        if (!_liberateMoveStartTime.TryGetValue(rescuerPtr, out float startTime))
+                        {
+                            startTime = now;
+                            _liberateMoveStartTime[rescuerPtr] = startTime;
+                        }
+                        else if (now - startTime > 5.5f)
+                        {
+                            // Prevent pathing soft-lock if the surrendered teammate is behind an unpathable wall/obstacle
+                            _liberateMoveStartTime.Remove(rescuerPtr);
+                            _liberateMoveCooldownUntil[rescuerPtr] = now + 20.0f;
+                            return;
+                        }
+
+                        ai.MoveDirectlyToward(bestSurrendered.transform.position, 1.35f);
                     }
+                }
+                else
+                {
+                    _liberateMoveStartTime.Remove(rescuerPtr);
                 }
             }
         }
