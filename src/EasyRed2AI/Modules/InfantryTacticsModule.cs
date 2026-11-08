@@ -1662,6 +1662,7 @@ namespace EasyRed2HumanAI
                         // If caught moving in the open under MG/rifle suppression (> 8.5m from destination), seek nearby local cover within 13.5m
                         if (suppression >= 20f &&
                             !soldier.IsOnCover() &&
+                            !HasActiveGoapCoverLock(ptr, Time.time) &&
                             !isEvadingArmor &&
                             !isStaffingEmplacement &&
                             !soldier.IsCharging() &&

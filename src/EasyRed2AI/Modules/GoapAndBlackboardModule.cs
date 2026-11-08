@@ -179,10 +179,10 @@ namespace EasyRed2HumanAI
             {
                 Id = GoapActionId.BoundWithOverwatch,
                 Required = GoapStateBits.SquadHasActiveThreat | GoapStateBits.AllyPinningThreat,
-                Forbidden = GoapStateBits.IsBleeding | GoapStateBits.InCover | GoapStateBits.OnBridgeOrNarrow,
-                Add = GoapStateBits.InCover | GoapStateBits.SquadSupported,
+                Forbidden = GoapStateBits.IsBleeding | GoapStateBits.IsHeavilySuppressed | GoapStateBits.IsMachineGunner | GoapStateBits.IsRadioman | GoapStateBits.OnBridgeOrNarrow | GoapStateBits.InPointBlankRange,
+                Add = GoapStateBits.InCover | GoapStateBits.CanFireAtVisibleEnemy | GoapStateBits.TargetEliminated | GoapStateBits.SquadSupported,
                 Remove = GoapStateBits.None,
-                BaseCost = 2.0f
+                BaseCost = 2.05f
             },
             new GoapActionDef
             {
@@ -1549,11 +1549,15 @@ namespace EasyRed2HumanAI
                 ((ws & GoapStateBits.InPointBlankRange) != 0 && plan.Step0 != GoapActionId.PointBlankBayonetBreach) ||
                 ((ws & GoapStateBits.IsBleeding) != 0 && plan.Step0 != GoapActionId.SeekEmergencyCover && plan.Step0 != GoapActionId.BandageInCover) ||
                 ((ws & GoapStateBits.RadioLinkDrifting) != 0 && plan.Step0 != GoapActionId.MaintainRadioLinkWithLeader) ||
-                (isEvadingArmor && plan.Step0 != GoapActionId.SeekEmergencyCover);
+                (isEvadingArmor && plan.Step0 != GoapActionId.SeekEmergencyCover) ||
+                ((ws & GoapStateBits.IsHeavilySuppressed) != 0 && (ws & GoapStateBits.InCover) == 0 && plan.Step0 != GoapActionId.SeekEmergencyCover);
 
             if (!hasActivePlan || emergencyPreempt || now >= plan.NextReplanTime)
             {
-                plan = PlanBestGoapActionChain(ws, soldier, ref board, personality, vet01, now);
+                GoapActionId prevActiveAction = hasActivePlan && !emergencyPreempt
+                    ? (plan.StepIndex == 0 ? plan.Step0 : plan.Step1)
+                    : GoapActionId.None;
+                plan = PlanBestGoapActionChain(ws, soldier, ref board, personality, vet01, now, prevActiveAction);
                 _botGoapPlans[ptr] = plan;
             }
 
@@ -1731,7 +1735,8 @@ namespace EasyRed2HumanAI
             ref SquadBlackboard board,
             SoldierPersonality personality,
             float vet01,
-            float now)
+            float now,
+            GoapActionId prevActiveAction)
         {
             // Determine highest priority Goal bit based on 3-Tier Hierarchy:
             // 1. Immediate Crisis Survival (Bleeding, Armor close, Exposed wall side, Heavy open suppression)
@@ -1792,6 +1797,10 @@ namespace EasyRed2HumanAI
                     continue;
 
                 float cost0 = GetPersonalityAndDirectiveAdjustedCost(a0, board.NetDirective, personality, vet01, ref factionProfile, ref micro);
+                // Plan Commitment Hysteresis (-0.35f inertia bonus) prevents stuttering/flip-flopping between nearly-tied actions
+                if (a0.Id == prevActiveAction)
+                    cost0 = Mathf.Max(0.05f, cost0 - 0.35f);
+
                 GoapStateBits wsAfter0 = (ws | a0.Add) & ~a0.Remove;
 
                 if ((wsAfter0 & desiredGoalBit) != 0)
@@ -1802,7 +1811,9 @@ namespace EasyRed2HumanAI
                         bestStep0 = a0.Id;
                         bestStep1 = GoapActionId.None;
                     }
-                    continue;
+                    // Allow MoveToFlankCover to also evaluate the 2-step Flank -> Frag Flush chain when carrying a frag grenade
+                    if (a0.Id != GoapActionId.MoveToFlankCover || (ws & GoapStateBits.HasFragGrenade) == 0)
+                        continue;
                 }
 
                 for (int j = 0; j < actionCount; j++)
@@ -1818,7 +1829,12 @@ namespace EasyRed2HumanAI
                     if ((wsAfter1 & desiredGoalBit) == 0)
                         continue;
 
-                    float totalCost = cost0 + GetPersonalityAndDirectiveAdjustedCost(a1, board.NetDirective, personality, vet01, ref factionProfile, ref micro);
+                    float cost1 = GetPersonalityAndDirectiveAdjustedCost(a1, board.NetDirective, personality, vet01, ref factionProfile, ref micro);
+                    // Synergy bonus for 2-step MoveToFlankCover -> FlushThreatWithFrag breach chain
+                    if (a0.Id == GoapActionId.MoveToFlankCover && a1.Id == GoapActionId.FlushThreatWithFrag)
+                        cost1 -= 1.05f;
+
+                    float totalCost = cost0 + cost1;
                     if (totalCost < bestCost)
                     {
                         bestCost = totalCost;
@@ -1826,6 +1842,16 @@ namespace EasyRed2HumanAI
                         bestStep1 = a1.Id;
                     }
                 }
+            }
+
+            // Fallback Goal Bridge: if TargetEliminated had no valid path during an active squad firefight
+            // (e.g. on a narrow bridge or pinned without flank cover or smoke), fall back to SuppressThreatPosition
+            // so a combat soldier never stalls with GoapActionId.None!
+            if (bestStep0 == GoapActionId.None && (ws & GoapStateBits.SquadHasActiveThreat) != 0 && (ws & GoapStateBits.IsBleeding) == 0)
+            {
+                bestStep0 = (ws & GoapStateBits.CanProvideOverwatch) != 0
+                    ? GoapActionId.HoldOverwatchFire
+                    : GoapActionId.SuppressThreatPosition;
             }
 
             return new BotGoapPlan
@@ -1985,6 +2011,7 @@ namespace EasyRed2HumanAI
                         ai.MoveDestination = shelteredPos;
                         plan.LockUnitCoverChange = true;
                         plan.PlanExpireTime = now + 4.0f;
+                        plan.NextReplanTime = Mathf.Max(plan.NextReplanTime, now + 3.2f);
                         WallSideRepositionsCount++;
                         GoapPlansExecutedCount++;
                     }
@@ -2087,12 +2114,13 @@ namespace EasyRed2HumanAI
                             {
                                 soldier.CoverPosition(chosenCover.Cast<AiDestination>());
                                 SetBotPose(ai, soldier, SoldierPose.Crouch);
+                                plan.NextReplanTime = Mathf.Max(plan.NextReplanTime, now + 4.0f);
                                 GoapPinAndFlankCount++;
                                 GoapPlansExecutedCount++;
                                 TrySayTacticalVoice(soldier, sq, VoiceManager.VoiceClip.imMoving, 0.25f);
                                 if (VisionConfig.DebugLogging.Value)
                                 {
-                                    AiCore.LogDebug("GoapPinFlank", $"{soldier.faction} {GetPersonality(soldier)} flanking pinned enemy to lateral cover.");
+                                    AiCore.LogDebug("GoapPinFlank", $"{soldier.faction} {GetPersonality(soldier)} flanking pinned enemy to lateral cover (nextStep:{plan.Step1}).");
                                 }
                             }
                             else if (soldier.IsOnCover() && plan.StepCount > 1)
@@ -2116,6 +2144,13 @@ namespace EasyRed2HumanAI
                     if (ai.IsMoving())
                     {
                         SetBotPose(ai, soldier, SoldierPose.Crouch);
+                    }
+                    else if (board.HasActiveThreat &&
+                             board.IsThreatBeingPinned(now) &&
+                             !ai.HasEnemyAndCanFireAtHim &&
+                             (myPos - board.ThreatPosition).sqrMagnitude > 24f * 24f)
+                    {
+                        TryAdvanceBoundTowardThreat(ai, soldier, sq, myPos, board.ThreatPosition, board.ThreatDirection, now, ref plan);
                     }
                     break;
 
@@ -2188,6 +2223,89 @@ namespace EasyRed2HumanAI
                         }
                     }
                     break;
+            }
+        }
+
+        private static void TryAdvanceBoundTowardThreat(
+            SoldierAI ai,
+            Soldier soldier,
+            Squad sq,
+            Vector3 myPos,
+            Vector3 threatPos,
+            Vector3 threatDir,
+            float now,
+            ref BotGoapPlan plan)
+        {
+            IntPtr ptr = soldier.Pointer;
+            if (_nextLocalCoverSeekTime.TryGetValue(ptr, out float nextSeek) && now < nextSeek)
+                return;
+
+            _nextLocalCoverSeekTime[ptr] = now + 3.0f;
+
+            var octree = CoverManager.staticCovers;
+            if (octree == null)
+                return;
+
+            Vector3 searchCenter = myPos + threatDir * 12.0f;
+            var nearby = octree.GetNearby(searchCenter, 14.0f);
+            if (nearby == null || nearby.Length == 0)
+                return;
+
+            float myDistToThreatSq = (threatPos - myPos).sqrMagnitude;
+            var unreachable = soldier.nonReachableCovers;
+            CombatCover bestAdvanceCover = null;
+            float bestScore = -999f;
+
+            int count = nearby.Length;
+            for (int i = 0; i < count; i++)
+            {
+                AiDestination dest = nearby[i];
+                if (dest == null || dest.Pointer == IntPtr.Zero)
+                    continue;
+                if (unreachable != null && unreachable.Contains(dest))
+                    continue;
+
+                CombatCover cc = dest.TryCast<CombatCover>();
+                if (cc == null)
+                    continue;
+
+                Vector3 covPos = cc.GetCoverPosition();
+                if (Mathf.Abs(covPos.y - myPos.y) > 2.8f)
+                    continue;
+
+                float dFromMeSq = (covPos - myPos).sqrMagnitude;
+                if (dFromMeSq < 5.5f * 5.5f || dFromMeSq > 22.0f * 22.0f)
+                    continue;
+
+                float covDistToThreatSq = (threatPos - covPos).sqrMagnitude;
+                if (covDistToThreatSq >= myDistToThreatSq - 25.0f || covDistToThreatSq < 8.0f * 8.0f)
+                    continue;
+
+                if (!cc.IsCoverAvailable(threatDir, soldier.faction))
+                    continue;
+
+                float advanceGain = Vector3.Dot(covPos - myPos, threatDir);
+                if (advanceGain < 4.5f)
+                    continue;
+
+                float score = advanceGain - Mathf.Sqrt(dFromMeSq) * 0.25f;
+                if (score > bestScore)
+                {
+                    bestScore = score;
+                    bestAdvanceCover = cc;
+                }
+            }
+
+            if (bestAdvanceCover != null)
+            {
+                soldier.CoverPosition(bestAdvanceCover.Cast<AiDestination>());
+                SetBotPose(ai, soldier, SoldierPose.Crouch);
+                plan.LockUnitCoverChange = true;
+                plan.PlanExpireTime = now + 5.5f;
+                plan.NextReplanTime = Mathf.Max(plan.NextReplanTime, now + 3.6f);
+                _localCoverProtectedUntil[ptr] = now + 5.5f;
+                GoapPlansExecutedCount++;
+                TrySayTacticalVoice(soldier, sq, VoiceManager.VoiceClip.imMoving, 0.20f);
             }
         }
 
