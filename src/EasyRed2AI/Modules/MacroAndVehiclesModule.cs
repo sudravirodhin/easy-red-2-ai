@@ -20,6 +20,7 @@ namespace EasyRed2HumanAI
         private static readonly Dictionary<IntPtr, float> _nextTankDisciplineCountTime = new Dictionary<IntPtr, float>(256);
         private static readonly Dictionary<IntPtr, float> _repairTaskStartTime = new Dictionary<IntPtr, float>(64);
         private static readonly HashSet<IntPtr> _countedRepairTasks = new HashSet<IntPtr>();
+        private static readonly Dictionary<IntPtr, float> _unreachableEmplacementUntil = new Dictionary<IntPtr, float>(128);
 
         // =====================================================================
         // Helper: Sheltered Tank / Vehicle Repair Position (Leeward Hull Cover)
@@ -2008,14 +2009,17 @@ namespace EasyRed2HumanAI
         private static void RunMacroObjectiveDirector(BattlePhase phase)
         {
             var rawObjectives = phase.objectives;
-            if (rawObjectives == null || rawObjectives.Length == 0)
+            var scriptedObjectives = MissionObjectiveScripted.scriptedMissionObjectives;
+            int rawLen = rawObjectives != null ? rawObjectives.Length : 0;
+            int scriptedLen = scriptedObjectives != null ? scriptedObjectives.Count : 0;
+            if (rawLen == 0 && scriptedLen == 0)
             {
                 _garrisonAssignedObjectiveBySquad.Clear();
                 return;
             }
 
-            var activeObjectives = new List<MissionObjective>(rawObjectives.Length);
-            for (int i = 0; i < rawObjectives.Length; i++)
+            var activeObjectives = new List<MissionObjective>(rawLen + scriptedLen);
+            for (int i = 0; i < rawLen; i++)
             {
                 MissionObjective obj = rawObjectives[i];
                 if (obj == null || obj.Pointer == IntPtr.Zero || obj.gameObject == null || !obj.gameObject.activeInHierarchy)
@@ -2024,6 +2028,30 @@ namespace EasyRed2HumanAI
                 if (task == null || task.Pointer == IntPtr.Zero || !task.IsTaskEnabled())
                     continue;
                 activeObjectives.Add(obj);
+            }
+
+            if (scriptedObjectives != null)
+            {
+                for (int i = 0; i < scriptedLen; i++)
+                {
+                    MissionObjectiveScripted sObj = scriptedObjectives[i];
+                    if (sObj == null || sObj.Pointer == IntPtr.Zero || sObj.gameObject == null || !sObj.gameObject.activeInHierarchy)
+                        continue;
+                    MissionTask task = sObj.missionTask;
+                    if (task == null || task.Pointer == IntPtr.Zero || !task.IsTaskEnabled())
+                        continue;
+                    bool duplicate = false;
+                    for (int j = 0; j < activeObjectives.Count; j++)
+                    {
+                        if (activeObjectives[j].Pointer == sObj.Pointer)
+                        {
+                            duplicate = true;
+                            break;
+                        }
+                    }
+                    if (!duplicate)
+                        activeObjectives.Add(sObj);
+                }
             }
 
             if (activeObjectives.Count == 0)
@@ -2136,11 +2164,11 @@ namespace EasyRed2HumanAI
                         1,
                         Mathf.Min(heldObjectives.Count, eligibleSquads.Count - 1));
 
-                    // Sort held objectives so threatened objectives (enemy within 150m) get garrisoned first
+                    // Sort held objectives so threatened or actively back-capped objectives get garrisoned first
                     heldObjectives.Sort((a, b) =>
                     {
-                        float dA = GetClosestEnemyDistanceSqToPoint(a.GetTaskPosition(), faction, allEnemyLeaderPositions);
-                        float dB = GetClosestEnemyDistanceSqToPoint(b.GetTaskPosition(), faction, allEnemyLeaderPositions);
+                        float dA = GetObjectiveThreatPriorityScore(a, faction, allEnemyLeaderPositions);
+                        float dB = GetObjectiveThreatPriorityScore(b, faction, allEnemyLeaderPositions);
                         return dA.CompareTo(dB);
                     });
 
@@ -2277,21 +2305,21 @@ namespace EasyRed2HumanAI
                     }
 
                     // Vanilla assigns defenders via GetRandomNonSecuredMissionObjective() once at spawn and never rebalances.
-                    // Sort held objectives so the most threatened objective is index 0.
+                    // Sort held objectives so the most threatened or actively back-capped objective is index 0.
                     heldObjectives.Sort((a, b) =>
                     {
-                        float dA = GetClosestEnemyDistanceSqToPoint(a.GetTaskPosition(), faction, allEnemyLeaderPositions);
-                        float dB = GetClosestEnemyDistanceSqToPoint(b.GetTaskPosition(), faction, allEnemyLeaderPositions);
+                        float dA = GetObjectiveThreatPriorityScore(a, faction, allEnemyLeaderPositions);
+                        float dB = GetObjectiveThreatPriorityScore(b, faction, allEnemyLeaderPositions);
                         return dA.CompareTo(dB);
                     });
 
-                    // 1) Ensure any threatened held objective (enemy within 165m) has at least 1 defending squad
+                    // 1) Ensure any threatened or actively back-capped held objective (enemy within 165m or capture bar ticking) has at least 1 defending squad
                     for (int h = 0; h < heldObjectives.Count; h++)
                     {
                         MissionObjective heldObj = heldObjectives[h];
                         IntPtr heldTaskPtr = heldObj.missionTask.Pointer;
                         Vector3 objPos = heldObj.GetTaskPosition();
-                        float closestEnemySq = GetClosestEnemyDistanceSqToPoint(objPos, faction, allEnemyLeaderPositions);
+                        float closestEnemySq = GetObjectiveThreatPriorityScore(heldObj, faction, allEnemyLeaderPositions);
                         if (closestEnemySq > 165f * 165f)
                             continue;
 
@@ -2324,11 +2352,11 @@ namespace EasyRed2HumanAI
                         }
                     }
 
-                    // 2) If the primary threatened objective (enemy within 155m) is under heavy attack while an unthreatened
-                    //    secondary objective (no enemy within 175m) has 2+ squads sitting idle, shift 1 excess squad per tick
+                    // 2) If the primary threatened objective (enemy within 155m or capture progress ticking) is under heavy attack while an unthreatened
+                    //    secondary objective (no enemy within 175m and 0% capture progress) has 2+ squads sitting idle, shift 1 excess squad per tick
                     //    (always leaving at least 1 sentry squad on each secondary objective).
                     MissionObjective primaryThreatObj = heldObjectives[0];
-                    float primaryThreatSq = GetClosestEnemyDistanceSqToPoint(primaryThreatObj.GetTaskPosition(), faction, allEnemyLeaderPositions);
+                    float primaryThreatSq = GetObjectiveThreatPriorityScore(primaryThreatObj, faction, allEnemyLeaderPositions);
                     if (primaryThreatSq <= 155f * 155f)
                     {
                         IntPtr primaryTaskPtr = primaryThreatObj.missionTask.Pointer;
@@ -2337,7 +2365,7 @@ namespace EasyRed2HumanAI
                         for (int h = heldObjectives.Count - 1; h >= 1; h--)
                         {
                             MissionObjective quietObj = heldObjectives[h];
-                            float quietEnemySq = GetClosestEnemyDistanceSqToPoint(quietObj.GetTaskPosition(), faction, allEnemyLeaderPositions);
+                            float quietEnemySq = GetObjectiveThreatPriorityScore(quietObj, faction, allEnemyLeaderPositions);
                             if (quietEnemySq <= 175f * 175f)
                                 continue;
 
@@ -2436,6 +2464,34 @@ namespace EasyRed2HumanAI
             return bestSquad;
         }
 
+        private static float GetObjectiveThreatPriorityScore(
+            MissionObjective obj,
+            string myFaction,
+            List<KeyValuePair<string, Vector3>> leaderPositions)
+        {
+            if (obj == null)
+                return float.MaxValue;
+
+            float bestSq = GetClosestEnemyDistanceSqToPoint(obj.GetTaskPosition(), myFaction, leaderPositions);
+            if (obj.missionTask != null)
+            {
+                try
+                {
+                    float capPct = Mathf.Clamp01(obj.missionTask.GetTaskCompletationPercentage());
+                    if (capPct > 0.05f)
+                    {
+                        // Back-cap / active capture alarm: even if only a lone enemy rifleman is inside the cap zone
+                        // (without an enemy squad leader nearby), treat the point as critically threatened (< 50m)
+                        // and scale priority urgently as capture progress approaches 100%.
+                        float capVirtualDistSq = Mathf.Lerp(50f * 50f, 8f * 8f, capPct);
+                        bestSq = Mathf.Min(bestSq * Mathf.Lerp(0.25f, 0.05f, capPct), capVirtualDistSq);
+                    }
+                }
+                catch { }
+            }
+            return bestSq;
+        }
+
         private static float GetClosestEnemyDistanceSqToPoint(
             Vector3 point,
             string myFaction,
@@ -2462,6 +2518,19 @@ namespace EasyRed2HumanAI
             {
                 MissionObjective obj = list[i];
                 float dSq = (obj.GetTaskPosition() - pos).sqrMagnitude;
+                if (obj.missionTask != null)
+                {
+                    try
+                    {
+                        float capPct = Mathf.Clamp01(obj.missionTask.GetTaskCompletationPercentage());
+                        if (capPct > 0.15f)
+                        {
+                            // Weight nearby partially captured objectives higher so attacking squads finish the cap
+                            dSq *= Mathf.Lerp(0.85f, 0.35f, capPct);
+                        }
+                    }
+                    catch { }
+                }
                 if (dSq < bestSq)
                 {
                     bestSq = dSq;
@@ -2569,6 +2638,14 @@ namespace EasyRed2HumanAI
                         Soldier u = units[uIdx];
                         if (u != null && u.IsAlive && u.targetDestination != null && u.targetDestination.Pointer == vehPtr)
                         {
+                            if (_assignedEmplacementUntil.TryGetValue(u.Pointer, out float claimUntil) && now >= claimUntil && !u.IsOnVehicle())
+                            {
+                                // Anti-stuck safeguard: bot failed to reach/board emplacement within 24s; release and cooldown
+                                u.targetDestination = null;
+                                _assignedEmplacementUntil.Remove(u.Pointer);
+                                _unreachableEmplacementUntil[u.Pointer] = now + 120.0f;
+                                continue;
+                            }
                             alreadyClaimedByInboundBot = true;
                             break;
                         }
@@ -2620,7 +2697,15 @@ namespace EasyRed2HumanAI
                         if (_assignedEmplacementUntil.TryGetValue(u.Pointer, out float assignedUntil) && now < assignedUntil)
                             continue;
 
-                        float dSq = (u.transform.position - vehPos).sqrMagnitude;
+                        if (_unreachableEmplacementUntil.TryGetValue(u.Pointer, out float unreachableUntil) && now < unreachableUntil)
+                            continue;
+
+                        Vector3 uPos = u.transform.position;
+                        // Avoid assigning ground infantry to unreachable rooftop/cliff emplacements (> 4.5m vertical delta)
+                        if (Mathf.Abs(vehPos.y - uPos.y) > 4.5f)
+                            continue;
+
+                        float dSq = (uPos - vehPos).sqrMagnitude;
                         // Prioritize bailed-out vehicle crews for crewing empty emplacements/artillery
                         if (isBailedCrew)
                             dSq *= 0.45f;

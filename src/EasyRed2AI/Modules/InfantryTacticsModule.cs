@@ -2095,17 +2095,31 @@ namespace EasyRed2HumanAI
                 isSkittish = false;
             }
 
-            bool isGreenRookie = !isSkittish && vet01 < 0.20f;
-            if (!isSkittish && !isGreenRookie)
+            FactionCommandProfile doc = GetFactionCommandProfile(soldier.faction);
+            bool isFanaticDoctrine = doc.PreferAmbushWhenAlone && doc.BayonetBreachCostMult <= 0.78f;
+
+            GenericGun heldGun = soldier.GetHeldGun();
+            bool isCompletelyOutOfAmmo = heldGun != null &&
+                                         heldGun.GetCurrentAmmoCount() <= 0 &&
+                                         soldier.IsOutOfAmmosFor(heldGun);
+            bool isBleeding = soldier.isBleeding || soldier.GetBleedValue() > 0.01f;
+            bool isBleedingOrDry = isBleeding ||
+                                   heldGun == null ||
+                                   isCompletelyOutOfAmmo ||
+                                   (heldGun.GetCurrentAmmoCount() <= 0 && soldier.MustReload());
+
+            // Fanatic doctrines (Japan, Gurkha, Finland) never surrender unless critically wounded/bleeding under extreme suppression
+            if (isFanaticDoctrine && !isBleeding)
             {
                 return false;
             }
 
-            GenericGun heldGun = soldier.GetHeldGun();
-            bool isBleedingOrDry = soldier.isBleeding ||
-                                   soldier.GetBleedValue() > 0.01f ||
-                                   heldGun == null ||
-                                   (heldGun.GetCurrentAmmoCount() <= 0 && soldier.MustReload());
+            bool isGreenRookie = !isSkittish && vet01 < 0.20f;
+            bool isDryRegular = !isSkittish && !isGreenRookie && isCompletelyOutOfAmmo && vet01 < 0.45f;
+            if (!isSkittish && !isGreenRookie && !isDryRegular)
+            {
+                return false;
+            }
 
             float reqSupp;
             if (isSkittish)
@@ -2113,9 +2127,18 @@ namespace EasyRed2HumanAI
                 float vetBonus = VisionConfig.VeterancyCuresSkittishness.Value ? (vet01 * 24f) : 0f;
                 reqSupp = (isBleedingOrDry ? 52f : 68f) + vetBonus;
             }
+            else if (isDryRegular)
+            {
+                reqSupp = 62f + (vet01 * 20f);
+            }
             else
             {
                 reqSupp = isBleedingOrDry ? 70f : 86f;
+            }
+
+            if (isFanaticDoctrine)
+            {
+                reqSupp += 22f;
             }
 
             if (suppression < reqSupp)

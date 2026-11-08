@@ -44,6 +44,8 @@ namespace EasyRed2HumanAI
             IsEntirelyAlone         = 1u << 21,
             OnBridgeOrNarrow        = 1u << 22,
             CanProvideOverwatch     = 1u << 23,
+            NeedAmmoOrMedScavenge   = 1u << 24,
+            ObjectiveCapContestUrgent = 1u << 25,
 
             // Goal & Chain Effect Bits
             SurvivedCrisis          = 1u << 26,
@@ -77,7 +79,8 @@ namespace EasyRed2HumanAI
             PointBlankBayonetBreach = 11,
             RescueSurrenderedComrade = 12,
             LoneWolfLinkUpOrAmbush = 13,
-            DirectFireEngagement = 14
+            DirectFireEngagement = 14,
+            ScavengeSupplyFromCorpse = 15
         }
 
         private struct GoapActionDef
@@ -219,8 +222,26 @@ namespace EasyRed2HumanAI
                 Add = GoapStateBits.TargetEliminated,
                 Remove = GoapStateBits.None,
                 BaseCost = 1.7f
+            },
+            new GoapActionDef
+            {
+                Id = GoapActionId.ScavengeSupplyFromCorpse,
+                Required = GoapStateBits.NeedAmmoOrMedScavenge,
+                Forbidden = GoapStateBits.IsBleeding | GoapStateBits.IsHeavilySuppressed | GoapStateBits.InPointBlankRange | GoapStateBits.HasVisibleEnemy | GoapStateBits.OnBridgeOrNarrow,
+                Add = GoapStateBits.SurvivedCrisis | GoapStateBits.SquadSupported,
+                Remove = GoapStateBits.NeedAmmoOrMedScavenge,
+                BaseCost = 1.15f
             }
         };
+
+        internal struct BotScavengeCache
+        {
+            public float NextScanTime;
+            public InventoryManager TargetInventory;
+            public Vector3 TargetPosition;
+        }
+
+        internal static readonly Dictionary<IntPtr, BotScavengeCache> _botScavengeCaches = new Dictionary<IntPtr, BotScavengeCache>(128);
 
         internal struct SquadBlackboard
         {
@@ -234,6 +255,14 @@ namespace EasyRed2HumanAI
             public Vector3 ThreatPosition;
             public Vector3 ThreatDirection;
             public Spottable PrimaryTarget;
+
+            // Macro Objective & Ticket / Attrition Context
+            public bool IsInvaderFaction;
+            public float TicketRatio01;
+            public bool HasActiveObjectiveTask;
+            public bool IsDefendingObjective;
+            public Vector3 ObjectivePosition;
+            public float ObjectiveCaptureProgress;
 
             // Tier 3 Team Net Directive assigned to this Squad Leader
             public SquadNetDirective NetDirective;
@@ -629,6 +658,8 @@ namespace EasyRed2HumanAI
                 _squadBlackboards.Clear();
             if (_botGoapPlans.Count > 512)
                 _botGoapPlans.Clear();
+            if (_botScavengeCaches.Count > 256)
+                _botScavengeCaches.Clear();
             if (_initialHqSpawnBriefingConsumed.Count > 256)
                 _initialHqSpawnBriefingConsumed.Clear();
         }
@@ -1310,6 +1341,37 @@ namespace EasyRed2HumanAI
                 board.NetDirective = SquadNetDirective.Disconnected_Autonomous;
             }
 
+            // Populate Macro Objective & Dynamic Operations Ticket / Attrition state
+            board.IsInvaderFaction = false;
+            board.TicketRatio01 = 1.0f;
+            board.HasActiveObjectiveTask = false;
+            board.IsDefendingObjective = false;
+            board.ObjectiveCaptureProgress = 0f;
+
+            try
+            {
+                BattleData bd = BattleManager.GetCurrentBattleData();
+                if (bd != null && !string.IsNullOrEmpty(leader.faction))
+                {
+                    board.IsInvaderFaction = bd.IsInvaderFaction(leader.faction);
+                    if (board.IsInvaderFaction && bd.invadersTickets > 0)
+                    {
+                        short remTickets = bd.GetRemainingInvaderTickets();
+                        board.TicketRatio01 = Mathf.Clamp01(remTickets / Mathf.Max(40f, (float)bd.invadersTickets));
+                    }
+                }
+
+                SquadTask curTask = sq.currentTask;
+                if (curTask != null && curTask.Pointer != IntPtr.Zero)
+                {
+                    board.HasActiveObjectiveTask = true;
+                    board.ObjectivePosition = curTask.GetTaskDestination();
+                    board.ObjectiveCaptureProgress = Mathf.Clamp01(curTask.GetTaskCompletationPercentage());
+                    board.IsDefendingObjective = _garrisonAssignedObjectiveBySquad.ContainsKey(sqPtr) || !board.IsInvaderFaction;
+                }
+            }
+            catch { }
+
             // Scan squad members once to find active threat, alive count & surrendered comrades
             board.HasActiveThreat = false;
             board.ThreatIsArmor = false;
@@ -1726,6 +1788,37 @@ namespace EasyRed2HumanAI
                 }
             }
 
+            // Battlefield Scavenging: if out of reserve ammo for primary weapon OR out of bandages (!hasSyringe)
+            // while not actively engaging a visible enemy or heavily suppressed, check for a nearby corpse/crate inventory!
+            if (!soldier.isBleeding && suppression < 25f && !ai.HasEnemyAndCanFireAtHim && !isOnBridge)
+            {
+                GenericGun heldGun = soldier.GetHeldGun();
+                bool outOfAmmo = heldGun != null && soldier.IsOutOfAmmosFor(heldGun);
+                bool outOfBandage = !soldier.hasSyringe;
+                if ((outOfAmmo || outOfBandage) &&
+                    TryGetNearbyScavengeInventory(soldier, myPos, outOfAmmo, outOfBandage, now, out _))
+                {
+                    ws |= GoapStateBits.NeedAmmoOrMedScavenge;
+                }
+            }
+
+            // Win-Condition Urgency: Defenders must contest objectives being back-capped/captured (capProgress >= 0.12f),
+            // and Attackers push onto the cap circle when capture progress is >= 0.45f or tickets are critically low (<= 0.25f)!
+            if (board.HasActiveObjectiveTask && sq != null && sq.currentTask != null)
+            {
+                float dToObjSq = (board.ObjectivePosition - myPos).sqrMagnitude;
+                if (dToObjSq <= 85f * 85f && !sq.currentTask.IsInsideTaskArea(myPos, 0.85f))
+                {
+                    bool defenderPointBeingCapped = board.IsDefendingObjective && board.ObjectiveCaptureProgress >= 0.12f;
+                    bool attackerMomentumOrLastStand = !board.IsDefendingObjective &&
+                                                       (board.ObjectiveCaptureProgress >= 0.45f || board.TicketRatio01 <= 0.25f);
+                    if (defenderPointBeingCapped || attackerMomentumOrLastStand)
+                    {
+                        ws |= GoapStateBits.ObjectiveCapContestUrgent;
+                    }
+                }
+            }
+
             return ws;
         }
 
@@ -1743,7 +1836,8 @@ namespace EasyRed2HumanAI
             // 2. Radioman Lifeline Preservation (Keep radio link with Squad Leader alive!)
             // 3. Point-Blank CQB Self-Defense
             // 4. Lone-Wolf Survival/Link-Up (when Entirely Alone)
-            // 5. Squad Leader & Team Net Directive (Anvil Pinning vs. Hammer Flanking vs. Local Fire & Maneuver)
+            // 5. Battlefield Ammo/Bandage Scavenging (when out of primary ammo or bandages out of direct LOS)
+            // 6. Squad Leader & Team Net Directive (Anvil Pinning vs. Hammer Flanking vs. Local Fire & Maneuver)
             GoapStateBits desiredGoalBit;
             if ((ws & (GoapStateBits.IsBleeding | GoapStateBits.ArmorThreatClose | GoapStateBits.ExposedSideOfWall)) != 0 ||
                 ((ws & GoapStateBits.IsHeavilySuppressed) != 0 && (ws & GoapStateBits.InCover) == 0))
@@ -1762,6 +1856,10 @@ namespace EasyRed2HumanAI
             {
                 desiredGoalBit = GoapStateBits.SurvivedCrisis;
             }
+            else if ((ws & GoapStateBits.NeedAmmoOrMedScavenge) != 0 && (ws & GoapStateBits.HasVisibleEnemy) == 0)
+            {
+                desiredGoalBit = GoapStateBits.SquadSupported;
+            }
             else if ((ws & GoapStateBits.ComradeNeedsLiberation) != 0 && (ws & GoapStateBits.HasVisibleEnemy) == 0)
             {
                 desiredGoalBit = GoapStateBits.SquadSupported;
@@ -1769,12 +1867,13 @@ namespace EasyRed2HumanAI
             else if ((ws & GoapStateBits.SquadHasActiveThreat) != 0)
             {
                 bool preferSupportOrPin =
-                    board.NetDirective == SquadNetDirective.Anvil_PinAndCallSupport ||
-                    (ws & (GoapStateBits.IsMachineGunner | GoapStateBits.IsRadioman)) != 0 ||
-                    personality == SoldierPersonality.Gunner_Anchor ||
-                    personality == SoldierPersonality.Gunner_Overwatch ||
-                    personality == SoldierPersonality.Leader_Tactician ||
-                    ((ws & GoapStateBits.AllyPinningThreat) == 0 && (ws & GoapStateBits.CanProvideOverwatch) != 0);
+                    (ws & GoapStateBits.ObjectiveCapContestUrgent) == 0 &&
+                    (board.NetDirective == SquadNetDirective.Anvil_PinAndCallSupport ||
+                     (ws & (GoapStateBits.IsMachineGunner | GoapStateBits.IsRadioman)) != 0 ||
+                     personality == SoldierPersonality.Gunner_Anchor ||
+                     personality == SoldierPersonality.Gunner_Overwatch ||
+                     personality == SoldierPersonality.Leader_Tactician ||
+                     ((ws & GoapStateBits.AllyPinningThreat) == 0 && (ws & GoapStateBits.CanProvideOverwatch) != 0));
 
                 desiredGoalBit = preferSupportOrPin ? GoapStateBits.SquadSupported : GoapStateBits.TargetEliminated;
             }
@@ -1796,7 +1895,7 @@ namespace EasyRed2HumanAI
                 if ((ws & a0.Required) != a0.Required || (ws & a0.Forbidden) != 0)
                     continue;
 
-                float cost0 = GetPersonalityAndDirectiveAdjustedCost(a0, board.NetDirective, personality, vet01, ref factionProfile, ref micro);
+                float cost0 = GetPersonalityAndDirectiveAdjustedCost(a0, ws, ref board, personality, vet01, ref factionProfile, ref micro);
                 // Plan Commitment Hysteresis (-0.35f inertia bonus) prevents stuttering/flip-flopping between nearly-tied actions
                 if (a0.Id == prevActiveAction)
                     cost0 = Mathf.Max(0.05f, cost0 - 0.35f);
@@ -1829,7 +1928,7 @@ namespace EasyRed2HumanAI
                     if ((wsAfter1 & desiredGoalBit) == 0)
                         continue;
 
-                    float cost1 = GetPersonalityAndDirectiveAdjustedCost(a1, board.NetDirective, personality, vet01, ref factionProfile, ref micro);
+                    float cost1 = GetPersonalityAndDirectiveAdjustedCost(a1, wsAfter0, ref board, personality, vet01, ref factionProfile, ref micro);
                     // Synergy bonus for 2-step MoveToFlankCover -> FlushThreatWithFrag breach chain
                     if (a0.Id == GoapActionId.MoveToFlankCover && a1.Id == GoapActionId.FlushThreatWithFrag)
                         cost1 -= 1.05f;
@@ -1869,19 +1968,29 @@ namespace EasyRed2HumanAI
 
         private static float GetPersonalityAndDirectiveAdjustedCost(
             GoapActionDef def,
-            SquadNetDirective netDirective,
+            GoapStateBits ws,
+            ref SquadBlackboard board,
             SoldierPersonality personality,
             float vet01,
             ref FactionCommandProfile factionProfile,
             ref BotMicroVariance micro)
         {
             float cost = def.BaseCost;
+            SquadNetDirective netDirective = board.NetDirective;
+            bool urgentObjPush = (ws & GoapStateBits.ObjectiveCapContestUrgent) != 0;
+            bool lowTicketConservation = board.IsInvaderFaction &&
+                                         board.TicketRatio01 <= 0.30f &&
+                                         board.ObjectiveCaptureProgress < 0.35f &&
+                                         !urgentObjPush;
+
             switch (def.Id)
             {
                 case GoapActionId.MoveToFlankCover:
                     cost *= factionProfile.FlankMoveCostMult * micro.AggressionCostMult;
                     if (netDirective == SquadNetDirective.Hammer_WideFlankEnvelopment)
                         cost -= 0.75f;
+                    if (urgentObjPush)
+                        cost -= 0.55f;
                     if (personality == SoldierPersonality.Assaulter_Skirmisher ||
                         personality == SoldierPersonality.Assaulter_Shock ||
                         personality == SoldierPersonality.Assaulter_Breacher)
@@ -1892,6 +2001,8 @@ namespace EasyRed2HumanAI
                     cost *= factionProfile.FragFlushCostMult * micro.AggressionCostMult;
                     if (netDirective == SquadNetDirective.Hammer_WideFlankEnvelopment)
                         cost -= 0.45f;
+                    if (urgentObjPush)
+                        cost -= 0.50f;
                     if (personality == SoldierPersonality.Assaulter_Breacher ||
                         personality == SoldierPersonality.Rifleman_Grenadier ||
                         personality == SoldierPersonality.AT_Demolitionist)
@@ -1902,6 +2013,8 @@ namespace EasyRed2HumanAI
                     cost *= factionProfile.SmokeCostMult * micro.AggressionCostMult;
                     if (netDirective == SquadNetDirective.Hammer_WideFlankEnvelopment)
                         cost -= 0.45f;
+                    if (urgentObjPush || lowTicketConservation)
+                        cost -= 0.55f;
                     if (personality == SoldierPersonality.Assaulter_Breacher ||
                         personality == SoldierPersonality.Rifleman_Grenadier ||
                         personality == SoldierPersonality.AT_Demolitionist)
@@ -1912,6 +2025,8 @@ namespace EasyRed2HumanAI
                     cost *= factionProfile.SuppressCostMult * micro.CautionCostMult;
                     if (netDirective == SquadNetDirective.Anvil_PinAndCallSupport)
                         cost -= 0.80f;
+                    if (lowTicketConservation)
+                        cost -= 0.35f;
                     if (personality == SoldierPersonality.Gunner_Anchor ||
                         personality == SoldierPersonality.Gunner_Overwatch ||
                         personality == SoldierPersonality.Gunner_AssaultMG)
@@ -1922,6 +2037,11 @@ namespace EasyRed2HumanAI
                     cost *= factionProfile.OverwatchHoldCostMult * micro.CautionCostMult;
                     if (netDirective == SquadNetDirective.Anvil_PinAndCallSupport)
                         cost -= 0.70f;
+                    // When objective is being back-capped or needs an overtime cap push, penalize sitting outside the cap radius!
+                    if (urgentObjPush)
+                        cost += 0.65f;
+                    else if (lowTicketConservation)
+                        cost -= 0.35f;
                     if (personality == SoldierPersonality.Gunner_Anchor ||
                         personality == SoldierPersonality.Gunner_Overwatch ||
                         personality == SoldierPersonality.Gunner_AssaultMG)
@@ -1931,15 +2051,20 @@ namespace EasyRed2HumanAI
                 case GoapActionId.BoundWithOverwatch:
                     cost *= factionProfile.OverwatchHoldCostMult * micro.AggressionCostMult;
                     if (netDirective == SquadNetDirective.Anvil_PinAndCallSupport)
-                        cost -= 0.70f;
+                        cost -= 0.45f;
+                    // Win-Condition Priority: strongly favor bounding into the cap zone when contesting or finishing an objective!
+                    if (urgentObjPush)
+                        cost -= 0.75f;
                     if (personality == SoldierPersonality.Gunner_Anchor ||
                         personality == SoldierPersonality.Gunner_Overwatch ||
                         personality == SoldierPersonality.Gunner_AssaultMG)
-                        cost -= 0.65f;
+                        cost -= 0.45f;
                     break;
 
                 case GoapActionId.PointBlankBayonetBreach:
                     cost *= factionProfile.BayonetBreachCostMult * micro.AggressionCostMult;
+                    if (urgentObjPush)
+                        cost -= 0.30f;
                     if (personality == SoldierPersonality.Assaulter_Shock ||
                         personality == SoldierPersonality.Assaulter_Breacher)
                         cost -= 0.35f;
@@ -1947,6 +2072,8 @@ namespace EasyRed2HumanAI
 
                 case GoapActionId.RescueSurrenderedComrade:
                     cost *= micro.AggressionCostMult;
+                    if (lowTicketConservation)
+                        cost -= 0.50f;
                     if (personality == SoldierPersonality.Medic_Heroic ||
                         personality == SoldierPersonality.Leader_OldGuard)
                         cost -= 0.75f;
@@ -1954,6 +2081,8 @@ namespace EasyRed2HumanAI
 
                 case GoapActionId.SeekEmergencyCover:
                     cost *= factionProfile.EmergencyCoverCostMult * micro.CautionCostMult;
+                    if (lowTicketConservation)
+                        cost -= 0.40f;
                     if (personality == SoldierPersonality.Rifleman_Cautious ||
                         personality == SoldierPersonality.Medic_Triage)
                         cost -= 0.45f;
@@ -1964,6 +2093,14 @@ namespace EasyRed2HumanAI
                 case GoapActionId.MaintainRadioLinkWithLeader:
                 case GoapActionId.LoneWolfLinkUpOrAmbush:
                     cost *= micro.CautionCostMult;
+                    if (lowTicketConservation)
+                        cost -= 0.35f;
+                    break;
+
+                case GoapActionId.ScavengeSupplyFromCorpse:
+                    cost *= micro.CautionCostMult;
+                    if (lowTicketConservation)
+                        cost -= 0.40f;
                     break;
 
                 case GoapActionId.DirectFireEngagement:
@@ -2145,12 +2282,70 @@ namespace EasyRed2HumanAI
                     {
                         SetBotPose(ai, soldier, SoldierPose.Crouch);
                     }
+                    else if ((ws & GoapStateBits.ObjectiveCapContestUrgent) != 0 && board.HasActiveObjectiveTask)
+                    {
+                        Vector3 toObj = board.ObjectivePosition - myPos;
+                        toObj.y = 0f;
+                        Vector3 objDir = toObj.sqrMagnitude > 0.01f ? toObj.normalized : board.ThreatDirection;
+                        TryAdvanceBoundTowardThreat(ai, soldier, sq, myPos, board.ObjectivePosition, objDir, now, ref plan);
+                    }
                     else if (board.HasActiveThreat &&
                              board.IsThreatBeingPinned(now) &&
                              !ai.HasEnemyAndCanFireAtHim &&
                              (myPos - board.ThreatPosition).sqrMagnitude > 24f * 24f)
                     {
                         TryAdvanceBoundTowardThreat(ai, soldier, sq, myPos, board.ThreatPosition, board.ThreatDirection, now, ref plan);
+                    }
+                    break;
+
+                case GoapActionId.ScavengeSupplyFromCorpse:
+                    {
+                        GenericGun heldGun = soldier.GetHeldGun();
+                        bool outOfAmmo = heldGun != null && soldier.IsOutOfAmmosFor(heldGun);
+                        bool outOfBandage = !soldier.hasSyringe;
+                        if ((outOfAmmo || outOfBandage) &&
+                            TryGetNearbyScavengeInventory(soldier, myPos, outOfAmmo, outOfBandage, now, out InventoryManager targetInv) &&
+                            targetInv != null)
+                        {
+                            Vector3 invPos = targetInv.InventoryPosition;
+                            float dSq = (invPos - myPos).sqrMagnitude;
+                            SetBotPose(ai, soldier, SoldierPose.Crouch);
+                            if (dSq <= 3.0f * 3.0f)
+                            {
+                                bool looted = false;
+                                if (outOfBandage && soldier.inventory != null)
+                                {
+                                    VirtualItem syr = targetInv.FindItemOfType<VirtualSyringe>();
+                                    if (syr != null && soldier.inventory.TakeIntoInventory(syr, targetInv))
+                                    {
+                                        soldier.hasSyringe = true;
+                                        looted = true;
+                                    }
+                                }
+                                if (outOfAmmo)
+                                {
+                                    soldier.RefillAmmoForWearedWeapon(0, true, null, false, 2);
+                                    looted = true;
+                                }
+                                _botScavengeCaches.Remove(ptr);
+                                if (looted)
+                                {
+                                    GoapPlansExecutedCount++;
+                                    if (VisionConfig.DebugLogging.Value)
+                                    {
+                                        AiCore.LogDebug(
+                                            "GoapScavenge",
+                                            $"{soldier.faction} {GetPersonality(soldier)} scavenged {(outOfAmmo ? "ammo" : "bandage")} from nearby body/crate.",
+                                            3.0f);
+                                    }
+                                }
+                            }
+                            else
+                            {
+                                plan.LockUnitCoverChange = true;
+                                ai.MoveDirectlyToward(invPos, 1.35f);
+                            }
+                        }
                     }
                     break;
 
@@ -2307,6 +2502,72 @@ namespace EasyRed2HumanAI
                 GoapPlansExecutedCount++;
                 TrySayTacticalVoice(soldier, sq, VoiceManager.VoiceClip.imMoving, 0.20f);
             }
+        }
+
+        private static bool TryGetNearbyScavengeInventory(
+            Soldier soldier,
+            Vector3 myPos,
+            bool needAmmo,
+            bool needBandage,
+            float now,
+            out InventoryManager bestInv)
+        {
+            bestInv = null;
+            IntPtr ptr = soldier.Pointer;
+            if (_botScavengeCaches.TryGetValue(ptr, out BotScavengeCache cache) && now < cache.NextScanTime)
+            {
+                if (cache.TargetInventory != null && cache.TargetInventory.Pointer != IntPtr.Zero)
+                {
+                    bestInv = cache.TargetInventory;
+                    return true;
+                }
+                return false;
+            }
+
+            var activeList = InventoryManager.activeInventories;
+            if (activeList == null || activeList.Count == 0)
+            {
+                _botScavengeCaches[ptr] = new BotScavengeCache { NextScanTime = now + 3.0f };
+                return false;
+            }
+
+            IntPtr myInvPtr = soldier.inventory != null ? soldier.inventory.Pointer : IntPtr.Zero;
+            float bestDistSq = 15.0f * 15.0f;
+            int count = activeList.Count;
+
+            for (int i = 0; i < count; i++)
+            {
+                InventoryManager inv = activeList[i];
+                if (inv == null || inv.Pointer == IntPtr.Zero || inv.Pointer == myInvPtr || inv.IsPlayersInventory())
+                    continue;
+
+                Vector3 invPos = inv.InventoryPosition;
+                if (Mathf.Abs(invPos.y - myPos.y) > 2.4f)
+                    continue;
+
+                float dSq = (invPos - myPos).sqrMagnitude;
+                if (dSq >= bestDistSq)
+                    continue;
+
+                Soldier owner = inv.GetComponent<Soldier>();
+                if (owner != null && owner.IsAlive && (!needAmmo || !owner.IsAmmoBoxCarrier() || owner.faction != soldier.faction))
+                    continue;
+
+                if (needBandage && !needAmmo && inv.FindItemOfType<VirtualSyringe>() == null)
+                    continue;
+
+                bestDistSq = dSq;
+                bestInv = inv;
+            }
+
+            _botScavengeCaches[ptr] = new BotScavengeCache
+            {
+                NextScanTime = now + 2.5f,
+                TargetInventory = bestInv,
+                TargetPosition = bestInv != null ? bestInv.InventoryPosition : Vector3.zero
+            };
+
+            return bestInv != null;
         }
 
         private static bool TryLinkUpOrJoinFriendlySquad(SoldierAI ai, Soldier self, Vector3 myPos, float maxRadius)
