@@ -461,7 +461,7 @@ namespace EasyRed2HumanAI
             // 1. If standing on the exposed front face of a wall, duck around to the leeward side immediately
             if (TryFindShelteredSideOfWall(myPos, threatDir, ignoreRoot, out Vector3 behindWallPos))
             {
-                SetBotPose(ai, soldier, SoldierPose.Idle);
+                SetBotPose(ai, soldier, SoldierPose.Idle, true);
                 ai.MoveDirectlyToward(behindWallPos, 1.2f);
                 AiCore.LogDebug("AntiArmor", $"{soldier.faction} rifleman scrambling behind wall to evade {targetVeh.name} at {dist:F0}m.", 6.0f);
                 return true;
@@ -473,7 +473,7 @@ namespace EasyRed2HumanAI
                 soldier.TryToGetToActualCover();
                 if (ai.IsMoving())
                 {
-                    SetBotPose(ai, soldier, SoldierPose.Idle);
+                    SetBotPose(ai, soldier, SoldierPose.Idle, true);
                     return true;
                 }
             }
@@ -499,7 +499,7 @@ namespace EasyRed2HumanAI
                 if (chosenDir.sqrMagnitude > 0.01f)
                 {
                     Vector3 retreatPos = myPos + chosenDir * 8.5f;
-                    SetBotPose(ai, soldier, SoldierPose.Idle);
+                    SetBotPose(ai, soldier, SoldierPose.Idle, true);
                     ai.MoveDirectlyToward(retreatPos, 1.5f);
                     AiCore.LogDebug("AntiArmor", $"{soldier.faction} infantryman fleeing open ground from {targetVeh.name} ({dist:F0}m).", 6.0f);
                     return true;
@@ -2029,6 +2029,11 @@ namespace EasyRed2HumanAI
                 if (bestCandidate != null)
                 {
                     _assignedEmplacementUntil[bestCandidate.Pointer] = now + 24.0f;
+                    _combatCrouchLockUntil.Remove(bestCandidate.Pointer);
+                    if (bestCandidate.aiController != null)
+                    {
+                        SetBotPose(bestCandidate.aiController, bestCandidate, SoldierPose.Idle, true);
+                    }
                     bestCandidate.CoverPosition(veh.Cast<AiDestination>());
                     StaticGunsStaffedCount++;
                     if (VisionConfig.DebugLogging.Value)
@@ -2254,7 +2259,14 @@ namespace EasyRed2HumanAI
 
             if (s.m_pose == SoldierPose.Prone)
             {
-                s.SetPose(SoldierPose.Idle, false);
+                if (s.aiController != null)
+                {
+                    SetBotPose(s.aiController, s, SoldierPose.Idle, true);
+                }
+                else
+                {
+                    s.SetPose(SoldierPose.Idle, false);
+                }
             }
 
             if (s.aiController != null)

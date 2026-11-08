@@ -70,10 +70,15 @@ namespace EasyRed2HumanAI
         public static bool TryConsumeBotRpcBudget(float minInterval = 0.35f)
         {
             float now = Time.time;
+            if (_nextAllowedBotRpcTime > now + 2.5f)
+            {
+                _nextAllowedBotRpcTime = 0f;
+            }
+
             if (now < _nextAllowedBotRpcTime)
                 return false;
 
-            _nextAllowedBotRpcTime = now + minInterval;
+            _nextAllowedBotRpcTime = now + Mathf.Clamp(minInterval, 0.05f, 2.0f);
             return true;
         }
 
@@ -212,6 +217,76 @@ namespace EasyRed2HumanAI
             }
         }
 
+        /// <summary>
+        /// Extends a soldier's alertness window (<see cref="Soldier.SetAlertedFor"/>) without forcing
+        /// <c>pointGunEndTime = Time.time + 3.0f</c> when the soldier does not currently have an
+        /// engageable visible target (<c>HasEnemyAndCanFireAtHim</c>). This prevents stationary
+        /// defenders behind cover/walls/windows from raising their rifle into the shooting posture
+        /// every 250ms and oscillating against <c>CheckTowardWallTps(1.0f)</c>.
+        /// </summary>
+        public static void RefreshAlertnessWithoutRaisingGun(Soldier soldier, float duration)
+        {
+            if (soldier == null)
+                return;
+
+            float now = Time.time;
+            float prevPointGunEnd = soldier.pointGunEndTime;
+            soldier.SetAlertedFor(duration);
+
+            SoldierAI ai = soldier.aiController;
+            bool canFireAtVisibleEnemy = ai != null && ai.HasEnemyAndCanFireAtHim;
+            if (!canFireAtVisibleEnemy)
+            {
+                soldier.pointGunEndTime = soldier.isTowardWallTps
+                    ? Mathf.Min(prevPointGunEnd, now)
+                    : prevPointGunEnd;
+            }
+        }
+
+        /// <summary>
+        /// Rotates a soldier's body horizontally toward <paramref name="flatDir"/> via
+        /// <see cref="Soldier.RotateToward"/> while preventing native <c>RotateToward</c>
+        /// (<c>0x18076060C</c>) from forcing <c>pointGunEndTime = Time.time + 1.5f</c> (which raises
+        /// the rifle into the shooting posture) or twisting <c>lookRotation.leftRight</c> against
+        /// <c>LookForward</c> when the soldier is not actively aiming at an enemy.
+        /// </summary>
+        public static void RotateBodyWithoutRaisingGun(Soldier soldier, Vector3 flatDir, float deltaTime)
+        {
+            if (soldier == null || deltaTime <= 0f)
+                return;
+
+            flatDir.y = 0f;
+            if (flatDir.sqrMagnitude < 0.001f)
+                return;
+
+            float now = Time.time;
+            float prevPointGunEnd = soldier.pointGunEndTime;
+            SoldierAI ai = soldier.aiController;
+            bool isActivelyAiming = now < prevPointGunEnd &&
+                                    !soldier.isTowardWallTps &&
+                                    ai != null &&
+                                    ai.HasEnemyAndCanFireAtHim;
+
+            var lookRot = soldier.lookRotation;
+            float prevLeftRight = lookRot != null ? lookRot.leftRight : 0f;
+            float prevUpDown = lookRot != null ? lookRot.upDown : 0f;
+
+            soldier.RotateToward(flatDir.normalized, deltaTime);
+
+            if (!isActivelyAiming)
+            {
+                soldier.pointGunEndTime = soldier.isTowardWallTps
+                    ? Mathf.Min(prevPointGunEnd, now)
+                    : prevPointGunEnd;
+
+                if (lookRot != null)
+                {
+                    lookRot.leftRight = prevLeftRight;
+                    lookRot.upDown = prevUpDown;
+                }
+            }
+        }
+
         public static int GetDeterministicHash(IntPtr ptr, int seed)
         {
             unchecked
@@ -266,6 +341,7 @@ namespace EasyRed2HumanAI
             _turretVehicleCache.Clear();
             _ceilingCache.Clear();
             _bridgeCellCache.Clear();
+            _nextAllowedBotRpcTime = 0f;
             TotalAdaptiveAiExtraTicks = 0;
         }
 

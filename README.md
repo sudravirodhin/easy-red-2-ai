@@ -1,4 +1,4 @@
-# Easy Red 2: Battle Hardened (`v0.5.0`)
+# Easy Red 2: Battle Hardened (`v0.5.1`)
 *Tactical AI, Veterancy, Personalities & Combined-Arms Overhaul*
 
 > [!IMPORTANT]
@@ -27,22 +27,22 @@ A comprehensive **BepInEx 6 (IL2CPP)** AI, combined-arms, and fairness overhaul 
 
 Download your preferred package from the **[Releases](https://github.com/sudravirodhin/easy-red-2-ai/releases)** page:
 
-### Option A: With BepInEx Included (`EasyRed2HumanAI-v0.5.0-with-BepInEx.zip`) — *Recommended for Fresh Installs*
+### Option A: With BepInEx Included (`EasyRed2HumanAI-v0.5.1-with-BepInEx.zip`) — *Recommended for Fresh Installs*
 Includes **[BepInEx 6.0.0-be.791 (Unity.IL2CPP-win-x64)](https://builds.bepinex.dev/projects/bepinex_be)**, the `.NET 6` runtime, Unity `2022.3.62` base libraries, pre-generated IL2CPP `interop` assemblies for Easy Red 2 Build `921`, and `EasyRed2HumanAI.dll` (with no other third-party mods).
 1. Open your **Easy Red 2** installation folder (e.g. `Steam\steamapps\common\Easy Red 2`, where `Easy Red 2.exe` is located).
-2. Extract all contents of `EasyRed2HumanAI-v0.5.0-with-BepInEx.zip` directly into the `Easy Red 2` folder.
+2. Extract all contents of `EasyRed2HumanAI-v0.5.1-with-BepInEx.zip` directly into the `Easy Red 2` folder.
 3. Launch the game!
 
-### Option B: Without BepInEx / Plugin Only (`EasyRed2HumanAI-v0.5.0-PluginOnly.zip` or `EasyRed2HumanAI.dll`)
+### Option B: Without BepInEx / Plugin Only (`EasyRed2HumanAI-v0.5.1-PluginOnly.zip` or `EasyRed2HumanAI.dll`)
 For users who already have **[BepInEx 6 Bleeding Edge (`BepInEx-Unity.IL2CPP-win-x64`)](https://builds.bepinex.dev/projects/bepinex_be)** installed:
-1. Download `EasyRed2HumanAI-v0.5.0-PluginOnly.zip` (or `EasyRed2HumanAI.dll` directly).
+1. Download `EasyRed2HumanAI-v0.5.1-PluginOnly.zip` (or `EasyRed2HumanAI.dll` directly).
 2. Place `EasyRed2HumanAI.dll` into:
    ```text
    Easy Red 2\BepInEx\plugins\EasyRed2HumanAI.dll
    ```
 
 ### Switching to Vanilla or Uninstalling (`Uninstall-BepInEx-Mod.bat`)
-Included in `EasyRed2HumanAI-v0.5.0-with-BepInEx.zip` (and in the root of this repository) is **[`Uninstall-BepInEx-Mod.bat`](Uninstall-BepInEx-Mod.bat)**. Double-click it inside your `Easy Red 2` folder when the game is closed to:
+Included in `EasyRed2HumanAI-v0.5.1-with-BepInEx.zip` (and in the root of this repository) is **[`Uninstall-BepInEx-Mod.bat`](Uninstall-BepInEx-Mod.bat)**. Double-click it inside your `Easy Red 2` folder when the game is closed to:
 * **`[1] Play Vanilla Temporarily`**: Moves `BepInEx`, `dotnet`, and `winhttp.dll` into `_BepInEx_Disabled_Backup\` so the game runs 100% pure vanilla without losing your configs or other plugins.
 * **`[2] Restore Modded Game`**: Moves everything back from `_BepInEx_Disabled_Backup\` in one click.
 * **`[3] Uninstall Completely`**: Permanently deletes `BepInEx`, `dotnet`, `winhttp.dll`, `doorstop_config.ini`, `.doorstop_version`, and `changelog.txt`.
@@ -56,7 +56,7 @@ Alongside shared tactical realism goals (some inspired by [`Easy-Red-2-Realism-O
 
 * **15-Minute Veteran Progression & 3D Shoulder Rank Promotions**: Surviving AI soldiers progress linearly over 15 minutes (`900s`) from Rookie to `[Vet I]`, `[Vet II]`, and `[Vet III ★]`, dynamically promoting in rank (`Pvt. → Cpl. → Sgt. → 1st Sgt.`), updating their **3D uniform shoulder rank decals** (`UpdateRanksDecal`), and displaying veterancy tags in the Squad Roster UI and 3D crosshair hover badges.
 * **30 Role-Based AI Personalities (10 Roles × 3 Archetypes)**: Every Infantry, Tank Crew, AA/Light Vehicle, and Aircraft Pilot bot receives one of 3 role-matched personalities (`[Spearhead]`, `[Breacher]`, `[Skirmisher]`, `[Deadeye]`, `[Stalker]`, `[Heroic]`, `[Triage]`, `[Brawler Crew]`, `[Ace]`, etc.) governing suppression grit, peek cadence, tank standoff distance, and combat habits.
-* **Death Screen Kill Attribution & Soldier Age Obituary**: Instant full-opacity obituary on the native `DeathPanel` showing **who killed you** (Rank + Full Name + `[FRIENDLY FIRE]`), **Weapon + Hit Zone (`Headshot (Helmet)`, `Torso`, etc.) + Distance (`42m`)**, and the fallen soldier's calculated **Age at death (`1925 - 1944 (Age 19)`)**.
+* **Death Screen Kill Attribution & Soldier Age Obituary**: Instant full-opacity obituary on the native `DeathPanel` showing **Cause of Death / Weapon / Ordnance** (including artillery calibers, mortar shells, bombs, rockets, and vehicle weapons + `[FRIENDLY FIRE]` / `[SELF-INFLICTED]`), **Hit Zone (`Headshot (Helmet)`, `Direct Blast`, `Shrapnel (Torso)`, etc.) + Distance (`42m`)**, and the fallen soldier's calculated **Age at death (`1925 - 1944 (Age 19)`)**.
 * **Vehicle Weak-Spot & Exposed-Crew Targeting**: Small arms actively aim at **exposed vehicle crew (`Seats.showUnitSet`)** and **un-flattened rubber tires (`VehicleDamageableWheelPart`)**, while AT rifles aim at **unbroken tank tracks (`VehicleDamageableTrackPart`)** and penetrable armor plates rather than center-mass hull armor.
 * **Window-Aperture Gaze Alignment & Dual Barrel-Height Auto-Peek**: Stationary indoor defenders detect `0.52m–1.28m` window openings to center their sight cone squarely out windows instead of staring at room walls, and evaluate both `spine` and `heldGun` barrel clearance to step up (`Prone → Crouch → Stand`) or sidestep corners.
 * **Sheltered Leeward Tank Crew Repairs & Behind-Wall Cover Filtering**: Tank crews route around the hull to crouch on the sheltered side opposite enemy fire before repairing, and `CombatCover` filters out exposed front-of-wall cover nodes.

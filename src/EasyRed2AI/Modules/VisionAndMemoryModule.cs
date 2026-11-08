@@ -574,7 +574,7 @@ namespace EasyRed2HumanAI
                             EnemyPos = enemyPos,
                             ExpireTime = now + 5.5f
                         };
-                        ally.SetAlertedFor(12f);
+                        AiCore.RefreshAlertnessWithoutRaisingGun(ally, 12f);
                         sharedWith++;
                     }
                 }
@@ -612,7 +612,7 @@ namespace EasyRed2HumanAI
                                 EnemyPos = enemyPos,
                                 ExpireTime = now + 5.5f
                             };
-                            ally.SetAlertedFor(12f);
+                            AiCore.RefreshAlertnessWithoutRaisingGun(ally, 12f);
                             sharedWith++;
                         }
                     }
@@ -800,6 +800,9 @@ namespace EasyRed2HumanAI
 
             // Verify unobstructed sightline up to the enemy's cover edge (dist - 2.5m) so gunners
             // never blind-fire into intermediate hills, walls, or buildings.
+            if (soldier.IsTowardWall())
+                return false;
+
             Vector3 gunPos = soldier.GunPosition();
             Vector3 toAim = aimPos - gunPos;
             float aimLen = toAim.magnitude;
@@ -809,10 +812,24 @@ namespace EasyRed2HumanAI
                     return false;
             }
 
-            ai.distFromTarget = dist;
-            ai.targetInWeaponRange = true;
-            ai.allowFireAtEnemy = true;
-            ai.RotateAndFireToward(aimPos, deltaTime);
+            Spottable prevVisible = ai.visibleTarget;
+            bool prevAiming = ai.aimingEnemy;
+            try
+            {
+                // Native SoldierAI.RotateAndFireToward (0x18055E454) returns early if visibleTarget == null
+                // and checks aimingEnemy (0x18055E7FA) before starting a burst.
+                ai.visibleTarget = lastInfo.Target;
+                ai.distFromTarget = dist;
+                ai.targetInWeaponRange = true;
+                ai.allowFireAtEnemy = true;
+                ai.aimingEnemy = soldier.AngleToDirection(aimPos - soldier.transform.position) < 25f;
+                ai.RotateAndFireToward(aimPos, deltaTime);
+            }
+            finally
+            {
+                ai.visibleTarget = prevVisible;
+                ai.aimingEnemy = prevAiming;
+            }
 
             if (!_nextSuppressiveBurstCountTime.TryGetValue(ptr, out float nextCount) || now >= nextCount)
             {
@@ -1077,7 +1094,8 @@ namespace EasyRed2HumanAI
                 return false;
 
             IntPtr ptr = soldier.Pointer;
-            if (_threatSectorCache.TryGetValue(ptr, out ThreatSectorCache cached) && Time.time < cached.ExpireTime)
+            bool hadPrevCache = _threatSectorCache.TryGetValue(ptr, out ThreatSectorCache cached);
+            if (hadPrevCache && Time.time < cached.ExpireTime)
             {
                 watchDir = cached.WatchDir;
                 hasActiveContact = cached.HasActiveContact;
@@ -1237,8 +1255,12 @@ namespace EasyRed2HumanAI
             if (contactCount > 0)
             {
                 hasActiveContact = true;
-                int pickIdx = AiCore.GetDeterministicHash(ptr, 41) % contactCount;
-                Vector3 chosenBase = pickIdx == 0 ? c0 : (pickIdx == 1 ? c1 : (pickIdx == 2 ? c2 : c3));
+                // Avoid "% contactCount" index shifts when distant 3rd/4th contacts flicker in and out;
+                // only split gaze between c0 and c1 when c1 is comparable in distance to c0.
+                bool useSecondContact = contactCount >= 2 &&
+                                        d1 <= d0 * 1.65f &&
+                                        (AiCore.GetDeterministicHash(ptr, 41) & 1) == 1;
+                Vector3 chosenBase = useSecondContact ? c1 : c0;
                 float maxFan = (soldier.hasMg || soldier.isMarksMan) ? 8f : 14f;
                 watchDir = PickClearWatchDirection(soldier, myPos, chosenBase, maxFan);
             }
@@ -1260,10 +1282,21 @@ namespace EasyRed2HumanAI
                 watchDir = PickClearWatchDirection(soldier, myPos, fallbackBase, 24f);
             }
 
-            float sectorJitter = (AiCore.GetDeterministicHash(ptr, 53) % 35) * 0.01f;
+            // Directional hysteresis: keep previous watch direction if the new sector is within ~25 degrees
+            if (hadPrevCache &&
+                cached.HasActiveContact == hasActiveContact &&
+                cached.WatchDir.sqrMagnitude > 0.01f &&
+                watchDir.sqrMagnitude > 0.01f &&
+                Vector3.Dot(cached.WatchDir, watchDir) >= 0.90f)
+            {
+                watchDir = cached.WatchDir;
+            }
+
+            float sectorJitter = (AiCore.GetDeterministicHash(ptr, 53) % 55) * 0.01f;
+            float cacheDuration = hasActiveContact ? 2.80f : 4.50f;
             _threatSectorCache[ptr] = new ThreatSectorCache
             {
-                ExpireTime = Time.time + 1.50f + sectorJitter,
+                ExpireTime = Time.time + cacheDuration + sectorJitter,
                 WatchDir = watchDir,
                 HasActiveContact = hasActiveContact
             };
@@ -1333,14 +1366,14 @@ namespace EasyRed2HumanAI
                             }
                             else
                             {
-                                soldier.RotateToward(watchDir, __0);
+                                AiCore.RotateBodyWithoutRaisingGun(soldier, watchDir, __0);
                             }
                         }
                         else if (angle > 14.0f)
                         {
                             _isTurningToWatchSector.Add(ptr);
                             ThreatSectorOrientationsCount++;
-                            soldier.RotateToward(watchDir, __0);
+                            AiCore.RotateBodyWithoutRaisingGun(soldier, watchDir, __0);
                         }
                     }
                 }
