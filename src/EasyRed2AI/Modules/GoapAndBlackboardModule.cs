@@ -278,6 +278,34 @@ namespace EasyRed2HumanAI
             public bool LockUnitCoverChange;
         }
 
+        internal struct BotMicroVariance
+        {
+            public float AggressionCostMult;      // 0.85f .. 1.15f (lower = bolder flanking, grenade flushing, smoke pushes, CQB breaching)
+            public float CautionCostMult;         // 0.85f .. 1.15f (lower = faster emergency cover seeking, wall shelter, suppression pinning, radio discipline)
+            public float ReactionJitterSeconds;   // 0.00f .. 0.38f (desynchronizes squadmate replan intervals so bots never move in robotic lockstep)
+            public float SuppressionJitter;       // -2.2f .. +2.2f (individual nerve variance on suppression thresholds)
+
+            public static BotMicroVariance FromSoldier(IntPtr soldierPtr)
+            {
+                // Zero-allocation deterministic bit-mixing via MurmurHash3 (AiCore.GetDeterministicHash)
+                int h0 = AiCore.GetDeterministicHash(soldierPtr, 901);
+                int h1 = AiCore.GetDeterministicHash(soldierPtr, 902);
+
+                float u0 = (h0 & 0xFFFF) * (1f / 65535f);
+                float u1 = ((h0 >> 16) & 0x7FFF) * (1f / 32767f);
+                float u2 = (h1 & 0xFFFF) * (1f / 65535f);
+                float u3 = ((h1 >> 16) & 0x7FFF) * (1f / 32767f);
+
+                return new BotMicroVariance
+                {
+                    AggressionCostMult = 0.85f + u0 * 0.30f,
+                    CautionCostMult = 0.85f + u1 * 0.30f,
+                    ReactionJitterSeconds = u2 * 0.38f,
+                    SuppressionJitter = (u3 - 0.5f) * 4.4f
+                };
+            }
+        }
+
         internal static readonly Dictionary<IntPtr, SquadBlackboard> _squadBlackboards = new Dictionary<IntPtr, SquadBlackboard>(64);
         internal static readonly Dictionary<IntPtr, BotGoapPlan> _botGoapPlans = new Dictionary<IntPtr, BotGoapPlan>(256);
         internal static readonly HashSet<IntPtr> _initialHqSpawnBriefingConsumed = new HashSet<IntPtr>();
@@ -1566,10 +1594,13 @@ namespace EasyRed2HumanAI
                 ws |= GoapStateBits.InCover;
 
             // Radioman and bailed-out vehicle crews value self-preservation more highly (drop/seek cover at >=12 suppression),
-            // while regular troops use their faction doctrine's SuppressionThresholdBase!
+            // while regular troops use their faction doctrine's SuppressionThresholdBase + individual BotMicroVariance!
             FactionCommandProfile factionProfile = GetFactionCommandProfile(soldier.faction);
+            BotMicroVariance micro = BotMicroVariance.FromSoldier(soldier.Pointer);
             bool highSelfPreservation = isRad || isBailedVehicleCrew;
-            float baseSuppThresh = highSelfPreservation ? 12f : factionProfile.SuppressionThresholdBase;
+            float baseSuppThresh = highSelfPreservation
+                ? 12f
+                : Mathf.Max(8f, factionProfile.SuppressionThresholdBase + micro.SuppressionJitter);
             float heavySuppThresh = highSelfPreservation ? 30f : (baseSuppThresh * 2.55f);
             if (suppression >= baseSuppThresh)
                 ws |= GoapStateBits.IsSuppressed;
@@ -1751,6 +1782,7 @@ namespace EasyRed2HumanAI
             GoapActionId bestStep1 = GoapActionId.None;
             float bestCost = 999f;
             FactionCommandProfile factionProfile = GetFactionCommandProfile(soldier.faction);
+            BotMicroVariance micro = BotMicroVariance.FromSoldier(soldier.Pointer);
 
             int actionCount = _goapActions.Length;
             for (int i = 0; i < actionCount; i++)
@@ -1759,7 +1791,7 @@ namespace EasyRed2HumanAI
                 if ((ws & a0.Required) != a0.Required || (ws & a0.Forbidden) != 0)
                     continue;
 
-                float cost0 = GetPersonalityAndDirectiveAdjustedCost(a0, board.NetDirective, personality, vet01, ref factionProfile);
+                float cost0 = GetPersonalityAndDirectiveAdjustedCost(a0, board.NetDirective, personality, vet01, ref factionProfile, ref micro);
                 GoapStateBits wsAfter0 = (ws | a0.Add) & ~a0.Remove;
 
                 if ((wsAfter0 & desiredGoalBit) != 0)
@@ -1786,7 +1818,7 @@ namespace EasyRed2HumanAI
                     if ((wsAfter1 & desiredGoalBit) == 0)
                         continue;
 
-                    float totalCost = cost0 + GetPersonalityAndDirectiveAdjustedCost(a1, board.NetDirective, personality, vet01, ref factionProfile);
+                    float totalCost = cost0 + GetPersonalityAndDirectiveAdjustedCost(a1, board.NetDirective, personality, vet01, ref factionProfile, ref micro);
                     if (totalCost < bestCost)
                     {
                         bestCost = totalCost;
@@ -1802,8 +1834,8 @@ namespace EasyRed2HumanAI
                 Step1 = bestStep1,
                 StepIndex = 0,
                 StepCount = (byte)(bestStep1 != GoapActionId.None ? 2 : (bestStep0 != GoapActionId.None ? 1 : 0)),
-                PlanExpireTime = now + 4.5f,
-                NextReplanTime = now + 1.5f,
+                PlanExpireTime = now + 4.3f + micro.ReactionJitterSeconds,
+                NextReplanTime = now + 1.35f + micro.ReactionJitterSeconds,
                 DesiredPose = SoldierPose.Crouch,
                 LockUnitCoverChange = false
             };
@@ -1814,13 +1846,14 @@ namespace EasyRed2HumanAI
             SquadNetDirective netDirective,
             SoldierPersonality personality,
             float vet01,
-            ref FactionCommandProfile factionProfile)
+            ref FactionCommandProfile factionProfile,
+            ref BotMicroVariance micro)
         {
             float cost = def.BaseCost;
             switch (def.Id)
             {
                 case GoapActionId.MoveToFlankCover:
-                    cost *= factionProfile.FlankMoveCostMult;
+                    cost *= factionProfile.FlankMoveCostMult * micro.AggressionCostMult;
                     if (netDirective == SquadNetDirective.Hammer_WideFlankEnvelopment)
                         cost -= 0.75f;
                     if (personality == SoldierPersonality.Assaulter_Skirmisher ||
@@ -1830,7 +1863,7 @@ namespace EasyRed2HumanAI
                     break;
 
                 case GoapActionId.FlushThreatWithFrag:
-                    cost *= factionProfile.FragFlushCostMult;
+                    cost *= factionProfile.FragFlushCostMult * micro.AggressionCostMult;
                     if (netDirective == SquadNetDirective.Hammer_WideFlankEnvelopment)
                         cost -= 0.45f;
                     if (personality == SoldierPersonality.Assaulter_Breacher ||
@@ -1840,7 +1873,7 @@ namespace EasyRed2HumanAI
                     break;
 
                 case GoapActionId.ThrowSmokeScreen:
-                    cost *= factionProfile.SmokeCostMult;
+                    cost *= factionProfile.SmokeCostMult * micro.AggressionCostMult;
                     if (netDirective == SquadNetDirective.Hammer_WideFlankEnvelopment)
                         cost -= 0.45f;
                     if (personality == SoldierPersonality.Assaulter_Breacher ||
@@ -1850,7 +1883,7 @@ namespace EasyRed2HumanAI
                     break;
 
                 case GoapActionId.SuppressThreatPosition:
-                    cost *= factionProfile.SuppressCostMult;
+                    cost *= factionProfile.SuppressCostMult * micro.CautionCostMult;
                     if (netDirective == SquadNetDirective.Anvil_PinAndCallSupport)
                         cost -= 0.80f;
                     if (personality == SoldierPersonality.Gunner_Anchor ||
@@ -1860,8 +1893,17 @@ namespace EasyRed2HumanAI
                     break;
 
                 case GoapActionId.HoldOverwatchFire:
+                    cost *= factionProfile.OverwatchHoldCostMult * micro.CautionCostMult;
+                    if (netDirective == SquadNetDirective.Anvil_PinAndCallSupport)
+                        cost -= 0.70f;
+                    if (personality == SoldierPersonality.Gunner_Anchor ||
+                        personality == SoldierPersonality.Gunner_Overwatch ||
+                        personality == SoldierPersonality.Gunner_AssaultMG)
+                        cost -= 0.65f;
+                    break;
+
                 case GoapActionId.BoundWithOverwatch:
-                    cost *= factionProfile.OverwatchHoldCostMult;
+                    cost *= factionProfile.OverwatchHoldCostMult * micro.AggressionCostMult;
                     if (netDirective == SquadNetDirective.Anvil_PinAndCallSupport)
                         cost -= 0.70f;
                     if (personality == SoldierPersonality.Gunner_Anchor ||
@@ -1871,23 +1913,35 @@ namespace EasyRed2HumanAI
                     break;
 
                 case GoapActionId.PointBlankBayonetBreach:
-                    cost *= factionProfile.BayonetBreachCostMult;
+                    cost *= factionProfile.BayonetBreachCostMult * micro.AggressionCostMult;
                     if (personality == SoldierPersonality.Assaulter_Shock ||
                         personality == SoldierPersonality.Assaulter_Breacher)
                         cost -= 0.35f;
                     break;
 
                 case GoapActionId.RescueSurrenderedComrade:
+                    cost *= micro.AggressionCostMult;
                     if (personality == SoldierPersonality.Medic_Heroic ||
                         personality == SoldierPersonality.Leader_OldGuard)
                         cost -= 0.75f;
                     break;
 
                 case GoapActionId.SeekEmergencyCover:
-                    cost *= factionProfile.EmergencyCoverCostMult;
+                    cost *= factionProfile.EmergencyCoverCostMult * micro.CautionCostMult;
                     if (personality == SoldierPersonality.Rifleman_Cautious ||
                         personality == SoldierPersonality.Medic_Triage)
                         cost -= 0.45f;
+                    break;
+
+                case GoapActionId.RepositionBehindWall:
+                case GoapActionId.BandageInCover:
+                case GoapActionId.MaintainRadioLinkWithLeader:
+                case GoapActionId.LoneWolfLinkUpOrAmbush:
+                    cost *= micro.CautionCostMult;
+                    break;
+
+                case GoapActionId.DirectFireEngagement:
+                    cost *= micro.AggressionCostMult;
                     break;
             }
 
