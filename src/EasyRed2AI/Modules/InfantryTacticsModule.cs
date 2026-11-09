@@ -484,6 +484,14 @@ namespace EasyRed2HumanAI
             if (ai == null || soldier == null || soldier.IsOnVehicle() || soldier.transform == null)
                 return false;
 
+            if (!soldier.isBleeding &&
+                soldier.targetDestination != null &&
+                (soldier.targetDestination.TryCast<MedicHealingDestination>() != null ||
+                 soldier.targetDestination.TryCast<VehicleRepairTask>() != null))
+            {
+                return false;
+            }
+
             if (soldier.IsOnCover())
                 return true;
 
@@ -1518,12 +1526,14 @@ namespace EasyRed2HumanAI
                         }
                     }
 
+                    bool isHealingTeammate = IsActivelyHealingTeammate(soldier, out _);
+
                     bool isStaffingEmplacement = _assignedEmplacementUntil.TryGetValue(ptr, out float empUntil) &&
                                                  Time.time < empUntil &&
                                                  !soldier.IsOnVehicle();
 
                     // Execute 3-Tier Bitmask GOAP Planner & Squad Blackboard (Pin/Flank/Smoke/Overwatch/Rescue)
-                    if (VisionConfig.EnableTacticalGoapPlanner.Value && !isRepairingVehicle)
+                    if (VisionConfig.EnableTacticalGoapPlanner.Value && !isRepairingVehicle && !isHealingTeammate)
                     {
                         ExecuteSoldierGoapTick(
                             __instance,
@@ -1543,6 +1553,7 @@ namespace EasyRed2HumanAI
                         !isOnBridge &&
                         !isEvadingArmor &&
                         !isRepairingVehicle &&
+                        !isHealingTeammate &&
                         !isStaffingEmplacement &&
                         !soldier.IsCharging() &&
                         !inPointBlankMelee &&
@@ -1664,6 +1675,7 @@ namespace EasyRed2HumanAI
                             !soldier.IsOnCover() &&
                             !HasActiveGoapCoverLock(ptr, Time.time) &&
                             !isEvadingArmor &&
+                            !isHealingTeammate &&
                             !isStaffingEmplacement &&
                             !soldier.IsCharging() &&
                             !inPointBlankMelee &&
@@ -1681,6 +1693,7 @@ namespace EasyRed2HumanAI
                             !VisionConfig.EnableTacticalGoapPlanner.Value &&
                             !isOnBridge &&
                             !isEvadingArmor &&
+                            !isHealingTeammate &&
                             !isStaffingEmplacement &&
                             !soldier.IsCharging() &&
                             !inPointBlankMelee &&

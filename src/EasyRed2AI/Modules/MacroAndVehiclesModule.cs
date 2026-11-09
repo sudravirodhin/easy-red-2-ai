@@ -3215,6 +3215,14 @@ namespace EasyRed2HumanAI
                         return;
                     }
 
+                    if (__0.targetDestination != null &&
+                        (__0.targetDestination.TryCast<MedicHealingDestination>() != null ||
+                         __0.targetDestination.TryCast<VehicleRepairTask>() != null))
+                    {
+                        __result = false;
+                        return;
+                    }
+
                     if (HasActiveGoapCoverLock(ptr, now))
                     {
                         __result = false;

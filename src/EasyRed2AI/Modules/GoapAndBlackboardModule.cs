@@ -280,6 +280,7 @@ namespace EasyRed2HumanAI
             public IntPtr FlankerLeftPtr;
             public IntPtr FlankerRightPtr;
             public float FlankUntil;
+            public float NextFlankCoverScanTime;
             public CombatCover FlankLeftCover;
             public CombatCover FlankRightCover;
 
@@ -290,13 +291,17 @@ namespace EasyRed2HumanAI
             public IntPtr RescuerPtr;
             public float RescueUntil;
 
-            public float NextSquadVoiceTime;
-
             public bool IsThreatBeingPinned(float now)
             {
                 return now < SuppressHoldUntil && (Suppressor0Ptr != IntPtr.Zero || Suppressor1Ptr != IntPtr.Zero);
             }
         }
+
+        private static readonly Dictionary<IntPtr, float> _nextSquadVoiceTime = new Dictionary<IntPtr, float>(64);
+        private static readonly Dictionary<IntPtr, float> _nextSoldierVoiceTime = new Dictionary<IntPtr, float>(256);
+        private static readonly Dictionary<IntPtr, float> _nextFlankCoverAssignTime = new Dictionary<IntPtr, float>(256);
+        private static readonly Dictionary<IntPtr, float> _medicHealStartTime = new Dictionary<IntPtr, float>(64);
+        private static readonly Dictionary<IntPtr, IntPtr> _medicHealTargetPtr = new Dictionary<IntPtr, IntPtr>(64);
 
         internal struct BotGoapPlan
         {
@@ -665,6 +670,79 @@ namespace EasyRed2HumanAI
                 _botScavengeCaches.Clear();
             if (_initialHqSpawnBriefingConsumed.Count > 256)
                 _initialHqSpawnBriefingConsumed.Clear();
+            if (_nextSquadVoiceTime.Count > 128)
+                _nextSquadVoiceTime.Clear();
+            if (_nextSoldierVoiceTime.Count > 512)
+                _nextSoldierVoiceTime.Clear();
+            if (_nextFlankCoverAssignTime.Count > 512)
+                _nextFlankCoverAssignTime.Clear();
+            if (_medicHealStartTime.Count > 128)
+            {
+                _medicHealStartTime.Clear();
+                _medicHealTargetPtr.Clear();
+            }
+        }
+
+        internal static bool IsActivelyHealingTeammate(Soldier soldier, out MedicHealingDestination healDest)
+        {
+            healDest = null;
+            if (soldier == null || soldier.targetDestination == null || soldier.targetDestination.Pointer == IntPtr.Zero)
+                return false;
+
+            healDest = soldier.targetDestination.TryCast<MedicHealingDestination>();
+            if (healDest == null)
+                return false;
+
+            IntPtr medicPtr = soldier.Pointer;
+            Soldier patient = healDest.soldierToHealUp;
+            if (patient == null ||
+                patient.Pointer == IntPtr.Zero ||
+                !patient.IsAlive ||
+                patient.IsOnVehicle() ||
+                patient.HasSurrended() ||
+                healDest.coverReached ||
+                !(patient.isBleeding || patient.GetBleedValue() > 0.01f))
+            {
+                _medicHealStartTime.Remove(medicPtr);
+                _medicHealTargetPtr.Remove(medicPtr);
+                soldier.CoverPosition(null);
+                healDest = null;
+                return false;
+            }
+
+            // Guard against unreachable patients (e.g. different building floor/roof or 12s pathing timeout)
+            float now = Time.time;
+            if (!_medicHealTargetPtr.TryGetValue(medicPtr, out IntPtr prevPatientPtr) || prevPatientPtr != patient.Pointer)
+            {
+                _medicHealTargetPtr[medicPtr] = patient.Pointer;
+                _medicHealStartTime[medicPtr] = now;
+            }
+            else if (_medicHealStartTime.TryGetValue(medicPtr, out float startT) && now - startT > 12.0f)
+            {
+                _medicHealStartTime.Remove(medicPtr);
+                _medicHealTargetPtr.Remove(medicPtr);
+                soldier.CoverPosition(null);
+                healDest = null;
+                return false;
+            }
+
+            if (soldier.transform != null && patient.transform != null)
+            {
+                Vector3 myPos = soldier.transform.position;
+                Vector3 patPos = patient.transform.position;
+                float vertDelta = Mathf.Abs(patPos.y - myPos.y);
+                Vector2 flatDelta = new Vector2(patPos.x - myPos.x, patPos.z - myPos.z);
+                if (vertDelta > 4.5f && flatDelta.sqrMagnitude < 12f * 12f)
+                {
+                    _medicHealStartTime.Remove(medicPtr);
+                    _medicHealTargetPtr.Remove(medicPtr);
+                    soldier.CoverPosition(null);
+                    healDest = null;
+                    return false;
+                }
+            }
+
+            return true;
         }
 
         // =====================================================================
@@ -686,15 +764,24 @@ namespace EasyRed2HumanAI
             if (now < soldier.skip_say_time || now < soldier.sayDelayedEnd)
                 return;
 
+            IntPtr soldPtr = soldier.Pointer;
+            if (soldPtr != IntPtr.Zero)
+            {
+                if (_nextSoldierVoiceTime.TryGetValue(soldPtr, out float nextSoldVoice) && now < nextSoldVoice)
+                    return;
+            }
+
             if (squad != null && squad.Pointer != IntPtr.Zero)
             {
-                if (_squadBlackboards.TryGetValue(squad.Pointer, out SquadBlackboard board))
-                {
-                    if (now < board.NextSquadVoiceTime)
-                        return;
-                    board.NextSquadVoiceTime = now + 4.8f;
-                    _squadBlackboards[squad.Pointer] = board;
-                }
+                IntPtr sqPtr = squad.Pointer;
+                if (_nextSquadVoiceTime.TryGetValue(sqPtr, out float nextSqVoice) && now < nextSqVoice)
+                    return;
+                _nextSquadVoiceTime[sqPtr] = now + 5.5f;
+            }
+
+            if (soldPtr != IntPtr.Zero)
+            {
+                _nextSoldierVoiceTime[soldPtr] = now + 9.0f;
             }
 
             try
@@ -1452,9 +1539,15 @@ namespace EasyRed2HumanAI
                 toThreat.y = 0f;
                 board.ThreatDirection = toThreat.sqrMagnitude > 0.01f ? toThreat.normalized : leader.transform.forward;
 
-                if (now >= board.FlankUntil || board.FlankLeftCover == null || board.FlankRightCover == null)
+                if (now >= board.NextFlankCoverScanTime ||
+                    (now >= board.FlankUntil && board.FlankLeftCover == null && board.FlankRightCover == null))
                 {
-                    FindSquadFlankCovers(sqCenter, board.ThreatPosition, board.ThreatDirection, leader.faction, out board.FlankLeftCover, out board.FlankRightCover);
+                    board.NextFlankCoverScanTime = now + 4.5f;
+                    CombatCover prevLeft = (now < board.FlankUntil && board.FlankerLeftPtr != IntPtr.Zero) ? board.FlankLeftCover : null;
+                    CombatCover prevRight = (now < board.FlankUntil && board.FlankerRightPtr != IntPtr.Zero) ? board.FlankRightCover : null;
+                    FindSquadFlankCovers(sqCenter, board.ThreatPosition, board.ThreatDirection, leader.faction, out CombatCover newLeft, out CombatCover newRight);
+                    board.FlankLeftCover = prevLeft != null ? prevLeft : newLeft;
+                    board.FlankRightCover = prevRight != null ? prevRight : newRight;
                 }
             }
             else
@@ -1894,10 +1987,15 @@ namespace EasyRed2HumanAI
             }
             else if ((ws & GoapStateBits.SquadHasActiveThreat) != 0)
             {
+                bool isMedic = soldier.IsMedic() ||
+                               personality == SoldierPersonality.Medic_Heroic ||
+                               personality == SoldierPersonality.Medic_Combat ||
+                               personality == SoldierPersonality.Medic_Triage;
                 bool preferSupportOrPin =
                     (ws & GoapStateBits.ObjectiveCapContestUrgent) == 0 &&
                     (board.NetDirective == SquadNetDirective.Anvil_PinAndCallSupport ||
                      (ws & (GoapStateBits.IsMachineGunner | GoapStateBits.IsRadioman)) != 0 ||
+                     isMedic ||
                      personality == SoldierPersonality.Gunner_Anchor ||
                      personality == SoldierPersonality.Gunner_Overwatch ||
                      personality == SoldierPersonality.Leader_Tactician ||
@@ -2023,6 +2121,10 @@ namespace EasyRed2HumanAI
                         personality == SoldierPersonality.Assaulter_Shock ||
                         personality == SoldierPersonality.Assaulter_Breacher)
                         cost -= 0.65f;
+                    else if (personality == SoldierPersonality.Medic_Heroic ||
+                             personality == SoldierPersonality.Medic_Combat ||
+                             personality == SoldierPersonality.Medic_Triage)
+                        cost += 1.25f;
                     break;
 
                 case GoapActionId.FlushThreatWithFrag:
@@ -2035,6 +2137,10 @@ namespace EasyRed2HumanAI
                         personality == SoldierPersonality.Rifleman_Grenadier ||
                         personality == SoldierPersonality.AT_Demolitionist)
                         cost -= 0.55f;
+                    else if (personality == SoldierPersonality.Medic_Heroic ||
+                             personality == SoldierPersonality.Medic_Combat ||
+                             personality == SoldierPersonality.Medic_Triage)
+                        cost += 0.90f;
                     break;
 
                 case GoapActionId.ThrowSmokeScreen:
@@ -2280,15 +2386,19 @@ namespace EasyRed2HumanAI
 
                             if (soldier.targetDestination == null || soldier.targetDestination.Pointer != chosenCover.Pointer)
                             {
-                                soldier.CoverPosition(chosenCover.Cast<AiDestination>());
-                                SetBotPose(ai, soldier, SoldierPose.Crouch);
-                                plan.NextReplanTime = Mathf.Max(plan.NextReplanTime, now + 4.0f);
-                                GoapPinAndFlankCount++;
-                                GoapPlansExecutedCount++;
-                                TrySayTacticalVoice(soldier, sq, VoiceManager.VoiceClip.imMoving, 0.25f);
-                                if (VisionConfig.DebugLogging.Value)
+                                if (!_nextFlankCoverAssignTime.TryGetValue(ptr, out float nextAssign) || now >= nextAssign)
                                 {
-                                    AiCore.LogDebug("GoapPinFlank", $"{soldier.faction} {GetPersonality(soldier)} flanking pinned enemy to lateral cover (nextStep:{plan.Step1}).");
+                                    _nextFlankCoverAssignTime[ptr] = now + 5.5f;
+                                    soldier.CoverPosition(chosenCover.Cast<AiDestination>());
+                                    SetBotPose(ai, soldier, SoldierPose.Crouch);
+                                    plan.NextReplanTime = Mathf.Max(plan.NextReplanTime, now + 4.5f);
+                                    GoapPinAndFlankCount++;
+                                    GoapPlansExecutedCount++;
+                                    TrySayTacticalVoice(soldier, sq, VoiceManager.VoiceClip.imMoving, 0.25f);
+                                    if (VisionConfig.DebugLogging.Value)
+                                    {
+                                        AiCore.LogDebug("GoapPinFlank", $"{soldier.faction} {GetPersonality(soldier)} flanking pinned enemy to lateral cover (nextStep:{plan.Step1}).", 3.0f);
+                                    }
                                 }
                             }
                             else if (soldier.IsOnCover() && plan.StepCount > 1)
