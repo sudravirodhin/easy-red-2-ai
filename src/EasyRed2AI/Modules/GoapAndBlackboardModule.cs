@@ -227,7 +227,7 @@ namespace EasyRed2HumanAI
             {
                 Id = GoapActionId.ScavengeSupplyFromCorpse,
                 Required = GoapStateBits.NeedAmmoOrMedScavenge,
-                Forbidden = GoapStateBits.IsBleeding | GoapStateBits.IsHeavilySuppressed | GoapStateBits.InPointBlankRange | GoapStateBits.HasVisibleEnemy | GoapStateBits.OnBridgeOrNarrow,
+                Forbidden = GoapStateBits.IsBleeding | GoapStateBits.IsHeavilySuppressed | GoapStateBits.InPointBlankRange | GoapStateBits.OnBridgeOrNarrow,
                 Add = GoapStateBits.SurvivedCrisis | GoapStateBits.SquadSupported,
                 Remove = GoapStateBits.NeedAmmoOrMedScavenge,
                 BaseCost = 1.15f
@@ -238,7 +238,10 @@ namespace EasyRed2HumanAI
         {
             public float NextScanTime;
             public InventoryManager TargetInventory;
+            public ItemObject TargetFloorItem;
+            public VirtualItem TargetInventoryAtWeapon;
             public Vector3 TargetPosition;
+            public bool IsAtWeaponPickup;
         }
 
         internal static readonly Dictionary<IntPtr, BotScavengeCache> _botScavengeCaches = new Dictionary<IntPtr, BotScavengeCache>(128);
@@ -1611,7 +1614,7 @@ namespace EasyRed2HumanAI
                 ((ws & GoapStateBits.InPointBlankRange) != 0 && plan.Step0 != GoapActionId.PointBlankBayonetBreach) ||
                 ((ws & GoapStateBits.IsBleeding) != 0 && plan.Step0 != GoapActionId.SeekEmergencyCover && plan.Step0 != GoapActionId.BandageInCover) ||
                 ((ws & GoapStateBits.RadioLinkDrifting) != 0 && plan.Step0 != GoapActionId.MaintainRadioLinkWithLeader) ||
-                (isEvadingArmor && plan.Step0 != GoapActionId.SeekEmergencyCover) ||
+                (isEvadingArmor && plan.Step0 != GoapActionId.SeekEmergencyCover && plan.Step0 != GoapActionId.ScavengeSupplyFromCorpse) ||
                 ((ws & GoapStateBits.IsHeavilySuppressed) != 0 && (ws & GoapStateBits.InCover) == 0 && plan.Step0 != GoapActionId.SeekEmergencyCover);
 
             if (!hasActivePlan || emergencyPreempt || now >= plan.NextReplanTime)
@@ -1788,15 +1791,40 @@ namespace EasyRed2HumanAI
                 }
             }
 
-            // Battlefield Scavenging: if out of reserve ammo for primary weapon OR out of bandages (!hasSyringe)
-            // while not actively engaging a visible enemy or heavily suppressed, check for a nearby corpse/crate inventory!
-            if (!soldier.isBleeding && suppression < 25f && !ai.HasEnemyAndCanFireAtHim && !isOnBridge)
+            // Battlefield Scavenging:
+            // 1) Out of reserve ammo for primary weapon OR out of bandages (!hasSyringe) when not fighting a visible foot enemy.
+            // 2) Need an Anti-Tank weapon/AT grenade when enemy armor is threatening the squad (or bot is an AT trooper whose launcher is dry)!
+            if (!soldier.isBleeding && suppression < 28f && !isOnBridge)
             {
                 GenericGun heldGun = soldier.GetHeldGun();
                 bool outOfAmmo = heldGun != null && soldier.IsOutOfAmmosFor(heldGun);
                 bool outOfBandage = !soldier.hasSyringe;
-                if ((outOfAmmo || outOfBandage) &&
-                    TryGetNearbyScavengeInventory(soldier, myPos, outOfAmmo, outOfBandage, now, out _))
+
+                bool armorThreatPresent = (ws & GoapStateBits.ArmorThreatClose) != 0 ||
+                                          (board.HasActiveThreat && board.PrimaryTarget != null && board.PrimaryTarget.TryCast<Vehicle>() != null) ||
+                                          (ai.visibleTarget != null && ai.visibleTarget.TryCast<Vehicle>() != null);
+                SoldierPersonality pers = GetPersonality(soldier);
+                bool isAtRole = pers == SoldierPersonality.AT_TankHunter ||
+                                pers == SoldierPersonality.AT_Ambusher ||
+                                pers == SoldierPersonality.AT_Demolitionist;
+                bool isMedicRole = pers == SoldierPersonality.Medic_Heroic ||
+                                   pers == SoldierPersonality.Medic_Combat ||
+                                   pers == SoldierPersonality.Medic_Triage;
+                bool needAtWeapon = false;
+                if ((armorThreatPresent || isAtRole) &&
+                    !soldier.IsSquadLeader() && !soldier.IsRadioman() && !isMedicRole)
+                {
+                    GenericGun gun0 = soldier.GetHeldGun(0);
+                    GenericGun gun1 = soldier.GetHeldGun(1);
+                    bool hasUsableAtGun = (gun0 != null && gun0.IsAtWeapon() && (gun0.GetCurrentAmmoCount() > 0 || !soldier.IsOutOfAmmosFor(gun0))) ||
+                                          (gun1 != null && gun1.IsAtWeapon() && (gun1.GetCurrentAmmoCount() > 0 || !soldier.IsOutOfAmmosFor(gun1)));
+                    bool hasAtGrenade = soldier.inventory != null && soldier.inventory.FindItemOfType<VirtualATGrenade>() != null;
+                    needAtWeapon = !hasUsableAtGun && !hasAtGrenade;
+                }
+
+                bool hasVisibleFootEnemy = ai.HasEnemyAndCanFireAtHim && (ai.visibleTarget == null || ai.visibleTarget.TryCast<Vehicle>() == null);
+                if (!hasVisibleFootEnemy && (needAtWeapon || outOfAmmo || outOfBandage) &&
+                    TryGetNearbyScavengeTarget(soldier, myPos, outOfAmmo, outOfBandage, needAtWeapon, now, out _))
                 {
                     ws |= GoapStateBits.NeedAmmoOrMedScavenge;
                 }
@@ -1856,7 +1884,7 @@ namespace EasyRed2HumanAI
             {
                 desiredGoalBit = GoapStateBits.SurvivedCrisis;
             }
-            else if ((ws & GoapStateBits.NeedAmmoOrMedScavenge) != 0 && (ws & GoapStateBits.HasVisibleEnemy) == 0)
+            else if ((ws & GoapStateBits.NeedAmmoOrMedScavenge) != 0)
             {
                 desiredGoalBit = GoapStateBits.SquadSupported;
             }
@@ -2101,6 +2129,9 @@ namespace EasyRed2HumanAI
                     cost *= micro.CautionCostMult;
                     if (lowTicketConservation)
                         cost -= 0.40f;
+                    // Urgently prioritize grabbing a nearby fallen Bazooka/Panzerfaust/AT grenade when enemy armor is closing in!
+                    if ((ws & GoapStateBits.ArmorThreatClose) != 0)
+                        cost -= 0.70f;
                     break;
 
                 case GoapActionId.DirectFireEngagement:
@@ -2303,30 +2334,98 @@ namespace EasyRed2HumanAI
                         GenericGun heldGun = soldier.GetHeldGun();
                         bool outOfAmmo = heldGun != null && soldier.IsOutOfAmmosFor(heldGun);
                         bool outOfBandage = !soldier.hasSyringe;
-                        if ((outOfAmmo || outOfBandage) &&
-                            TryGetNearbyScavengeInventory(soldier, myPos, outOfAmmo, outOfBandage, now, out InventoryManager targetInv) &&
-                            targetInv != null)
+                        bool armorThreatPresent = (ws & GoapStateBits.ArmorThreatClose) != 0 ||
+                                                  (board.HasActiveThreat && board.PrimaryTarget != null && board.PrimaryTarget.TryCast<Vehicle>() != null) ||
+                                                  (ai.visibleTarget != null && ai.visibleTarget.TryCast<Vehicle>() != null);
+                        SoldierPersonality pers = GetPersonality(soldier);
+                        bool isAtRole = pers == SoldierPersonality.AT_TankHunter ||
+                                        pers == SoldierPersonality.AT_Ambusher ||
+                                        pers == SoldierPersonality.AT_Demolitionist;
+                        bool isMedicRole = pers == SoldierPersonality.Medic_Heroic ||
+                                           pers == SoldierPersonality.Medic_Combat ||
+                                           pers == SoldierPersonality.Medic_Triage;
+                        bool needAtWeapon = (armorThreatPresent || isAtRole) &&
+                                            !soldier.IsSquadLeader() && !soldier.IsRadioman() && !isMedicRole;
+
+                        if ((needAtWeapon || outOfAmmo || outOfBandage) &&
+                            TryGetNearbyScavengeTarget(soldier, myPos, outOfAmmo, outOfBandage, needAtWeapon, now, out BotScavengeCache scavCache))
                         {
-                            Vector3 invPos = targetInv.InventoryPosition;
-                            float dSq = (invPos - myPos).sqrMagnitude;
+                            Vector3 targetPos = scavCache.TargetPosition;
+                            float dSq = (targetPos - myPos).sqrMagnitude;
                             SetBotPose(ai, soldier, SoldierPose.Crouch);
                             if (dSq <= 3.0f * 3.0f)
                             {
                                 bool looted = false;
-                                if (outOfBandage && soldier.inventory != null)
+                                string lootedDesc = "supply";
+
+                                // 1. Pick up physical floor items (dropped AT launchers, ammo boxes, magazines, firearms, syringes)
+                                if (scavCache.TargetFloorItem != null && scavCache.TargetFloorItem.Pointer != IntPtr.Zero &&
+                                    scavCache.TargetFloorItem.gameObject != null && scavCache.TargetFloorItem.gameObject.activeInHierarchy)
                                 {
-                                    VirtualItem syr = targetInv.FindItemOfType<VirtualSyringe>();
-                                    if (syr != null && soldier.inventory.TakeIntoInventory(syr, targetInv))
+                                    GenericGun floorGun = scavCache.TargetFloorItem.TryCast<GenericGun>();
+                                    if (floorGun != null)
                                     {
-                                        soldier.hasSyringe = true;
+                                        int slot = floorGun.IsAtWeapon() ? 1 : 0;
+                                        soldier.PickUpItem(scavCache.TargetFloorItem.gameObject, slot);
+                                        soldier.RefillAmmoForWearedWeapon(slot, true, null, false, 2);
                                         looted = true;
+                                        lootedDesc = floorGun.IsAtWeapon() ? "dropped AT weapon" : "dropped firearm";
+                                    }
+                                    else if (soldier.inventory != null && soldier.inventory.AddItemToInventoryAndDestroyInstance(scavCache.TargetFloorItem))
+                                    {
+                                        if (outOfAmmo)
+                                            soldier.RefillAmmoForWearedWeapon(0, true, null, false, 2);
+                                        if (outOfBandage && soldier.inventory.FindItemOfType<VirtualSyringe>() != null)
+                                            soldier.hasSyringe = true;
+                                        looted = true;
+                                        lootedDesc = scavCache.IsAtWeaponPickup ? "floor AT grenade" : "floor ammo/supply";
                                     }
                                 }
-                                if (outOfAmmo)
+                                // 2. Scavenge from corpse inventory, supply crate, or friendly ammo carrier
+                                else if (scavCache.TargetInventory != null && scavCache.TargetInventory.Pointer != IntPtr.Zero)
                                 {
-                                    soldier.RefillAmmoForWearedWeapon(0, true, null, false, 2);
-                                    looted = true;
+                                    InventoryManager targetInv = scavCache.TargetInventory;
+                                    if (scavCache.IsAtWeaponPickup)
+                                    {
+                                        if (scavCache.TargetInventoryAtWeapon != null)
+                                        {
+                                            soldier.PickUpItemFromInventory(scavCache.TargetInventoryAtWeapon, targetInv, 1);
+                                            soldier.RefillAmmoForWearedWeapon(1, true, null, false, 2);
+                                            looted = true;
+                                            lootedDesc = "AT launcher from body/crate";
+                                        }
+                                        else if (soldier.inventory != null)
+                                        {
+                                            VirtualItem atGren = targetInv.FindItemOfType<VirtualATGrenade>();
+                                            if (atGren != null && soldier.inventory.TakeIntoInventory(atGren, targetInv))
+                                            {
+                                                looted = true;
+                                                lootedDesc = "AT grenade from body/crate";
+                                            }
+                                        }
+                                    }
+
+                                    if (outOfBandage && soldier.inventory != null)
+                                    {
+                                        VirtualItem syr = targetInv.FindItemOfType<VirtualSyringe>();
+                                        if (syr != null && soldier.inventory.TakeIntoInventory(syr, targetInv))
+                                        {
+                                            soldier.hasSyringe = true;
+                                            looted = true;
+                                            if (lootedDesc == "supply")
+                                                lootedDesc = "bandage";
+                                        }
+                                    }
+
+                                    if (outOfAmmo)
+                                    {
+                                        soldier.RefillAmmoForWearedWeapon(0, true, null, false, 2);
+                                        looted = true;
+                                        if (lootedDesc == "supply")
+                                            lootedDesc = "ammo";
+                                    }
                                 }
+
                                 _botScavengeCaches.Remove(ptr);
                                 if (looted)
                                 {
@@ -2335,7 +2434,7 @@ namespace EasyRed2HumanAI
                                     {
                                         AiCore.LogDebug(
                                             "GoapScavenge",
-                                            $"{soldier.faction} {GetPersonality(soldier)} scavenged {(outOfAmmo ? "ammo" : "bandage")} from nearby body/crate.",
+                                            $"{soldier.faction} {GetPersonality(soldier)} scavenged {lootedDesc}.",
                                             3.0f);
                                     }
                                 }
@@ -2343,7 +2442,7 @@ namespace EasyRed2HumanAI
                             else
                             {
                                 plan.LockUnitCoverChange = true;
-                                ai.MoveDirectlyToward(invPos, 1.35f);
+                                ai.MoveDirectlyToward(targetPos, 1.35f);
                             }
                         }
                     }
@@ -2504,70 +2603,195 @@ namespace EasyRed2HumanAI
             }
         }
 
-        private static bool TryGetNearbyScavengeInventory(
+        private static bool TryGetNearbyScavengeTarget(
             Soldier soldier,
             Vector3 myPos,
             bool needAmmo,
             bool needBandage,
+            bool needAtWeapon,
             float now,
-            out InventoryManager bestInv)
+            out BotScavengeCache result)
         {
-            bestInv = null;
             IntPtr ptr = soldier.Pointer;
-            if (_botScavengeCaches.TryGetValue(ptr, out BotScavengeCache cache) && now < cache.NextScanTime)
+            if (_botScavengeCaches.TryGetValue(ptr, out result) && now < result.NextScanTime)
             {
-                if (cache.TargetInventory != null && cache.TargetInventory.Pointer != IntPtr.Zero)
+                if (result.TargetFloorItem != null && result.TargetFloorItem.Pointer != IntPtr.Zero &&
+                    result.TargetFloorItem.gameObject != null && result.TargetFloorItem.gameObject.activeInHierarchy)
                 {
-                    bestInv = cache.TargetInventory;
+                    result.TargetPosition = result.TargetFloorItem.transform.position;
+                    return true;
+                }
+                if (result.TargetInventory != null && result.TargetInventory.Pointer != IntPtr.Zero)
+                {
+                    result.TargetPosition = result.TargetInventory.InventoryPosition;
                     return true;
                 }
                 return false;
             }
 
+            result = new BotScavengeCache { NextScanTime = now + 2.5f };
+            float bestDistSq = (needAtWeapon ? 18.0f : 15.0f) * (needAtWeapon ? 18.0f : 15.0f);
+            GenericGun heldGun = soldier.GetHeldGun();
+            bool isPrimaryCompletelyDry = needAmmo && heldGun != null && heldGun.GetCurrentAmmoCount() <= 0 && !heldGun.IsAtWeapon();
+
+            // 1. Scan physical items dropped on the floor (ItemObject.spawnedItems)
+            var floorItems = ItemObject.spawnedItems;
+            if (floorItems != null)
+            {
+                int fCount = floorItems.Count;
+                for (int i = 0; i < fCount; i++)
+                {
+                    ItemObject item = floorItems[i];
+                    if (item == null || item.Pointer == IntPtr.Zero || item.gameObject == null || !item.gameObject.activeInHierarchy || item.transform == null)
+                        continue;
+
+                    Vector3 itemPos = item.transform.position;
+                    if (Mathf.Abs(itemPos.y - myPos.y) > 2.4f)
+                        continue;
+
+                    float dSq = (itemPos - myPos).sqrMagnitude;
+                    if (dSq >= bestDistSq)
+                        continue;
+
+                    GenericGun floorGun = item.TryCast<GenericGun>();
+                    if (floorGun != null)
+                    {
+                        if (needAtWeapon && floorGun.IsAtWeapon() && floorGun.GetCurrentAmmoCount() > 0)
+                        {
+                            bestDistSq = dSq;
+                            result.TargetFloorItem = item;
+                            result.TargetInventory = null;
+                            result.TargetPosition = itemPos;
+                            result.IsAtWeaponPickup = true;
+                            continue;
+                        }
+                        if (isPrimaryCompletelyDry && !floorGun.IsAtWeapon() && floorGun.GetCurrentAmmoCount() > 0)
+                        {
+                            bestDistSq = dSq;
+                            result.TargetFloorItem = item;
+                            result.TargetInventory = null;
+                            result.TargetPosition = itemPos;
+                            result.IsAtWeaponPickup = false;
+                            continue;
+                        }
+                        continue;
+                    }
+
+                    if (needAmmo && item.TryCast<AmmoItem>() != null)
+                    {
+                        bestDistSq = dSq;
+                        result.TargetFloorItem = item;
+                        result.TargetInventory = null;
+                        result.TargetPosition = itemPos;
+                        result.IsAtWeaponPickup = false;
+                        continue;
+                    }
+
+                    VirtualItem vi = item.ToVirtualItem();
+                    if (vi == null)
+                        continue;
+
+                    if (needAtWeapon && vi.TryCast<VirtualATGrenade>() != null)
+                    {
+                        bestDistSq = dSq;
+                        result.TargetFloorItem = item;
+                        result.TargetInventory = null;
+                        result.TargetPosition = itemPos;
+                        result.IsAtWeaponPickup = true;
+                    }
+                    else if (needAmmo && vi.TryCast<VirtualMagazineItem>() != null)
+                    {
+                        bestDistSq = dSq;
+                        result.TargetFloorItem = item;
+                        result.TargetInventory = null;
+                        result.TargetPosition = itemPos;
+                        result.IsAtWeaponPickup = false;
+                    }
+                    else if (needBandage && (vi.TryCast<VirtualSyringe>() != null || vi.TryCast<VirtualBandages>() != null))
+                    {
+                        bestDistSq = dSq;
+                        result.TargetFloorItem = item;
+                        result.TargetInventory = null;
+                        result.TargetPosition = itemPos;
+                        result.IsAtWeaponPickup = false;
+                    }
+                }
+            }
+
+            // 2. Scan nearby corpse inventories, supply crates, and friendly ammo carriers (InventoryManager.activeInventories)
             var activeList = InventoryManager.activeInventories;
-            if (activeList == null || activeList.Count == 0)
+            if (activeList != null)
             {
-                _botScavengeCaches[ptr] = new BotScavengeCache { NextScanTime = now + 3.0f };
-                return false;
+                IntPtr myInvPtr = soldier.inventory != null ? soldier.inventory.Pointer : IntPtr.Zero;
+                int count = activeList.Count;
+
+                for (int i = 0; i < count; i++)
+                {
+                    InventoryManager inv = activeList[i];
+                    if (inv == null || inv.Pointer == IntPtr.Zero || inv.Pointer == myInvPtr || inv.IsPlayersInventory())
+                        continue;
+
+                    Vector3 invPos = inv.InventoryPosition;
+                    if (Mathf.Abs(invPos.y - myPos.y) > 2.4f)
+                        continue;
+
+                    float dSq = (invPos - myPos).sqrMagnitude;
+                    if (dSq >= bestDistSq)
+                        continue;
+
+                    Soldier owner = inv.GetComponent<Soldier>();
+                    if (owner != null && owner.IsAlive && (!needAmmo || !owner.IsAmmoBoxCarrier() || owner.faction != soldier.faction))
+                        continue;
+
+                    if (needAtWeapon && (owner == null || !owner.IsAlive))
+                    {
+                        VirtualItem atGren = inv.FindItemOfType<VirtualATGrenade>();
+                        if (atGren != null)
+                        {
+                            bestDistSq = dSq;
+                            result.TargetFloorItem = null;
+                            result.TargetInventory = inv;
+                            result.TargetInventoryAtWeapon = null;
+                            result.TargetPosition = invPos;
+                            result.IsAtWeaponPickup = true;
+                            continue;
+                        }
+
+                        VirtualItem vw = inv.FindItemOfType<VirtualWeapon>();
+                        if (vw != null)
+                        {
+                            ItemObject prefab = vw.GetItemPrefab();
+                            GenericGun prefabGun = prefab != null ? prefab.TryCast<GenericGun>() : null;
+                            if (prefabGun != null && prefabGun.IsAtWeapon())
+                            {
+                                bestDistSq = dSq;
+                                result.TargetFloorItem = null;
+                                result.TargetInventory = inv;
+                                result.TargetInventoryAtWeapon = vw;
+                                result.TargetPosition = invPos;
+                                result.IsAtWeaponPickup = true;
+                                continue;
+                            }
+                        }
+                    }
+
+                    if (!needAmmo && !needBandage)
+                        continue;
+
+                    if (needBandage && !needAmmo && inv.FindItemOfType<VirtualSyringe>() == null)
+                        continue;
+
+                    bestDistSq = dSq;
+                    result.TargetFloorItem = null;
+                    result.TargetInventory = inv;
+                    result.TargetInventoryAtWeapon = null;
+                    result.TargetPosition = invPos;
+                    result.IsAtWeaponPickup = false;
+                }
             }
 
-            IntPtr myInvPtr = soldier.inventory != null ? soldier.inventory.Pointer : IntPtr.Zero;
-            float bestDistSq = 15.0f * 15.0f;
-            int count = activeList.Count;
-
-            for (int i = 0; i < count; i++)
-            {
-                InventoryManager inv = activeList[i];
-                if (inv == null || inv.Pointer == IntPtr.Zero || inv.Pointer == myInvPtr || inv.IsPlayersInventory())
-                    continue;
-
-                Vector3 invPos = inv.InventoryPosition;
-                if (Mathf.Abs(invPos.y - myPos.y) > 2.4f)
-                    continue;
-
-                float dSq = (invPos - myPos).sqrMagnitude;
-                if (dSq >= bestDistSq)
-                    continue;
-
-                Soldier owner = inv.GetComponent<Soldier>();
-                if (owner != null && owner.IsAlive && (!needAmmo || !owner.IsAmmoBoxCarrier() || owner.faction != soldier.faction))
-                    continue;
-
-                if (needBandage && !needAmmo && inv.FindItemOfType<VirtualSyringe>() == null)
-                    continue;
-
-                bestDistSq = dSq;
-                bestInv = inv;
-            }
-
-            _botScavengeCaches[ptr] = new BotScavengeCache
-            {
-                NextScanTime = now + 2.5f,
-                TargetInventory = bestInv,
-                TargetPosition = bestInv != null ? bestInv.InventoryPosition : Vector3.zero
-            };
-
-            return bestInv != null;
+            _botScavengeCaches[ptr] = result;
+            return result.TargetFloorItem != null || result.TargetInventory != null;
         }
 
         private static bool TryLinkUpOrJoinFriendlySquad(SoldierAI ai, Soldier self, Vector3 myPos, float maxRadius)

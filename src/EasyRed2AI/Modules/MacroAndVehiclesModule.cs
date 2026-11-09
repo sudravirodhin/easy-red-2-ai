@@ -21,6 +21,9 @@ namespace EasyRed2HumanAI
         private static readonly Dictionary<IntPtr, float> _repairTaskStartTime = new Dictionary<IntPtr, float>(64);
         private static readonly HashSet<IntPtr> _countedRepairTasks = new HashSet<IntPtr>();
         private static readonly Dictionary<IntPtr, float> _unreachableEmplacementUntil = new Dictionary<IntPtr, float>(128);
+        private static readonly List<RepairStation> _activeRepairStations = new List<RepairStation>(16);
+        private static float _nextRepairStationScanTime;
+        private static readonly Dictionary<IntPtr, RepairStation> _vehiclesSeekingRepairStation = new Dictionary<IntPtr, RepairStation>(32);
 
         // =====================================================================
         // Helper: Sheltered Tank / Vehicle Repair Position (Leeward Hull Cover)
@@ -773,6 +776,28 @@ namespace EasyRed2HumanAI
             _knownEnemyClusters.Clear();
             _airborneAircraft.Clear();
 
+            if (now >= _nextRepairStationScanTime)
+            {
+                _nextRepairStationScanTime = now + 15.0f;
+                _activeRepairStations.Clear();
+                try
+                {
+                    var stations = UnityEngine.Object.FindObjectsOfType<RepairStation>();
+                    if (stations != null)
+                    {
+                        for (int i = 0; i < stations.Length; i++)
+                        {
+                            RepairStation st = stations[i];
+                            if (st != null && st.Pointer != IntPtr.Zero && st.gameObject != null && st.gameObject.activeInHierarchy && st.transform != null)
+                            {
+                                _activeRepairStations.Add(st);
+                            }
+                        }
+                    }
+                }
+                catch { }
+            }
+
             var allSquads = Squad.AllSquads;
             if (allSquads == null || allSquads.Count == 0)
                 return;
@@ -1256,9 +1281,168 @@ namespace EasyRed2HumanAI
             }
         }
 
+        private static bool TryRouteVehicleToRepairStation(AIVehicle aiVeh, Vehicle veh, float now)
+        {
+            if (aiVeh == null || veh == null || veh.Pointer == IntPtr.Zero || veh.transform == null)
+                return false;
+
+            if (!AiCore.IsLocallyOwnedVehicle(veh) ||
+                veh.IsDisabled() ||
+                veh.IsAirVehicle() ||
+                veh.PlayerIsInside() ||
+                veh.PlayerIsDriving() ||
+                !veh.HasDriver())
+            {
+                _vehiclesSeekingRepairStation.Remove(veh.Pointer);
+                return false;
+            }
+
+            MovableVehicle mov = veh.TryCast<MovableVehicle>();
+            if (mov == null)
+                return false;
+
+            // Cannot drive to a repair station if tracks or engine are 100% broken (crew must field-repair first)
+            float tracksDmg = mov.GetPercentageDamageFor(VehicleInternalPart.tracks);
+            float engineDmg = mov.GetPercentageDamageFor(VehicleInternalPart.engine);
+            if (tracksDmg >= 0.98f || engineDmg >= 0.98f)
+            {
+                _vehiclesSeekingRepairStation.Remove(veh.Pointer);
+                return false;
+            }
+
+            RefreshCombinedArmsIntelIfNeeded();
+            if (_activeRepairStations.Count == 0)
+            {
+                _vehiclesSeekingRepairStation.Remove(veh.Pointer);
+                return false;
+            }
+
+            float hullDmg = mov.GetPercentageDamageFor(VehicleInternalPart.hull);
+            float fuelDmg = mov.GetPercentageDamageFor(VehicleInternalPart.fuelTank);
+            float maxPartDamage = Mathf.Max(Mathf.Max(hullDmg, fuelDmg), Mathf.Max(engineDmg, tracksDmg));
+
+            Turret mainTurret = veh.GetMainTurret(false);
+            bool outOfTurretAmmo = false;
+            if (mainTurret != null && mainTurret.WeaponsCount() > 0)
+            {
+                mainTurret.CheckBullets(out bool hasHe, out bool hasAp, out bool hasFire, out bool hasFlak);
+                outOfTurretAmmo = !hasHe && !hasAp && !hasFire && !hasFlak;
+            }
+
+            IntPtr vehPtr = veh.Pointer;
+            bool alreadySeeking = _vehiclesSeekingRepairStation.TryGetValue(vehPtr, out RepairStation activeStation) &&
+                                  activeStation != null && activeStation.Pointer != IntPtr.Zero &&
+                                  activeStation.gameObject != null && activeStation.gameObject.activeInHierarchy &&
+                                  activeStation.transform != null;
+
+            bool needsStation = alreadySeeking
+                ? (outOfTurretAmmo || maxPartDamage > 0.02f || veh.CanRefillAmmmo())
+                : (outOfTurretAmmo || maxPartDamage >= 0.35f);
+
+            if (!needsStation)
+            {
+                if (alreadySeeking)
+                {
+                    _vehiclesSeekingRepairStation.Remove(vehPtr);
+                    Squad sq = aiVeh.squadInside;
+                    if (sq != null && !sq.IsPlayerInSquad() && sq.Leader != null)
+                    {
+                        sq.Leader_OrderAttackCurrentTask(sq.Leader);
+                    }
+                    aiVeh.rerollDestination = true;
+                    if (VisionConfig.DebugLogging.Value)
+                    {
+                        AiCore.LogDebug("RepairStation", $"Vehicle finished repairing/re-arming at RepairStation and is returning to battle.");
+                    }
+                }
+                return false;
+            }
+
+            Vector3 vehPos = veh.transform.position;
+            string myFaction = GetVehicleCrewFaction(veh, mainTurret);
+            RepairStation bestStation = alreadySeeking ? activeStation : null;
+
+            if (bestStation == null)
+            {
+                float bestDistSq = 650.0f * 650.0f;
+                for (int i = 0; i < _activeRepairStations.Count; i++)
+                {
+                    RepairStation st = _activeRepairStations[i];
+                    if (st == null || st.Pointer == IntPtr.Zero || st.gameObject == null || !st.gameObject.activeInHierarchy || st.transform == null)
+                        continue;
+
+                    Vector3 stPos = st.transform.position;
+                    float dSq = (stPos - vehPos).sqrMagnitude;
+                    if (dSq >= bestDistSq)
+                        continue;
+
+                    bool overrun = false;
+                    if (!string.IsNullOrEmpty(myFaction))
+                    {
+                        for (int c = 0; c < _knownEnemyClusters.Count; c++)
+                        {
+                            if (_knownEnemyClusters[c].Faction != myFaction &&
+                                (_knownEnemyClusters[c].Position - stPos).sqrMagnitude <= 40.0f * 40.0f)
+                            {
+                                overrun = true;
+                                break;
+                            }
+                        }
+                    }
+                    if (overrun)
+                        continue;
+
+                    bestDistSq = dSq;
+                    bestStation = st;
+                }
+            }
+
+            if (bestStation == null)
+                return false;
+
+            _vehiclesSeekingRepairStation[vehPtr] = bestStation;
+            Vector3 stationPos = bestStation.transform.position;
+            float stationRadius = Mathf.Max(5.0f, bestStation.radius);
+            float distToStation = Vector3.Distance(vehPos, stationPos);
+
+            if (distToStation <= stationRadius * 0.85f)
+            {
+                // Parked inside the RepairStation circle: hold brake while RepairStation.Update repairs parts & refills turrets!
+                float holdUntil = now + 1.0f;
+                if (aiVeh.resumeDriveTime < holdUntil)
+                    aiVeh.resumeDriveTime = holdUntil;
+                return true;
+            }
+
+            Squad crewSq = aiVeh.squadInside;
+            if (crewSq != null && !crewSq.IsPlayerInSquad())
+            {
+                if (crewSq.order == Order.follow)
+                    crewSq.order = Order.defend;
+                crewSq.moveOrderPosition = stationPos;
+                crewSq.moveOrderRadius = Mathf.Max(4.0f, stationRadius * 0.65f);
+            }
+
+            if ((aiVeh.setVehicleDestination - stationPos).sqrMagnitude > 4.0f * 4.0f)
+            {
+                aiVeh.setVehicleDestination = stationPos;
+                aiVeh.rerollDestination = false;
+                RecordCombinedArmsAssist(
+                    vehPtr,
+                    now,
+                    "RepairStation",
+                    $"{myFaction ?? "AI"} vehicle routing to RepairStation ({distToStation:F0}m away, dmg:{maxPartDamage * 100f:F0}%, dryAmmo:{outOfTurretAmmo}).");
+            }
+
+            return true;
+        }
+
         private static void TrySteerVehicleTowardKnownThreat(AIVehicle aiVeh, Vehicle veh, float now)
         {
             if (aiVeh == null || veh == null || veh.Pointer == IntPtr.Zero || veh.transform == null)
+                return;
+
+            if (TryRouteVehicleToRepairStation(aiVeh, veh, now))
                 return;
 
             if (!AiCore.IsLocallyOwnedVehicle(veh) ||
@@ -3217,6 +3401,19 @@ namespace EasyRed2HumanAI
                     Vehicle veh = __instance.veh;
                     if (veh == null || veh.Pointer == IntPtr.Zero)
                         return;
+
+                    if (_vehiclesSeekingRepairStation.TryGetValue(veh.Pointer, out RepairStation st) &&
+                        st != null && st.Pointer != IntPtr.Zero && st.transform != null && veh.transform != null)
+                    {
+                        float r = Mathf.Max(5.0f, st.radius) * 0.85f;
+                        if ((veh.transform.position - st.transform.position).sqrMagnitude <= r * r)
+                        {
+                            float pauseUntil = Time.time + 0.35f;
+                            if (__instance.resumeDriveTime < pauseUntil)
+                                __instance.resumeDriveTime = pauseUntil;
+                            return;
+                        }
+                    }
 
                     bool isReversing = __instance.going_in_retro;
                     if (!isReversing && (__instance.path == null || __instance.path.NodesCount <= 0 || __instance.stopToShoot))
