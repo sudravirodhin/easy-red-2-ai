@@ -629,16 +629,30 @@ namespace EasyRed2HumanAI
             }
         }
 
-        internal static bool IsSafeToThrowGrenadeAt(Soldier thrower, Vector3 targetPos, float dist, float friendlySafeRadius = 9.5f)
+        internal static bool IsSafeToThrowGrenadeAt(Soldier thrower, Vector3 targetPos, float dist, float friendlySafeRadius = 11.5f)
         {
             if (thrower == null || thrower.transform == null)
                 return false;
 
             Vector3 myPos = thrower.transform.position;
+            if (dist <= 0.01f)
+            {
+                dist = Vector3.Distance(myPos, targetPos);
+            }
+
+            // Never throw lethal grenades at point-blank targets (< 8.5m) where blast radius endangers thrower and squadmates
+            if (dist < 8.5f)
+            {
+                VeteranAndTacticsPatches.FriendlyFirePrevented++;
+                return false;
+            }
 
             // Never throw grenades from indoors beneath a low ceiling (high risk of bouncing off window lintel/ceiling)
             if (AiCore.HasLowCeilingOverhead(myPos, 3.2f))
+            {
+                VeteranAndTacticsPatches.WallsBlocked++;
                 return false;
+            }
 
             // 1. Ensure throw arc is not blocked by an interior ceiling, window frame, or wall right in front of the thrower
             Vector3 throwOrigin = myPos + Vector3.up * 1.45f;
@@ -647,24 +661,50 @@ namespace EasyRed2HumanAI
             if (toArc.sqrMagnitude > 0.04f)
             {
                 Vector3 arcDir = toArc.normalized;
-                float checkLen = Mathf.Min(dist * 0.55f, 7.0f);
+                float checkLen = Mathf.Min(dist * 0.55f, 7.5f);
                 if (AiCore.IsDirectionBlockedByEnvironment(throwOrigin, arcDir, checkLen, thrower.transform.root))
+                {
+                    VeteranAndTacticsPatches.WallsBlocked++;
                     return false;
+                }
 
-                Vector3 highArcDir = (arcDir + Vector3.up * 0.32f).normalized;
-                if (AiCore.IsDirectionBlockedByEnvironment(throwOrigin, highArcDir, Mathf.Min(checkLen, 4.5f), thrower.transform.root))
+                Vector3 highArcDir = (arcDir + Vector3.up * 0.35f).normalized;
+                if (AiCore.IsDirectionBlockedByEnvironment(throwOrigin, highArcDir, Mathf.Min(checkLen, 5.0f), thrower.transform.root))
+                {
+                    VeteranAndTacticsPatches.WallsBlocked++;
                     return false;
+                }
             }
 
-            // 2. Ensure no friendly soldiers (or the player) are within the blast radius of the target position
+            // 2. Ensure no friendly soldiers (or the player) are within the blast radius or throw trajectory corridor
             string myFaction = thrower.faction;
-            float safeRadiusSq = friendlySafeRadius * friendlySafeRadius;
+            IntPtr throwerPtr = thrower.Pointer;
+            float aiSafeRadius = Mathf.Max(friendlySafeRadius, 11.5f);
+            float aiSafeRadiusSq = aiSafeRadius * aiSafeRadius;
+            float playerSafeRadius = Mathf.Max(friendlySafeRadius, 15.0f);
+            float playerSafeRadiusSq = playerSafeRadius * playerSafeRadius;
+            Vector3 throwDir = (targetPos - myPos) / Mathf.Max(dist, 0.1f);
 
             Soldier player = Soldier.CurrentControlledSoldierOrNull();
-            if (player != null && player.IsAlive && player.faction == myFaction && player.transform != null &&
-                (player.transform.position - targetPos).sqrMagnitude <= safeRadiusSq)
+            if (player != null && player.IsAlive && player.faction == myFaction && player.transform != null)
             {
-                return false;
+                Vector3 playerPos = player.transform.position;
+                if ((playerPos - targetPos).sqrMagnitude <= playerSafeRadiusSq)
+                {
+                    VeteranAndTacticsPatches.FriendlyFirePrevented++;
+                    return false;
+                }
+
+                float playerProj = Vector3.Dot(playerPos - myPos, throwDir);
+                if (playerProj > -1.5f && playerProj < dist + 4.0f)
+                {
+                    Vector3 closestOnArc = myPos + throwDir * Mathf.Clamp(playerProj, 0f, dist);
+                    if ((playerPos - closestOnArc).sqrMagnitude <= 5.5f * 5.5f)
+                    {
+                        VeteranAndTacticsPatches.FriendlyFirePrevented++;
+                        return false;
+                    }
+                }
             }
 
             var allSquads = Squad.AllSquads;
@@ -676,17 +716,32 @@ namespace EasyRed2HumanAI
                     if (sq == null || sq.units == null) continue;
                     Soldier leader = sq.Leader;
                     if (leader == null || leader.faction != myFaction || leader.transform == null) continue;
-                    if ((leader.transform.position - targetPos).sqrMagnitude > 48f * 48f) continue;
+                    if ((leader.transform.position - targetPos).sqrMagnitude > 52f * 52f) continue;
 
                     var units = sq.units;
                     int c = units.Count;
                     for (int i = 0; i < c; i++)
                     {
                         Soldier f = units[i];
-                        if (f != null && f.IsAlive && f.transform != null &&
-                            (f.transform.position - targetPos).sqrMagnitude <= safeRadiusSq)
+                        if (f == null || f.Pointer == throwerPtr || !f.IsAlive || f.transform == null)
+                            continue;
+
+                        Vector3 fPos = f.transform.position;
+                        if ((fPos - targetPos).sqrMagnitude <= aiSafeRadiusSq)
                         {
+                            VeteranAndTacticsPatches.FriendlyFirePrevented++;
                             return false;
+                        }
+
+                        float fProj = Vector3.Dot(fPos - myPos, throwDir);
+                        if (fProj > 1.0f && fProj < dist + 2.0f)
+                        {
+                            Vector3 closestOnArc = myPos + throwDir * Mathf.Clamp(fProj, 0f, dist);
+                            if ((fPos - closestOnArc).sqrMagnitude <= 3.5f * 3.5f)
+                            {
+                                VeteranAndTacticsPatches.FriendlyFirePrevented++;
+                                return false;
+                            }
                         }
                     }
                 }
@@ -734,15 +789,21 @@ namespace EasyRed2HumanAI
                 return;
 
             Vector3 myPos = soldier.transform.position;
+            Vector3 liveTargetPos = targetSoldier.GetCenterOfUnit();
+            if ((liveTargetPos - lastInfo.LastSeenPos).sqrMagnitude > 7.0f * 7.0f)
+                return;
+
             float dist = Vector3.Distance(myPos, lastInfo.LastSeenPos);
-            if (dist < 10.0f || dist > 30.0f)
+            float liveDist = Vector3.Distance(myPos, liveTargetPos);
+            if (dist < 10.0f || dist > 30.0f || liveDist < 10.0f || liveDist > 30.0f)
                 return;
 
             VirtualItem fragItem = soldier.inventory.FindItemOfType<VirtualGrenade>();
-            if (fragItem == null || dist > soldier.GetGrenadeThrowRange(fragItem))
+            if (fragItem == null || Mathf.Max(dist, liveDist) > soldier.GetGrenadeThrowRange(fragItem))
                 return;
 
-            if (!IsSafeToThrowGrenadeAt(soldier, lastInfo.LastSeenPos, dist, 9.5f))
+            if (!IsSafeToThrowGrenadeAt(soldier, liveTargetPos, liveDist, 11.5f) ||
+                !IsSafeToThrowGrenadeAt(soldier, lastInfo.LastSeenPos, dist, 11.5f))
                 return;
 
             if (!AiCore.TryConsumeBotRpcBudget(0.45f))

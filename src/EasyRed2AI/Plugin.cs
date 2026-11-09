@@ -64,6 +64,7 @@ namespace EasyRed2HumanAI
             SafePatch(typeof(VeteranAndTacticsPatches.Squad_SendUnitsToCovers_Patch));
             SafePatch(typeof(VeteranAndTacticsPatches.Squad_GetCoveredPositionInArea_Patch));
             SafePatch(typeof(VeteranAndTacticsPatches.Soldier_CheckAndOpenDoor_Patch));
+            SafePatch(typeof(VeteranAndTacticsPatches.Soldier_Throw_Patch));
             SafePatch(typeof(VeteranAndTacticsPatches.Explosion_CreateExplosion_Patch));
             SafePatch(typeof(VeteranAndTacticsPatches.Bullet_BulletDamage_Patch));
             SafePatch(typeof(VeteranAndTacticsPatches.DeathPanel_ShowDeath_Patch));

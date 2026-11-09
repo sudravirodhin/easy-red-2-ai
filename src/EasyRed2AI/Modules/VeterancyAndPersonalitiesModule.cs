@@ -620,6 +620,55 @@ namespace EasyRed2HumanAI
             }
         }
 
+        [HarmonyPatch(typeof(Soldier), nameof(Soldier.Throw))]
+        public static class Soldier_Throw_Patch
+        {
+            public static bool Prefix(Soldier __instance, VirtualItem __0, Spottable __1)
+            {
+                try
+                {
+                    if (!VisionConfig.EnableMod.Value ||
+                        VisionConfig.FriendlyFireConeDegrees.Value <= 0.1f ||
+                        __instance == null ||
+                        __instance.Pointer == IntPtr.Zero ||
+                        !__instance.IsAI() ||
+                        __instance.IsPlayer() ||
+                        __instance.transform == null)
+                    {
+                        return true;
+                    }
+
+                    // Allow non-lethal smoke grenades to be thrown near friendlies
+                    if (__0 == null || __0.TryCast<VirtualSmokeGrenade>() != null)
+                    {
+                        return true;
+                    }
+
+                    if (__1 == null || __1.Pointer == IntPtr.Zero)
+                    {
+                        __instance.throw_end_time = Time.time + 3.0f;
+                        return false;
+                    }
+
+                    Vector3 targetPos = __1.GetCenterOfUnit();
+                    float dist = Vector3.Distance(__instance.transform.position, targetPos);
+                    if (!IsSafeToThrowGrenadeAt(__instance, targetPos, dist, 11.5f))
+                    {
+                        __instance.throw_end_time = Time.time + 3.0f;
+                        if (VisionConfig.DebugLogging.Value)
+                        {
+                            AiCore.LogDebug(
+                                "GrenadeFFBlocked",
+                                $"Blocked danger-close lethal grenade throw by {__instance.faction} soldier ({dist:F0}m).");
+                        }
+                        return false;
+                    }
+                }
+                catch { }
+                return true;
+            }
+        }
+
         [HarmonyPatch(typeof(AIPlane), nameof(AIPlane.Update))]
         public static class AIPlane_Update_Patch
         {
