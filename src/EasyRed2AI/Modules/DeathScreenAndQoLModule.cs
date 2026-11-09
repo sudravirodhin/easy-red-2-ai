@@ -597,21 +597,29 @@ namespace EasyRed2HumanAI
         [HarmonyPatch(typeof(Bullet), nameof(Bullet.BulletDamage))]
         public static class Bullet_BulletDamage_Patch
         {
-            public static void Prefix(ImpactSpecifier __0, BulletData __1, Vector3 __2, int __3, Soldier __4)
+            public static bool Prefix(
+                ImpactSpecifier __0,
+                BulletData __1,
+                Vector3 __2,
+                int __3,
+                Soldier __4,
+                ref Creature __result)
             {
                 try
                 {
-                    if (!VisionConfig.EnableMod.Value || !VisionConfig.EnableDeathScreenAttribution.Value || __0 == null)
-                        return;
+                    if (!VisionConfig.EnableMod.Value || __0 == null)
+                        return true;
 
                     Soldier victim = null;
                     string hitDetail = "Torso";
+                    bool isDirectBodyOrHelmetHit = false;
 
                     BodyPart bp = __0.TryCast<BodyPart>();
                     if (bp != null && bp.unit != null)
                     {
                         victim = bp.unit.TryCast<Soldier>();
                         hitDetail = FormatBodyPart(bp.bodyPart);
+                        isDirectBodyOrHelmetHit = true;
                     }
                     else
                     {
@@ -620,6 +628,7 @@ namespace EasyRed2HumanAI
                         {
                             victim = helmet.User;
                             hitDetail = "Headshot (Helmet)";
+                            isDirectBodyOrHelmetHit = true;
                         }
                         else
                         {
@@ -639,8 +648,33 @@ namespace EasyRed2HumanAI
                         }
                     }
 
-                    if (victim == null || !IsPlayerCharacter(victim))
-                        return;
+                    // Protect pilots seated inside an intact, non-disabled airplane from being one-tapped
+                    // directly in their BodyPart/Helmet collider by small-arms/machine-gun rounds (< 18mm).
+                    if (isDirectBodyOrHelmetHit &&
+                        victim != null &&
+                        victim.Pointer != IntPtr.Zero &&
+                        victim.IsOnVehicle() &&
+                        __1 != null &&
+                        !__1.IsHe() &&
+                        !__1.IsFlak() &&
+                        __1.caliber < 18f &&
+                        string.IsNullOrEmpty(_activeExplosionWeaponName))
+                    {
+                        Vehicle victimVeh = victim.GetCurrentVehicle();
+                        if (victimVeh != null &&
+                            victimVeh.Pointer != IntPtr.Zero &&
+                            victimVeh.IsAirVehicle() &&
+                            !victimVeh.IsCoverDestroyed() &&
+                            !victimVeh.IsDisabled())
+                        {
+                            AirplanePilotMgHitsBlockedCount++;
+                            __result = null;
+                            return false;
+                        }
+                    }
+
+                    if (!VisionConfig.EnableDeathScreenAttribution.Value || victim == null || !IsPlayerCharacter(victim))
+                        return true;
 
                     bool fromExplosion = !string.IsNullOrEmpty(_activeExplosionWeaponName);
                     string expWeaponName = _activeExplosionWeaponName;
@@ -704,6 +738,8 @@ namespace EasyRed2HumanAI
                     };
                 }
                 catch { }
+
+                return true;
             }
         }
 

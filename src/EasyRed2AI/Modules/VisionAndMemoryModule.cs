@@ -213,6 +213,25 @@ namespace EasyRed2HumanAI
                     if (!VisionConfig.EnableMod.Value || __instance == null || __0 == null)
                         return true;
 
+                    if (!AiCore.IsValidAliveSpottable(__0))
+                    {
+                        __result = false;
+                        return false;
+                    }
+
+                    Soldier targetSoldier = __0.TryCast<Soldier>();
+                    if (targetSoldier != null && targetSoldier.IsOnVehicle())
+                    {
+                        Vehicle targetVeh = targetSoldier.GetCurrentVehicle();
+                        if (targetVeh != null && targetVeh.IsAirVehicle())
+                        {
+                            // Never allow ground infantry or turrets to target a pilot's Soldier body inside an aircraft cockpit;
+                            // they must target the Airplane vehicle itself.
+                            __result = false;
+                            return false;
+                        }
+                    }
+
                     TotalSightChecks++;
 
                     Soldier observer = __instance.TryCast<Soldier>();
@@ -252,7 +271,6 @@ namespace EasyRed2HumanAI
                                                  !observer.aiController.IsMoving();
                     bool hasActiveThreatSector = isStationaryOverwatch &&
                                                  VeteranAndTacticsPatches.HasActiveThreatSectorContact(observer);
-                    Soldier targetSoldier = __0.TryCast<Soldier>();
                     bool isQuietFlanker = targetSoldier != null &&
                                           !targetSoldier.IsSpotted &&
                                           !HasFiredRecently(targetSoldier, 4.0f);
@@ -346,8 +364,24 @@ namespace EasyRed2HumanAI
                         return true;
 
                     Turret turret = __instance.turret;
-                    if (turret == null)
-                        return true;
+                    if (turret == null || !AiCore.IsValidAliveSpottable(__0))
+                    {
+                        __result = false;
+                        return false;
+                    }
+
+                    Soldier targetSoldier = __0.TryCast<Soldier>();
+                    if (targetSoldier != null && targetSoldier.IsOnVehicle())
+                    {
+                        Vehicle targetVeh = targetSoldier.GetCurrentVehicle();
+                        if (targetVeh != null && targetVeh.IsAirVehicle())
+                        {
+                            // Never allow ground/vehicle turrets to target the pilot Soldier inside an airplane cockpit;
+                            // turrets must target the Airplane vehicle itself (fixes pilot killed by "Machine Gun").
+                            __result = false;
+                            return false;
+                        }
+                    }
 
                     TotalSightChecks++;
 
@@ -521,11 +555,19 @@ namespace EasyRed2HumanAI
         // =====================================================================
         internal static void RecordAndBroadcastVisualContact(Soldier spotter, Spottable visibleEnemy)
         {
-            if (spotter == null || spotter.Pointer == IntPtr.Zero || visibleEnemy == null || visibleEnemy.Pointer == IntPtr.Zero)
+            if (spotter == null || spotter.Pointer == IntPtr.Zero || !AiCore.IsValidAliveSpottable(visibleEnemy))
                 return;
 
             if (visibleEnemy.IsAirVehicle())
                 return;
+
+            Soldier enemySoldier = visibleEnemy.TryCast<Soldier>();
+            if (enemySoldier != null && enemySoldier.IsOnVehicle())
+            {
+                Vehicle ev = enemySoldier.GetCurrentVehicle();
+                if (ev != null && ev.IsAirVehicle())
+                    return;
+            }
 
             IntPtr spotterPtr = spotter.Pointer;
             Vector3 enemyPos = visibleEnemy.GetCenterOfUnit();
@@ -548,7 +590,8 @@ namespace EasyRed2HumanAI
             if (_nextSpotterCalloutTime.TryGetValue(spotterPtr, out float nextCallout) && now < nextCallout)
                 return;
 
-            _nextSpotterCalloutTime[spotterPtr] = now + 1.65f;
+            bool isMpWithPlayers = AiCore.IsMultiplayerWithRemotePlayers();
+            _nextSpotterCalloutTime[spotterPtr] = now + (isMpWithPlayers ? 4.25f : 2.50f);
 
             Vector3 spotterPos = spotter.transform.position;
             string myFaction = spotter.faction;
@@ -580,40 +623,45 @@ namespace EasyRed2HumanAI
                 }
             }
 
-            var allSquads = Squad.AllSquads;
-            if (allSquads != null)
+            // In multiplayer with remote players or when the spotter already alerted squadmates,
+            // skip scanning Squad.AllSquads (avoids IL2CPP dictionary enumerator overhead across 150+ bots).
+            if (!isMpWithPlayers && sharedWith == 0)
             {
-                foreach (var kvp in allSquads)
+                var allSquads = Squad.AllSquads;
+                if (allSquads != null)
                 {
-                    Squad sq = kvp.Value;
-                    if (sq == null || sq == mySquad || sq.units == null)
-                        continue;
-
-                    Soldier leader = sq.Leader;
-                    if (leader == null || leader.faction != myFaction)
-                        continue;
-
-                    if ((leader.transform.position - spotterPos).sqrMagnitude > 36f * 36f)
-                        continue;
-
-                    var units = sq.units;
-                    int c = units.Count;
-                    for (int i = 0; i < c; i++)
+                    foreach (var kvp in allSquads)
                     {
-                        Soldier ally = units[i];
-                        if (ally == null || !ally.IsAlive || ally.Pointer == spotterPtr || ally.IsPlayer() || ally.IsOnVehicle())
+                        Squad sq = kvp.Value;
+                        if (sq == null || sq == mySquad || sq.units == null)
                             continue;
 
-                        if ((ally.transform.position - spotterPos).sqrMagnitude <= calloutRadiusSq)
+                        Soldier leader = sq.Leader;
+                        if (leader == null || leader.faction != myFaction)
+                            continue;
+
+                        if ((leader.transform.position - spotterPos).sqrMagnitude > 36f * 36f)
+                            continue;
+
+                        var units = sq.units;
+                        int c = units.Count;
+                        for (int i = 0; i < c; i++)
                         {
-                            IntPtr allyPtr = ally.Pointer;
-                            _localCalloutCache[allyPtr] = new LocalCalloutRecord
+                            Soldier ally = units[i];
+                            if (ally == null || !ally.IsAlive || ally.Pointer == spotterPtr || ally.IsPlayer() || ally.IsOnVehicle())
+                                continue;
+
+                            if ((ally.transform.position - spotterPos).sqrMagnitude <= calloutRadiusSq)
                             {
-                                EnemyPos = enemyPos,
-                                ExpireTime = now + 5.5f
-                            };
-                            AiCore.RefreshAlertnessWithoutRaisingGun(ally, 12f);
-                            sharedWith++;
+                                IntPtr allyPtr = ally.Pointer;
+                                _localCalloutCache[allyPtr] = new LocalCalloutRecord
+                                {
+                                    EnemyPos = enemyPos,
+                                    ExpireTime = now + 5.5f
+                                };
+                                AiCore.RefreshAlertnessWithoutRaisingGun(ally, 12f);
+                                sharedWith++;
+                            }
                         }
                     }
                 }

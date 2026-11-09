@@ -16,10 +16,16 @@ namespace EasyRed2HumanAI
     {
         private static int _cachedSolidEnvMask;
         private static float _nextAllowedBotRpcTime;
+        private static float _nextRoomCheckTime;
+        private static int _cachedRoomPlayerCount = 1;
+        private static int _lastHeavyWorkFrame = -1;
+        private static readonly List<IntPtr> _sharedPruneBuffer = new List<IntPtr>(256);
         private static readonly Dictionary<IntPtr, Vehicle> _turretVehicleCache = new Dictionary<IntPtr, Vehicle>(64);
         private static readonly Dictionary<long, bool> _ceilingCache = new Dictionary<long, bool>(512);
         private static readonly Dictionary<long, bool> _bridgeCellCache = new Dictionary<long, bool>(512);
         private static readonly Dictionary<string, float> _debugLogCooldowns = new Dictionary<string, float>(32);
+
+        public static int TotalPingGovernorSkippedCycles;
 
         public static void LogDebug(string category, string message, float minInterval = 2.0f)
         {
@@ -32,6 +38,98 @@ namespace EasyRed2HumanAI
 
             _debugLogCooldowns[category] = now + minInterval;
             Plugin.Log.LogInfo($"[Diag:{category}] {message}");
+        }
+
+        public static int GetConnectedPlayerCount()
+        {
+            float now = Time.unscaledTime;
+            if (now < _nextRoomCheckTime)
+                return _cachedRoomPlayerCount;
+
+            _nextRoomCheckTime = now + 1.0f;
+            try
+            {
+                if (PhotonNetwork.InRoom && PhotonNetwork.CurrentRoom != null)
+                {
+                    _cachedRoomPlayerCount = Mathf.Max(1, (int)PhotonNetwork.CurrentRoom.PlayerCount);
+                }
+                else
+                {
+                    _cachedRoomPlayerCount = 1;
+                }
+            }
+            catch
+            {
+                _cachedRoomPlayerCount = 1;
+            }
+            return _cachedRoomPlayerCount;
+        }
+
+        public static bool IsMultiplayerWithRemotePlayers()
+        {
+            return GetConnectedPlayerCount() > 1;
+        }
+
+        /// <summary>
+        /// Returns true when the current frame time is elevated and bot brain cycles should
+        /// yield/coast for a cycle so human player ping and Photon packet delivery never spike.
+        /// </summary>
+        public static bool ShouldSkipBotCycleForNetworkPing()
+        {
+            float dt = Time.unscaledDeltaTime;
+            int players = GetConnectedPlayerCount();
+            float threshold = players >= 6 ? 0.0168f : (players > 1 ? 0.0178f : 0.0250f);
+            if (dt > threshold)
+            {
+                TotalPingGovernorSkippedCycles++;
+                return true;
+            }
+            return false;
+        }
+
+        /// <summary>
+        /// Ensures at most ONE global director pass (Macro Director, TeamNet GOAP Coordinator,
+        /// or Dictionary Pruning) executes on any single frame, and never on a slow frame.
+        /// </summary>
+        public static bool TryClaimHeavyFrameWorkSlot()
+        {
+            if (ShouldSkipBotCycleForNetworkPing())
+                return false;
+
+            int frame = Time.frameCount;
+            if (_lastHeavyWorkFrame == frame)
+                return false;
+
+            _lastHeavyWorkFrame = frame;
+            return true;
+        }
+
+        /// <summary>
+        /// Validates that an IL2CPP <see cref="Spottable"/> interface wrapper still points to an
+        /// alive, non-destroyed Unity <see cref="Component"/> with a valid native transform.
+        /// Prevents native NullReferenceExceptions in <c>Soldier.GetCenterOfUnit</c> / <c>TurretAI.CanSee</c>.
+        /// </summary>
+        public static bool IsValidAliveSpottable(Spottable s)
+        {
+            if (s == null || s.Pointer == IntPtr.Zero)
+                return false;
+
+            try
+            {
+                Component comp = s.TryCast<Component>();
+                if (comp == null || comp.transform == null)
+                    return false;
+
+                Creature c = s.TryCast<Creature>();
+                if (c != null && !c.IsAlive)
+                    return false;
+
+                return true;
+            }
+            catch
+            {
+                return false;
+            }
         }
 
         public static bool IsMasterClient()
@@ -69,6 +167,9 @@ namespace EasyRed2HumanAI
 
         public static bool TryConsumeBotRpcBudget(float minInterval = 0.35f)
         {
+            if (ShouldSkipBotCycleForNetworkPing())
+                return false;
+
             float now = Time.time;
             if (_nextAllowedBotRpcTime > now + 2.5f)
             {
@@ -78,7 +179,13 @@ namespace EasyRed2HumanAI
             if (now < _nextAllowedBotRpcTime)
                 return false;
 
-            _nextAllowedBotRpcTime = now + Mathf.Clamp(minInterval, 0.05f, 2.0f);
+            int players = GetConnectedPlayerCount();
+            if (players > 1)
+            {
+                minInterval *= (1.0f + Mathf.Min(players - 1, 12) * 0.25f);
+            }
+
+            _nextAllowedBotRpcTime = now + Mathf.Clamp(minInterval, 0.05f, 3.0f);
             return true;
         }
 
@@ -305,16 +412,17 @@ namespace EasyRed2HumanAI
             if (dict == null || dict.Count == 0)
                 return;
 
-            var remove = new List<IntPtr>();
+            _sharedPruneBuffer.Clear();
             foreach (var k in dict.Keys)
             {
                 if (!alive.Contains(k))
-                    remove.Add(k);
+                    _sharedPruneBuffer.Add(k);
             }
-            for (int i = 0; i < remove.Count; i++)
+            for (int i = 0; i < _sharedPruneBuffer.Count; i++)
             {
-                dict.Remove(remove[i]);
+                dict.Remove(_sharedPruneBuffer[i]);
             }
+            _sharedPruneBuffer.Clear();
         }
 
         public static void PruneSet(HashSet<IntPtr> set, HashSet<IntPtr> alive)
@@ -322,16 +430,17 @@ namespace EasyRed2HumanAI
             if (set == null || set.Count == 0)
                 return;
 
-            var remove = new List<IntPtr>();
+            _sharedPruneBuffer.Clear();
             foreach (var k in set)
             {
                 if (!alive.Contains(k))
-                    remove.Add(k);
+                    _sharedPruneBuffer.Add(k);
             }
-            for (int i = 0; i < remove.Count; i++)
+            for (int i = 0; i < _sharedPruneBuffer.Count; i++)
             {
-                set.Remove(remove[i]);
+                set.Remove(_sharedPruneBuffer[i]);
             }
+            _sharedPruneBuffer.Clear();
         }
 
         public static int TotalAdaptiveAiExtraTicks;
@@ -343,6 +452,17 @@ namespace EasyRed2HumanAI
             _bridgeCellCache.Clear();
             _nextAllowedBotRpcTime = 0f;
             TotalAdaptiveAiExtraTicks = 0;
+            TotalPingGovernorSkippedCycles = 0;
+        }
+
+        public static void PruneSpatialCachesIfOversized()
+        {
+            if (_turretVehicleCache.Count > 256)
+                _turretVehicleCache.Clear();
+            if (_ceilingCache.Count > 4096)
+                _ceilingCache.Clear();
+            if (_bridgeCellCache.Count > 4096)
+                _bridgeCellCache.Clear();
         }
 
         // =====================================================================
@@ -366,7 +486,10 @@ namespace EasyRed2HumanAI
                 if (!VisionConfig.EnableMod.Value || !VisionConfig.EnableAdaptiveAiTickScaling.Value || Time.timeScale <= 0.01f)
                     return;
 
-                // Frame-time guard: never add extra ticks on frames slower than 25ms (< 40 FPS)
+                // Prioritize multiplayer ping & frame-time stability: never add extra ticks on busy frames
+                if (ShouldSkipBotCycleForNetworkPing())
+                    return;
+
                 float dt = Time.unscaledDeltaTime;
                 if (dt > 0.025f)
                     return;
@@ -396,21 +519,41 @@ namespace EasyRed2HumanAI
                         }
                     }
 
-                    // Scale active foot-soldier brain ticks per frame with battlefield population:
-                    //   <= 45 units : 1 active foot soldier / frame (~0.5s full cycle at 60 FPS)
-                    //   46..95 units: 2 active foot soldiers / frame (~0.6s full cycle at 60 FPS)
-                    //   96+ units   : 3 active foot soldiers / frame (~0.65s full cycle at 60 FPS)
-                    int targetFootTicks = count > 95 ? 3 : (count > 45 ? 2 : 1);
-                    if (dt > 0.019f && targetFootTicks > 2)
+                    int players = GetConnectedPlayerCount();
+                    int targetFootTicks;
+                    int maxScanSteps;
+
+                    if (players >= 4)
                     {
-                        targetFootTicks = 2;
+                        // Large multiplayer lobby (4-10+ players): strictly 1 active foot tick per frame
+                        // so Photon outgoing serialization queues never contend with player ping.
+                        targetFootTicks = 1;
+                        maxScanSteps = Mathf.Min(count - 1, 3);
+                    }
+                    else if (players > 1)
+                    {
+                        // Small Co-op session (2-3 players): at most 2 ticks and only when frame time < 14.5ms
+                        targetFootTicks = (count > 60 && dt < 0.0145f) ? 2 : 1;
+                        maxScanSteps = Mathf.Min(count - 1, 4);
+                    }
+                    else
+                    {
+                        // Singleplayer:
+                        //   <= 45 units : 1 active foot soldier / frame (~0.5s full cycle at 60 FPS)
+                        //   46..95 units: 2 active foot soldiers / frame (~0.6s full cycle at 60 FPS)
+                        //   96+ units   : 3 active foot soldiers / frame (~0.65s full cycle at 60 FPS)
+                        targetFootTicks = count > 95 ? 3 : (count > 45 ? 2 : 1);
+                        if (dt > 0.019f && targetFootTicks > 2)
+                        {
+                            targetFootTicks = 2;
+                        }
+                        maxScanSteps = Mathf.Min(count - 1, 8);
                     }
 
                     if (activeFootSoldiersTicked >= targetFootTicks)
                         return;
 
                     _isRunningExtraTicks = true;
-                    int maxScanSteps = Mathf.Min(count - 1, 8);
                     int scanned = 0;
 
                     while (activeFootSoldiersTicked < targetFootTicks && scanned < maxScanSteps)

@@ -42,6 +42,10 @@ namespace EasyRed2HumanAI
         public static int PlaneAudioLoopsDesyncedCount { get; private set; }
         public static int ThinCoverPenetrationsCount { get; private set; }
         public static int ParachutesDriftedCount { get; private set; }
+        public static int AircraftTopAttackPenetrationsAssistedCount { get; private set; }
+        public static int AirplanePilotMgHitsBlockedCount { get; private set; }
+
+        internal static bool SuppressAirplanePilotMgSpallDamage;
 
         public static void ClearBallisticsCaches()
         {
@@ -156,9 +160,48 @@ namespace EasyRed2HumanAI
         {
             private const int ImpactUnknownOrBlocked = -1;
 
-            public static void Prefix(BulletInstance __instance, BulletData bulletData)
+            public static void Prefix(
+                BulletInstance __instance,
+                Vector3 hitDirection,
+                BulletData bulletData,
+                RaycastHit hit)
             {
                 VeteranAndTacticsPatches.BeginProjectileImpactContext(__instance, bulletData);
+
+                try
+                {
+                    if (!VisionConfig.EnableMod.Value || __instance == null || bulletData == null)
+                        return;
+
+                    // Prevent diving aircraft AP cannons/HMGs from falsely ricocheting off simplified
+                    // tank hull/turret box colliders before VehicleDamagablePart.TryPenetrateArmor runs.
+                    if (__instance.canRicochet && bulletData.mmPenetration >= 12)
+                    {
+                        bool isAirOrTopAttack =
+                            ((__instance.startPosition.y - hit.point.y) >= 20.0f && hitDirection.y <= -0.15f);
+
+                        if (!isAirOrTopAttack)
+                        {
+                            Soldier shooter = __instance.shooter;
+                            if (shooter != null && shooter.Pointer != IntPtr.Zero && shooter.IsOnVehicle())
+                            {
+                                Vehicle shooterVeh = shooter.GetCurrentVehicle();
+                                if (shooterVeh != null && shooterVeh.Pointer != IntPtr.Zero && shooterVeh.IsAirVehicle())
+                                    isAirOrTopAttack = true;
+                            }
+                        }
+
+                        if (isAirOrTopAttack)
+                        {
+                            Collider col = hit.collider;
+                            if (col != null && col.Pointer != IntPtr.Zero && col.GetComponent<VehicleDamagablePart>() != null)
+                            {
+                                __instance.canRicochet = false;
+                            }
+                        }
+                    }
+                }
+                catch { }
             }
 
             public static void Postfix(
@@ -306,6 +349,117 @@ namespace EasyRed2HumanAI
                 catch { }
 
                 return ImpactUnknownOrBlocked;
+            }
+        }
+
+        // ============================================================================
+        // 2B. AIRCRAFT AP TOP-ATTACK PENETRATION & COCKPIT PILOT MG PROTECTION
+        // - Normalizes top-down roof impact angles and models thinner tank roof/engine-deck
+        //   armor (plus diving aircraft kinetic energy) when aircraft AP weapons strike ground armor.
+        // - Prevents small-caliber machine gun rounds (< 18mm, non-HE, non-Flak) that pierce
+        //   an intact airplane's 1mm fuselage from rolling instant-kill spall damage onto the pilot.
+        // ============================================================================
+        [HarmonyPatch(typeof(VehicleDamagablePart), nameof(VehicleDamagablePart.TryPenetrateArmor))]
+        public static class VehicleDamagablePart_TryPenetrateArmor_Patch
+        {
+            public struct ArmorPenetrationPatchState
+            {
+                public float SavedArmorThickness;
+                public bool ModifiedArmorThickness;
+                public bool SuppressedPilotMgSpall;
+            }
+
+            public static void Prefix(
+                VehicleDamagablePart __instance,
+                BulletData __0,
+                Vector3 __1,
+                Vector3 __2,
+                Vector3 __3,
+                ref float __4,
+                Soldier __5,
+                out ArmorPenetrationPatchState __state)
+            {
+                __state = default;
+
+                try
+                {
+                    if (!VisionConfig.EnableMod.Value || __instance == null || __instance.Pointer == IntPtr.Zero || __0 == null)
+                        return;
+
+                    Vehicle rootVeh = __instance.rootVeh;
+                    bool targetIsAir = rootVeh != null && rootVeh.Pointer != IntPtr.Zero && rootVeh.IsAirVehicle();
+
+                    // Case 1: Intact airplane hit by a small-arms / machine-gun round (< 18mm, non-HE, non-Flak).
+                    // Allow the round to damage the airplane's fuselage/wing/engine HP normally, but suppress the
+                    // Random.Range(10, 150) seated-crew spall roll so the pilot isn't sniped out of an intact plane.
+                    if (targetIsAir)
+                    {
+                        if (!rootVeh.IsCoverDestroyed() &&
+                            !rootVeh.IsDisabled() &&
+                            !__0.IsHe() &&
+                            !__0.IsFlak() &&
+                            __0.caliber < 18f)
+                        {
+                            SuppressAirplanePilotMgSpallDamage = true;
+                            __state.SuppressedPilotMgSpall = true;
+                            AirplanePilotMgHitsBlockedCount++;
+                        }
+                        return;
+                    }
+
+                    // Case 2: Ground vehicle / tank hit by an aircraft AP weapon or steep top-down dive attack.
+                    if (__0.mmPenetration >= 12 && __instance.armorThickness > 8f)
+                    {
+                        bool isAirOrTopAttack = ((__1.y - __2.y) >= 20.0f && __3.y <= -0.15f);
+                        if (!isAirOrTopAttack && __5 != null && __5.Pointer != IntPtr.Zero && __5.IsOnVehicle())
+                        {
+                            Vehicle shooterVeh = __5.GetCurrentVehicle();
+                            if (shooterVeh != null && shooterVeh.Pointer != IntPtr.Zero && shooterVeh.IsAirVehicle())
+                                isAirOrTopAttack = true;
+                        }
+
+                        if (isAirOrTopAttack)
+                        {
+                            __state.SavedArmorThickness = __instance.armorThickness;
+                            __state.ModifiedArmorThickness = true;
+
+                            // Normalize obliquity for top-deck roof strikes and scale hull/turret box armor
+                            // to reflect thin WWII tank roof/engine-deck plating (12mm-25mm) + dive velocity energy.
+                            if (__4 > 15.0f)
+                                __4 = 15.0f;
+
+                            __instance.armorThickness = Mathf.Max(8.0f, __state.SavedArmorThickness * 0.45f);
+                            AircraftTopAttackPenetrationsAssistedCount++;
+                        }
+                    }
+                }
+                catch { }
+            }
+
+            public static void Postfix(VehicleDamagablePart __instance, ArmorPenetrationPatchState __state)
+            {
+                if (__state.SuppressedPilotMgSpall)
+                    SuppressAirplanePilotMgSpallDamage = false;
+
+                if (__state.ModifiedArmorThickness && __instance != null && __instance.Pointer != IntPtr.Zero)
+                {
+                    try
+                    {
+                        __instance.armorThickness = __state.SavedArmorThickness;
+                    }
+                    catch { }
+                }
+            }
+        }
+
+        [HarmonyPatch(typeof(Soldier), nameof(Soldier.Damage), new Type[] { typeof(float) })]
+        public static class Soldier_Damage_Patch
+        {
+            public static bool Prefix()
+            {
+                if (SuppressAirplanePilotMgSpallDamage)
+                    return false;
+                return true;
             }
         }
 

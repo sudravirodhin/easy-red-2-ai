@@ -1119,22 +1119,39 @@ namespace EasyRed2HumanAI
             public struct SequentialUpdateState
             {
                 public bool WasBleeding;
+                public bool SkippedForPing;
                 public float PrevPointGunEndTime;
             }
 
-            public static void Prefix(SoldierAI __instance, out SequentialUpdateState __state)
+            public static bool Prefix(SoldierAI __instance, out SequentialUpdateState __state)
             {
                 __state = default;
                 try
                 {
                     if (!VisionConfig.EnableMod.Value || __instance == null)
-                        return;
+                        return true;
 
                     Soldier soldier = __instance.character;
                     if (!AiCore.IsLocallyOwnedBot(soldier) || soldier.IsOnVehicle())
-                        return;
+                        return true;
 
                     __state.PrevPointGunEndTime = soldier.pointGunEndTime;
+
+                    // Prioritize multiplayer ping & frame-time stability over bot brain cycles:
+                    // When hosting a room with elevated frame time, let bots coast/hang for a cycle.
+                    if (AiCore.ShouldSkipBotCycleForNetworkPing())
+                    {
+                        __state.SkippedForPing = true;
+                        if (AiCore.IsMultiplayerWithRemotePlayers() &&
+                            Time.unscaledDeltaTime > 0.0205f &&
+                            (__instance.visibleTarget == null || __instance.distFromTarget > 35f))
+                        {
+                            // Also skip native SoldierAI.SequentialUpdate (pathfinding/octree cover queries)
+                            // for bots not in close combat so the host frame finishes immediately.
+                            return false;
+                        }
+                        return true;
+                    }
 
                     if (VisionConfig.EnableThreatSectorConcentration.Value)
                     {
@@ -1181,6 +1198,7 @@ namespace EasyRed2HumanAI
                     }
                 }
                 catch { }
+                return true;
             }
 
             public static void Postfix(SoldierAI __instance, SequentialUpdateState __state)
@@ -1197,6 +1215,9 @@ namespace EasyRed2HumanAI
                     }
 
                     if (!VisionConfig.EnableMod.Value || soldier == null || !soldier.IsAlive || soldier.IsPlayer())
+                        return;
+
+                    if (__state.SkippedForPing || AiCore.ShouldSkipBotCycleForNetworkPing())
                         return;
 
                     IntPtr ptr = soldier.Pointer;

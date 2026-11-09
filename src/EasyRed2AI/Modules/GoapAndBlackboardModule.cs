@@ -774,6 +774,9 @@ namespace EasyRed2HumanAI
                     return;
             }
 
+            if (Photon.Pun.PhotonNetwork.InRoom && !AiCore.TryConsumeBotRpcBudget(0.55f))
+                return;
+
             if (squad != null && squad.Pointer != IntPtr.Zero)
             {
                 IntPtr sqPtr = squad.Pointer;
@@ -961,6 +964,9 @@ namespace EasyRed2HumanAI
         ///      squads swing left/right (`AttackFromSide`) rather than funneling down the same center line.
         /// Disconnected squads (no Radioman and >45m from friendly forces) cannot hear the Team Net and fight on their own.
         /// </summary>
+        private static readonly List<Squad> _reusableConnectedInfantrySquads = new List<Squad>(32);
+        private static readonly List<Squad> _reusableActiveVehicleAnvils = new List<Squad>(16);
+
         internal static void RunTeamNetGoapCoordinator(float now)
         {
             if (!VisionConfig.EnableTacticalGoapPlanner.Value)
@@ -970,8 +976,10 @@ namespace EasyRed2HumanAI
             if (allSquads == null || allSquads.Count < 1)
                 return;
 
-            var connectedInfantrySquads = new List<Squad>(24);
-            var activeVehicleAnvils = new List<Squad>(8);
+            var connectedInfantrySquads = _reusableConnectedInfantrySquads;
+            var activeVehicleAnvils = _reusableActiveVehicleAnvils;
+            connectedInfantrySquads.Clear();
+            activeVehicleAnvils.Clear();
 
             foreach (var kvp in allSquads)
             {

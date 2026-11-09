@@ -11,7 +11,7 @@ namespace EasyRed2HumanAI
     {
         public const string PluginGuid = "com.antigravity.easyred2.humanai";
         public const string PluginName = "Easy Red 2 - Battle Hardened";
-        public const string PluginVersion = "0.6.2";
+        public const string PluginVersion = "0.6.3";
 
         internal static Plugin Instance;
         internal static new ManualLogSource Log;
@@ -82,6 +82,9 @@ namespace EasyRed2HumanAI
             SafePatch(typeof(VeteranAndTacticsPatches.Vehicle_IsCoverAvailable_Patch));
             SafePatch(typeof(VeteranAndTacticsPatches.Vehicle_IsCoverOccupied_Patch));
             SafePatch(typeof(VeteranAndTacticsPatches.Vehicle_OnCoverReached_Patch));
+            SafePatch(typeof(VeteranAndTacticsPatches.AIVehicle_SwitchSeatAi_Patch));
+            SafePatch(typeof(VeteranAndTacticsPatches.PlayerController_SwitchSeat_Patch));
+            SafePatch(typeof(VeteranAndTacticsPatches.Vehicle_GetOnVehicle_Patch));
             SafePatch(typeof(VeteranAndTacticsPatches.AIVehicle_MovableVehicleRoutine_Patch));
             SafePatch(typeof(VeteranAndTacticsPatches.Vehicle_OnVehicleSuppressed_Patch));
             SafePatch(typeof(VeteranAndTacticsPatches.VehicleWithWheels_OnTriggerEnter_Patch));
@@ -96,6 +99,8 @@ namespace EasyRed2HumanAI
             // Bundle 6: Ballistics, Plane Audio De-Throbber & Battlefield Immersion
             SafePatch(typeof(VeteranAndTacticsPatches.VehiclePlane_UpdateMotorSound_Patch));
             SafePatch(typeof(VeteranAndTacticsPatches.BulletInstance_OnHit_Patch));
+            SafePatch(typeof(VeteranAndTacticsPatches.VehicleDamagablePart_TryPenetrateArmor_Patch));
+            SafePatch(typeof(VeteranAndTacticsPatches.Soldier_Damage_Patch));
             SafePatch(typeof(VeteranAndTacticsPatches.VehicleParachute_MoveDown_Patch));
             SafePatch(typeof(VeteranAndTacticsPatches.CinematicCameraGUI_EnableCinematicCamera_Patch));
 

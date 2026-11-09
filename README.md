@@ -1,4 +1,4 @@
-# Easy Red 2: Battle Hardened (`v0.6.2`)
+# Easy Red 2: Battle Hardened (`v0.6.3`)
 *3-Tier Tactical GOAP, Squad Blackboard, Radioman Intel Net, Veterancy, Personalities & Combined-Arms Overhaul*
 
 > [!IMPORTANT]
@@ -19,7 +19,7 @@ A comprehensive **BepInEx 6 (IL2CPP)** AI, combined-arms, and fairness overhaul 
 | **Target Branch** | Steam `public` (Default Branch) |
 | **Confirmed Game Version** | **Easy Red 2 — Game Build `921`** (Steam Build ID `26375879`, Unity `2022.3.62f3` IL2CPP x64) |
 | **Mod Loader** | **[BepInEx 6 Bleeding Edge (`BepInEx-Unity.IL2CPP-win-x64`, build `#791`+)](https://builds.bepinex.dev/projects/bepinex_be)** |
-| **Last Confirmed Test Date** | **November 8, 2026** (`2026-11-08`) |
+| **Last Confirmed Test Date** | **November 9, 2026** (`2026-11-09`) |
 
 ---
 
@@ -27,22 +27,22 @@ A comprehensive **BepInEx 6 (IL2CPP)** AI, combined-arms, and fairness overhaul 
 
 Download your preferred package from the **[Releases](https://github.com/sudravirodhin/easy-red-2-ai/releases)** page:
 
-### Option A: With BepInEx Included (`EasyRed2HumanAI-v0.6.2-with-BepInEx.zip`) — *Recommended for Fresh Installs*
+### Option A: With BepInEx Included (`EasyRed2HumanAI-v0.6.3-with-BepInEx.zip`) — *Recommended for Fresh Installs*
 Includes **[BepInEx 6.0.0-be.791 (Unity.IL2CPP-win-x64)](https://builds.bepinex.dev/projects/bepinex_be)**, the `.NET 6` runtime, Unity `2022.3.62` base libraries, pre-generated IL2CPP `interop` assemblies for Easy Red 2 Build `921`, and `EasyRed2HumanAI.dll` (with no other third-party mods).
 1. Open your **Easy Red 2** installation folder (e.g. `Steam\steamapps\common\Easy Red 2`, where `Easy Red 2.exe` is located).
-2. Extract all contents of `EasyRed2HumanAI-v0.6.2-with-BepInEx.zip` directly into the `Easy Red 2` folder.
+2. Extract all contents of `EasyRed2HumanAI-v0.6.3-with-BepInEx.zip` directly into the `Easy Red 2` folder.
 3. Launch the game!
 
-### Option B: Without BepInEx / Plugin Only (`EasyRed2HumanAI-v0.6.2-PluginOnly.zip` or `EasyRed2HumanAI.dll`)
+### Option B: Without BepInEx / Plugin Only (`EasyRed2HumanAI-v0.6.3-PluginOnly.zip` or `EasyRed2HumanAI.dll`)
 For users who already have **[BepInEx 6 Bleeding Edge (`BepInEx-Unity.IL2CPP-win-x64`)](https://builds.bepinex.dev/projects/bepinex_be)** installed:
-1. Download `EasyRed2HumanAI-v0.6.2-PluginOnly.zip` (or `EasyRed2HumanAI.dll` directly).
+1. Download `EasyRed2HumanAI-v0.6.3-PluginOnly.zip` (or `EasyRed2HumanAI.dll` directly).
 2. Place `EasyRed2HumanAI.dll` into:
    ```text
    Easy Red 2\BepInEx\plugins\EasyRed2HumanAI.dll
    ```
 
 ### Switching to Vanilla or Uninstalling (`Uninstall-BepInEx-Mod.bat`)
-Included in `EasyRed2HumanAI-v0.6.2-with-BepInEx.zip` (and in the root of this repository) is **[`Uninstall-BepInEx-Mod.bat`](Uninstall-BepInEx-Mod.bat)**. Double-click it inside your `Easy Red 2` folder when the game is closed to:
+Included in `EasyRed2HumanAI-v0.6.3-with-BepInEx.zip` (and in the root of this repository) is **[`Uninstall-BepInEx-Mod.bat`](Uninstall-BepInEx-Mod.bat)**. Double-click it inside your `Easy Red 2` folder when the game is closed to:
 * **`[1] Play Vanilla Temporarily`**: Moves `BepInEx`, `dotnet`, and `winhttp.dll` into `_BepInEx_Disabled_Backup\` so the game runs 100% pure vanilla without losing your configs or other plugins.
 * **`[2] Restore Modded Game`**: Moves everything back from `_BepInEx_Disabled_Backup\` in one click.
 * **`[3] Uninstall Completely`**: Permanently deletes `BepInEx`, `dotnet`, `winhttp.dll`, `doorstop_config.ini`, `.doorstop_version`, and `changelog.txt`.
@@ -67,7 +67,8 @@ Alongside shared tactical realism goals (some inspired by [`Easy-Red-2-Realism-O
 * **Sheltered Leeward Tank Crew Repairs & Behind-Wall Cover Filtering**: Tank crews route around the hull to crouch on the sheltered side opposite enemy fire before repairing, and `CombatCover` filters out exposed front-of-wall cover nodes.
 * **Client-Side Plane Engine Loop De-Throbber**: Desynchronizes aircraft motor loop playback offsets across near/far audio clips, clamps Doppler pitch warble (`<= 0.22`), and low-pass smooths engine pitch transitions to eliminate vanilla's repetitive "wah-wah" flyby throbbing.
 * **Quick-Tap `Tab` Spotting & 64-Character Multiplayer Room Names**: Short-press your Squad Orders keybind (`Tab`) to immediately spot in your look direction without opening the radial wheel, and lift vanilla's 8-character multiplayer room name cap up to **64 characters**.
-* **Zero-Spike Performance, Adaptive AI Brain Tick Scaling & Co-op RPC Budget**: Single-raycast `ResourcesManager.groundMask` environment queries (zero `GetComponentInParent` hierarchy walks), O(1) vision/cover caches, dynamic `Creature.ProcessSequentialUpdates` scaling (`1 → 3` active foot-soldier brain ticks/frame so bots in 120–140 unit battles react in `~0.6s` instead of `2.0–2.5s+` and never waste frames on vehicle/dead slots), and global Photon RPC pacing designed for 100+ active bots in Singleplayer and Co-op.
+* **Zero-Spike Performance, Multiplayer Host Ping Governor & Co-op RPC Budget**: Single-raycast `ResourcesManager.groundMask` environment queries (zero `GetComponentInParent` hierarchy walks), O(1) vision/cover caches, dynamic `Creature.ProcessSequentialUpdates` scaling, and a **Multiplayer Host Ping Governor (`ShouldSkipBotCycleForNetworkPing` + `TryClaimHeavyFrameWorkSlot`)** that prioritizes human player ping in 150+ bot / 10-player lobbies by letting bots coast/skip update cycles whenever frame time rises, staggering periodic directors so at most one runs per frame, eliminating mid-match cache-wipe thundering herds, and scaling global Photon RPC pacing with connected player count.
+* **Aircraft AP Top-Attack Tank Penetration, Cockpit Pilot MG Protection & Player Gunner Seat Priority**: Diving aircraft AP cannons (`mmPenetration >= 12`) no longer falsely ricochet off simplified tank box colliders and normalize top-deck roof impact angles (`<= 15°`, `0.45x` roof/engine-deck armor thickness); pilots inside intact airplanes are protected from instant-kill machine-gun cockpit snipes (`< 18mm`, non-HE/non-Flak) while the plane itself still takes normal structural damage; human players (Host or Client) can always switch into a gunner/driver seat occupied by an AI bot (`PlayerController.SwitchSeat` + `AIVehicle.SwitchSeatAi`); and bots now staff **both seats** (Gunner + Loader/Spotter) on 2-seat static emplacements.
 
 > *(Want the deep-dive engineering breakdown of what vanilla's `GameAssembly.dll` did under the hood and why each change was made? Read **[`docs/design-and-justifications.md`](docs/design-and-justifications.md)**!)*
 
