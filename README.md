@@ -1,4 +1,4 @@
-# Easy Red 2: Battle Hardened (`v0.6.3`)
+# Easy Red 2: Battle Hardened (`v0.6.4`)
 *3-Tier Tactical GOAP, Squad Blackboard, Radioman Intel Net, Veterancy, Personalities & Combined-Arms Overhaul*
 
 > [!IMPORTANT]
@@ -27,22 +27,22 @@ A comprehensive **BepInEx 6 (IL2CPP)** AI, combined-arms, and fairness overhaul 
 
 Download your preferred package from the **[Releases](https://github.com/sudravirodhin/easy-red-2-ai/releases)** page:
 
-### Option A: With BepInEx Included (`EasyRed2HumanAI-v0.6.3-with-BepInEx.zip`) — *Recommended for Fresh Installs*
+### Option A: With BepInEx Included (`EasyRed2HumanAI-v0.6.4-with-BepInEx.zip`) — *Recommended for Fresh Installs*
 Includes **[BepInEx 6.0.0-be.791 (Unity.IL2CPP-win-x64)](https://builds.bepinex.dev/projects/bepinex_be)**, the `.NET 6` runtime, Unity `2022.3.62` base libraries, pre-generated IL2CPP `interop` assemblies for Easy Red 2 Build `921`, and `EasyRed2HumanAI.dll` (with no other third-party mods).
 1. Open your **Easy Red 2** installation folder (e.g. `Steam\steamapps\common\Easy Red 2`, where `Easy Red 2.exe` is located).
-2. Extract all contents of `EasyRed2HumanAI-v0.6.3-with-BepInEx.zip` directly into the `Easy Red 2` folder.
+2. Extract all contents of `EasyRed2HumanAI-v0.6.4-with-BepInEx.zip` directly into the `Easy Red 2` folder.
 3. Launch the game!
 
-### Option B: Without BepInEx / Plugin Only (`EasyRed2HumanAI-v0.6.3-PluginOnly.zip` or `EasyRed2HumanAI.dll`)
+### Option B: Without BepInEx / Plugin Only (`EasyRed2HumanAI-v0.6.4-Plugin-Only.zip` or `EasyRed2HumanAI.dll`)
 For users who already have **[BepInEx 6 Bleeding Edge (`BepInEx-Unity.IL2CPP-win-x64`)](https://builds.bepinex.dev/projects/bepinex_be)** installed:
-1. Download `EasyRed2HumanAI-v0.6.3-PluginOnly.zip` (or `EasyRed2HumanAI.dll` directly).
+1. Download `EasyRed2HumanAI-v0.6.4-Plugin-Only.zip` (or `EasyRed2HumanAI.dll` directly).
 2. Place `EasyRed2HumanAI.dll` into:
    ```text
    Easy Red 2\BepInEx\plugins\EasyRed2HumanAI.dll
    ```
 
 ### Switching to Vanilla or Uninstalling (`Uninstall-BepInEx-Mod.bat`)
-Included in `EasyRed2HumanAI-v0.6.3-with-BepInEx.zip` (and in the root of this repository) is **[`Uninstall-BepInEx-Mod.bat`](Uninstall-BepInEx-Mod.bat)**. Double-click it inside your `Easy Red 2` folder when the game is closed to:
+Included in `EasyRed2HumanAI-v0.6.4-with-BepInEx.zip` (and in the root of this repository) is **[`Uninstall-BepInEx-Mod.bat`](Uninstall-BepInEx-Mod.bat)**. Double-click it inside your `Easy Red 2` folder when the game is closed to:
 * **`[1] Play Vanilla Temporarily`**: Moves `BepInEx`, `dotnet`, and `winhttp.dll` into `_BepInEx_Disabled_Backup\` so the game runs 100% pure vanilla without losing your configs or other plugins.
 * **`[2] Restore Modded Game`**: Moves everything back from `_BepInEx_Disabled_Backup\` in one click.
 * **`[3] Uninstall Completely`**: Permanently deletes `BepInEx`, `dotnet`, `winhttp.dll`, `doorstop_config.ini`, `.doorstop_version`, and `changelog.txt`.
@@ -68,7 +68,11 @@ Alongside shared tactical realism goals (some inspired by [`Easy-Red-2-Realism-O
 * **Client-Side Plane Engine Loop De-Throbber**: Desynchronizes aircraft motor loop playback offsets across near/far audio clips, clamps Doppler pitch warble (`<= 0.22`), and low-pass smooths engine pitch transitions to eliminate vanilla's repetitive "wah-wah" flyby throbbing.
 * **Quick-Tap `Tab` Spotting & 64-Character Multiplayer Room Names**: Short-press your Squad Orders keybind (`Tab`) to immediately spot in your look direction without opening the radial wheel, and lift vanilla's 8-character multiplayer room name cap up to **64 characters**.
 * **Zero-Spike Performance, Multiplayer Host Ping Governor & Co-op RPC Budget**: Single-raycast `ResourcesManager.groundMask` environment queries (zero `GetComponentInParent` hierarchy walks), O(1) vision/cover caches, dynamic `Creature.ProcessSequentialUpdates` scaling, and a **Multiplayer Host Ping Governor (`ShouldSkipBotCycleForNetworkPing` + `TryClaimHeavyFrameWorkSlot`)** that prioritizes human player ping in 150+ bot / 10-player lobbies by letting bots coast/skip update cycles whenever frame time rises, staggering periodic directors so at most one runs per frame, eliminating mid-match cache-wipe thundering herds, and scaling global Photon RPC pacing with connected player count.
-* **Aircraft AP Top-Attack Tank Penetration, Cockpit Pilot MG Protection & Player Gunner Seat Priority**: Diving aircraft AP cannons (`mmPenetration >= 12`) no longer falsely ricochet off simplified tank box colliders and normalize top-deck roof impact angles (`<= 15°`, `0.45x` roof/engine-deck armor thickness); pilots inside intact airplanes are protected from instant-kill machine-gun cockpit snipes (`< 18mm`, non-HE/non-Flak) while the plane itself still takes normal structural damage; human players (Host or Client) can always switch into a gunner/driver seat occupied by an AI bot (`PlayerController.SwitchSeat` + `AIVehicle.SwitchSeatAi`); and bots now staff **both seats** (Gunner + Loader/Spotter) on 2-seat static emplacements.
+* **Realistic Aircraft Canopy/Belly Armor, Enclosed Tank Crew Blast Protection, Host-Assist AP & Multiplayer Client Roadkill Fix**:
+  * **Aircraft Top-Attack AP + Host-Assist for Vanilla Clients**: Diving aircraft AP cannons (`mmPenetration >= 12`) no longer falsely ricochet off simplified tank box colliders and normalize top-deck roof impact angles (`<= 15°`, `0.45x` roof/engine-deck armor thickness)—and when hosting for **unmodded vanilla friends**, the Host automatically detects unmodded players (`"bh_ver"` Photon property) and applies top-attack roof penetrations on their behalf whenever vanilla `TryPenetrateArmor` deterministically rejects the hit (zero double-damage!).
+  * **Realistic Airplane Canopy vs. Armored Floor & Fuselage Spall**: Direct canopy/window hits (`BodyPart` / `ItemHelmet`) from level/above (dogfighting fighters, open cockpits) and `.50 cal+` (`>= 12.5mm`) rounds remain lethal, while `< 12.5mm` rifle-caliber ground fire coming up from steep below is stopped by the aircraft's armored floor pan/seat/engine—and vanilla's oversized `1.2m × 2.0m × 1.2m` (`10–150` RNG) fuselage spall box is eliminated for rifle rounds and tightened to a `0.42m` cockpit radius for `.50 cal` HMGs (`18mm+` cannons, HE, and Flak keep full `1.0x` lethality).
+  * **Enclosed Tank Crew Explosion & Kinetic AP Spall Realism**: Buttoned-up crew inside intact enclosed armor (`!seat.showUnitSet`) no longer magically die through `50mm+` of steel from non-penetrating external frag grenades, mortar splash, or light HE (`BodyPart.TryDamageWithExplosion`), receiving concussive suppression instead—while AT grenades (`30mm+`), satchel charges, HEAT warheads, AT mines, heavy artillery, aerial bombs, and open-topped seats (`seat.showUnitSet`) remain fully lethal. Solid kinetic AP spall inside armored vehicles is also scaled by caliber (`< 25mm` wounds rather than instant-wiping crews; `58mm+` and HE/APHE remain `1.0x`).
+  * **Multiplayer Client Vehicle Roadkill Fix + Seat Priority + 2-Seat Emplacements**: Fixes a vanilla multiplayer bug where **no remote client could ever run over enemy bots** (`VehicleWithWheels.FixedUpdate` zeroes `this.speed = 0` on the Host whenever `!OwnDriverOrVehicle()`, causing `OnTriggerEnter` to abort 100% of client roadkills—and also fixes reverse-gear roadkills!). Human players (Host or Client) can always switch into a gunner/driver seat occupied by an AI bot (`PlayerController.SwitchSeat` + `AIVehicle.SwitchSeatAi`), and bots staff **both seats** on 2-seat static emplacements.
 
 > *(Want the deep-dive engineering breakdown of what vanilla's `GameAssembly.dll` did under the hood and why each change was made? Read **[`docs/design-and-justifications.md`](docs/design-and-justifications.md)**!)*
 
@@ -206,6 +210,9 @@ Whether you are **joining a 100% vanilla server as a modded client**, **hosting 
 | **All Autonomous Enemy & Friendly AI Squads (Vision, Cover, Indoor Crouch, Bounding, Bayonet/Melee, Anti-Armor)** | **Host-Driven (Synced to All)** | Inactive for host-owned bots | **Vanilla clients experience 100%!** Even a vanilla client's **own on-foot AI squadmates** remain owned and simulated by the Host (`0x180A71EE2`)! | **Works 100%** for everyone |
 | **AI Crewmates Inside a Client-Driven Tank/Vehicle** | **Client-Owned Vehicle Crew** | **Works 100%** for your vehicle's AI gunners/repair crew (`0x180A7230A`)! | Vanilla client's own tank crew uses vanilla AI while that client is driving | **Works 100%** for everyone |
 | **Thin-Cover Wood Bullet Penetration** (`EnableThinCoverBulletPenetration`) | **Per-Shooter Simulation** | Works for bullets fired by you and your locally owned units | Works for bullets fired by the Host and **all Host-owned AI bots** (which can hit vanilla players behind thin fences!) | **Works 100%** for all players and bots |
+| **Multiplayer Client Vehicle Roadkill Fix** (`VehicleWithWheels.OnTriggerEnter`) | **Host-Authoritative (`SyncVehicle`)** | Requires Host to run `v0.6.4+` | **Vanilla clients experience 100%!** Unmodded friends driving tanks/trucks can finally roadkill enemy bots! | **Works 100%** for everyone |
+| **Aircraft Top-Attack AP Roof Penetration** (`TryPenetrateArmor` + `"bh_ver"` Host-Assist) | **Per-Shooter + Host-Assist** | Works for your own aircraft AP passes | **Vanilla clients experience 100%!** Host detects unmodded players and applies top-attack roof penetrations on their behalf without double-damage! | **Works 100%** for everyone |
+| **Enclosed Tank Crew Blast & Airplane Canopy/Belly Armor** | **Per-Victim Owner** | Protects you and your locally owned crew | Protects Host + **all Host-owned AI tank crews & pilots** (vanilla clients' own player health remains client-authoritative unless modded) | **Works 100%** for all players and AI |
 
 ---
 

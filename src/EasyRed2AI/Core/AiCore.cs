@@ -18,12 +18,14 @@ namespace EasyRed2HumanAI
         private static float _nextAllowedBotRpcTime;
         private static float _nextRoomCheckTime;
         private static int _cachedRoomPlayerCount = 1;
+        private static IntPtr _lastPublishedRoomPtr;
         private static int _lastHeavyWorkFrame = -1;
         private static readonly List<IntPtr> _sharedPruneBuffer = new List<IntPtr>(256);
         private static readonly Dictionary<IntPtr, Vehicle> _turretVehicleCache = new Dictionary<IntPtr, Vehicle>(64);
         private static readonly Dictionary<long, bool> _ceilingCache = new Dictionary<long, bool>(512);
         private static readonly Dictionary<long, bool> _bridgeCellCache = new Dictionary<long, bool>(512);
         private static readonly Dictionary<string, float> _debugLogCooldowns = new Dictionary<string, float>(32);
+        private static readonly Dictionary<int, (bool HasMod, float ExpireTime)> _playerModdedCache = new Dictionary<int, (bool HasMod, float ExpireTime)>(16);
 
         public static int TotalPingGovernorSkippedCycles;
 
@@ -52,10 +54,25 @@ namespace EasyRed2HumanAI
                 if (PhotonNetwork.InRoom && PhotonNetwork.CurrentRoom != null)
                 {
                     _cachedRoomPlayerCount = Mathf.Max(1, (int)PhotonNetwork.CurrentRoom.PlayerCount);
+
+                    IntPtr roomPtr = PhotonNetwork.CurrentRoom.Pointer;
+                    if (roomPtr != IntPtr.Zero && roomPtr != _lastPublishedRoomPtr && PhotonNetwork.LocalPlayer != null)
+                    {
+                        _lastPublishedRoomPtr = roomPtr;
+                        _playerModdedCache.Clear();
+                        var props = new ExitGames.Client.Photon.Hashtable();
+                        props[(Il2CppSystem.String)"bh_ver"] = (Il2CppSystem.String)Plugin.PluginVersion;
+                        PhotonNetwork.LocalPlayer.SetCustomProperties(props);
+                    }
                 }
                 else
                 {
                     _cachedRoomPlayerCount = 1;
+                    if (_lastPublishedRoomPtr != IntPtr.Zero)
+                    {
+                        _lastPublishedRoomPtr = IntPtr.Zero;
+                        _playerModdedCache.Clear();
+                    }
                 }
             }
             catch
@@ -163,6 +180,47 @@ namespace EasyRed2HumanAI
 
             SyncVehicle syncher = v.vehicleSyncher;
             return syncher == null || syncher.OwnSyncher;
+        }
+
+        /// <summary>
+        /// Checks whether the human player controlling <paramref name="s"/> has published the
+        /// <c>"bh_ver"</c> Photon custom property (cached for 5s per ActorNumber).
+        /// Returns true for local players/bots or on error so Host-assist only activates for confirmed unmodded remote players.
+        /// </summary>
+        public static bool IsPlayerRunningBattleHardened(Soldier s)
+        {
+            if (s == null || s.Pointer == IntPtr.Zero)
+                return true;
+
+            try
+            {
+                SyncSoldier syncher = s.soldierSyncher;
+                if (syncher == null || syncher.OwnSyncher)
+                    return true;
+
+                Photon.Realtime.Player controller = syncher.Controller ?? syncher.Owner;
+                if (controller == null)
+                    return true;
+
+                int actorNum = controller.ActorNumber;
+                float now = Time.unscaledTime;
+                if (_playerModdedCache.TryGetValue(actorNum, out var cached) && now < cached.ExpireTime)
+                    return cached.HasMod;
+
+                bool hasMod = false;
+                var props = controller.CustomProperties;
+                if (props != null && props.ContainsKey((Il2CppSystem.String)"bh_ver"))
+                    hasMod = true;
+
+                if (_playerModdedCache.Count > 32)
+                    _playerModdedCache.Clear();
+                _playerModdedCache[actorNum] = (hasMod, now + 5.0f);
+                return hasMod;
+            }
+            catch
+            {
+                return true;
+            }
         }
 
         public static bool TryConsumeBotRpcBudget(float minInterval = 0.35f)

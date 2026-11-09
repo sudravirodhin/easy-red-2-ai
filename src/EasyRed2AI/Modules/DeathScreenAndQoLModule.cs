@@ -25,8 +25,9 @@ namespace EasyRed2HumanAI
         private static BulletData _activeImpactBulletData;
         private static bool _activeImpactIsMortar;
         private static Vector3 _activeImpactStartPos;
+        private static Vector3 _activeImpactDirection;
 
-        public static void BeginProjectileImpactContext(Corvostudio.Weapons.BulletInstance inst, BulletData bulletData)
+        public static void BeginProjectileImpactContext(Corvostudio.Weapons.BulletInstance inst, BulletData bulletData, Vector3 hitDirection = default)
         {
             if (inst == null && bulletData == null)
             {
@@ -38,6 +39,7 @@ namespace EasyRed2HumanAI
             _activeImpactBulletData = bulletData ?? (inst != null ? inst.bulletData : null);
             _activeImpactIsMortar = inst != null && inst.isMortar;
             _activeImpactStartPos = inst != null ? inst.startPosition : Vector3.zero;
+            _activeImpactDirection = hitDirection.sqrMagnitude > 0.0001f ? hitDirection.normalized : Vector3.zero;
         }
 
         public static void EndProjectileImpactContext()
@@ -45,6 +47,7 @@ namespace EasyRed2HumanAI
             _activeImpactHasContext = false;
             _activeImpactBulletData = null;
             _activeImpactIsMortar = false;
+            _activeImpactDirection = Vector3.zero;
         }
 
         // Active Death Screen Obituary Banner state (rendered on both DeathPanel and OnGUI overlay)
@@ -648,8 +651,10 @@ namespace EasyRed2HumanAI
                         }
                     }
 
-                    // Protect pilots seated inside an intact, non-disabled airplane from being one-tapped
-                    // directly in their BodyPart/Helmet collider by small-arms/machine-gun rounds (< 18mm).
+                    // Realistic Airplane Canopy vs. Armored Belly/Seat Pan Protection:
+                    // Allow direct canopy/window BodyPart & Helmet hits from level/above (dogfighting aircraft,
+                    // open cockpits) and from heavy .50 cal+ rounds (>= 12.5mm), while stopping rifle-caliber
+                    // ground fire (< 12.5mm, non-HE, non-Flak) coming up from steep below through the floor/engine.
                     if (isDirectBodyOrHelmetHit &&
                         victim != null &&
                         victim.Pointer != IntPtr.Zero &&
@@ -657,7 +662,7 @@ namespace EasyRed2HumanAI
                         __1 != null &&
                         !__1.IsHe() &&
                         !__1.IsFlak() &&
-                        __1.caliber < 18f &&
+                        __1.caliber < 12.5f &&
                         string.IsNullOrEmpty(_activeExplosionWeaponName))
                     {
                         Vehicle victimVeh = victim.GetCurrentVehicle();
@@ -667,9 +672,26 @@ namespace EasyRed2HumanAI
                             !victimVeh.IsCoverDestroyed() &&
                             !victimVeh.IsDisabled())
                         {
-                            AirplanePilotMgHitsBlockedCount++;
-                            __result = null;
-                            return false;
+                            bool fromSteepBelow = _activeImpactHasContext &&
+                                                  _activeImpactDirection.sqrMagnitude > 0.001f &&
+                                                  _activeImpactDirection.y > 0.30f;
+
+                            if (!fromSteepBelow && !_activeImpactHasContext &&
+                                __4 != null && __4.Pointer != IntPtr.Zero &&
+                                __4.transform != null && victim.transform != null)
+                            {
+                                Vehicle shooterVeh = __4.IsOnVehicle() ? __4.GetCurrentVehicle() : null;
+                                bool shooterAirborne = shooterVeh != null && shooterVeh.Pointer != IntPtr.Zero && shooterVeh.IsAirVehicle();
+                                if (!shooterAirborne && (victim.transform.position.y - __4.transform.position.y) >= 15.0f)
+                                    fromSteepBelow = true;
+                            }
+
+                            if (fromSteepBelow)
+                            {
+                                AirplanePilotMgHitsBlockedCount++;
+                                __result = null;
+                                return false;
+                            }
                         }
                     }
 

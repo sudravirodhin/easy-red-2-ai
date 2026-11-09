@@ -666,6 +666,20 @@ namespace EasyRed2HumanAI
         internal static readonly Dictionary<IntPtr, float> _nextKamikazeTargetSearchTime = new Dictionary<IntPtr, float>(16);
         public static int CombinedArmsPriorityAssistsCount;
         public static int KamikazeDivesTriggeredCount;
+        public static int RemoteClientRoadkillsAssistedCount;
+
+        private struct RemoteVehicleMotionState
+        {
+            public Vector3 LastSamplePos;
+            public float LastSampleTime;
+            public Vector3 SmoothedVelocity;
+            public float LastMoveTime;
+            public float LastSignedSpeed;
+            public float LastPacketTime;
+            public bool HasSample;
+        }
+
+        private static readonly Dictionary<IntPtr, RemoteVehicleMotionState> _remoteVehicleMotion = new Dictionary<IntPtr, RemoteVehicleMotionState>(32);
 
         private struct ActiveRadioSupportInfo
         {
@@ -732,6 +746,8 @@ namespace EasyRed2HumanAI
                 _vehicleContinuousYieldStart.Clear();
                 _nextFriendlyYieldCountTime.Clear();
             }
+            if (_remoteVehicleMotion.Count > 64)
+                _remoteVehicleMotion.Clear();
         }
 
         private static void RecordCombinedArmsAssist(IntPtr unitPtr, float now, string tag, string msg)
@@ -4438,6 +4454,67 @@ namespace EasyRed2HumanAI
             }
         }
 
+        [HarmonyPatch(typeof(SyncVehicle), nameof(SyncVehicle.SyncVehiclePosition))]
+        public static class SyncVehicle_SyncVehiclePosition_Patch
+        {
+            public static void Postfix(SyncVehicle __instance, float __2)
+            {
+                try
+                {
+                    if (!VisionConfig.EnableMod.Value || __instance == null)
+                        return;
+
+                    Vehicle veh = __instance.vehicle;
+                    if (veh == null || veh.Pointer == IntPtr.Zero)
+                        return;
+
+                    IntPtr ptr = veh.Pointer;
+                    _remoteVehicleMotion.TryGetValue(ptr, out RemoteVehicleMotionState state);
+                    state.LastSignedSpeed = __2;
+                    state.LastPacketTime = Time.time;
+                    _remoteVehicleMotion[ptr] = state;
+                }
+                catch { }
+            }
+        }
+
+        [HarmonyPatch(typeof(SyncVehicle), nameof(SyncVehicle.UpdatePosAndRot))]
+        public static class SyncVehicle_UpdatePosAndRot_Patch
+        {
+            public static void Postfix(SyncVehicle __instance)
+            {
+                try
+                {
+                    if (!VisionConfig.EnableMod.Value || __instance == null)
+                        return;
+
+                    Vehicle veh = __instance.vehicle;
+                    if (veh == null || veh.Pointer == IntPtr.Zero || veh.OwnDriverOrVehicle() || !veh.HasDriverAlive || veh.transform == null)
+                        return;
+
+                    IntPtr ptr = veh.Pointer;
+                    float now = Time.time;
+                    _remoteVehicleMotion.TryGetValue(ptr, out RemoteVehicleMotionState state);
+
+                    float dt = now - state.LastSampleTime;
+                    if (!state.HasSample || dt >= 0.08f)
+                    {
+                        Vector3 curPos = veh.transform.position;
+                        if (state.HasSample && dt > 0.04f && dt < 0.65f)
+                        {
+                            state.SmoothedVelocity = (curPos - state.LastSamplePos) / dt;
+                            state.LastMoveTime = now;
+                        }
+                        state.LastSamplePos = curPos;
+                        state.LastSampleTime = now;
+                        state.HasSample = true;
+                        _remoteVehicleMotion[ptr] = state;
+                    }
+                }
+                catch { }
+            }
+        }
+
         [HarmonyPatch(typeof(VehicleWithWheels), nameof(VehicleWithWheels.OnTriggerEnter))]
         public static class VehicleWithWheels_OnTriggerEnter_Patch
         {
@@ -4445,13 +4522,8 @@ namespace EasyRed2HumanAI
             {
                 try
                 {
-                    if (!VisionConfig.EnableMod.Value ||
-                        !VisionConfig.EnableFriendlyVehicleRightOfWay.Value ||
-                        __instance == null ||
-                        __0 == null)
-                    {
+                    if (!VisionConfig.EnableMod.Value || __instance == null || __0 == null)
                         return true;
-                    }
 
                     GameObject go = __0.gameObject;
                     if (go == null)
@@ -4462,41 +4534,137 @@ namespace EasyRed2HumanAI
                         return true;
 
                     string vehFaction = GetVehicleCrewFaction(__instance);
-                    if (string.IsNullOrEmpty(vehFaction) || string.IsNullOrEmpty(soldier.faction))
-                        return true;
+                    bool isSameFaction = !string.IsNullOrEmpty(vehFaction) &&
+                                         !string.IsNullOrEmpty(soldier.faction) &&
+                                         ResourcesManager.IsSameFaction(vehFaction, soldier.faction);
 
-                    // Enemy soldiers still take full vanilla roadkill damage
-                    if (!ResourcesManager.IsSameFaction(vehFaction, soldier.faction))
-                        return true;
-
-                    // Friendly soldier: grant hit immunity and gently nudge AI bots clear of the hull/tracks
-                    soldier.DisableHitByVehicleFor(1.25f);
-
-                    float now = Time.time;
-                    if (soldier.IsAI() && __instance.transform != null)
+                    if (isSameFaction)
                     {
-                        Vector2 extents = GetCachedVehicleHalfExtents(__instance);
-                        Vector3 vehFwd = __instance.transform.forward;
-                        vehFwd.y = 0f;
-                        vehFwd = vehFwd.sqrMagnitude > 0.001f ? vehFwd.normalized : Vector3.forward;
-                        Vector3 vehRight = __instance.transform.right;
-                        vehRight.y = 0f;
-                        vehRight = vehRight.sqrMagnitude > 0.001f ? vehRight.normalized : Vector3.right;
+                        if (!VisionConfig.EnableFriendlyVehicleRightOfWay.Value)
+                            return true;
 
-                        TryNudgeFriendlySoldierAside(soldier, __instance.transform.position, vehFwd, vehRight, extents.x, now, true);
+                        // Friendly soldier: grant hit immunity and gently nudge AI bots clear of the hull/tracks
+                        soldier.DisableHitByVehicleFor(1.25f);
+
+                        float now = Time.time;
+                        if (soldier.IsAI() && __instance.transform != null)
+                        {
+                            Vector2 extents = GetCachedVehicleHalfExtents(__instance);
+                            Vector3 vehFwd = __instance.transform.forward;
+                            vehFwd.y = 0f;
+                            vehFwd = vehFwd.sqrMagnitude > 0.001f ? vehFwd.normalized : Vector3.forward;
+                            Vector3 vehRight = __instance.transform.right;
+                            vehRight.y = 0f;
+                            vehRight = vehRight.sqrMagnitude > 0.001f ? vehRight.normalized : Vector3.right;
+
+                            TryNudgeFriendlySoldierAside(soldier, __instance.transform.position, vehFwd, vehRight, extents.x, now, true);
+                        }
+
+                        // In vanilla VehicleWithWheels.OnTriggerEnter (0x18087C92B-0x18087C940), same-faction collisions
+                        // still deal 1000f lethal roadkill damage whenever soldier.IsPlayer() or veh.PlayerIsInside()!
+                        if (soldier.IsPlayer() || __instance.PlayerIsInside())
+                        {
+                            RecordFriendlyYieldOrSave(
+                                __instance.Pointer,
+                                now,
+                                $"Prevented friendly {vehFaction} vehicle from roadkilling friendly {(soldier.IsPlayer() ? "player" : "soldier")}.");
+                        }
+
+                        return false;
                     }
 
-                    // In vanilla VehicleWithWheels.OnTriggerEnter (0x18087C92B-0x18087C940), same-faction collisions
-                    // still deal 1000f lethal roadkill damage whenever soldier.IsPlayer() or veh.PlayerIsInside()!
-                    if (soldier.IsPlayer() || __instance.PlayerIsInside())
+                    // Enemy soldier roadkill authority check (Host owns all SyncVehicle instances via OwnSyncher)
+                    if (!AiCore.IsLocallyOwnedVehicle(__instance) ||
+                        !soldier.AllowHitByVehicle ||
+                        soldier.IsOnVehicle() ||
+                        __instance.transform == null ||
+                        soldier.transform == null)
                     {
-                        RecordFriendlyYieldOrSave(
-                            __instance.Pointer,
-                            now,
-                            $"Prevented friendly {vehFaction} vehicle from roadkilling friendly {(soldier.IsPlayer() ? "player" : "soldier")}.");
+                        return true;
                     }
 
-                    return false;
+                    // Fix 1: Remote multiplayer client driving a vehicle/tank.
+                    // In vanilla, VehicleWithWheels.FixedUpdate (0x180879A14 -> 0x18087AAF9) overwrites `this.speed = 0f`
+                    // on the Host every physics tick whenever `!OwnDriverOrVehicle()`, causing `OnTriggerEnter`'s
+                    // `if (this.speed > 0.5f)` check (0x18087C971) to fail 100% of the time for all client drivers!
+                    if (!__instance.OwnDriverOrVehicle() && __instance.HasDriverAlive)
+                    {
+                        float now = Time.time;
+                        Vector3 velFlat = Vector3.zero;
+                        Vector3 fwdFlat = __instance.transform.forward;
+                        fwdFlat.y = 0f;
+                        fwdFlat = fwdFlat.sqrMagnitude > 0.001f ? fwdFlat.normalized : Vector3.forward;
+
+                        if (_remoteVehicleMotion.TryGetValue(__instance.Pointer, out RemoteVehicleMotionState mState))
+                        {
+                            if (now - mState.LastMoveTime <= 0.45f)
+                            {
+                                velFlat = new Vector3(mState.SmoothedVelocity.x, 0f, mState.SmoothedVelocity.z);
+                            }
+
+                            if (now - mState.LastPacketTime <= 0.75f)
+                            {
+                                Vector3 packetVel = fwdFlat * mState.LastSignedSpeed;
+                                if (packetVel.sqrMagnitude > velFlat.sqrMagnitude)
+                                    velFlat = packetVel;
+                            }
+                        }
+
+                        SyncVehicle syncher = __instance.vehicleSyncher;
+                        if (velFlat.sqrMagnitude < 0.25f && syncher != null && syncher.syncDestPos.HasValue)
+                        {
+                            Vector3 fallbackVel = fwdFlat * syncher.last_speed_update;
+                            if (fallbackVel.sqrMagnitude > velFlat.sqrMagnitude)
+                                velFlat = fallbackVel;
+                        }
+
+                        float horizSpeed = velFlat.magnitude;
+                        if (horizSpeed > 0.85f)
+                        {
+                            Vector3 toSoldierFlat = soldier.transform.position - __instance.transform.position;
+                            toSoldierFlat.y = 0f;
+                            if (toSoldierFlat.sqrMagnitude < 0.09f ||
+                                Vector3.Dot(velFlat / horizSpeed, toSoldierFlat.normalized) > 0.15f)
+                            {
+                                soldier.DisableHitByVehicleFor(1.0f);
+                                soldier.Damage(1000f);
+                                RemoteClientRoadkillsAssistedCount++;
+                                AiCore.LogDebug("RoadkillAssist", $"Host applied roadkill for remote client driver ({horizSpeed:F1}m/s).");
+                                return false;
+                            }
+                        }
+                        return true;
+                    }
+
+                    // Fix 2: Local/Host driver reversing over an enemy (vanilla checks `this.speed > 0.5f` on signed Z speed).
+                    if (__instance.OwnDriverOrVehicle() && __instance.HasDriverAlive)
+                    {
+                        Rigidbody rb = __instance.rb;
+                        if (rb != null && !rb.isKinematic)
+                        {
+                            Vector3 rbVel = rb.velocity;
+                            Vector3 localVel = __instance.transform.InverseTransformDirection(rbVel);
+                            if (localVel.z < -1.15f)
+                            {
+                                Vector3 rbVelFlat = new Vector3(rbVel.x, 0f, rbVel.z);
+                                float revSpeed = rbVelFlat.magnitude;
+                                if (revSpeed > 1.15f)
+                                {
+                                    Vector3 toSoldierFlat = soldier.transform.position - __instance.transform.position;
+                                    toSoldierFlat.y = 0f;
+                                    if (toSoldierFlat.sqrMagnitude < 0.09f ||
+                                        Vector3.Dot(rbVelFlat / revSpeed, toSoldierFlat.normalized) > 0.25f)
+                                    {
+                                        soldier.DisableHitByVehicleFor(1.0f);
+                                        soldier.Damage(1000f);
+                                        return false;
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    return true;
                 }
                 catch { }
                 return true;

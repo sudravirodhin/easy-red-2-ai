@@ -38,14 +38,19 @@ namespace EasyRed2HumanAI
         private static readonly Dictionary<IntPtr, PlaneAudioState> _planeAudioStates = new Dictionary<IntPtr, PlaneAudioState>(32);
         private static readonly Dictionary<IntPtr, int> _colliderImpactCache = new Dictionary<IntPtr, int>(512);
         private static readonly Dictionary<IntPtr, ParachuteDriftState> _parachuteDriftStates = new Dictionary<IntPtr, ParachuteDriftState>(32);
+        private static readonly Dictionary<IntPtr, float> _vehicleExplosionArmorCache = new Dictionary<IntPtr, float>(64);
 
         public static int PlaneAudioLoopsDesyncedCount { get; private set; }
         public static int ThinCoverPenetrationsCount { get; private set; }
         public static int ParachutesDriftedCount { get; private set; }
         public static int AircraftTopAttackPenetrationsAssistedCount { get; private set; }
         public static int AirplanePilotMgHitsBlockedCount { get; private set; }
+        public static int EnclosedCrewExplosionHitsBlockedCount { get; private set; }
+        public static int HostVanillaClientApAssistsCount { get; private set; }
 
-        internal static bool SuppressAirplanePilotMgSpallDamage;
+        internal static bool ActiveCrewSpallContext;
+        internal static float ActiveCrewSpallMultiplier = 1.0f;
+        internal static float ActiveCrewSpallMaxDamage = 9999f;
 
         public static void ClearBallisticsCaches()
         {
@@ -55,6 +60,8 @@ namespace EasyRed2HumanAI
                 _planeAudioStates.Clear();
             if (_parachuteDriftStates.Count > 64)
                 _parachuteDriftStates.Clear();
+            if (_vehicleExplosionArmorCache.Count > 128)
+                _vehicleExplosionArmorCache.Clear();
         }
 
         // ============================================================================
@@ -164,9 +171,11 @@ namespace EasyRed2HumanAI
                 BulletInstance __instance,
                 Vector3 hitDirection,
                 BulletData bulletData,
-                RaycastHit hit)
+                RaycastHit hit,
+                out bool __state)
             {
-                VeteranAndTacticsPatches.BeginProjectileImpactContext(__instance, bulletData);
+                __state = false;
+                VeteranAndTacticsPatches.BeginProjectileImpactContext(__instance, bulletData, hitDirection);
 
                 try
                 {
@@ -174,29 +183,69 @@ namespace EasyRed2HumanAI
                         return;
 
                     // Prevent diving aircraft AP cannons/HMGs from falsely ricocheting off simplified
-                    // tank hull/turret box colliders before VehicleDamagablePart.TryPenetrateArmor runs.
-                    if (__instance.canRicochet && bulletData.mmPenetration >= 12)
+                    // tank hull/turret box colliders before VehicleDamagablePart.TryPenetrateArmor runs,
+                    // and provide Host-authoritative AP roof-penetration assist for unmodded vanilla clients.
+                    if (bulletData.mmPenetration >= 12 && (__instance.canRicochet || (!__instance.canDamage && AiCore.IsMasterClient())))
                     {
+                        Soldier shooter = __instance.shooter;
                         bool isAirOrTopAttack =
                             ((__instance.startPosition.y - hit.point.y) >= 20.0f && hitDirection.y <= -0.15f);
 
-                        if (!isAirOrTopAttack)
+                        if (!isAirOrTopAttack && shooter != null && shooter.Pointer != IntPtr.Zero && shooter.IsOnVehicle())
                         {
-                            Soldier shooter = __instance.shooter;
-                            if (shooter != null && shooter.Pointer != IntPtr.Zero && shooter.IsOnVehicle())
-                            {
-                                Vehicle shooterVeh = shooter.GetCurrentVehicle();
-                                if (shooterVeh != null && shooterVeh.Pointer != IntPtr.Zero && shooterVeh.IsAirVehicle())
-                                    isAirOrTopAttack = true;
-                            }
+                            Vehicle shooterVeh = shooter.GetCurrentVehicle();
+                            if (shooterVeh != null && shooterVeh.Pointer != IntPtr.Zero && shooterVeh.IsAirVehicle())
+                                isAirOrTopAttack = true;
                         }
 
                         if (isAirOrTopAttack)
                         {
                             Collider col = hit.collider;
-                            if (col != null && col.Pointer != IntPtr.Zero && col.GetComponent<VehicleDamagablePart>() != null)
+                            VehicleDamagablePart vPart = (col != null && col.Pointer != IntPtr.Zero)
+                                ? col.GetComponent<VehicleDamagablePart>()
+                                : null;
+
+                            if (vPart != null && vPart.Pointer != IntPtr.Zero)
                             {
                                 __instance.canRicochet = false;
+
+                                // Host-Assist for Unmodded Vanilla Clients:
+                                // When an unmodded remote player fires an AP gun from an aircraft/top-attack pass and
+                                // vanilla TryPenetrateArmor is 100% guaranteed to reject penetration on their client
+                                // (`mmPen <= baseArmor || mmPen <= vanillaAngledArmor`), promote `canDamage = true`
+                                // solely for this impact on the Host so the Host evaluates our roof-armor check and
+                                // syncs SyncVehicle damage to all players with zero risk of double-damage.
+                                if (!__instance.canDamage &&
+                                    !bulletData.IsHe() &&
+                                    vPart.armorThickness > 8f &&
+                                    AiCore.IsMasterClient())
+                                {
+                                    Vehicle rootVeh = vPart.rootVeh;
+                                    if (rootVeh != null &&
+                                        rootVeh.Pointer != IntPtr.Zero &&
+                                        !rootVeh.IsAirVehicle() &&
+                                        AiCore.IsLocallyOwnedVehicle(rootVeh) &&
+                                        shooter != null &&
+                                        shooter.Pointer != IntPtr.Zero &&
+                                        shooter.IsPlayer() &&
+                                        !AiCore.IsPlayerRunningBattleHardened(shooter))
+                                    {
+                                        float dist = Vector3.Distance(__instance.startPosition, hit.point);
+                                        float mmPen = bulletData.CalculateMmPenetrationWithFallof(dist);
+                                        float baseArmor = (float)(int)vPart.armorThickness;
+                                        float obliquity = Vector3.Angle(-hitDirection, hit.normal);
+                                        float vanillaArmor = vPart.considerAngledArmor
+                                            ? (float)vPart.GetPenetrationAtAngle(obliquity)
+                                            : baseArmor;
+
+                                        if (mmPen <= baseArmor || mmPen <= vanillaArmor)
+                                        {
+                                            __instance.canDamage = true;
+                                            __state = true;
+                                            HostVanillaClientApAssistsCount++;
+                                        }
+                                    }
+                                }
                             }
                         }
                     }
@@ -209,11 +258,18 @@ namespace EasyRed2HumanAI
                 Vector3 hitDirection,
                 float impactSpeed,
                 BulletData bulletData,
-                RaycastHit hit)
+                RaycastHit hit,
+                bool __state)
             {
                 try
                 {
+                    if (__state && __instance != null)
+                        __instance.canDamage = false;
+
                     VeteranAndTacticsPatches.EndProjectileImpactContext();
+
+                    if (__state)
+                        return;
 
                     if (!VisionConfig.EnableMod.Value || !VisionConfig.EnableThinCoverBulletPenetration.Value)
                         return;
@@ -353,11 +409,18 @@ namespace EasyRed2HumanAI
         }
 
         // ============================================================================
-        // 2B. AIRCRAFT AP TOP-ATTACK PENETRATION & COCKPIT PILOT MG PROTECTION
+        // 2B. REALISTIC AIRCRAFT CANOPY/SPALL, TOP-ATTACK AP & ENCLOSED TANK CREW ARMOR
         // - Normalizes top-down roof impact angles and models thinner tank roof/engine-deck
         //   armor (plus diving aircraft kinetic energy) when aircraft AP weapons strike ground armor.
-        // - Prevents small-caliber machine gun rounds (< 18mm, non-HE, non-Flak) that pierce
-        //   an intact airplane's 1mm fuselage from rolling instant-kill spall damage onto the pilot.
+        // - Replaces vanilla's oversized 1.2m x 2.0m x 1.2m Random(10..150) airplane fuselage
+        //   spall box: blocks rifle-caliber (< 12.5mm) fuselage spall while allowing tight 0.42m
+        //   cockpit strikes from .50 cal / HMG (12.5mm-17.9mm) with scaled fragmentation, and
+        //   full 1.0x lethality for 18mm+ cannons, HE, and Flak.
+        // - Scales solid kinetic AP spall inside armored ground vehicles by shell caliber.
+        // - Protects buttoned-up crew inside intact enclosed armor (!seat.showUnitSet) from
+        //   non-penetrating external blasts (BodyPart.TryDamageWithExplosion), converting light
+        //   external explosions into concussive suppression while AT grenades, HEAT, mines,
+        //   satchel charges, heavy artillery, aerial bombs, and open-topped seats stay lethal.
         // ============================================================================
         [HarmonyPatch(typeof(VehicleDamagablePart), nameof(VehicleDamagablePart.TryPenetrateArmor))]
         public static class VehicleDamagablePart_TryPenetrateArmor_Patch
@@ -366,7 +429,30 @@ namespace EasyRed2HumanAI
             {
                 public float SavedArmorThickness;
                 public bool ModifiedArmorThickness;
-                public bool SuppressedPilotMgSpall;
+                public bool ModifiedCrewSpall;
+            }
+
+            private static bool IsImpactNearSeatedAirCrew(Vehicle airVeh, Vector3 impactPos, float maxDistSq)
+            {
+                var seats = airVeh.seats;
+                if (seats == null)
+                    return false;
+
+                int count = seats.Length;
+                for (int i = 0; i < count; i++)
+                {
+                    Seats seat = seats[i];
+                    if (seat == null)
+                        continue;
+
+                    Soldier crew = seat.unitSet;
+                    if (crew != null && crew.Pointer != IntPtr.Zero && crew.IsAlive)
+                    {
+                        if ((crew.GetCenterOfUnit() - impactPos).sqrMagnitude <= maxDistSq)
+                            return true;
+                    }
+                }
+                return false;
             }
 
             public static void Prefix(
@@ -389,9 +475,7 @@ namespace EasyRed2HumanAI
                     Vehicle rootVeh = __instance.rootVeh;
                     bool targetIsAir = rootVeh != null && rootVeh.Pointer != IntPtr.Zero && rootVeh.IsAirVehicle();
 
-                    // Case 1: Intact airplane hit by a small-arms / machine-gun round (< 18mm, non-HE, non-Flak).
-                    // Allow the round to damage the airplane's fuselage/wing/engine HP normally, but suppress the
-                    // Random.Range(10, 150) seated-crew spall roll so the pilot isn't sniped out of an intact plane.
+                    // Case 1: Intact airplane fuselage hit by small-arms or heavy machine gun (< 18mm, non-HE, non-Flak).
                     if (targetIsAir)
                     {
                         if (!rootVeh.IsCoverDestroyed() &&
@@ -400,15 +484,31 @@ namespace EasyRed2HumanAI
                             !__0.IsFlak() &&
                             __0.caliber < 18f)
                         {
-                            SuppressAirplanePilotMgSpallDamage = true;
-                            __state.SuppressedPilotMgSpall = true;
-                            AirplanePilotMgHitsBlockedCount++;
+                            // .50 cal / HMG (12.5mm-17.9mm) hitting directly within 0.42m of a seated crewman deals scaled spall;
+                            // rifle-caliber (< 12.5mm) or fuselage/wing hits away from the cockpit only damage aircraft HP.
+                            if (__0.caliber >= 12.5f && IsImpactNearSeatedAirCrew(rootVeh, __2, 0.42f * 0.42f))
+                            {
+                                ActiveCrewSpallContext = true;
+                                ActiveCrewSpallMultiplier = 0.28f;
+                                ActiveCrewSpallMaxDamage = 34.0f;
+                                __state.ModifiedCrewSpall = true;
+                            }
+                            else
+                            {
+                                ActiveCrewSpallContext = true;
+                                ActiveCrewSpallMultiplier = 0.0f;
+                                ActiveCrewSpallMaxDamage = 0.0f;
+                                __state.ModifiedCrewSpall = true;
+                                AirplanePilotMgHitsBlockedCount++;
+                            }
                         }
                         return;
                     }
 
+                    float basePlateArmor = __instance.armorThickness;
+
                     // Case 2: Ground vehicle / tank hit by an aircraft AP weapon or steep top-down dive attack.
-                    if (__0.mmPenetration >= 12 && __instance.armorThickness > 8f)
+                    if (__0.mmPenetration >= 12 && basePlateArmor > 8f)
                     {
                         bool isAirOrTopAttack = ((__1.y - __2.y) >= 20.0f && __3.y <= -0.15f);
                         if (!isAirOrTopAttack && __5 != null && __5.Pointer != IntPtr.Zero && __5.IsOnVehicle())
@@ -420,7 +520,7 @@ namespace EasyRed2HumanAI
 
                         if (isAirOrTopAttack)
                         {
-                            __state.SavedArmorThickness = __instance.armorThickness;
+                            __state.SavedArmorThickness = basePlateArmor;
                             __state.ModifiedArmorThickness = true;
 
                             // Normalize obliquity for top-deck roof strikes and scale hull/turret box armor
@@ -428,8 +528,35 @@ namespace EasyRed2HumanAI
                             if (__4 > 15.0f)
                                 __4 = 15.0f;
 
-                            __instance.armorThickness = Mathf.Max(8.0f, __state.SavedArmorThickness * 0.45f);
+                            __instance.armorThickness = Mathf.Max(8.0f, basePlateArmor * 0.45f);
                             AircraftTopAttackPenetrationsAssistedCount++;
+                        }
+                    }
+
+                    // Case 3: Solid kinetic AP spall scaling inside armored ground vehicles (>= 8mm hull/turret armor).
+                    // AT rifles / autocannons (< 25mm) and light solid AP (25mm-57mm) wound/incapacitate individual
+                    // crewmen along the penetration path instead of rolling vanilla's full 150 HP wipe, while 58mm+
+                    // tank/AT guns and all HE/APHE/HEAT bursts retain full 1.0x crew lethality.
+                    if (rootVeh != null &&
+                        rootVeh.Pointer != IntPtr.Zero &&
+                        !rootVeh.IsCoverDestroyed() &&
+                        !__0.IsHe() &&
+                        !__0.IsFlak() &&
+                        basePlateArmor >= 8.0f)
+                    {
+                        if (__0.caliber < 25.0f)
+                        {
+                            ActiveCrewSpallContext = true;
+                            ActiveCrewSpallMultiplier = 0.40f;
+                            ActiveCrewSpallMaxDamage = 45.0f;
+                            __state.ModifiedCrewSpall = true;
+                        }
+                        else if (__0.caliber < 58.0f)
+                        {
+                            ActiveCrewSpallContext = true;
+                            ActiveCrewSpallMultiplier = 0.72f;
+                            ActiveCrewSpallMaxDamage = 95.0f;
+                            __state.ModifiedCrewSpall = true;
                         }
                     }
                 }
@@ -438,8 +565,12 @@ namespace EasyRed2HumanAI
 
             public static void Postfix(VehicleDamagablePart __instance, ArmorPenetrationPatchState __state)
             {
-                if (__state.SuppressedPilotMgSpall)
-                    SuppressAirplanePilotMgSpallDamage = false;
+                if (__state.ModifiedCrewSpall)
+                {
+                    ActiveCrewSpallContext = false;
+                    ActiveCrewSpallMultiplier = 1.0f;
+                    ActiveCrewSpallMaxDamage = 9999f;
+                }
 
                 if (__state.ModifiedArmorThickness && __instance != null && __instance.Pointer != IntPtr.Zero)
                 {
@@ -455,10 +586,109 @@ namespace EasyRed2HumanAI
         [HarmonyPatch(typeof(Soldier), nameof(Soldier.Damage), new Type[] { typeof(float) })]
         public static class Soldier_Damage_Patch
         {
-            public static bool Prefix()
+            public static bool Prefix(ref float __0)
             {
-                if (SuppressAirplanePilotMgSpallDamage)
+                if (!ActiveCrewSpallContext)
+                    return true;
+
+                if (ActiveCrewSpallMultiplier <= 0.001f)
                     return false;
+
+                __0 = Mathf.Min(__0 * ActiveCrewSpallMultiplier, ActiveCrewSpallMaxDamage);
+                return __0 > 0.05f;
+            }
+        }
+
+        [HarmonyPatch(typeof(BodyPart), nameof(BodyPart.TryDamageWithExplosion))]
+        public static class BodyPart_TryDamageWithExplosion_Patch
+        {
+            private static float GetEffectiveVehicleExplosionArmor(Vehicle veh)
+            {
+                IntPtr ptr = veh.Pointer;
+                if (_vehicleExplosionArmorCache.TryGetValue(ptr, out float cachedArmor))
+                    return cachedArmor;
+
+                float maxHullArmor = 0f;
+                var parts = veh.damageableParts;
+                if (parts != null)
+                {
+                    int count = parts.Count;
+                    for (int i = 0; i < count; i++)
+                    {
+                        VehicleDamagablePart p = parts[i];
+                        if (p == null || p.Pointer == IntPtr.Zero)
+                            continue;
+
+                        if (p.TryCast<VehicleDamageableWheelPart>() != null ||
+                            p.TryCast<VehicleDamageableTrackPart>() != null)
+                        {
+                            continue;
+                        }
+
+                        if (p.armorThickness > maxHullArmor)
+                            maxHullArmor = p.armorThickness;
+                    }
+                }
+
+                float effArmor = maxHullArmor < 6.0f
+                    ? 0.0f
+                    : Mathf.Clamp(maxHullArmor * 0.35f, 8.0f, 28.0f);
+
+                _vehicleExplosionArmorCache[ptr] = effArmor;
+                return effArmor;
+            }
+
+            private static bool IsSoldierInEnclosedVehicleSeat(Vehicle veh, Soldier victim)
+            {
+                var seats = veh.seats;
+                if (seats == null)
+                    return false;
+
+                IntPtr victimPtr = victim.Pointer;
+                int count = seats.Length;
+                for (int i = 0; i < count; i++)
+                {
+                    Seats seat = seats[i];
+                    if (seat != null && seat.unitSet != null && seat.unitSet.Pointer == victimPtr)
+                        return !seat.showUnitSet;
+                }
+                return false;
+            }
+
+            public static bool Prefix(BodyPart __instance, float __0)
+            {
+                try
+                {
+                    if (!VisionConfig.EnableMod.Value || __instance == null || __instance.unit == null)
+                        return true;
+
+                    Soldier victim = __instance.unit.TryCast<Soldier>();
+                    if (victim == null || victim.Pointer == IntPtr.Zero || !victim.IsOnVehicle() || !victim.IsAlive)
+                        return true;
+
+                    Vehicle veh = victim.GetCurrentVehicle();
+                    if (veh == null || veh.Pointer == IntPtr.Zero || veh.IsAirVehicle() || veh.IsCoverDestroyed())
+                        return true;
+
+                    float effectiveArmor = GetEffectiveVehicleExplosionArmor(veh);
+                    if (effectiveArmor <= 0f || __0 >= effectiveArmor)
+                        return true;
+
+                    if (!IsSoldierInEnclosedVehicleSeat(veh, victim))
+                        return true;
+
+                    // Buttoned-up crew inside intact enclosed armor survive external non-penetrating blasts
+                    // with concussive suppression instead of dying inside an undamaged tank hull.
+                    SyncSoldier syncher = victim.soldierSyncher;
+                    if (syncher == null || syncher.OwnSyncher)
+                    {
+                        victim.Suppress(25);
+                    }
+
+                    EnclosedCrewExplosionHitsBlockedCount++;
+                    return false;
+                }
+                catch { }
                 return true;
             }
         }
