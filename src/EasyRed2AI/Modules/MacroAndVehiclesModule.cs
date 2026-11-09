@@ -25,6 +25,7 @@ namespace EasyRed2HumanAI
         private static float _nextRepairStationScanTime;
         private static readonly Dictionary<IntPtr, RepairStation> _vehiclesSeekingRepairStation = new Dictionary<IntPtr, RepairStation>(32);
         private static readonly Dictionary<IntPtr, IntPtr> _squadOrderedToVehicle = new Dictionary<IntPtr, IntPtr>(32);
+        private static readonly Dictionary<IntPtr, float> _squadTaskCommittedUntil = new Dictionary<IntPtr, float>(64);
 
         // =====================================================================
         // Helper: Sheltered Tank / Vehicle Repair Position (Leeward Hull Cover)
@@ -712,6 +713,8 @@ namespace EasyRed2HumanAI
                 _nextPlaneOrbitSteerTime.Clear();
             if (_nextCombinedArmsAssistCountTime.Count > 128)
                 _nextCombinedArmsAssistCountTime.Clear();
+            if (_squadTaskCommittedUntil.Count > 128)
+                _squadTaskCommittedUntil.Clear();
             if (_cachedVehicleExtents.Count > 128)
                 _cachedVehicleExtents.Clear();
             if (_nextVehiclePedestrianScanTime.Count > 128)
@@ -2242,6 +2245,7 @@ namespace EasyRed2HumanAI
             if (activeObjectives.Count == 0)
             {
                 _garrisonAssignedObjectiveBySquad.Clear();
+                _squadTaskCommittedUntil.Clear();
                 return;
             }
 
@@ -2249,7 +2253,10 @@ namespace EasyRed2HumanAI
             if (allSquads == null || allSquads.Count == 0)
                 return;
 
+            float now = Time.time;
             var squadsByFaction = new Dictionary<string, List<Squad>>(4);
+            var playerSquadsByFaction = new Dictionary<string, List<Squad>>(4);
+            var activeFactions = new HashSet<string>();
             var allEnemyLeaderPositions = new List<KeyValuePair<string, Vector3>>(32);
 
             foreach (var kvp in allSquads)
@@ -2264,9 +2271,26 @@ namespace EasyRed2HumanAI
 
                 allEnemyLeaderPositions.Add(new KeyValuePair<string, Vector3>(leader.faction, leader.transform.position));
 
-                // Only skip if the Human Player is the Squad Leader (if an AI is Squad Leader and the player is a private,
-                // the AI Squad Leader still follows Team Net orders!)
-                if (leader.IsPlayer() || sq.IsVehicleCrew || !AiCore.IsLocallyOwnedBot(leader) || leader.IsOnVehicle())
+                // When the Human Player is the Squad Leader, vanilla SoldierAI.SquadOrdersRoutine does not run,
+                // so if the player's squad has no active objective (or their previous objective was captured/lost)
+                // and is connected to the Team Radio Net, let the Team Net suggest the next priority objective!
+                if (leader.IsPlayer())
+                {
+                    _garrisonAssignedObjectiveBySquad.Remove(sq.Pointer);
+                    if (!sq.IsVehicleCrew && IsSquadConnectedToRadioNet(sq))
+                    {
+                        if (!playerSquadsByFaction.TryGetValue(leader.faction, out List<Squad> pList))
+                        {
+                            pList = new List<Squad>(4);
+                            playerSquadsByFaction[leader.faction] = pList;
+                        }
+                        pList.Add(sq);
+                        activeFactions.Add(leader.faction);
+                    }
+                    continue;
+                }
+
+                if (sq.IsVehicleCrew || !AiCore.IsLocallyOwnedBot(leader) || leader.IsOnVehicle())
                 {
                     _garrisonAssignedObjectiveBySquad.Remove(sq.Pointer);
                     continue;
@@ -2292,15 +2316,11 @@ namespace EasyRed2HumanAI
                     squadsByFaction[leader.faction] = fList;
                 }
                 fList.Add(sq);
+                activeFactions.Add(leader.faction);
             }
 
-            foreach (var fKvp in squadsByFaction)
+            foreach (string faction in activeFactions)
             {
-                string faction = fKvp.Key;
-                List<Squad> eligibleSquads = fKvp.Value;
-                if (eligibleSquads.Count == 0)
-                    continue;
-
                 var heldObjectives = new List<MissionObjective>(activeObjectives.Count);
                 var unheldObjectives = new List<MissionObjective>(activeObjectives.Count);
 
@@ -2338,6 +2358,23 @@ namespace EasyRed2HumanAI
                     }
                 }
 
+                // Suggest an objective over the Team Radio Net for any Player Squad Leader who has no active objective
+                if (playerSquadsByFaction.TryGetValue(faction, out List<Squad> playerSquads))
+                {
+                    for (int pIdx = 0; pIdx < playerSquads.Count; pIdx++)
+                    {
+                        TrySuggestObjectiveForPlayerSquadLeader(
+                            playerSquads[pIdx],
+                            faction,
+                            heldObjectives,
+                            unheldObjectives,
+                            allEnemyLeaderPositions);
+                    }
+                }
+
+                if (!squadsByFaction.TryGetValue(faction, out List<Squad> eligibleSquads) || eligibleSquads.Count == 0)
+                    continue;
+
                 // If this faction holds 1+ objectives while also having 1+ uncaptured/contested objectives to attack:
                 // Allocate faction-doctrine garrison share (e.g. 28% UK/France/Italy vs 22% default vs 16% USSR/Japan/Mongolia)
                 // to garrison held points, prioritizing held objectives that have enemy squads within 150m.
@@ -2372,12 +2409,20 @@ namespace EasyRed2HumanAI
                             if (assignedGarrisonSquads.Contains(cand.Pointer))
                                 continue;
 
+                            bool alreadyOnThisGarrison =
+                                (_garrisonAssignedObjectiveBySquad.TryGetValue(cand.Pointer, out IntPtr curTaskPtr) && curTaskPtr == heldTaskPtr) ||
+                                (cand.currentTask != null && cand.currentTask.Pointer == heldTaskPtr);
+
+                            // Never yank a squad that is already committed to attacking an active unheld objective
+                            // (or contains the human player) back to rear garrison duty!
+                            if (!alreadyOnThisGarrison && IsSquadCommittedToActiveObjective(cand, unheldObjectives, now))
+                                continue;
+
                             float dSq = (cand.Leader.transform.position - objPos).sqrMagnitude;
-                            // Continuity bonus if this squad is already garrisoning this objective
-                            if (_garrisonAssignedObjectiveBySquad.TryGetValue(cand.Pointer, out IntPtr curTaskPtr) &&
-                                curTaskPtr == heldTaskPtr)
+                            // Strong continuity bonus if this squad is already garrisoning this objective
+                            if (alreadyOnThisGarrison)
                             {
-                                dSq *= 0.45f;
+                                dSq *= 0.25f;
                             }
 
                             if (dSq < bestScore)
@@ -2396,8 +2441,7 @@ namespace EasyRed2HumanAI
 
                             if (isNewGarrison || bestSquad.currentTask == null || bestSquad.currentTask.Pointer != heldTaskPtr)
                             {
-                                bestSquad.currentTask = heldObj.missionTask.Cast<SquadTask>();
-                                bestSquad.Leader_OrderAttackCurrentTask(bestSquad.Leader);
+                                AssignAiSquadMacroTask(bestSquad, heldObj, now, 50.0f);
                                 ConsumeInitialHqSpawnBriefingIfNoRadio(bestSquad);
                                 if (isNewGarrison)
                                 {
@@ -2420,26 +2464,14 @@ namespace EasyRed2HumanAI
 
                         _garrisonAssignedObjectiveBySquad.Remove(sq.Pointer);
 
-                        bool needsAttackReassign = sq.currentTask == null;
-                        if (!needsAttackReassign)
-                        {
-                            for (int h = 0; h < heldObjectives.Count; h++)
-                            {
-                                if (sq.currentTask.Pointer == heldObjectives[h].missionTask.Pointer)
-                                {
-                                    needsAttackReassign = true;
-                                    break;
-                                }
-                            }
-                        }
-
-                        if (needsAttackReassign)
+                        // Only reassign if sq.currentTask is null or no longer in unheldObjectives (e.g., objective was just captured!)
+                        bool onActiveUnheld = IsSquadTaskInObjectiveList(sq, unheldObjectives);
+                        if (!onActiveUnheld)
                         {
                             MissionObjective bestUnheld = GetClosestObjectiveToPosition(sq.Leader.transform.position, unheldObjectives);
                             if (bestUnheld != null && bestUnheld.missionTask != null)
                             {
-                                sq.currentTask = bestUnheld.missionTask.Cast<SquadTask>();
-                                sq.Leader_OrderAttackCurrentTask(sq.Leader);
+                                AssignAiSquadMacroTask(sq, bestUnheld, now, 45.0f);
                                 ConsumeInitialHqSpawnBriefingIfNoRadio(sq);
                                 if (VisionConfig.DebugLogging.Value)
                                 {
@@ -2463,27 +2495,12 @@ namespace EasyRed2HumanAI
                         Squad sq = eligibleSquads[sIdx];
                         _garrisonAssignedObjectiveBySquad.Remove(sq.Pointer);
 
-                        bool onActiveHeld = false;
-                        if (sq.currentTask != null)
-                        {
-                            IntPtr curPtr = sq.currentTask.Pointer;
-                            for (int h = 0; h < heldObjectives.Count; h++)
-                            {
-                                if (heldObjectives[h].missionTask.Pointer == curPtr)
-                                {
-                                    onActiveHeld = true;
-                                    break;
-                                }
-                            }
-                        }
-
-                        if (!onActiveHeld)
+                        if (!IsSquadTaskInObjectiveList(sq, heldObjectives))
                         {
                             MissionObjective closestHeld = GetClosestObjectiveToPosition(sq.Leader.transform.position, heldObjectives);
                             if (closestHeld != null && closestHeld.missionTask != null)
                             {
-                                sq.currentTask = closestHeld.missionTask.Cast<SquadTask>();
-                                sq.Leader_OrderAttackCurrentTask(sq.Leader);
+                                AssignAiSquadMacroTask(sq, closestHeld, now, 45.0f);
                             }
                         }
                         ConsumeInitialHqSpawnBriefingIfNoRadio(sq);
@@ -2521,13 +2538,12 @@ namespace EasyRed2HumanAI
 
                         if (!hasDefenderAssigned)
                         {
-                            Squad bestReserve = PickBestReserveDefenderSquad(eligibleSquads, heldObjectives, heldTaskPtr, objPos);
+                            Squad bestReserve = PickBestReserveDefenderSquad(eligibleSquads, heldObjectives, heldTaskPtr, objPos, now);
                             if (bestReserve != null)
                             {
                                 if (!heldObj.CanAttractFaction(faction))
                                     _garrisonAssignedObjectiveBySquad[bestReserve.Pointer] = heldTaskPtr;
-                                bestReserve.currentTask = heldObj.missionTask.Cast<SquadTask>();
-                                bestReserve.Leader_OrderAttackCurrentTask(bestReserve.Leader);
+                                AssignAiSquadMacroTask(bestReserve, heldObj, now, 50.0f);
                                 MacroGarrisonsAssignedCount++;
                                 if (VisionConfig.DebugLogging.Value)
                                 {
@@ -2565,6 +2581,10 @@ namespace EasyRed2HumanAI
                                 if (sq.currentTask != null && sq.currentTask.Pointer == quietTaskPtr)
                                 {
                                     quietSquadCount++;
+                                    // Respect objective commitment so we don't ping-pong a squad that was just reassigned
+                                    if (IsSquadCommittedToActiveObjective(sq, heldObjectives, now))
+                                        continue;
+
                                     float dSq = (sq.Leader.transform.position - primaryPos).sqrMagnitude;
                                     if (dSq < closestExcessDistSq)
                                     {
@@ -2578,8 +2598,7 @@ namespace EasyRed2HumanAI
                             {
                                 if (!primaryThreatObj.CanAttractFaction(faction))
                                     _garrisonAssignedObjectiveBySquad[closestExcessSquad.Pointer] = primaryTaskPtr;
-                                closestExcessSquad.currentTask = primaryThreatObj.missionTask.Cast<SquadTask>();
-                                closestExcessSquad.Leader_OrderAttackCurrentTask(closestExcessSquad.Leader);
+                                AssignAiSquadMacroTask(closestExcessSquad, primaryThreatObj, now, 50.0f);
                                 MacroGarrisonsAssignedCount++;
                                 if (VisionConfig.DebugLogging.Value)
                                 {
@@ -2594,17 +2613,191 @@ namespace EasyRed2HumanAI
                 {
                     for (int sIdx = 0; sIdx < eligibleSquads.Count; sIdx++)
                     {
-                        _garrisonAssignedObjectiveBySquad.Remove(eligibleSquads[sIdx].Pointer);
+                        Squad sq = eligibleSquads[sIdx];
+                        _garrisonAssignedObjectiveBySquad.Remove(sq.Pointer);
+
+                        // In pure attack (heldObjectives.Count == 0 && unheldObjectives.Count > 0),
+                        // if a squad's previous objective was just captured, assign the closest remaining unheld objective
+                        // and update the HUD if the player is a member of this squad!
+                        if (unheldObjectives.Count > 0 && !IsSquadTaskInObjectiveList(sq, unheldObjectives))
+                        {
+                            MissionObjective nextAttack = GetClosestObjectiveToPosition(sq.Leader.transform.position, unheldObjectives);
+                            if (nextAttack != null && nextAttack.missionTask != null)
+                            {
+                                AssignAiSquadMacroTask(sq, nextAttack, now, 45.0f);
+                            }
+                        }
                     }
                 }
             }
+        }
+
+        private static bool IsSquadTaskInObjectiveList(Squad sq, List<MissionObjective> objectives)
+        {
+            if (sq == null || sq.currentTask == null || sq.currentTask.Pointer == IntPtr.Zero || objectives == null)
+                return false;
+
+            try
+            {
+                if (sq.currentTask.GetTaskCompletationPercentage() >= 1.0f)
+                    return false;
+            }
+            catch { }
+
+            IntPtr curPtr = sq.currentTask.Pointer;
+            for (int i = 0; i < objectives.Count; i++)
+            {
+                MissionObjective obj = objectives[i];
+                if (obj != null && obj.missionTask != null && obj.missionTask.Pointer == curPtr)
+                    return true;
+            }
+            return false;
+        }
+
+        private static bool IsSquadCommittedToActiveObjective(Squad sq, List<MissionObjective> validObjectives, float now)
+        {
+            if (!IsSquadTaskInObjectiveList(sq, validObjectives))
+                return false;
+
+            // When the Human Player is a subordinate member of an AI-led squad, keep the AI Squad Leader
+            // committed to the current active objective until it is actually captured or lost!
+            if (sq.IsPlayerInSquad())
+                return true;
+
+            if (_squadTaskCommittedUntil.TryGetValue(sq.Pointer, out float commitUntil) && now < commitUntil)
+                return true;
+
+            if (sq.Leader != null && sq.Leader.transform != null)
+            {
+                float distToTaskSq = (sq.Leader.transform.position - sq.currentTask.GetTaskDestination()).sqrMagnitude;
+                if (distToTaskSq <= 85.0f * 85.0f)
+                    return true;
+            }
+
+            if (_squadBlackboards.TryGetValue(sq.Pointer, out SquadBlackboard board) && board.HasActiveThreat)
+                return true;
+
+            return false;
+        }
+
+        private static void AssignAiSquadMacroTask(Squad sq, MissionObjective obj, float now, float commitDuration)
+        {
+            if (sq == null || obj == null || obj.missionTask == null)
+                return;
+
+            IntPtr newTaskPtr = obj.missionTask.Pointer;
+            bool changed = sq.currentTask == null || sq.currentTask.Pointer != newTaskPtr;
+            sq.currentTask = obj.missionTask.Cast<SquadTask>();
+            _squadTaskCommittedUntil[sq.Pointer] = now + (sq.IsPlayerInSquad() ? Mathf.Max(commitDuration, 65.0f) : commitDuration);
+
+            if (sq.Leader != null)
+            {
+                sq.Leader_OrderAttackCurrentTask(sq.Leader);
+            }
+
+            if (changed && sq.IsPlayerInSquad())
+            {
+                NotifyPlayerSquadTaskUpdated(sq);
+            }
+        }
+
+        private static void TrySuggestObjectiveForPlayerSquadLeader(
+            Squad playerSq,
+            string faction,
+            List<MissionObjective> heldObjectives,
+            List<MissionObjective> unheldObjectives,
+            List<KeyValuePair<string, Vector3>> allEnemyLeaderPositions)
+        {
+            if (playerSq == null || playerSq.Leader == null || playerSq.Leader.transform == null)
+                return;
+
+            // If the Player Squad Leader already has an active, valid objective (in either unheldObjectives or heldObjectives),
+            // never overwrite the player's current objective!
+            if (IsSquadTaskInObjectiveList(playerSq, unheldObjectives) ||
+                IsSquadTaskInObjectiveList(playerSq, heldObjectives))
+            {
+                ConsumeInitialHqSpawnBriefingIfNoRadio(playerSq);
+                return;
+            }
+
+            MissionObjective suggestedObj = null;
+            Vector3 leaderPos = playerSq.Leader.transform.position;
+
+            if (unheldObjectives != null && unheldObjectives.Count > 0)
+            {
+                suggestedObj = GetClosestObjectiveToPosition(leaderPos, unheldObjectives);
+            }
+            else if (heldObjectives != null && heldObjectives.Count > 0)
+            {
+                // Suggest the most threatened held objective if enemies are within 165m, otherwise the closest held objective
+                MissionObjective bestThreatened = null;
+                float bestThreatScore = 165f * 165f;
+                for (int i = 0; i < heldObjectives.Count; i++)
+                {
+                    MissionObjective cand = heldObjectives[i];
+                    float score = GetObjectiveThreatPriorityScore(cand, faction, allEnemyLeaderPositions);
+                    if (score <= bestThreatScore)
+                    {
+                        bestThreatScore = score;
+                        bestThreatened = cand;
+                    }
+                }
+                suggestedObj = bestThreatened ?? GetClosestObjectiveToPosition(leaderPos, heldObjectives);
+            }
+
+            if (suggestedObj == null || suggestedObj.missionTask == null)
+                return;
+
+            playerSq.currentTask = suggestedObj.missionTask.Cast<SquadTask>();
+            ConsumeInitialHqSpawnBriefingIfNoRadio(playerSq);
+            NotifyPlayerSquadTaskUpdated(playerSq);
+
+            // Have the squad's AI Radioman (if alive) audibly relay the new HQ objective to the Player Squad Leader
+            if (playerSq.units != null)
+            {
+                var units = playerSq.units;
+                int count = units.Count;
+                for (int i = 0; i < count; i++)
+                {
+                    Soldier u = units[i];
+                    if (u != null && u.IsAlive && !u.IsPlayer() && u.IsRadioman())
+                    {
+                        TrySayTacticalVoice(u, playerSq, VoiceManager.VoiceClip.attackThere, 0.25f);
+                        break;
+                    }
+                }
+            }
+
+            if (VisionConfig.DebugLogging.Value)
+            {
+                AiCore.LogDebug(
+                    "MacroDirector",
+                    $"Team Radio Net suggested objective '{suggestedObj.GetDisplayName()}' to Player Squad Leader ('{playerSq.squadName}').");
+            }
+        }
+
+        private static void NotifyPlayerSquadTaskUpdated(Squad sq)
+        {
+            if (sq == null)
+                return;
+
+            try
+            {
+                if (ResourcesManager.instance != null)
+                {
+                    ResourcesManager.instance.StartCoroutine(sq.UpdateSquadTaskUI());
+                }
+                PlayerGUI.UpdateSquadGUI();
+            }
+            catch { }
         }
 
         private static Squad PickBestReserveDefenderSquad(
             List<Squad> eligibleSquads,
             List<MissionObjective> heldObjectives,
             IntPtr targetTaskPtr,
-            Vector3 targetPos)
+            Vector3 targetPos,
+            float now)
         {
             Squad bestSquad = null;
             float bestScore = float.MaxValue;
@@ -2613,6 +2806,10 @@ namespace EasyRed2HumanAI
             {
                 Squad cand = eligibleSquads[sIdx];
                 if (cand.currentTask != null && cand.currentTask.Pointer == targetTaskPtr)
+                    continue;
+
+                // Respect task commitment hysteresis so reserve squads don't get ping-ponged mid-march
+                if (IsSquadCommittedToActiveObjective(cand, heldObjectives, now))
                     continue;
 
                 int sameTaskCount = 0;

@@ -7,7 +7,7 @@ namespace EasyRed2HumanAI
     public static partial class VeteranAndTacticsPatches
     {
         // =====================================================================
-        // 3-TIER HIERARCHICAL GOAP, SQUAD BLACKBOARD & RADIOMAN INTEL NET (v0.6.0)
+        // 3-TIER HIERARCHICAL GOAP, SQUAD BLACKBOARD & RADIOMAN INTEL NET (v0.6.1)
         // Tier 3 (Team Net GOAP): Cross-Squad Anvil & Hammer + Combined-Arms Support
         //         (Strictly gated by alive Radioman / Vehicle Radio relay!)
         // Tier 2 (Squad Leader GOAP): Translates Net Directive or Local Objective
@@ -302,6 +302,7 @@ namespace EasyRed2HumanAI
         private static readonly Dictionary<IntPtr, float> _nextFlankCoverAssignTime = new Dictionary<IntPtr, float>(256);
         private static readonly Dictionary<IntPtr, float> _medicHealStartTime = new Dictionary<IntPtr, float>(64);
         private static readonly Dictionary<IntPtr, IntPtr> _medicHealTargetPtr = new Dictionary<IntPtr, IntPtr>(64);
+        private static readonly Dictionary<IntPtr, IntPtr> _pincerOrderedTaskBySquad = new Dictionary<IntPtr, IntPtr>(64);
 
         internal struct BotGoapPlan
         {
@@ -681,6 +682,8 @@ namespace EasyRed2HumanAI
                 _medicHealStartTime.Clear();
                 _medicHealTargetPtr.Clear();
             }
+            if (_pincerOrderedTaskBySquad.Count > 128)
+                _pincerOrderedTaskBySquad.Clear();
         }
 
         internal static bool IsActivelyHealingTeammate(Soldier soldier, out MedicHealingDestination healDest)
@@ -1113,8 +1116,9 @@ namespace EasyRed2HumanAI
 
                 Vector3 axisDir = vehToThreat / vehDist;
                 Vector3 perpRight = new Vector3(axisDir.z, 0f, -axisDir.x);
+                IntPtr vehTaskPtr = vehSq.currentTask != null ? vehSq.currentTask.Pointer : IntPtr.Zero;
 
-                Squad bestHammerSq = FindBestAvailableHammerSquad(connectedInfantrySquads, -1, vehLeader.faction, threatPos, 165f, now);
+                Squad bestHammerSq = FindBestAvailableHammerSquad(connectedInfantrySquads, -1, vehLeader.faction, vehTaskPtr, threatPos, 115f, now);
                 if (bestHammerSq != null)
                 {
                     IssueHammerFlankDirective(bestHammerSq, vehPos, threatPos, axisDir, perpRight, now, $"Tank/Vehicle Anvil ('{vehSq.squadName}')");
@@ -1147,15 +1151,16 @@ namespace EasyRed2HumanAI
 
                 Vector3 axisDir = anvilToThreat / anvilDist;
                 Vector3 perpRight = new Vector3(axisDir.z, 0f, -axisDir.x);
+                IntPtr anvilTaskPtr = anvilSq.currentTask != null ? anvilSq.currentTask.Pointer : IntPtr.Zero;
 
-                // Find best nearby Radio-Connected friendly squad within 165m to act as the HAMMER (Wide Flank)
-                Squad bestHammerSq = FindBestAvailableHammerSquad(connectedInfantrySquads, i, anvilLeader.faction, threatPos, 165f, now);
+                // Find best nearby Radio-Connected friendly squad within 115m on the same objective/sector to act as the HAMMER
+                Squad bestHammerSq = FindBestAvailableHammerSquad(connectedInfantrySquads, i, anvilLeader.faction, anvilTaskPtr, threatPos, 115f, now);
 
                 if (bestHammerSq != null)
                 {
                     // Lock in ANVIL directive on Squad A (Pin & Call Radio Support if Radioman ready)
                     anvilBoard.NetDirective = SquadNetDirective.Anvil_PinAndCallSupport;
-                    anvilBoard.NetDirectiveExpireTime = now + 18.0f;
+                    anvilBoard.NetDirectiveExpireTime = now + 24.0f;
                     anvilBoard.NetDirectiveTargetPos = threatPos;
                     _squadBlackboards[anvilSq.Pointer] = anvilBoard;
                     ConsumeInitialHqSpawnBriefingIfNoRadio(anvilSq);
@@ -1163,7 +1168,7 @@ namespace EasyRed2HumanAI
                     TrySayTacticalVoice(anvilLeader, anvilSq, VoiceManager.VoiceClip.coveringFire, 0.1f);
                     TryTriggerSquadRadioSupport(anvilSq, anvilLeader);
 
-                    // Lock in HAMMER directive on Squad B (Native Squad.AttackFromSide wide envelopment!)
+                    // Lock in HAMMER directive on Squad B
                     IssueHammerFlankDirective(bestHammerSq, anvilPos, threatPos, axisDir, perpRight, now, $"Infantry Anvil ('{anvilSq.squadName}')");
                 }
                 else if (anvilBoard.AliveMemberCount >= 4 &&
@@ -1171,24 +1176,14 @@ namespace EasyRed2HumanAI
                          (anvilBoard.FlankLeftCover != null || anvilBoard.FlankRightCover != null) &&
                          anvilLeader.Params != null && anvilLeader.Params.canGiveOrders && anvilLeader.Params.canMove)
                 {
-                    // Single-Squad Self-Pin & Flank: MG gunner has the enemy pinned and lateral cover exists
-                    FactionCommandProfile anvilProfile = GetFactionCommandProfile(anvilLeader.faction);
-                    float sideSign = anvilBoard.FlankRightCover != null ? 1f : -1f;
-                    float latBias = anvilProfile.FlankLateralBias;
-                    float fwdBias = Mathf.Sqrt(Mathf.Max(0.1f, 1f - latBias * latBias));
-                    Vector3 flankDir = (axisDir * fwdBias - perpRight * (sideSign * latBias)).normalized;
-
+                    // Single-Squad Self-Pin & Flank: MG gunner has the enemy pinned and lateral cover exists.
+                    // Note: Do NOT call anvilSq.AttackFromSide(..., threatPos, ...) because setting sq.orderPosition to threatPos
+                    // (outside sq.currentTask) causes vanilla Squad.Leader_OrderAttackCurrentTask to immediately overwrite the order 250ms later!
                     anvilBoard.NetDirective = SquadNetDirective.Hammer_WideFlankEnvelopment;
-                    anvilBoard.NetDirectiveExpireTime = now + 16.0f;
+                    anvilBoard.NetDirectiveExpireTime = now + 22.0f;
                     anvilBoard.NetDirectiveTargetPos = threatPos;
                     _squadBlackboards[anvilSq.Pointer] = anvilBoard;
                     ConsumeInitialHqSpawnBriefingIfNoRadio(anvilSq);
-
-                    try
-                    {
-                        anvilSq.AttackFromSide(flankDir, threatPos, 18.0f);
-                    }
-                    catch { }
 
                     TrySayTacticalVoice(anvilLeader, anvilSq, VoiceManager.VoiceClip.attackThere, 0.2f);
                     TryTriggerSquadRadioSupport(anvilSq, anvilLeader);
@@ -1227,7 +1222,7 @@ namespace EasyRed2HumanAI
                 Vector3 toTask = taskPos - leader.transform.position;
                 toTask.y = 0f;
                 float distToTask = toTask.magnitude;
-                if (distToTask < 45f || distToTask > 175f)
+                if (distToTask < 55f || distToTask > 175f)
                     continue;
 
                 if (!primarySquadByTask.ContainsKey(taskPtr))
@@ -1250,25 +1245,31 @@ namespace EasyRed2HumanAI
                 Vector3 pincerFlankDir = (axisDir * fwdBias - perpRight * (sideSign * latBias)).normalized;
 
                 board.NetDirective = SquadNetDirective.Hammer_WideFlankEnvelopment;
-                board.NetDirectiveExpireTime = now + 18.0f;
+                board.NetDirectiveExpireTime = now + 28.0f;
                 board.NetDirectiveTargetPos = taskPos;
                 _squadBlackboards[sq.Pointer] = board;
                 ConsumeInitialHqSpawnBriefingIfNoRadio(sq);
 
-                try
+                // Only issue the squad-level AttackFromSide waypoint ONCE per objective assignment so the Squad Leader
+                // doesn't re-shout move orders and reset the waypoint every 18 seconds mid-march!
+                if (!_pincerOrderedTaskBySquad.TryGetValue(sq.Pointer, out IntPtr prevPincerTask) || prevPincerTask != taskPtr)
                 {
-                    sq.AttackFromSide(pincerFlankDir, taskPos, 22.0f);
-                }
-                catch { }
+                    _pincerOrderedTaskBySquad[sq.Pointer] = taskPtr;
+                    try
+                    {
+                        sq.AttackFromSide(pincerFlankDir, taskPos, 22.0f);
+                    }
+                    catch { }
 
-                TeamNetAnvilHammerCount++;
-                GoapPlansExecutedCount++;
-                if (VisionConfig.DebugLogging.Value)
-                {
-                    AiCore.LogDebug(
-                        "TeamNetPincer",
-                        $"{leader.faction} squad '{sq.squadName}' executing objective pincer (latBias:{latBias:F2}, dist:{distToTask:F0}m).",
-                        4.0f);
+                    TeamNetAnvilHammerCount++;
+                    GoapPlansExecutedCount++;
+                    if (VisionConfig.DebugLogging.Value)
+                    {
+                        AiCore.LogDebug(
+                            "TeamNetPincer",
+                            $"{leader.faction} squad '{sq.squadName}' executing objective pincer (latBias:{latBias:F2}, dist:{distToTask:F0}m).",
+                            4.0f);
+                    }
                 }
             }
         }
@@ -1277,6 +1278,7 @@ namespace EasyRed2HumanAI
             List<Squad> connectedInfantrySquads,
             int excludeIndex,
             string faction,
+            IntPtr anvilTaskPtr,
             Vector3 threatPos,
             float maxDist,
             float now)
@@ -1305,11 +1307,23 @@ namespace EasyRed2HumanAI
                 }
 
                 float dToThreatSq = (candLeader.transform.position - threatPos).sqrMagnitude;
-                if (dToThreatSq < bestHammerDistSq && dToThreatSq > 25f * 25f)
+                if (dToThreatSq >= bestHammerDistSq || dToThreatSq <= 22f * 22f)
+                    continue;
+
+                // Never pull a squad away from an unrelated objective across the map to flank a distant skirmish
+                if (candSq.currentTask != null && candSq.currentTask.Pointer != IntPtr.Zero)
                 {
-                    bestHammerDistSq = dToThreatSq;
-                    bestHammerSq = candSq;
+                    bool sameObjective = anvilTaskPtr != IntPtr.Zero && candSq.currentTask.Pointer == anvilTaskPtr;
+                    if (!sameObjective && dToThreatSq > 60f * 60f)
+                    {
+                        float taskToThreatSq = (candSq.currentTask.GetTaskDestination() - threatPos).sqrMagnitude;
+                        if (taskToThreatSq > 85f * 85f)
+                            continue;
+                    }
                 }
+
+                bestHammerDistSq = dToThreatSq;
+                bestHammerSq = candSq;
             }
 
             return bestHammerSq;
@@ -1345,26 +1359,17 @@ namespace EasyRed2HumanAI
             if (hammerLeader == null || hammerLeader.transform == null)
                 return;
 
-            FactionCommandProfile hammerProfile = GetFactionCommandProfile(hammerLeader.faction);
-            Vector3 hammerPos = hammerLeader.transform.position;
-            float sideSign = Vector3.Dot(hammerPos - anvilPos, perpRight) >= 0f ? 1f : -1f;
-            float latBias = hammerProfile.FlankLateralBias;
-            float fwdBias = Mathf.Sqrt(Mathf.Max(0.1f, 1f - latBias * latBias));
-            Vector3 flankDir = (axisDir * fwdBias - perpRight * (sideSign * latBias)).normalized;
-
             SquadBlackboard hammerBoard = GetOrUpdateSquadBlackboard(hammerSq, hammerLeader);
             hammerBoard.NetDirective = SquadNetDirective.Hammer_WideFlankEnvelopment;
-            hammerBoard.NetDirectiveExpireTime = now + 20.0f;
+            hammerBoard.NetDirectiveExpireTime = now + 24.0f;
             hammerBoard.NetDirectiveTargetPos = threatPos;
             _squadBlackboards[hammerSq.Pointer] = hammerBoard;
             ConsumeInitialHqSpawnBriefingIfNoRadio(hammerSq);
 
-            try
-            {
-                hammerSq.AttackFromSide(flankDir, threatPos, 20.0f);
-            }
-            catch { }
-
+            // Note: Do NOT call hammerSq.AttackFromSide(flankDir, threatPos, 20f) here!
+            // In vanilla Squad.Leader_OrderAttackCurrentTask (0x180806E8B), if sq.orderPosition is set to threatPos
+            // (outside sq.currentTask), vanilla immediately overwrites the order 250ms later with a new voice callout.
+            // Instead, Hammer_WideFlankEnvelopment drives individual soldier GOAP flanking & lateral cover selection!
             TrySayTacticalVoice(hammerLeader, hammerSq, VoiceManager.VoiceClip.attackThere, 0.25f);
             TeamNetAnvilHammerCount++;
             GoapPlansExecutedCount++;
