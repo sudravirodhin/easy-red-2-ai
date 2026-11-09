@@ -26,6 +26,8 @@ namespace EasyRed2HumanAI
         private static readonly Dictionary<IntPtr, RepairStation> _vehiclesSeekingRepairStation = new Dictionary<IntPtr, RepairStation>(32);
         private static readonly Dictionary<IntPtr, IntPtr> _squadOrderedToVehicle = new Dictionary<IntPtr, IntPtr>(32);
         private static readonly Dictionary<IntPtr, float> _squadTaskCommittedUntil = new Dictionary<IntPtr, float>(64);
+        private static readonly Dictionary<IntPtr, float> _nextTurretFFCheckTime = new Dictionary<IntPtr, float>(64);
+        private static readonly Dictionary<IntPtr, float> _turretFFBlockedUntil = new Dictionary<IntPtr, float>(64);
 
         // =====================================================================
         // Helper: Sheltered Tank / Vehicle Repair Position (Leeward Hull Cover)
@@ -715,6 +717,11 @@ namespace EasyRed2HumanAI
                 _nextCombinedArmsAssistCountTime.Clear();
             if (_squadTaskCommittedUntil.Count > 128)
                 _squadTaskCommittedUntil.Clear();
+            if (_nextTurretFFCheckTime.Count > 128)
+            {
+                _nextTurretFFCheckTime.Clear();
+                _turretFFBlockedUntil.Clear();
+            }
             if (_cachedVehicleExtents.Count > 128)
                 _cachedVehicleExtents.Clear();
             if (_nextVehiclePedestrianScanTime.Count > 128)
@@ -1283,6 +1290,226 @@ namespace EasyRed2HumanAI
                     }
                 }
             }
+        }
+
+        // =====================================================================
+        // Emplacement & Vehicle Turret Friendly Fire Prevention (TurretAI.AutoPilot)
+        // =====================================================================
+        internal static bool ShouldBlockTurretFriendlyFire(TurretAI turretAi, Turret turret, Soldier gunner)
+        {
+            if (turretAi == null || turret == null || turret.Pointer == IntPtr.Zero)
+                return false;
+
+            Vehicle rootVeh = AiCore.GetCachedTurretVehicle(turret);
+            if (rootVeh != null && !AiCore.IsLocallyOwnedVehicle(rootVeh))
+                return false;
+
+            IntPtr turretPtr = turret.Pointer;
+            float now = Time.time;
+
+            if (_turretFFBlockedUntil.TryGetValue(turretPtr, out float blockedUntil) && now < blockedUntil)
+                return true;
+
+            if (_nextTurretFFCheckTime.TryGetValue(turretPtr, out float nextCheck) && now < nextCheck)
+                return false;
+
+            _nextTurretFFCheckTime[turretPtr] = now + 0.10f;
+
+            string myFaction = (gunner != null && !string.IsNullOrEmpty(gunner.faction))
+                ? gunner.faction
+                : GetVehicleCrewFaction(rootVeh, turret);
+            if (string.IsNullOrEmpty(myFaction))
+                return false;
+
+            Vector3 firePos = turret.GetFirePos();
+            Vector3 fireDir = turret.GetFireDir();
+            if (fireDir.sqrMagnitude < 0.001f)
+                return false;
+            fireDir.Normalize();
+
+            bool hasTargetPos = false;
+            Vector3 targetPos = Vector3.zero;
+            if (turretAi.CurrentVisibleTarget != null && turretAi.CurrentVisibleTarget.Pointer != IntPtr.Zero)
+            {
+                targetPos = turretAi.CurrentVisibleTarget.GetCenterOfUnit();
+                hasTargetPos = true;
+            }
+            else if (turretAi.HasRadioSupportRequest)
+            {
+                targetPos = turretAi.RadioRequestTargetPosition;
+                hasTargetPos = true;
+            }
+
+            float targetDist = hasTargetPos ? Vector3.Distance(firePos, targetPos) : 160.0f;
+            float maxCheckDist = Mathf.Clamp(targetDist + 5.0f, 12.0f, 220.0f);
+            float baseConeDeg = VisionConfig.FriendlyFireConeDegrees.Value;
+            float caliber = turret.GetCaliber();
+            bool isArtillery = turret.IsArtillery();
+            bool isIndirect = turret.IsUpIndirectFire();
+            bool isExplosive = caliber >= 20.0f || isArtillery;
+
+            float dangerCloseBlastRadius = 0f;
+            if (isArtillery || caliber >= 70.0f)
+                dangerCloseBlastRadius = 18.0f;
+            else if (caliber >= 37.0f)
+                dangerCloseBlastRadius = 11.0f;
+            else if (caliber >= 20.0f)
+                dangerCloseBlastRadius = 6.0f;
+
+            // 1. Prevent direct-fire cannons/AT guns from detonating HE shells on a low wall or sandbag right in front of the muzzle
+            if (isExplosive && !isIndirect && VisionConfig.EnableWallShootingPrevention.Value)
+            {
+                Transform ignoreRoot = (rootVeh != null && rootVeh.transform != null)
+                    ? rootVeh.transform.root
+                    : (turret.transform != null ? turret.transform.root : null);
+                if (ignoreRoot != null && AiCore.IsDirectionBlockedByEnvironment(firePos, fireDir, 5.2f, ignoreRoot))
+                {
+                    _turretFFBlockedUntil[turretPtr] = now + 0.30f;
+                    WallsBlocked++;
+                    return true;
+                }
+            }
+
+            IntPtr gunnerPtr = gunner != null ? gunner.Pointer : IntPtr.Zero;
+            IntPtr rootVehPtr = rootVeh != null ? rootVeh.Pointer : IntPtr.Zero;
+
+            // 2. Always check the Human Player first in O(1) so friendly emplacements/turrets never shoot through the player!
+            Soldier player = Soldier.CurrentControlledSoldierOrNull();
+            if (player != null &&
+                !string.IsNullOrEmpty(player.faction) &&
+                ResourcesManager.IsSameFaction(myFaction, player.faction))
+            {
+                if (IsFriendlySoldierInTurretFireDanger(
+                    player, gunnerPtr, rootVehPtr, firePos, fireDir, maxCheckDist,
+                    baseConeDeg, isIndirect, isExplosive, hasTargetPos, targetPos, dangerCloseBlastRadius))
+                {
+                    _turretFFBlockedUntil[turretPtr] = now + 0.30f;
+                    FriendlyFirePrevented++;
+                    return true;
+                }
+            }
+
+            // 3. Check all friendly squads in the firing corridor or explosive impact zone
+            var allSquads = Squad.AllSquads;
+            if (allSquads != null)
+            {
+                foreach (var kvp in allSquads)
+                {
+                    Squad sq = kvp.Value;
+                    if (sq == null || sq.units == null)
+                        continue;
+
+                    Soldier leader = sq.Leader;
+                    if (leader == null || string.IsNullOrEmpty(leader.faction) || !ResourcesManager.IsSameFaction(myFaction, leader.faction))
+                        continue;
+
+                    if (leader.transform != null)
+                    {
+                        Vector3 lPos = leader.transform.position;
+                        bool nearLine = (lPos - firePos).sqrMagnitude <= (maxCheckDist + 45f) * (maxCheckDist + 45f);
+                        bool nearBlast = hasTargetPos && dangerCloseBlastRadius > 0f &&
+                                         (lPos - targetPos).sqrMagnitude <= (dangerCloseBlastRadius + 45f) * (dangerCloseBlastRadius + 45f);
+                        if (!nearLine && !nearBlast)
+                            continue;
+                    }
+
+                    var units = sq.units;
+                    int uCount = units.Count;
+                    for (int i = 0; i < uCount; i++)
+                    {
+                        if (IsFriendlySoldierInTurretFireDanger(
+                            units[i], gunnerPtr, rootVehPtr, firePos, fireDir, maxCheckDist,
+                            baseConeDeg, isIndirect, isExplosive, hasTargetPos, targetPos, dangerCloseBlastRadius))
+                        {
+                            _turretFFBlockedUntil[turretPtr] = now + 0.30f;
+                            FriendlyFirePrevented++;
+                            return true;
+                        }
+                    }
+                }
+            }
+
+            return false;
+        }
+
+        private static bool IsFriendlySoldierInTurretFireDanger(
+            Soldier friend,
+            IntPtr gunnerPtr,
+            IntPtr rootVehPtr,
+            Vector3 firePos,
+            Vector3 fireDir,
+            float maxCheckDist,
+            float baseConeDeg,
+            bool isIndirect,
+            bool isExplosive,
+            bool hasTargetPos,
+            Vector3 targetPos,
+            float dangerCloseBlastRadius)
+        {
+            if (friend == null || friend.Pointer == IntPtr.Zero || !friend.IsAlive || friend.Pointer == gunnerPtr || friend.transform == null)
+                return false;
+
+            if (rootVehPtr != IntPtr.Zero && friend.IsOnVehicle())
+            {
+                Vehicle friendVeh = friend.GetCurrentVehicle();
+                if (friendVeh != null && friendVeh.Pointer == rootVehPtr)
+                    return false;
+            }
+
+            bool isPlayer = friend.IsPlayer();
+            Vector3 chestPos = friend.GetCenterOfUnit();
+            Vector3 feetPos = friend.transform.position + Vector3.up * 0.45f;
+
+            // A. Danger-Close Explosive Blast Radius around the target impact point
+            if (hasTargetPos && dangerCloseBlastRadius > 0f)
+            {
+                float blastR = isPlayer ? (dangerCloseBlastRadius + 3.5f) : dangerCloseBlastRadius;
+                if ((chestPos - targetPos).sqrMagnitude <= blastR * blastR)
+                    return true;
+            }
+
+            Vector3 toFriend = chestPos - firePos;
+            float distSq = toFriend.sqrMagnitude;
+            if (distSq < 0.04f)
+                return false;
+
+            float dist = Mathf.Sqrt(distSq);
+
+            // B. Point-Blank Muzzle Danger Zone (friendly standing right in front of the barrel)
+            if (dist <= 3.5f && Vector3.Angle(fireDir, toFriend) <= 45.0f)
+                return true;
+
+            // C. Direct Line-of-Fire Corridor & Cone
+            if (!isIndirect && dist <= maxCheckDist)
+            {
+                float along = Vector3.Dot(toFriend, fireDir);
+                if (along > 0.4f && along <= maxCheckDist)
+                {
+                    Vector3 rayPt = firePos + fireDir * along;
+                    float perpChest = Vector3.Distance(rayPt, chestPos);
+                    float perpFeet = Vector3.Distance(rayPt, feetPos);
+                    float minPerp = Mathf.Min(perpChest, perpFeet);
+
+                    // Also account for horizontal (XZ) sweep when vertical separation is within 2.4m
+                    if (Mathf.Abs(rayPt.y - chestPos.y) <= 2.4f)
+                    {
+                        Vector2 flatRay = new Vector2(rayPt.x - chestPos.x, rayPt.z - chestPos.z);
+                        minPerp = Mathf.Min(minPerp, flatRay.magnitude);
+                    }
+
+                    float corridorRadius = isPlayer
+                        ? (isExplosive ? 3.6f : 2.6f)
+                        : (isExplosive ? 2.8f : 1.85f);
+                    float coneDeg = isPlayer
+                        ? Mathf.Max(baseConeDeg, 8.5f)
+                        : Mathf.Max(baseConeDeg, 6.0f);
+
+                    if (minPerp <= corridorRadius || Vector3.Angle(fireDir, toFriend) <= coneDeg)
+                        return true;
+                }
+            }
+
+            return false;
         }
 
         private static bool TryRouteVehicleToRepairStation(AIVehicle aiVeh, Vehicle veh, float now)

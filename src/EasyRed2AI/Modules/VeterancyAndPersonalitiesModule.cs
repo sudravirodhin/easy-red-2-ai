@@ -593,6 +593,33 @@ namespace EasyRed2HumanAI
             }
         }
 
+        [HarmonyPatch(typeof(TurretAI), nameof(TurretAI.AutoPilot))]
+        public static class TurretAI_AutoPilot_Patch
+        {
+            public static void Postfix(TurretAI __instance, Soldier __0)
+            {
+                try
+                {
+                    if (!VisionConfig.EnableMod.Value ||
+                        VisionConfig.FriendlyFireConeDegrees.Value <= 0.1f ||
+                        __instance == null)
+                    {
+                        return;
+                    }
+
+                    Turret turret = __instance.turret;
+                    if (turret == null || turret.Pointer == IntPtr.Zero || !turret.IsFiring())
+                        return;
+
+                    if (ShouldBlockTurretFriendlyFire(__instance, turret, __0))
+                    {
+                        turret.SetGunTriggerPressed(false, __0);
+                    }
+                }
+                catch { }
+            }
+        }
+
         [HarmonyPatch(typeof(AIPlane), nameof(AIPlane.Update))]
         public static class AIPlane_Update_Patch
         {
