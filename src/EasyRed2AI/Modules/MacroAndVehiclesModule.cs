@@ -24,6 +24,7 @@ namespace EasyRed2HumanAI
         private static readonly List<RepairStation> _activeRepairStations = new List<RepairStation>(16);
         private static float _nextRepairStationScanTime;
         private static readonly Dictionary<IntPtr, RepairStation> _vehiclesSeekingRepairStation = new Dictionary<IntPtr, RepairStation>(32);
+        private static readonly Dictionary<IntPtr, IntPtr> _squadOrderedToVehicle = new Dictionary<IntPtr, IntPtr>(32);
 
         // =====================================================================
         // Helper: Sheltered Tank / Vehicle Repair Position (Leeward Hull Cover)
@@ -2744,8 +2745,7 @@ namespace EasyRed2HumanAI
                     continue;
 
                 bool isStaticGun = veh.TryCast<MovableVehicle>() == null;
-                bool isUnmannedCombatVehicle = !isStaticGun && !veh.HasDriver();
-                bool isParkedArmedTransport = isUnmannedCombatVehicle && veh.IsTransportVehicle();
+                bool isUnmannedCombatVehicle = !isStaticGun && !veh.HasDriver() && !veh.IsTransportVehicle();
 
                 Turret mainTurret = veh.GetMainTurret(false);
                 if (mainTurret == null || mainTurret.WeaponsCount() <= 0 || mainTurret.GetSittedUnit(veh) != null)
@@ -2754,8 +2754,9 @@ namespace EasyRed2HumanAI
                 IntPtr vehPtr = veh.Pointer;
                 Vector3 vehPos = veh.transform.position;
 
-                // 1. If this is an empty/abandoned movable combat vehicle (Tank, Armored Car, Halftrack)
-                //    and a bailed-out Vehicle Crew (`sq.IsVehicleCrew`) is within 85m, order that crew to re-mount it!
+                // 1. If this is an empty/abandoned movable combat vehicle (Tank, Armored Car)
+                //    and a bailed-out Vehicle Crew (`sq.IsVehicleCrew`) with >= 2 alive crewmen (driver + gunner) is within 85m,
+                //    order all alive members of that crew (including the Leader) to re-mount it!
                 if (isUnmannedCombatVehicle)
                 {
                     Squad bestBailedCrew = null;
@@ -2764,11 +2765,21 @@ namespace EasyRed2HumanAI
                     foreach (var kvp in allSquads)
                     {
                         Squad sq = kvp.Value;
-                        if (sq == null || !sq.IsVehicleCrew || sq.IsPlayerInSquad() || sq.SomeoneIsRepairing())
+                        if (sq == null || !sq.IsVehicleCrew || sq.units == null || sq.IsPlayerInSquad() || sq.SomeoneIsRepairing())
                             continue;
 
                         Soldier leader = sq.Leader;
                         if (leader == null || !AiCore.IsLocallyOwnedBot(leader) || leader.IsOnVehicle() || leader.transform == null)
+                            continue;
+
+                        int aliveCrewCount = 0;
+                        for (int cIdx = 0; cIdx < sq.units.Count; cIdx++)
+                        {
+                            Soldier cUnit = sq.units[cIdx];
+                            if (cUnit != null && cUnit.IsAlive && !cUnit.IsOnVehicle())
+                                aliveCrewCount++;
+                        }
+                        if (aliveCrewCount < 2)
                             continue;
 
                         float dSq = (leader.transform.position - vehPos).sqrMagnitude;
@@ -2783,7 +2794,17 @@ namespace EasyRed2HumanAI
                     {
                         try
                         {
-                            bestBailedCrew.SendUnitsToVehicle(veh);
+                            _squadOrderedToVehicle[bestBailedCrew.Pointer] = vehPtr;
+                            AiDestination crewVehDest = veh.Cast<AiDestination>();
+                            for (int cIdx = 0; cIdx < bestBailedCrew.units.Count; cIdx++)
+                            {
+                                Soldier cUnit = bestBailedCrew.units[cIdx];
+                                if (cUnit != null && AiCore.IsLocallyOwnedBot(cUnit) && !cUnit.IsOnVehicle())
+                                {
+                                    _assignedEmplacementUntil[cUnit.Pointer] = now + 24.0f;
+                                    cUnit.CoverPosition(crewVehDest);
+                                }
+                            }
                             StaticGunsStaffedCount++;
                             TrySayTacticalVoice(bestBailedCrew.Leader, bestBailedCrew, VoiceManager.VoiceClip.illTakeHisSeat, 0.15f);
                         }
@@ -2792,7 +2813,9 @@ namespace EasyRed2HumanAI
                     }
                 }
 
-                if (!isStaticGun && !isParkedArmedTransport)
+                // Never assign regular foot soldiers to driverless movable vehicles (halftracks, trucks, jeeps, tanks) —
+                // only staff true static guns/emplacements (`isStaticGun`) that have an open turret seat!
+                if (!isStaticGun || !TryGetAvailableTurretSeatIndex(veh, out _))
                     continue;
 
                 Soldier bestCandidate = null;
@@ -2922,6 +2945,249 @@ namespace EasyRed2HumanAI
                         AiCore.LogDebug("Emplacement", $"{bestCandidate.faction} soldier assigned to crew empty emplacement/turret ({Mathf.Sqrt(bestDistSq):F0}m away).");
                     }
                 }
+            }
+        }
+
+        private static bool TryGetAvailableTurretSeatIndex(Vehicle veh, out int turretSeatIndex)
+        {
+            turretSeatIndex = -1;
+            if (veh == null || veh.seats == null)
+                return false;
+
+            var seats = veh.seats;
+            int count = seats.Length;
+
+            // Prefer the MainTurretSeat first if it is empty
+            Seats mainSeat = veh.MainTurretSeat;
+            if (mainSeat != null && mainSeat.hasTurret && !mainSeat.hasUnitSet &&
+                mainSeat.connectedTurret != null && mainSeat.connectedTurret.WeaponsCount() > 0)
+            {
+                for (int i = 0; i < count; i++)
+                {
+                    if (seats[i] != null && seats[i].Pointer == mainSeat.Pointer)
+                    {
+                        turretSeatIndex = i;
+                        return true;
+                    }
+                }
+            }
+
+            for (int i = 0; i < count; i++)
+            {
+                Seats s = seats[i];
+                if (s != null && s.hasTurret && !s.hasUnitSet &&
+                    s.connectedTurret != null && s.connectedTurret.WeaponsCount() > 0)
+                {
+                    turretSeatIndex = i;
+                    return true;
+                }
+            }
+
+            return false;
+        }
+
+        private static bool TryGetAvailableDriverSeatIndex(Vehicle veh, out int driverSeatIndex)
+        {
+            driverSeatIndex = -1;
+            if (veh == null || veh.seats == null)
+                return false;
+
+            var seats = veh.seats;
+            int count = seats.Length;
+            for (int i = 0; i < count; i++)
+            {
+                Seats s = seats[i];
+                if (s != null && s.isDriver && !s.hasUnitSet)
+                {
+                    driverSeatIndex = i;
+                    return true;
+                }
+            }
+            return false;
+        }
+
+        [HarmonyPatch(typeof(Squad), nameof(Squad.SendUnitsToVehicle))]
+        public static class Squad_SendUnitsToVehicle_Patch
+        {
+            public static void Prefix(Squad __instance, Vehicle __0)
+            {
+                try
+                {
+                    if (__instance != null && __instance.Pointer != IntPtr.Zero && __0 != null && __0.Pointer != IntPtr.Zero)
+                    {
+                        _squadOrderedToVehicle[__instance.Pointer] = __0.Pointer;
+                    }
+                }
+                catch { }
+            }
+        }
+
+        [HarmonyPatch(typeof(Squad), nameof(Squad.OrderLeaveVehicle))]
+        public static class Squad_OrderLeaveVehicle_Patch
+        {
+            public static void Postfix(Squad __instance)
+            {
+                try
+                {
+                    if (__instance != null && __instance.Pointer != IntPtr.Zero)
+                    {
+                        _squadOrderedToVehicle.Remove(__instance.Pointer);
+                    }
+                }
+                catch { }
+            }
+        }
+
+        [HarmonyPatch(typeof(Squad), nameof(Squad.OrderLeaveAllVehiclesAndCovers))]
+        public static class Squad_OrderLeaveAllVehiclesAndCovers_Patch
+        {
+            public static void Postfix(Squad __instance)
+            {
+                try
+                {
+                    if (__instance != null && __instance.Pointer != IntPtr.Zero)
+                    {
+                        _squadOrderedToVehicle.Remove(__instance.Pointer);
+                    }
+                }
+                catch { }
+            }
+        }
+
+        /// <summary>
+        /// Prevents CoverManager / Squad.SendUnitsToCovers from treating driverless movable vehicles
+        /// (abandoned trucks, halftracks, jeeps, tanks) or emplacements with no open turret seats as valid cover.
+        /// </summary>
+        [HarmonyPatch(typeof(Vehicle), nameof(Vehicle.IsCoverAvailable))]
+        public static class Vehicle_IsCoverAvailable_Patch
+        {
+            public static void Postfix(Vehicle __instance, ref bool __result)
+            {
+                try
+                {
+                    if (!__result || !VisionConfig.EnableMod.Value || __instance == null)
+                        return;
+
+                    if (__instance.TryCast<MovableVehicle>() != null && !__instance.HasDriver())
+                    {
+                        __result = false;
+                        return;
+                    }
+
+                    if (!TryGetAvailableTurretSeatIndex(__instance, out _))
+                    {
+                        __result = false;
+                    }
+                }
+                catch { }
+            }
+        }
+
+        /// <summary>
+        /// In vanilla (0x18085FD40), Vehicle.IsCoverOccupied returns false as long as ANY seat (including non-turret
+        /// loader/spotter/passenger seats) is empty, causing extra foot soldiers to climb into non-turret seats.
+        /// Mark the cover as occupied as soon as all turret seats are filled (or if it is a driverless movable vehicle).
+        /// </summary>
+        [HarmonyPatch(typeof(Vehicle), nameof(Vehicle.IsCoverOccupied))]
+        public static class Vehicle_IsCoverOccupied_Patch
+        {
+            public static void Postfix(Vehicle __instance, ref bool __result)
+            {
+                try
+                {
+                    if (__result || !VisionConfig.EnableMod.Value || __instance == null)
+                        return;
+
+                    if (__instance.TryCast<MovableVehicle>() != null && !__instance.HasDriver())
+                    {
+                        __result = true;
+                        return;
+                    }
+
+                    if (!TryGetAvailableTurretSeatIndex(__instance, out _))
+                    {
+                        __result = true;
+                    }
+                }
+                catch { }
+            }
+        }
+
+        /// <summary>
+        /// In vanilla, Vehicle.OnCoverReached (0x180860560) calls GetOnVehicleBestPos (0x18085E430 / 0x18087B070),
+        /// which places AI foot soldiers into whichever empty seat is first or physically closest — including
+        /// driver seats and non-turret passenger/loader seats!
+        /// This patch ensures:
+        ///   1. Regular AI foot soldiers NEVER climb into driverless movable vehicles or non-turret seats,
+        ///      and ONLY board an empty turret seat (`TryGetAvailableTurretSeatIndex`).
+        ///   2. Bailed-out Vehicle Crews (`sq.IsVehicleCrew`) re-mounting an unmanned combat vehicle always fill
+        ///      the driver seat first (`TryGetAvailableDriverSeatIndex`), then turret seats.
+        /// </summary>
+        [HarmonyPatch(typeof(Vehicle), nameof(Vehicle.OnCoverReached))]
+        public static class Vehicle_OnCoverReached_Patch
+        {
+            public static bool Prefix(Vehicle __instance, Soldier __0)
+            {
+                try
+                {
+                    if (!VisionConfig.EnableMod.Value || __instance == null || __0 == null || !__0.IsAI())
+                        return true;
+
+                    if (__instance.IsCoverDestroyed() || __instance.IsDisabled())
+                    {
+                        __0.CoverPosition(null);
+                        return false;
+                    }
+
+                    Squad sq = __0.joinedSquad;
+                    bool isPlayerSquadOrVeh = __instance.PlayerIsInside() || (sq != null && sq.IsPlayerInSquad());
+                    if (isPlayerSquadOrVeh)
+                        return true;
+
+                    bool isExplicitBoardOrder = sq != null &&
+                                                _squadOrderedToVehicle.TryGetValue(sq.Pointer, out IntPtr orderedVehPtr) &&
+                                                orderedVehPtr == __instance.Pointer;
+                    bool isVehicleCrew = sq != null && sq.IsVehicleCrew;
+                    bool isMovable = __instance.TryCast<MovableVehicle>() != null;
+
+                    if (isVehicleCrew && isMovable)
+                    {
+                        if (!__instance.HasDriver() && TryGetAvailableDriverSeatIndex(__instance, out int driverIdx))
+                        {
+                            __instance.GetOnVehicle(driverIdx, __0);
+                            return false;
+                        }
+                        if (TryGetAvailableTurretSeatIndex(__instance, out int crewTurretIdx))
+                        {
+                            __instance.GetOnVehicle(crewTurretIdx, __0);
+                            return false;
+                        }
+                        return true;
+                    }
+
+                    if (isExplicitBoardOrder)
+                        return true;
+
+                    // Regular AI foot soldier reaching a Vehicle as cover/emplacement:
+                    // 1. Never climb into a driverless movable vehicle (truck, halftrack, jeep, tank)
+                    if (isMovable && !__instance.HasDriver())
+                    {
+                        __0.CoverPosition(null);
+                        return false;
+                    }
+
+                    // 2. Only climb into an empty turret seat; never board a non-turret loader/passenger seat!
+                    if (TryGetAvailableTurretSeatIndex(__instance, out int turretSeatIdx))
+                    {
+                        __instance.GetOnVehicle(turretSeatIdx, __0);
+                        return false;
+                    }
+
+                    __0.CoverPosition(null);
+                    return false;
+                }
+                catch { }
+                return true;
             }
         }
 
