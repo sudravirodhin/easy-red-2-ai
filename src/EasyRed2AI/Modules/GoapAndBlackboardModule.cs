@@ -108,7 +108,7 @@ namespace EasyRed2HumanAI
             {
                 Id = GoapActionId.BandageInCover,
                 Required = GoapStateBits.IsBleeding | GoapStateBits.InCover,
-                Forbidden = GoapStateBits.InPointBlankRange,
+                Forbidden = GoapStateBits.InPointBlankRange | GoapStateBits.ExposedSideOfWall | GoapStateBits.ArmorThreatClose,
                 Add = GoapStateBits.SurvivedCrisis,
                 Remove = GoapStateBits.IsBleeding,
                 BaseCost = 0.7f
@@ -245,6 +245,8 @@ namespace EasyRed2HumanAI
             public Soldier TargetBuddyDonor;
             public Soldier TargetNeedyAllyToFeed;
             public Vector3 TargetPosition;
+            public bool NeedAmmo;
+            public bool NeedBandage;
             public bool IsAtWeaponPickup;
             public bool IsRoleWeaponUpgrade;
             public bool IsBuddyBandageRefill;
@@ -252,6 +254,42 @@ namespace EasyRed2HumanAI
             public bool IsFeedingNeedyAlly;
             public bool IsRadioPackPickup;
             public bool IsHelmetPickup;
+        }
+
+        private struct FreeFloorItemEntry
+        {
+            public ItemObject Item;
+            public Vector3 Pos;
+        }
+
+        private static readonly List<FreeFloorItemEntry> _freeFloorItemsSnapshot = new List<FreeFloorItemEntry>(64);
+        private static float _nextFreeFloorItemsSnapshotTime;
+
+        private static void EnsureFreeFloorItemsSnapshot(float now)
+        {
+            if (now < _nextFreeFloorItemsSnapshotTime)
+                return;
+
+            _nextFreeFloorItemsSnapshotTime = now + 0.75f;
+            _freeFloorItemsSnapshot.Clear();
+
+            var floorItems = ItemObject.spawnedItems;
+            if (floorItems == null)
+                return;
+
+            int fCount = floorItems.Count;
+            for (int i = 0; i < fCount; i++)
+            {
+                ItemObject item = floorItems[i];
+                if (IsFloorItemFreeToPickUp(item))
+                {
+                    _freeFloorItemsSnapshot.Add(new FreeFloorItemEntry
+                    {
+                        Item = item,
+                        Pos = item.transform.position
+                    });
+                }
+            }
         }
 
         internal static readonly Dictionary<IntPtr, BotScavengeCache> _botScavengeCaches = new Dictionary<IntPtr, BotScavengeCache>(128);
@@ -435,6 +473,10 @@ namespace EasyRed2HumanAI
             public IntPtr RescuerPtr;
             public float RescueUntil;
 
+            public IntPtr DragRescuerPtr;
+            public IntPtr DragPatientPtr;
+            public float DragClaimUntil;
+
             public bool IsThreatBeingPinned(float now)
             {
                 return now < SuppressHoldUntil && (Suppressor0Ptr != IntPtr.Zero || Suppressor1Ptr != IntPtr.Zero);
@@ -496,7 +538,7 @@ namespace EasyRed2HumanAI
         internal struct FactionCommandProfile
         {
             public float RadioRelayRadius;            // Default 45m (USA: 55m, UK/Canada: 50m, USSR/France: 38m, Mongolia/China: 42m)
-            public bool AllowDisconnectedLocalFlank;  // True for decentralized doctrines (Germany, Finland, Mongolia, Australia, NZ, Gurkha, Poland, Greece, China, Japan)
+            public bool AllowDisconnectedLocalFlank;  // True for decentralized doctrines (Germany, Finland, USA, Mongolia, Australia, NZ, Gurkha, Poland, Greece, China, Japan)
             public bool PreferAmbushWhenAlone;        // True for Japan, Finland, Gurkha, China (hold local ambush cover when alone vs retreating to merge)
             public float FlankLateralBias;            // 0.78f (tight) to 0.90f (wide encirclement like Finland/Mongolia/Japan; default 0.83f)
             public float GarrisonSquadRatio;          // Default 0.22f (UK/France/Italy: 0.28f; USSR/Japan/Mongolia: 0.16f)
@@ -504,11 +546,13 @@ namespace EasyRed2HumanAI
             public float SuppressionThresholdBase;    // Default 18f (USA/Manchukuo: 15f; Italy: 16f; Germany: 19f; Poland/NZ: 22f; Finland: 23f; Gurkha: 24f; Japan: 25f)
             public float SuppressCostMult;            // Germany: 0.72f, UK/India: 0.80f, France: 0.82f
             public float SmokeCostMult;               // USA: 0.70f, Canada/UK: 0.75f, Japan: 0.76f
-            public float FlankMoveCostMult;           // Finland: 0.72f, Mongolia: 0.74f, USSR/Australia: 0.76f, Canada/NZ: 0.78f, Germany: 0.80f
+            public float FlankMoveCostMult;           // Finland: 0.72f, Mongolia: 0.74f, USSR/Australia/Canada: 0.76f, Germany/NZ: 0.78f, USA: 0.82f
             public float FragFlushCostMult;           // China: 0.74f, USSR/Canada: 0.78f, USA_Afrikan: 0.80f, Hungary: 0.84f
             public float OverwatchHoldCostMult;       // UK: 0.78f, Germany/USA/India: 0.82f, Italy/France: 0.84f
             public float BayonetBreachCostMult;       // Japan: 0.62f, Gurkha: 0.65f, NZ: 0.75f, Greece: 0.80f, Australia: 0.82f
             public float EmergencyCoverCostMult;      // USA: 0.82f, Manchukuo: 0.78f, China: 0.84f, Italy: 0.85f
+            public float ScavengeAndResupplyMult;     // Finland: 0.72f, China: 0.74f, Poland: 0.76f, Gurkha/Greece: 0.78f, Germany/USSR: 0.80f, USA/Aus/NZ: 0.82f
+            public float ComradeAidAndDragMult;       // USA/USA_Afrikan: 0.74f, Aus/NZ: 0.75f, Finland: 0.76f, Canada/Poland/Gurkha: 0.78f; USSR: 1.08f, Manchukuo: 1.18f, Japan: 1.22f
 
             public static readonly FactionCommandProfile Default = new FactionCommandProfile
             {
@@ -525,7 +569,9 @@ namespace EasyRed2HumanAI
                 FragFlushCostMult = 1.0f,
                 OverwatchHoldCostMult = 1.0f,
                 BayonetBreachCostMult = 1.0f,
-                EmergencyCoverCostMult = 1.0f
+                EmergencyCoverCostMult = 1.0f,
+                ScavengeAndResupplyMult = 1.0f,
+                ComradeAidAndDragMult = 1.0f
             };
         }
 
@@ -566,18 +612,20 @@ namespace EasyRed2HumanAI
             switch (f)
             {
                 case "Germany":
-                    // Wehrmacht / Fallschirmjager: Auftragstaktik (local initiative when cut off) + MG34/42 Base-of-Fire
+                    // Wehrmacht / Fallschirmjager: Auftragstaktik (local initiative when cut off) + MG34/42 Base-of-Fire + Beutewaffen scavenging
                     p.RadioRelayRadius = 48f;
                     p.AllowDisconnectedLocalFlank = true;
                     p.FlankLateralBias = 0.82f;
                     p.SuppressionThresholdBase = 19.5f;
                     p.SuppressCostMult = 0.72f;
-                    p.FlankMoveCostMult = 0.80f;
+                    p.FlankMoveCostMult = 0.78f;
                     p.OverwatchHoldCostMult = 0.82f;
+                    p.ScavengeAndResupplyMult = 0.80f;
+                    p.ComradeAidAndDragMult = 0.86f;
                     break;
 
                 case "Finland":
-                    // Finnish Army: Motti wide encirclement, autonomous forest ambush, zero reliance on HQ radio
+                    // Finnish Army: Motti wide encirclement, autonomous forest ambush, master field scavengers & "Kaveria ei jateta" comrade rescue
                     p.RadioRelayRadius = 42f;
                     p.AllowDisconnectedLocalFlank = true;
                     p.PreferAmbushWhenAlone = true;
@@ -586,10 +634,12 @@ namespace EasyRed2HumanAI
                     p.SuppressionThresholdBase = 23f;
                     p.FlankMoveCostMult = 0.72f;
                     p.FragFlushCostMult = 0.82f;
+                    p.ScavengeAndResupplyMult = 0.72f;
+                    p.ComradeAidAndDragMult = 0.76f;
                     break;
 
                 case "UnitedStates_Afrikan":
-                    // US 92nd Infantry (Italy): strong radio net + close-range flanking and grenade grit
+                    // US 92nd Infantry (Italy): strong radio net + close-range flanking, grenade grit, and high buddy aid
                     p.RadioRelayRadius = 52f;
                     p.AllowDisconnectedLocalFlank = true;
                     p.SuppressionThresholdBase = 20f;
@@ -597,20 +647,25 @@ namespace EasyRed2HumanAI
                     p.FlankMoveCostMult = 0.80f;
                     p.FragFlushCostMult = 0.80f;
                     p.OverwatchHoldCostMult = 0.84f;
+                    p.ScavengeAndResupplyMult = 0.82f;
+                    p.ComradeAidAndDragMult = 0.74f;
                     break;
 
                 case "UnitedStates":
-                    // US Army / Marines: Superior radio net, smoke screens, combined arms, and high force preservation
+                    // US Army / Marines: Superior radio net, NCO initiative, smoke screens, buddy resupply & casualty care
                     p.RadioRelayRadius = 55f;
+                    p.AllowDisconnectedLocalFlank = true;
                     p.SuppressionThresholdBase = 15.5f;
                     p.SmokeCostMult = 0.70f;
                     p.OverwatchHoldCostMult = 0.82f;
-                    p.FlankMoveCostMult = 0.85f;
+                    p.FlankMoveCostMult = 0.82f;
                     p.EmergencyCoverCostMult = 0.82f;
+                    p.ScavengeAndResupplyMult = 0.82f;
+                    p.ComradeAidAndDragMult = 0.74f;
                     break;
 
                 case "England":
-                    // British Army: Methodical "Bite & Hold" set-piece overwatch, smoke, and strong objective garrisoning
+                    // British Army: Methodical "Bite & Hold" set-piece overwatch, smoke, strong garrisoning, and disciplined casualty aid
                     p.RadioRelayRadius = 50f;
                     p.FlankLateralBias = 0.80f;
                     p.GarrisonSquadRatio = 0.28f;
@@ -618,30 +673,36 @@ namespace EasyRed2HumanAI
                     p.SuppressCostMult = 0.80f;
                     p.SmokeCostMult = 0.76f;
                     p.OverwatchHoldCostMult = 0.78f;
+                    p.ScavengeAndResupplyMult = 0.86f;
+                    p.ComradeAidAndDragMult = 0.82f;
                     break;
 
                 case "Canada":
-                    // Canadian Army (Juno / Ortona / Scheldt): Commonwealth radio net + aggressive urban/beach shock breaching
+                    // Canadian Army (Juno / Ortona / Scheldt): Commonwealth radio net + aggressive urban/beach shock breaching & comrade rescue
                     p.RadioRelayRadius = 48f;
                     p.AllowDisconnectedLocalFlank = true;
                     p.SuppressionThresholdBase = 20f;
                     p.SmokeCostMult = 0.75f;
-                    p.FlankMoveCostMult = 0.78f;
+                    p.FlankMoveCostMult = 0.76f;
                     p.FragFlushCostMult = 0.78f;
+                    p.ScavengeAndResupplyMult = 0.84f;
+                    p.ComradeAidAndDragMult = 0.78f;
                     break;
 
                 case "Australia":
-                    // Australian AIF (Tobruk / Kokoda): Autonomous bush/desert patrol flanking and close-quarters grit
+                    // Australian AIF (Tobruk / Kokoda): Autonomous bush/desert patrol flanking, close-quarters grit, and "mateship" casualty care
                     p.RadioRelayRadius = 46f;
                     p.AllowDisconnectedLocalFlank = true;
                     p.FlankLateralBias = 0.86f;
                     p.SuppressionThresholdBase = 21.5f;
                     p.FlankMoveCostMult = 0.76f;
                     p.BayonetBreachCostMult = 0.82f;
+                    p.ScavengeAndResupplyMult = 0.82f;
+                    p.ComradeAidAndDragMult = 0.75f;
                     break;
 
                 case "NewZealand":
-                    // 2nd NZ Division / Maori Battalion (Crete / Cassino): Fierce close-assault & counter-attack shock
+                    // 2nd NZ Division / Maori Battalion (Crete / Cassino): Fierce close-assault, counter-attack shock & strong mate recovery
                     p.RadioRelayRadius = 46f;
                     p.AllowDisconnectedLocalFlank = true;
                     p.FlankLateralBias = 0.85f;
@@ -649,19 +710,23 @@ namespace EasyRed2HumanAI
                     p.FlankMoveCostMult = 0.78f;
                     p.FragFlushCostMult = 0.82f;
                     p.BayonetBreachCostMult = 0.75f;
+                    p.ScavengeAndResupplyMult = 0.82f;
+                    p.ComradeAidAndDragMult = 0.75f;
                     break;
 
                 case "India":
-                    // Indian Army: Disciplined mountain/desert overwatch and proactive emplacement defense
+                    // Indian Army: Disciplined mountain/desert overwatch, proactive emplacement defense & regimental casualty care
                     p.RadioRelayRadius = 46f;
                     p.GarrisonSquadRatio = 0.25f;
                     p.EmplacementSearchMult = 1.18f;
                     p.SuppressCostMult = 0.80f;
                     p.OverwatchHoldCostMult = 0.82f;
+                    p.ScavengeAndResupplyMult = 0.88f;
+                    p.ComradeAidAndDragMult = 0.82f;
                     break;
 
                 case "Gurkha":
-                    // Gurkhas: Fearless close-quarters Kukri/melee shock, wide infiltration, and lone ambush resilience
+                    // Gurkhas: Fearless close-quarters Kukri/melee shock, wide infiltration, field scavenging & fierce unit brotherhood
                     p.RadioRelayRadius = 44f;
                     p.AllowDisconnectedLocalFlank = true;
                     p.PreferAmbushWhenAlone = true;
@@ -669,10 +734,12 @@ namespace EasyRed2HumanAI
                     p.SuppressionThresholdBase = 24f;
                     p.FlankMoveCostMult = 0.75f;
                     p.BayonetBreachCostMult = 0.65f;
+                    p.ScavengeAndResupplyMult = 0.78f;
+                    p.ComradeAidAndDragMult = 0.78f;
                     break;
 
                 case "France":
-                    // 1940 French Army: Bataille Conduite (Methodical top-down battle, strong emplacements, brittle if radio cut)
+                    // 1940 French Army: Bataille Conduite (Methodical top-down battle, strong emplacements, urgent radio recovery if cut)
                     p.RadioRelayRadius = 38f;
                     p.AllowDisconnectedLocalFlank = false;
                     p.FlankLateralBias = 0.78f;
@@ -680,30 +747,36 @@ namespace EasyRed2HumanAI
                     p.EmplacementSearchMult = 1.25f;
                     p.SuppressCostMult = 0.82f;
                     p.OverwatchHoldCostMult = 0.84f;
+                    p.ScavengeAndResupplyMult = 0.94f;
+                    p.ComradeAidAndDragMult = 0.88f;
                     break;
 
                 case "Poland":
-                    // Polish Army: Tenacious mobile defense, high cohesion when cut off, strong comrade liberation
+                    // Polish Army: Tenacious mobile defense, high cohesion when cut off, aggressive weapon scavenging & comrade liberation
                     p.RadioRelayRadius = 42f;
                     p.AllowDisconnectedLocalFlank = true;
                     p.EmplacementSearchMult = 1.15f;
                     p.SuppressionThresholdBase = 22f;
                     p.FlankMoveCostMult = 0.82f;
                     p.FragFlushCostMult = 0.84f;
+                    p.ScavengeAndResupplyMult = 0.76f;
+                    p.ComradeAidAndDragMult = 0.78f;
                     break;
 
                 case "Greece":
-                    // Greek Army: Mountain fortification defense & counter-charge grit
+                    // Greek Army: Mountain fortification defense, counter-charge grit, captured supply scavenging & comrade aid
                     p.RadioRelayRadius = 40f;
                     p.AllowDisconnectedLocalFlank = true;
                     p.GarrisonSquadRatio = 0.26f;
                     p.EmplacementSearchMult = 1.22f;
                     p.SuppressionThresholdBase = 21f;
                     p.BayonetBreachCostMult = 0.80f;
+                    p.ScavengeAndResupplyMult = 0.78f;
+                    p.ComradeAidAndDragMult = 0.80f;
                     break;
 
                 case "Ussr":
-                    // Red Army: Deep Battle tank-infantry pincers & close SMG/grenade shock, but strictly centralized at HQ
+                    // Red Army: Deep Battle tank-infantry pincers & close SMG/grenade shock, active battlefield re-arming, relentless assault wave
                     p.RadioRelayRadius = 38f;
                     p.AllowDisconnectedLocalFlank = false;
                     p.FlankLateralBias = 0.86f;
@@ -712,6 +785,8 @@ namespace EasyRed2HumanAI
                     p.FlankMoveCostMult = 0.76f;
                     p.FragFlushCostMult = 0.78f;
                     p.BayonetBreachCostMult = 0.84f;
+                    p.ScavengeAndResupplyMult = 0.80f;
+                    p.ComradeAidAndDragMult = 1.08f;
                     break;
 
                 case "Mongolia":
@@ -723,10 +798,12 @@ namespace EasyRed2HumanAI
                     p.SuppressionThresholdBase = 19.5f;
                     p.FlankMoveCostMult = 0.74f;
                     p.OverwatchHoldCostMult = 0.85f;
+                    p.ScavengeAndResupplyMult = 0.84f;
+                    p.ComradeAidAndDragMult = 0.90f;
                     break;
 
                 case "China":
-                    // National Revolutionary Army (Shanghai / Nanking): Low radio reliance, close grenade ambushes, trench grit
+                    // National Revolutionary Army (Shanghai / Nanking): Low radio reliance, close grenade ambushes, aggressive battlefield scavenging
                     p.RadioRelayRadius = 38f;
                     p.AllowDisconnectedLocalFlank = true;
                     p.PreferAmbushWhenAlone = true;
@@ -735,10 +812,12 @@ namespace EasyRed2HumanAI
                     p.FragFlushCostMult = 0.74f;
                     p.BayonetBreachCostMult = 0.78f;
                     p.EmergencyCoverCostMult = 0.84f;
+                    p.ScavengeAndResupplyMult = 0.74f;
+                    p.ComradeAidAndDragMult = 0.92f;
                     break;
 
                 case "Japan":
-                    // Imperial Japanese Army / SNLF: Wide infiltration, smoke + bayonet shock, lone ambush to the last man
+                    // Imperial Japanese Army / SNLF: Wide infiltration, smoke + bayonet shock, lone ambush to the last man, relentless assault over casualty dragging
                     p.RadioRelayRadius = 42f;
                     p.AllowDisconnectedLocalFlank = true;
                     p.PreferAmbushWhenAlone = true;
@@ -748,6 +827,8 @@ namespace EasyRed2HumanAI
                     p.SmokeCostMult = 0.76f;
                     p.FlankMoveCostMult = 0.78f;
                     p.BayonetBreachCostMult = 0.62f;
+                    p.ScavengeAndResupplyMult = 0.84f;
+                    p.ComradeAidAndDragMult = 1.22f;
                     break;
 
                 case "Manchukuo":
@@ -759,6 +840,8 @@ namespace EasyRed2HumanAI
                     p.SuppressionThresholdBase = 14.5f;
                     p.EmergencyCoverCostMult = 0.78f;
                     p.OverwatchHoldCostMult = 0.88f;
+                    p.ScavengeAndResupplyMult = 0.95f;
+                    p.ComradeAidAndDragMult = 1.18f;
                     break;
 
                 case "Italy":
@@ -770,6 +853,8 @@ namespace EasyRed2HumanAI
                     p.SuppressionThresholdBase = 16f;
                     p.OverwatchHoldCostMult = 0.84f;
                     p.EmergencyCoverCostMult = 0.85f;
+                    p.ScavengeAndResupplyMult = 0.92f;
+                    p.ComradeAidAndDragMult = 0.90f;
                     break;
 
                 case "Romania":
@@ -781,6 +866,8 @@ namespace EasyRed2HumanAI
                     p.SuppressionThresholdBase = 16.5f;
                     p.SuppressCostMult = 0.84f;
                     p.EmergencyCoverCostMult = 0.86f;
+                    p.ScavengeAndResupplyMult = 0.90f;
+                    p.ComradeAidAndDragMult = 0.92f;
                     break;
 
                 case "Hungary":
@@ -792,6 +879,8 @@ namespace EasyRed2HumanAI
                     p.SuppressionThresholdBase = 18.5f;
                     p.SuppressCostMult = 0.84f;
                     p.FragFlushCostMult = 0.84f;
+                    p.ScavengeAndResupplyMult = 0.86f;
+                    p.ComradeAidAndDragMult = 0.88f;
                     break;
             }
 
@@ -826,6 +915,8 @@ namespace EasyRed2HumanAI
             _squadBlackboards.Clear();
             _botGoapPlans.Clear();
             _botScavengeCaches.Clear();
+            _freeFloorItemsSnapshot.Clear();
+            _nextFreeFloorItemsSnapshotTime = 0f;
             _nextWeaponUpgradeAllowedTime.Clear();
             _nextBuddyBandageRefillTime.Clear();
             _casualtyDragStates.Clear();
@@ -1774,6 +1865,11 @@ namespace EasyRed2HumanAI
             {
                 board.RescuerPtr = IntPtr.Zero;
             }
+            if (now >= board.DragClaimUntil)
+            {
+                board.DragRescuerPtr = IntPtr.Zero;
+                board.DragPatientPtr = IntPtr.Zero;
+            }
 
             _squadBlackboards[sqPtr] = board;
             return board;
@@ -1888,13 +1984,16 @@ namespace EasyRed2HumanAI
 
             // Emergent Buddy Casualty Dragging (Soldier.CarryBodySynched):
             // If this soldier is currently carrying a wounded buddy to cover/Medic (or spots an unclaimed wounded buddy
-            // in the open nearby while not in direct point-blank combat), handle the carry & drop-off cleanly!
+            // in the open nearby while not bleeding, evading armor, or in point-blank combat), handle the carry & drop-off cleanly!
             if (VisionConfig.EnableBuddyCasualtyDragging.Value &&
                 !inPointBlankMelee &&
                 !isOnBridge &&
+                !isEvadingArmor &&
                 soldier.transform != null &&
                 TryExecuteBuddyCasualtyDrag(ai, soldier, sq, ref board, soldier.transform.position, now))
             {
+                if (sq != null && sq.Pointer != IntPtr.Zero)
+                    _squadBlackboards[sq.Pointer] = board;
                 return;
             }
 
@@ -2163,14 +2262,17 @@ namespace EasyRed2HumanAI
                                      !sq.IsVehicleCrew &&
                                      !board.PreviouslyHadAliveRadioman &&
                                      !isRad &&
+                                     !isMedicRole &&
                                      (soldier.vest_Obj == null || !soldier.vest_Obj.isFuelTank);
 
                 bool wantHelmet = VisionConfig.EnableEmergentWearableScavenge.Value &&
+                                  !onRetreatTask &&
                                   !soldier.hasHeadgear &&
                                   suppression < 12f;
 
                 bool canFeedNeedyAlly = VisionConfig.EnableBuddyResupply.Value &&
                                         !onRetreatTask &&
+                                        !outOfAmmo &&
                                         soldier.IsAmmoBoxCarrier();
 
                 bool hasVisibleFootEnemy = ai.HasEnemyAndCanFireAtHim && (ai.visibleTarget == null || ai.visibleTarget.TryCast<Vehicle>() == null);
@@ -2309,8 +2411,17 @@ namespace EasyRed2HumanAI
                         bestStep0 = a0.Id;
                         bestStep1 = GoapActionId.None;
                     }
-                    // Allow MoveToFlankCover to also evaluate the 2-step Flank -> Frag Flush chain when carrying a frag grenade
-                    if (a0.Id != GoapActionId.MoveToFlankCover || (ws & GoapStateBits.HasFragGrenade) == 0)
+                    // Allow 2-step tactical chains to compete even when Step 0 partially satisfies the goal bit:
+                    //  1) MoveToFlankCover -> FlushThreatWithFrag (when carrying frag grenade)
+                    //  2) SeekEmergencyCover / RepositionBehindWall -> BandageInCover (when bleeding out of cover)
+                    //  3) ThrowSmokeScreen -> MoveToFlankCover / BoundWithOverwatch (when smoking to mask an unpinned advance)
+                    bool canChainFlankFrag = a0.Id == GoapActionId.MoveToFlankCover && (ws & GoapStateBits.HasFragGrenade) != 0;
+                    bool canChainCoverBandage = (a0.Id == GoapActionId.SeekEmergencyCover || a0.Id == GoapActionId.RepositionBehindWall) &&
+                                                (ws & GoapStateBits.IsBleeding) != 0;
+                    bool canChainSmokePush = a0.Id == GoapActionId.ThrowSmokeScreen &&
+                                             (ws & GoapStateBits.HasSmokeGrenade) != 0 &&
+                                             (ws & GoapStateBits.AllyPinningThreat) == 0;
+                    if (!canChainFlankFrag && !canChainCoverBandage && !canChainSmokePush)
                         continue;
                 }
 
@@ -2328,9 +2439,15 @@ namespace EasyRed2HumanAI
                         continue;
 
                     float cost1 = GetPersonalityAndDirectiveAdjustedCost(a1, wsAfter0, ref board, personality, vet01, ref factionProfile, ref micro);
-                    // Synergy bonus for 2-step MoveToFlankCover -> FlushThreatWithFrag breach chain
+                    // Synergy bonuses for intentional 2-step tactical chains:
                     if (a0.Id == GoapActionId.MoveToFlankCover && a1.Id == GoapActionId.FlushThreatWithFrag)
-                        cost1 -= 1.05f;
+                        cost1 -= 1.45f;
+                    else if ((a0.Id == GoapActionId.SeekEmergencyCover || a0.Id == GoapActionId.RepositionBehindWall) &&
+                             a1.Id == GoapActionId.BandageInCover)
+                        cost1 -= 0.85f;
+                    else if (a0.Id == GoapActionId.ThrowSmokeScreen &&
+                             (a1.Id == GoapActionId.MoveToFlankCover || a1.Id == GoapActionId.BoundWithOverwatch))
+                        cost1 -= 1.15f;
 
                     float totalCost = cost0 + cost1;
                     if (totalCost < bestCost)
@@ -2456,14 +2573,17 @@ namespace EasyRed2HumanAI
                     break;
 
                 case GoapActionId.BoundWithOverwatch:
-                    cost *= factionProfile.OverwatchHoldCostMult * micro.AggressionCostMult;
-                    if (netDirective == SquadNetDirective.Anvil_PinAndCallSupport)
+                    cost *= factionProfile.FlankMoveCostMult * micro.AggressionCostMult;
+                    if (netDirective == SquadNetDirective.Anvil_PinAndCallSupport ||
+                        netDirective == SquadNetDirective.Hammer_WideFlankEnvelopment)
                         cost -= 0.45f;
                     // Win-Condition Priority: strongly favor bounding into the cap zone when contesting or finishing an objective!
                     if (urgentObjPush)
                         cost -= 0.75f;
-                    if (personality == SoldierPersonality.Gunner_Anchor ||
-                        personality == SoldierPersonality.Gunner_Overwatch ||
+                    if (personality == SoldierPersonality.Assaulter_Shock ||
+                        personality == SoldierPersonality.Assaulter_Breacher ||
+                        personality == SoldierPersonality.Assaulter_Skirmisher ||
+                        personality == SoldierPersonality.Rifleman_Grenadier ||
                         personality == SoldierPersonality.Gunner_AssaultMG)
                         cost -= 0.45f;
                     break;
@@ -2478,7 +2598,7 @@ namespace EasyRed2HumanAI
                     break;
 
                 case GoapActionId.RescueSurrenderedComrade:
-                    cost *= micro.AggressionCostMult;
+                    cost *= factionProfile.ComradeAidAndDragMult * micro.AggressionCostMult;
                     if (lowTicketConservation)
                         cost -= 0.50f;
                     if (personality == SoldierPersonality.Medic_Heroic ||
@@ -2505,16 +2625,25 @@ namespace EasyRed2HumanAI
                     break;
 
                 case GoapActionId.ScavengeSupplyFromCorpse:
-                    cost *= micro.CautionCostMult;
+                    cost *= factionProfile.ScavengeAndResupplyMult * micro.CautionCostMult;
                     if (lowTicketConservation)
                         cost -= 0.40f;
                     // Urgently prioritize grabbing a nearby fallen Bazooka/Panzerfaust/AT grenade when enemy armor is closing in!
                     if ((ws & GoapStateBits.ArmorThreatClose) != 0)
                         cost -= 0.70f;
+                    // Prioritize inheriting a fallen radio pack when the squad is cut off from its Radioman!
+                    if (!board.PreviouslyHadAliveRadioman && !factionProfile.AllowDisconnectedLocalFlank)
+                        cost -= 0.45f;
                     break;
 
                 case GoapActionId.DirectFireEngagement:
                     cost *= micro.AggressionCostMult;
+                    if ((ws & GoapStateBits.IsSuppressed) != 0)
+                        cost += 0.45f;
+                    if (netDirective == SquadNetDirective.Hammer_WideFlankEnvelopment)
+                        cost += 0.50f;
+                    if (urgentObjPush)
+                        cost += 0.60f;
                     break;
             }
 
@@ -2550,6 +2679,15 @@ namespace EasyRed2HumanAI
                     }
                     break;
 
+                case GoapActionId.BandageInCover:
+                    plan.LockUnitCoverChange = true;
+                    SetBotPose(ai, soldier, SoldierPose.Crouch);
+                    if (soldier.isBleeding && soldier.hasSyringe && !soldier.isInHandsAnimation && !soldier.isInBodyAnimation)
+                    {
+                        ai.TryStopBleeding();
+                    }
+                    break;
+
                 case GoapActionId.RepositionBehindWall:
                     if (TryFindShelteredSideOfWall(myPos, board.ThreatDirection, soldier.transform.root, out Vector3 shelteredPos))
                     {
@@ -2563,6 +2701,10 @@ namespace EasyRed2HumanAI
                         plan.NextReplanTime = Mathf.Max(plan.NextReplanTime, now + 3.2f);
                         WallSideRepositionsCount++;
                         GoapPlansExecutedCount++;
+                        if ((shelteredPos - myPos).sqrMagnitude <= 1.8f * 1.8f && plan.StepCount > 1)
+                        {
+                            plan.StepIndex = 1;
+                        }
                     }
                     break;
 
@@ -2716,63 +2858,32 @@ namespace EasyRed2HumanAI
 
                 case GoapActionId.ScavengeSupplyFromCorpse:
                     {
-                        GenericGun heldGun = soldier.GetHeldGun();
-                        bool outOfAmmo = heldGun != null && soldier.IsOutOfAmmosFor(heldGun);
-                        bool outOfBandage = !soldier.hasSyringe;
-                        bool armorThreatPresent = (ws & GoapStateBits.ArmorThreatClose) != 0 ||
-                                                  (board.HasActiveThreat && board.PrimaryTarget != null && board.PrimaryTarget.TryCast<Vehicle>() != null) ||
-                                                  (ai.visibleTarget != null && ai.visibleTarget.TryCast<Vehicle>() != null);
-                        SoldierPersonality pers = GetPersonality(soldier);
-                        bool isAtRole = pers == SoldierPersonality.AT_TankHunter ||
-                                        pers == SoldierPersonality.AT_Ambusher ||
-                                        pers == SoldierPersonality.AT_Demolitionist;
-                        bool isMedicRole = pers == SoldierPersonality.Medic_Heroic ||
-                                           pers == SoldierPersonality.Medic_Combat ||
-                                           pers == SoldierPersonality.Medic_Triage;
-                        bool onRetreat = IsSquadOnRetreatTask(sq);
-                        bool needAtWeapon = (armorThreatPresent || isAtRole) &&
-                                            !onRetreat && !soldier.IsSquadLeader() && !soldier.IsRadioman() && !isMedicRole;
-
-                        EvaluateRoleWeaponUpgradeNeed(
-                            soldier,
-                            sq,
-                            pers,
-                            isMedicRole,
-                            onRetreat,
-                            ref board,
-                            now,
-                            out bool needUrgentPrimary,
-                            out bool wantSquadMg,
-                            out bool wantRoleUpgrade);
-                        bool wantAnyWeaponUpgrade = needUrgentPrimary || wantSquadMg || wantRoleUpgrade;
-
-                        bool wantRadioPack = VisionConfig.EnableEmergentWearableScavenge.Value &&
-                                             sq != null && !sq.IsVehicleCrew &&
-                                             !board.PreviouslyHadAliveRadioman && !soldier.IsRadioman() &&
-                                             !isMedicRole && !onRetreat;
-                        bool wantHelmet = VisionConfig.EnableEmergentWearableScavenge.Value &&
-                                          !soldier.hasHeadgear && !onRetreat;
-                        bool canFeedNeedyAlly = VisionConfig.EnableBuddyResupply.Value &&
-                                                !outOfAmmo && !onRetreat &&
-                                                (soldier.IsAmmoBoxCarrier() || soldier.CanBorrowAmmo);
-
-                        if ((needAtWeapon || wantAnyWeaponUpgrade || outOfAmmo || outOfBandage || wantRadioPack || wantHelmet || canFeedNeedyAlly) &&
-                            TryGetNearbyScavengeTarget(
-                                soldier,
-                                myPos,
-                                pers,
-                                outOfAmmo,
-                                outOfBandage,
-                                needAtWeapon,
-                                needUrgentPrimary,
-                                wantSquadMg,
-                                wantRoleUpgrade,
-                                wantRadioPack,
-                                wantHelmet,
-                                canFeedNeedyAlly,
-                                now,
-                                out BotScavengeCache scavCache))
+                        // Reuse the BotScavengeCache populated by BuildSoldierWorldState (eliminates duplicate 50-line evaluation per tick)
+                        if (_botScavengeCaches.TryGetValue(ptr, out BotScavengeCache scavCache) &&
+                            (scavCache.TargetFloorItem != null ||
+                             scavCache.TargetInventory != null ||
+                             scavCache.TargetBuddyDonor != null ||
+                             scavCache.TargetNeedyAllyToFeed != null))
                         {
+                            if ((scavCache.IsBuddyBandageRefill || scavCache.IsBuddyAmmoBorrow) &&
+                                scavCache.TargetBuddyDonor != null &&
+                                scavCache.TargetBuddyDonor.Pointer != IntPtr.Zero &&
+                                scavCache.TargetBuddyDonor.IsAlive &&
+                                scavCache.TargetBuddyDonor.transform != null)
+                            {
+                                scavCache.TargetPosition = scavCache.TargetBuddyDonor.transform.position;
+                            }
+                            else if (scavCache.IsFeedingNeedyAlly &&
+                                     scavCache.TargetNeedyAllyToFeed != null &&
+                                     scavCache.TargetNeedyAllyToFeed.Pointer != IntPtr.Zero &&
+                                     scavCache.TargetNeedyAllyToFeed.IsAlive &&
+                                     scavCache.TargetNeedyAllyToFeed.transform != null)
+                            {
+                                scavCache.TargetPosition = scavCache.TargetNeedyAllyToFeed.transform.position;
+                            }
+
+                            bool outOfAmmo = scavCache.NeedAmmo;
+                            bool outOfBandage = scavCache.NeedBandage;
                             Vector3 targetPos = scavCache.TargetPosition;
                             float dSq = (targetPos - myPos).sqrMagnitude;
                             SetBotPose(ai, soldier, SoldierPose.Crouch);
@@ -3490,9 +3601,21 @@ namespace EasyRed2HumanAI
                 }
             }
 
-            result = new BotScavengeCache { NextScanTime = now + 2.8f };
+            FactionCommandProfile factionProfile = GetFactionCommandProfile(soldier.faction);
+            BotMicroVariance micro = BotMicroVariance.FromSoldier(ptr);
+            float scanInterval = (needAtWeapon || needUrgentPrimary || needAmmo || wantRadioPack)
+                ? (2.8f + micro.ReactionJitterSeconds)
+                : (5.2f + micro.ReactionJitterSeconds);
+            result = new BotScavengeCache
+            {
+                NextScanTime = now + scanInterval,
+                NeedAmmo = needAmmo,
+                NeedBandage = needBandage
+            };
             bool wantAnyUpgrade = needUrgentPrimary || wantSquadMg || wantRoleUpgrade;
-            float maxSearchRadius = (needAtWeapon || needUrgentPrimary) ? 20.0f : ((wantSquadMg || wantRadioPack) ? 16.0f : 12.5f);
+            float doctrineSearchScale = Mathf.Clamp(1.0f / Mathf.Max(0.5f, factionProfile.ScavengeAndResupplyMult), 0.85f, 1.25f);
+            float baseSearchRadius = (needAtWeapon || needUrgentPrimary) ? 20.0f : ((wantSquadMg || wantRadioPack) ? 16.0f : 12.5f);
+            float maxSearchRadius = baseSearchRadius * doctrineSearchScale;
             float bestDistSq = maxSearchRadius * maxSearchRadius;
             GenericGun heldGun = soldier.GetHeldGun();
             bool canPickUpNewWeapon = (!_nextWeaponUpgradeAllowedTime.TryGetValue(ptr, out float nextWepT) || now >= nextWepT);
@@ -3528,6 +3651,8 @@ namespace EasyRed2HumanAI
                         result = new BotScavengeCache
                         {
                             NextScanTime = now + 2.8f,
+                            NeedAmmo = needAmmo,
+                            NeedBandage = needBandage,
                             TargetBuddyDonor = sSnap.Ref,
                             TargetPosition = sSnap.Pos,
                             IsBuddyBandageRefill = true
@@ -3541,6 +3666,8 @@ namespace EasyRed2HumanAI
                         result = new BotScavengeCache
                         {
                             NextScanTime = now + 2.8f,
+                            NeedAmmo = needAmmo,
+                            NeedBandage = needBandage,
                             TargetBuddyDonor = sSnap.Ref,
                             TargetPosition = sSnap.Pos,
                             IsBuddyAmmoBorrow = true
@@ -3558,6 +3685,8 @@ namespace EasyRed2HumanAI
                             result = new BotScavengeCache
                             {
                                 NextScanTime = now + 2.8f,
+                                NeedAmmo = needAmmo,
+                                NeedBandage = needBandage,
                                 TargetNeedyAllyToFeed = ally,
                                 TargetPosition = sSnap.Pos,
                                 IsFeedingNeedyAlly = true
@@ -3567,143 +3696,159 @@ namespace EasyRed2HumanAI
                 }
             }
 
-            // 1. Scan ONLY genuinely dropped physical floor items (IsPhysicEnabled() == true && parent == null)
-            var floorItems = ItemObject.spawnedItems;
-            if (floorItems != null)
+            // 1. Scan ONLY genuinely dropped physical floor items via the shared 0.75s _freeFloorItemsSnapshot
+            EnsureFreeFloorItemsSnapshot(now);
+            int fCount = _freeFloorItemsSnapshot.Count;
+            for (int i = 0; i < fCount; i++)
             {
-                int fCount = floorItems.Count;
-                for (int i = 0; i < fCount; i++)
+                FreeFloorItemEntry fEntry = _freeFloorItemsSnapshot[i];
+                Vector3 itemPos = fEntry.Pos;
+                if (Mathf.Abs(itemPos.y - myPos.y) > 2.4f)
+                    continue;
+
+                float dSq = (itemPos - myPos).sqrMagnitude;
+                if (dSq >= bestDistSq)
+                    continue;
+
+                ItemObject item = fEntry.Item;
+                if (!IsFloorItemFreeToPickUp(item))
+                    continue;
+
+                GenericGun floorGun = item.TryCast<GenericGun>();
+                if (floorGun != null)
                 {
-                    ItemObject item = floorItems[i];
-                    if (!IsFloorItemFreeToPickUp(item))
-                        continue;
-
-                    Vector3 itemPos = item.transform.position;
-                    if (Mathf.Abs(itemPos.y - myPos.y) > 2.4f)
-                        continue;
-
-                    float dSq = (itemPos - myPos).sqrMagnitude;
-                    if (dSq >= bestDistSq)
-                        continue;
-
-                    GenericGun floorGun = item.TryCast<GenericGun>();
-                    if (floorGun != null)
-                    {
-                        if (needAtWeapon && canPickUpNewWeapon && floorGun.IsAtWeapon() && floorGun.GetCurrentAmmoCount() > 0)
-                        {
-                            bestDistSq = dSq;
-                            result = new BotScavengeCache
-                            {
-                                NextScanTime = now + 2.8f,
-                                TargetFloorItem = item,
-                                TargetPosition = itemPos,
-                                IsAtWeaponPickup = true
-                            };
-                            continue;
-                        }
-                        if (wantAnyUpgrade && canPickUpNewWeapon && IsCandidateGunValidUpgrade(floorGun, pers, needUrgentPrimary, wantSquadMg, wantRoleUpgrade, true))
-                        {
-                            bestDistSq = dSq;
-                            result = new BotScavengeCache
-                            {
-                                NextScanTime = now + 2.8f,
-                                TargetFloorItem = item,
-                                TargetPosition = itemPos,
-                                IsRoleWeaponUpgrade = true
-                            };
-                            continue;
-                        }
-                        if (isPrimaryCompletelyDry && !floorGun.IsPistol() && !floorGun.IsAtWeapon() && floorGun.GetCurrentAmmoCount() > 0)
-                        {
-                            bestDistSq = dSq;
-                            result = new BotScavengeCache
-                            {
-                                NextScanTime = now + 2.8f,
-                                TargetFloorItem = item,
-                                TargetPosition = itemPos
-                            };
-                            continue;
-                        }
-                        continue;
-                    }
-
-                    if (wantHelmet && dSq <= 9.0f * 9.0f && item.TryCast<ItemHelmet>() != null)
+                    if (needAtWeapon && canPickUpNewWeapon && floorGun.IsAtWeapon() && floorGun.GetCurrentAmmoCount() > 0)
                     {
                         bestDistSq = dSq;
                         result = new BotScavengeCache
                         {
                             NextScanTime = now + 2.8f,
-                            TargetFloorItem = item,
-                            TargetPosition = itemPos,
-                            IsHelmetPickup = true
-                        };
-                        continue;
-                    }
-
-                    if (wantRadioPack)
-                    {
-                        ItemClothing floorCloth = item.TryCast<ItemClothing>();
-                        if (floorCloth != null && floorCloth.isRadio)
-                        {
-                            bestDistSq = dSq;
-                            result = new BotScavengeCache
-                            {
-                                NextScanTime = now + 2.8f,
-                                TargetFloorItem = item,
-                                TargetPosition = itemPos,
-                                IsRadioPackPickup = true
-                            };
-                            continue;
-                        }
-                    }
-
-                    if (needAmmo && item.TryCast<AmmoItem>() != null)
-                    {
-                        bestDistSq = dSq;
-                        result = new BotScavengeCache
-                        {
-                            NextScanTime = now + 2.8f,
-                            TargetFloorItem = item,
-                            TargetPosition = itemPos
-                        };
-                        continue;
-                    }
-
-                    VirtualItem vi = item.ToVirtualItem();
-                    if (vi == null)
-                        continue;
-
-                    if (needAtWeapon && vi.TryCast<VirtualATGrenade>() != null)
-                    {
-                        bestDistSq = dSq;
-                        result = new BotScavengeCache
-                        {
-                            NextScanTime = now + 2.8f,
+                            NeedAmmo = needAmmo,
+                            NeedBandage = needBandage,
                             TargetFloorItem = item,
                             TargetPosition = itemPos,
                             IsAtWeaponPickup = true
                         };
+                        continue;
                     }
-                    else if (needAmmo && vi.TryCast<VirtualMagazineItem>() != null)
+                    if (wantAnyUpgrade && canPickUpNewWeapon && IsCandidateGunValidUpgrade(floorGun, pers, needUrgentPrimary, wantSquadMg, wantRoleUpgrade, true))
                     {
                         bestDistSq = dSq;
                         result = new BotScavengeCache
                         {
                             NextScanTime = now + 2.8f,
+                            NeedAmmo = needAmmo,
+                            NeedBandage = needBandage,
                             TargetFloorItem = item,
-                            TargetPosition = itemPos
+                            TargetPosition = itemPos,
+                            IsRoleWeaponUpgrade = true
                         };
+                        continue;
                     }
-                    else if (needBandage && (vi.TryCast<VirtualSyringe>() != null || vi.TryCast<VirtualBandages>() != null))
+                    if (isPrimaryCompletelyDry && !floorGun.IsPistol() && !floorGun.IsAtWeapon() && floorGun.GetCurrentAmmoCount() > 0)
                     {
                         bestDistSq = dSq;
                         result = new BotScavengeCache
                         {
                             NextScanTime = now + 2.8f,
+                            NeedAmmo = needAmmo,
+                            NeedBandage = needBandage,
                             TargetFloorItem = item,
                             TargetPosition = itemPos
                         };
+                        continue;
                     }
+                    continue;
+                }
+
+                if (wantHelmet && dSq <= 9.0f * 9.0f && item.TryCast<ItemHelmet>() != null)
+                {
+                    bestDistSq = dSq;
+                    result = new BotScavengeCache
+                    {
+                        NextScanTime = now + 2.8f,
+                        NeedAmmo = needAmmo,
+                        NeedBandage = needBandage,
+                        TargetFloorItem = item,
+                        TargetPosition = itemPos,
+                        IsHelmetPickup = true
+                    };
+                    continue;
+                }
+
+                if (wantRadioPack)
+                {
+                    ItemClothing floorCloth = item.TryCast<ItemClothing>();
+                    if (floorCloth != null && floorCloth.isRadio)
+                    {
+                        bestDistSq = dSq;
+                        result = new BotScavengeCache
+                        {
+                            NextScanTime = now + 2.8f,
+                            NeedAmmo = needAmmo,
+                            NeedBandage = needBandage,
+                            TargetFloorItem = item,
+                            TargetPosition = itemPos,
+                            IsRadioPackPickup = true
+                        };
+                        continue;
+                    }
+                }
+
+                if (needAmmo && item.TryCast<AmmoItem>() != null)
+                {
+                    bestDistSq = dSq;
+                    result = new BotScavengeCache
+                    {
+                        NextScanTime = now + 2.8f,
+                        NeedAmmo = needAmmo,
+                        NeedBandage = needBandage,
+                        TargetFloorItem = item,
+                        TargetPosition = itemPos
+                    };
+                    continue;
+                }
+
+                VirtualItem vi = item.ToVirtualItem();
+                if (vi == null)
+                    continue;
+
+                if (needAtWeapon && vi.TryCast<VirtualATGrenade>() != null)
+                {
+                    bestDistSq = dSq;
+                    result = new BotScavengeCache
+                    {
+                        NextScanTime = now + 2.8f,
+                        NeedAmmo = needAmmo,
+                        NeedBandage = needBandage,
+                        TargetFloorItem = item,
+                        TargetPosition = itemPos,
+                        IsAtWeaponPickup = true
+                    };
+                }
+                else if (needAmmo && vi.TryCast<VirtualMagazineItem>() != null)
+                {
+                    bestDistSq = dSq;
+                    result = new BotScavengeCache
+                    {
+                        NextScanTime = now + 2.8f,
+                        NeedAmmo = needAmmo,
+                        NeedBandage = needBandage,
+                        TargetFloorItem = item,
+                        TargetPosition = itemPos
+                    };
+                }
+                else if (needBandage && (vi.TryCast<VirtualSyringe>() != null || vi.TryCast<VirtualBandages>() != null))
+                {
+                    bestDistSq = dSq;
+                    result = new BotScavengeCache
+                    {
+                        NextScanTime = now + 2.8f,
+                        NeedAmmo = needAmmo,
+                        NeedBandage = needBandage,
+                        TargetFloorItem = item,
+                        TargetPosition = itemPos
+                    };
                 }
             }
 
@@ -3759,6 +3904,8 @@ namespace EasyRed2HumanAI
                                 result = new BotScavengeCache
                                 {
                                     NextScanTime = now + 2.8f,
+                                    NeedAmmo = needAmmo,
+                                    NeedBandage = needBandage,
                                     TargetInventory = inv,
                                     TargetInventoryWearable = vCloth,
                                     TargetPosition = invPos,
@@ -3777,6 +3924,8 @@ namespace EasyRed2HumanAI
                                 result = new BotScavengeCache
                                 {
                                     NextScanTime = now + 2.8f,
+                                    NeedAmmo = needAmmo,
+                                    NeedBandage = needBandage,
                                     TargetInventory = inv,
                                     TargetInventoryWearable = vHelm,
                                     TargetPosition = invPos,
@@ -3798,6 +3947,8 @@ namespace EasyRed2HumanAI
                                 result = new BotScavengeCache
                                 {
                                     NextScanTime = now + 2.8f,
+                                    NeedAmmo = needAmmo,
+                                    NeedBandage = needBandage,
                                     TargetInventory = inv,
                                     TargetPosition = invPos,
                                     IsAtWeaponPickup = true
@@ -3815,6 +3966,8 @@ namespace EasyRed2HumanAI
                                 result = new BotScavengeCache
                                 {
                                     NextScanTime = now + 2.8f,
+                                    NeedAmmo = needAmmo,
+                                    NeedBandage = needBandage,
                                     TargetInventory = inv,
                                     TargetInventoryAtWeapon = vw,
                                     TargetPosition = invPos,
@@ -3838,6 +3991,8 @@ namespace EasyRed2HumanAI
                                 result = new BotScavengeCache
                                 {
                                     NextScanTime = now + 2.8f,
+                                    NeedAmmo = needAmmo,
+                                    NeedBandage = needBandage,
                                     TargetInventory = inv,
                                     TargetInventoryPrimaryWeapon = vw,
                                     TargetPosition = invPos,
@@ -3858,6 +4013,8 @@ namespace EasyRed2HumanAI
                     result = new BotScavengeCache
                     {
                         NextScanTime = now + 2.8f,
+                        NeedAmmo = needAmmo,
+                        NeedBandage = needBandage,
                         TargetInventory = inv,
                         TargetPosition = invPos
                     };
@@ -3939,7 +4096,7 @@ namespace EasyRed2HumanAI
             if (!VisionConfig.EnableBuddyCasualtyDragging.Value || sq == null || sq.units == null)
                 return false;
 
-            if (soldier.IsSquadLeader() || soldier.IsRadioman() || soldier.IsMedic() || soldier.carryData != null)
+            if (soldier.isBleeding || soldier.IsSquadLeader() || soldier.IsRadioman() || soldier.IsMedic() || soldier.carryData != null)
                 return false;
 
             SoldierPersonality pers = GetPersonality(soldier);
@@ -3948,7 +4105,14 @@ namespace EasyRed2HumanAI
                 pers == SoldierPersonality.Medic_Triage)
                 return false;
 
-            if (soldier.GetSuppressionValue() >= 28f || ai.HasEnemyAndCanFireAtHim)
+            FactionCommandProfile factionProfile = GetFactionCommandProfile(soldier.faction);
+            float comradeMult = Mathf.Max(0.55f, factionProfile.ComradeAidAndDragMult);
+            float maxDragSupp = Mathf.Clamp(28f / comradeMult, 18f, 36f);
+            if (soldier.GetSuppressionValue() >= maxDragSupp || ai.HasEnemyAndCanFireAtHim)
+                return false;
+
+            // Prevent multiple squadmates from simultaneously walking over to drag a casualty in the same squad
+            if (now < board.DragClaimUntil && board.DragRescuerPtr != IntPtr.Zero && board.DragRescuerPtr != ptr)
                 return false;
 
             if (_casualtyDragStates.TryGetValue(ptr, out CasualtyDragState dragState) && now < dragState.NextScanTime)
@@ -3963,7 +4127,8 @@ namespace EasyRed2HumanAI
             int uCount = sq.units.Count;
             Soldier bestPatient = null;
             Vector3 bestPatientPos = Vector3.zero;
-            float bestDistSq = 9.5f * 9.5f;
+            float maxDragRadius = Mathf.Clamp(9.5f / comradeMult, 7.0f, 12.5f);
+            float bestDistSq = maxDragRadius * maxDragRadius;
             Soldier squadMedic = null;
             Vector3 squadMedicPos = Vector3.zero;
 
@@ -4007,6 +4172,10 @@ namespace EasyRed2HumanAI
 
             if (bestPatient == null)
                 return false;
+
+            board.DragRescuerPtr = ptr;
+            board.DragPatientPtr = bestPatient.Pointer;
+            board.DragClaimUntil = now + 4.5f;
 
             Vector3 dropSpot;
             if (squadMedic != null && (squadMedicPos - bestPatientPos).sqrMagnitude <= 14.0f * 14.0f)

@@ -3716,10 +3716,17 @@ namespace EasyRed2HumanAI
                             AiCore.LogDebug("MedicTriage", $"{myFaction} medic redirected to secondary casualty (avoided dogpile).");
                         }
                     }
-                    else if (skippedDogpiledNearest)
+                    else
                     {
-                        // All nearby wounded already have a healthy nearby medic (or 2 max): keep rifle up in cover!
-                        MedicTriageRedirectsCount++;
+                        if (__0.targetDestination != null && __0.targetDestination.TryCast<MedicHealingDestination>() != null)
+                        {
+                            __0.CoverPosition(null);
+                        }
+                        if (skippedDogpiledNearest)
+                        {
+                            // All nearby wounded already have a healthy nearby medic (or 2 max): keep rifle up in cover!
+                            MedicTriageRedirectsCount++;
+                        }
                     }
 
                     return false;

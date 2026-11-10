@@ -40,6 +40,7 @@ For users who already have **[BepInEx 6 Bleeding Edge (`BepInEx-Unity.IL2CPP-win
    ```text
    Easy Red 2\BepInEx\plugins\EasyRed2HumanAI.dll
    ```
+   *(Using **[Quartermaster - ER2 Mod Manager](https://www.nexusmods.com/easyred2/mods/107)**? Import `EasyRed2HumanAI-v0.6.7-Plugin-Only.zip` directly in Quartermaster's Mods tab—do not import `with-BepInEx.zip`.)*
 
 ### Switching to Vanilla or Uninstalling (`Uninstall-BepInEx-Mod.bat`)
 Included in `EasyRed2HumanAI-v0.6.7-with-BepInEx.zip` (and in the root of this repository) is **[`Uninstall-BepInEx-Mod.bat`](Uninstall-BepInEx-Mod.bat)**. Double-click it inside your `Easy Red 2` folder when the game is closed to:
