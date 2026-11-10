@@ -1318,7 +1318,9 @@ namespace EasyRed2HumanAI
                     }
 
                     if (VisionConfig.BandageOnlyAfterFindingCover.Value &&
-                        (soldier.isBleeding || soldier.GetBleedValue() > 0.01f))
+                        (soldier.isBleeding || soldier.GetBleedValue() > 0.01f) &&
+                        soldier.inventory != null &&
+                        soldier.inventory.FindItemOfType<VirtualBandages>() != null)
                     {
                         IntPtr ptr = soldier.Pointer;
                         if (!_bleedCoverDeadline.TryGetValue(ptr, out float deadline))
@@ -1390,8 +1392,12 @@ namespace EasyRed2HumanAI
                         _noProneUntil[ptr] = Time.time + 3.5f;
                     }
 
-                    bool isBleeding = soldier.isBleeding || soldier.GetBleedValue() > 0.01f;
-                    if (isBleeding)
+                    // Only enter the self-bandaging routine if the soldier actually carries VirtualBandages!
+                    // Otherwise an out-of-bandages bleeding soldier would early-return every tick instead of shooting or resupplying from a Medic/corpse!
+                    bool isBleedingWithBandage = (soldier.isBleeding || soldier.GetBleedValue() > 0.01f) &&
+                                                 soldier.inventory != null &&
+                                                 soldier.inventory.FindItemOfType<VirtualBandages>() != null;
+                    if (isBleedingWithBandage)
                     {
                         if (!VisionConfig.BandageOnlyAfterFindingCover.Value)
                         {

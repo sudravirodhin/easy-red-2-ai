@@ -1,6 +1,8 @@
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
+using System.Runtime.CompilerServices;
+using System.Text;
 using HarmonyLib;
 using Photon.Pun;
 using UnityEngine;
@@ -31,6 +33,51 @@ namespace EasyRed2HumanAI
         private static float _nextRemotePlayerPosScanTime;
 
         public static int TotalPingGovernorSkippedCycles;
+
+        [InterpolatedStringHandler]
+        public ref struct DebugLogInterpolatedStringHandler
+        {
+            private StringBuilder _builder;
+
+            public DebugLogInterpolatedStringHandler(int literalLength, int formattedCount, out bool shouldAppend)
+            {
+                if (!VisionConfig.DebugLogging.Value || Plugin.Log == null)
+                {
+                    _builder = null;
+                    shouldAppend = false;
+                    return;
+                }
+                _builder = new StringBuilder(literalLength + formattedCount * 12);
+                shouldAppend = true;
+            }
+
+            public void AppendLiteral(string s) => _builder?.Append(s);
+            public void AppendFormatted<T>(T value) => _builder?.Append(value);
+            public void AppendFormatted<T>(T value, string format)
+            {
+                if (_builder == null)
+                    return;
+                if (value is IFormattable formattable)
+                    _builder.Append(formattable.ToString(format, null));
+                else
+                    _builder.Append(value);
+            }
+
+            internal string GetFormattedText() => _builder != null ? _builder.ToString() : string.Empty;
+        }
+
+        public static void LogDebug(string category, DebugLogInterpolatedStringHandler message, float minInterval = 4.0f)
+        {
+            if (!VisionConfig.DebugLogging.Value || Plugin.Log == null)
+                return;
+
+            float now = Time.unscaledTime;
+            if (_debugLogCooldowns.TryGetValue(category, out float nextAllowed) && now < nextAllowed)
+                return;
+
+            _debugLogCooldowns[category] = now + minInterval;
+            Plugin.Log.LogInfo($"[Diag:{category}] {message.GetFormattedText()}");
+        }
 
         public static void LogDebug(string category, string message, float minInterval = 4.0f)
         {

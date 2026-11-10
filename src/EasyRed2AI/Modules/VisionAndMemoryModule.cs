@@ -87,9 +87,15 @@ namespace EasyRed2HumanAI
 
         private static readonly List<IntPtr> _reusableExpiredFirePtrs = new List<IntPtr>(64);
 
+        public static void ClearVisionCaches()
+        {
+            _lastFiredTime.Clear();
+            _nextCleanupTime = 0f;
+        }
+
         public static void CleanupExpiredFiringRecords()
         {
-            if (Time.time <= _nextCleanupTime)
+            if (Time.time <= _nextCleanupTime && _nextCleanupTime - Time.time <= 30f)
                 return;
 
             _nextCleanupTime = Time.time + 15f;
@@ -817,10 +823,10 @@ namespace EasyRed2HumanAI
             return true;
         }
 
-        internal static void TryFlushLastKnownEnemyWithGrenade(SoldierAI ai, Soldier soldier)
+        internal static bool TryFlushLastKnownEnemyWithGrenade(SoldierAI ai, Soldier soldier)
         {
             if (!VisionConfig.EnableLastKnownSuppression.Value || ai == null || soldier == null || soldier.Pointer == IntPtr.Zero)
-                return;
+                return false;
 
             if (ai.visibleTarget != null ||
                 ai.IsMoving() ||
@@ -830,51 +836,51 @@ namespace EasyRed2HumanAI
                 soldier.IsReloading ||
                 soldier.inventory == null)
             {
-                return;
+                return false;
             }
 
             IntPtr ptr = soldier.Pointer;
             float now = Time.time;
             if (now <= soldier.throw_end_time + 6.0f)
-                return;
+                return false;
 
             if (_nextSuppressiveGrenadeTime.TryGetValue(ptr, out float nextGren) && now < nextGren)
-                return;
+                return false;
 
             if (!_lastKnownTargets.TryGetValue(ptr, out LastKnownTargetInfo lastInfo) || !lastInfo.WasInfantry)
-                return;
+                return false;
 
             float elapsed = now - lastInfo.LastSeenTime;
             if (elapsed < 0.35f || elapsed > 4.5f)
-                return;
+                return false;
 
             if (lastInfo.Target == null || lastInfo.Target.Pointer == IntPtr.Zero)
-                return;
+                return false;
 
             Soldier targetSoldier = lastInfo.Target.TryCast<Soldier>();
             if (targetSoldier == null || !targetSoldier.IsAlive)
-                return;
+                return false;
 
             Vector3 myPos = soldier.transform.position;
             Vector3 liveTargetPos = targetSoldier.GetCenterOfUnit();
             if ((liveTargetPos - lastInfo.LastSeenPos).sqrMagnitude > 7.0f * 7.0f)
-                return;
+                return false;
 
             float dist = Vector3.Distance(myPos, lastInfo.LastSeenPos);
             float liveDist = Vector3.Distance(myPos, liveTargetPos);
             if (dist < 10.0f || dist > 30.0f || liveDist < 10.0f || liveDist > 30.0f)
-                return;
+                return false;
 
             VirtualItem fragItem = soldier.inventory.FindItemOfType<VirtualGrenade>();
             if (fragItem == null || Mathf.Max(dist, liveDist) > soldier.GetGrenadeThrowRange(fragItem))
-                return;
+                return false;
 
             if (!IsSafeToThrowGrenadeAt(soldier, liveTargetPos, liveDist, 11.5f) ||
                 !IsSafeToThrowGrenadeAt(soldier, lastInfo.LastSeenPos, dist, 11.5f))
-                return;
+                return false;
 
             if (!AiCore.TryConsumeBotRpcBudget(0.45f))
-                return;
+                return false;
 
             _nextSuppressiveGrenadeTime[ptr] = now + 14.0f;
             soldier.Throw(fragItem, lastInfo.Target);
@@ -884,6 +890,7 @@ namespace EasyRed2HumanAI
             {
                 AiCore.LogDebug("LastKnownGrenade", $"{soldier.faction} soldier threw frag grenade at last-known enemy cover ({dist:F0}m).");
             }
+            return true;
         }
 
         private static bool TryMaintainSuppressiveFireOnLastKnown(SoldierAI ai, Soldier soldier, float deltaTime)

@@ -52,7 +52,8 @@ namespace EasyRed2HumanAI
             RadioLinkPreserved      = 1u << 27,
             TargetPinned            = 1u << 28,
             TargetEliminated        = 1u << 29,
-            SquadSupported          = 1u << 30
+            SquadSupported          = 1u << 30,
+            HasBandage              = 1u << 31
         }
 
         internal enum SquadNetDirective : byte
@@ -107,7 +108,7 @@ namespace EasyRed2HumanAI
             new GoapActionDef
             {
                 Id = GoapActionId.BandageInCover,
-                Required = GoapStateBits.IsBleeding | GoapStateBits.InCover,
+                Required = GoapStateBits.IsBleeding | GoapStateBits.HasBandage | GoapStateBits.InCover,
                 Forbidden = GoapStateBits.InPointBlankRange | GoapStateBits.ExposedSideOfWall | GoapStateBits.ArmorThreatClose,
                 Add = GoapStateBits.SurvivedCrisis,
                 Remove = GoapStateBits.IsBleeding,
@@ -156,15 +157,15 @@ namespace EasyRed2HumanAI
                 Id = GoapActionId.MoveToFlankCover,
                 Required = GoapStateBits.SquadHasActiveThreat | GoapStateBits.AllyPinningThreat | GoapStateBits.FlankCoverAvailable,
                 Forbidden = GoapStateBits.IsBleeding | GoapStateBits.IsMachineGunner | GoapStateBits.IsRadioman | GoapStateBits.OnBridgeOrNarrow,
-                Add = GoapStateBits.InCover | GoapStateBits.InGrenadeRange | GoapStateBits.TargetEliminated,
+                Add = GoapStateBits.InCover | GoapStateBits.InGrenadeRange | GoapStateBits.TargetLostBehindCover | GoapStateBits.TargetEliminated,
                 Remove = GoapStateBits.None,
                 BaseCost = 1.6f
             },
             new GoapActionDef
             {
                 Id = GoapActionId.FlushThreatWithFrag,
-                Required = GoapStateBits.HasFragGrenade | GoapStateBits.InGrenadeRange,
-                Forbidden = GoapStateBits.IsBleeding | GoapStateBits.IsRadioman | GoapStateBits.InPointBlankRange,
+                Required = GoapStateBits.HasFragGrenade | GoapStateBits.InGrenadeRange | GoapStateBits.TargetLostBehindCover,
+                Forbidden = GoapStateBits.IsBleeding | GoapStateBits.IsRadioman | GoapStateBits.InPointBlankRange | GoapStateBits.CanFireAtVisibleEnemy,
                 Add = GoapStateBits.TargetEliminated | GoapStateBits.SquadSupported,
                 Remove = GoapStateBits.HasFragGrenade,
                 BaseCost = 1.4f
@@ -209,10 +210,10 @@ namespace EasyRed2HumanAI
             {
                 Id = GoapActionId.LoneWolfLinkUpOrAmbush,
                 Required = GoapStateBits.IsEntirelyAlone,
-                Forbidden = GoapStateBits.InPointBlankRange | GoapStateBits.OnBridgeOrNarrow,
-                Add = GoapStateBits.InCover | GoapStateBits.SurvivedCrisis,
+                Forbidden = GoapStateBits.IsBleeding | GoapStateBits.InPointBlankRange | GoapStateBits.OnBridgeOrNarrow | GoapStateBits.CanFireAtVisibleEnemy,
+                Add = GoapStateBits.InCover | GoapStateBits.SurvivedCrisis | GoapStateBits.SquadSupported,
                 Remove = GoapStateBits.IsEntirelyAlone,
-                BaseCost = 1.5f
+                BaseCost = 1.35f
             },
             new GoapActionDef
             {
@@ -227,8 +228,8 @@ namespace EasyRed2HumanAI
             {
                 Id = GoapActionId.ScavengeSupplyFromCorpse,
                 Required = GoapStateBits.NeedAmmoOrMedScavenge,
-                Forbidden = GoapStateBits.IsBleeding | GoapStateBits.IsHeavilySuppressed | GoapStateBits.InPointBlankRange | GoapStateBits.OnBridgeOrNarrow,
-                Add = GoapStateBits.SurvivedCrisis | GoapStateBits.SquadSupported,
+                Forbidden = GoapStateBits.IsHeavilySuppressed | GoapStateBits.InPointBlankRange | GoapStateBits.OnBridgeOrNarrow,
+                Add = GoapStateBits.HasBandage | GoapStateBits.SurvivedCrisis | GoapStateBits.SquadSupported,
                 Remove = GoapStateBits.NeedAmmoOrMedScavenge,
                 BaseCost = 1.15f
             }
@@ -254,6 +255,7 @@ namespace EasyRed2HumanAI
             public bool IsFeedingNeedyAlly;
             public bool IsRadioPackPickup;
             public bool IsHelmetPickup;
+            public bool IsMedicSyringePickup;
         }
 
         private struct FreeFloorItemEntry
@@ -267,7 +269,7 @@ namespace EasyRed2HumanAI
 
         private static void EnsureFreeFloorItemsSnapshot(float now)
         {
-            if (now < _nextFreeFloorItemsSnapshotTime)
+            if (now < _nextFreeFloorItemsSnapshotTime && _nextFreeFloorItemsSnapshotTime - now <= 5.0f)
                 return;
 
             _nextFreeFloorItemsSnapshotTime = now + 0.75f;
@@ -530,6 +532,7 @@ namespace EasyRed2HumanAI
             public bool HasActiveThreat;
             public bool ThreatIsArmor;
             public bool HasAliveMachineGunner;
+            public bool HasAliveMedic;
             public int AliveMemberCount;
             public Vector3 SquadCenter;
             public Vector3 ThreatPosition;
@@ -578,12 +581,14 @@ namespace EasyRed2HumanAI
             }
         }
 
-        private static readonly Dictionary<IntPtr, float> _nextSquadVoiceTime = new Dictionary<IntPtr, float>(64);
-        private static readonly Dictionary<IntPtr, float> _nextSoldierVoiceTime = new Dictionary<IntPtr, float>(256);
-        private static readonly Dictionary<IntPtr, float> _nextFlankCoverAssignTime = new Dictionary<IntPtr, float>(256);
-        private static readonly Dictionary<IntPtr, float> _medicHealStartTime = new Dictionary<IntPtr, float>(64);
-        private static readonly Dictionary<IntPtr, IntPtr> _medicHealTargetPtr = new Dictionary<IntPtr, IntPtr>(64);
-        private static readonly Dictionary<IntPtr, IntPtr> _pincerOrderedTaskBySquad = new Dictionary<IntPtr, IntPtr>(64);
+        internal static readonly Dictionary<IntPtr, float> _nextSquadVoiceTime = new Dictionary<IntPtr, float>(64);
+        internal static readonly Dictionary<IntPtr, float> _nextSoldierVoiceTime = new Dictionary<IntPtr, float>(256);
+        internal static readonly Dictionary<IntPtr, float> _nextFlankCoverAssignTime = new Dictionary<IntPtr, float>(256);
+        internal static readonly Dictionary<IntPtr, float> _medicHealStartTime = new Dictionary<IntPtr, float>(64);
+        internal static readonly Dictionary<IntPtr, IntPtr> _medicHealTargetPtr = new Dictionary<IntPtr, IntPtr>(64);
+        internal static readonly Dictionary<IntPtr, IntPtr> _pincerOrderedTaskBySquad = new Dictionary<IntPtr, IntPtr>(64);
+        private static readonly Dictionary<IntPtr, Squad> _reusablePrimarySquadByTask = new Dictionary<IntPtr, Squad>(8);
+        private static readonly Dictionary<IntPtr, int> _reusablePincerCountByTask = new Dictionary<IntPtr, int>(8);
 
         internal struct BotGoapPlan
         {
@@ -1530,8 +1535,10 @@ namespace EasyRed2HumanAI
             // =================================================================
             // 2. Multi-Squad Objective Pincer (When 2+ Connected Squads Push the Same Objective)
             // =================================================================
-            var primarySquadByTask = new Dictionary<IntPtr, Squad>(8);
-            var pincerCountByTask = new Dictionary<IntPtr, int>(8);
+            _reusablePrimarySquadByTask.Clear();
+            _reusablePincerCountByTask.Clear();
+            var primarySquadByTask = _reusablePrimarySquadByTask;
+            var pincerCountByTask = _reusablePincerCountByTask;
 
             for (int i = 0; i < infCount; i++)
             {
@@ -1615,6 +1622,8 @@ namespace EasyRed2HumanAI
                     }
                 }
             }
+            _reusablePrimarySquadByTask.Clear();
+            _reusablePincerCountByTask.Clear();
         }
 
         private static Squad FindBestAvailableHammerSquad(
@@ -1813,10 +1822,11 @@ namespace EasyRed2HumanAI
             }
             catch { }
 
-            // Scan squad members once to find active threat, alive count, MG gunner presence & surrendered comrades
+            // Scan squad members once to find active threat, alive count, MG gunner/Medic presence & surrendered comrades
             board.HasActiveThreat = false;
             board.ThreatIsArmor = false;
             board.HasAliveMachineGunner = false;
+            board.HasAliveMedic = false;
             board.PrimaryTarget = null;
             board.SurrenderedComrade = null;
             board.AliveMemberCount = 0;
@@ -1845,6 +1855,10 @@ namespace EasyRed2HumanAI
                     if (u.hasMg || u.IsGunner() || u.GetHeldFunctionalBipod() != null)
                     {
                         board.HasAliveMachineGunner = true;
+                    }
+                    if (u.hasSyringe)
+                    {
+                        board.HasAliveMedic = true;
                     }
 
                     SoldierAI uAi = u.aiController;
@@ -2068,6 +2082,7 @@ namespace EasyRed2HumanAI
                 soldier.IsOnVehicle() ||
                 soldier.HasSurrended() ||
                 soldier.IsCharging() ||
+                soldier.isInBodyAnimation ||
                 isStaffingEmplacement)
             {
                 return;
@@ -2111,7 +2126,10 @@ namespace EasyRed2HumanAI
             bool hasActivePlan = _botGoapPlans.TryGetValue(ptr, out BotGoapPlan plan) && now < plan.PlanExpireTime;
             bool emergencyPreempt =
                 ((ws & GoapStateBits.InPointBlankRange) != 0 && plan.Step0 != GoapActionId.PointBlankBayonetBreach) ||
-                ((ws & GoapStateBits.IsBleeding) != 0 && plan.Step0 != GoapActionId.SeekEmergencyCover && plan.Step0 != GoapActionId.BandageInCover) ||
+                ((ws & GoapStateBits.IsBleeding) != 0 &&
+                 plan.Step0 != GoapActionId.SeekEmergencyCover &&
+                 plan.Step0 != GoapActionId.BandageInCover &&
+                 plan.Step0 != GoapActionId.ScavengeSupplyFromCorpse) ||
                 ((ws & GoapStateBits.RadioLinkDrifting) != 0 && plan.Step0 != GoapActionId.MaintainRadioLinkWithLeader) ||
                 (isEvadingArmor && plan.Step0 != GoapActionId.SeekEmergencyCover && plan.Step0 != GoapActionId.ScavengeSupplyFromCorpse) ||
                 ((ws & GoapStateBits.IsHeavilySuppressed) != 0 && (ws & GoapStateBits.InCover) == 0 && plan.Step0 != GoapActionId.SeekEmergencyCover);
@@ -2237,19 +2255,28 @@ namespace EasyRed2HumanAI
                 ws |= GoapStateBits.TargetLostBehindCover;
             }
 
+            float dToThreatSq = board.HasActiveThreat ? (board.ThreatPosition - myPos).sqrMagnitude : 999999f;
+            if (board.HasActiveThreat && dToThreatSq >= 10f * 10f && dToThreatSq <= 29f * 29f)
+                ws |= GoapStateBits.InGrenadeRange;
+
             if (soldier.inventory != null && now > soldier.throw_end_time + 5.0f)
             {
-                if (soldier.inventory.FindItemOfType<VirtualGrenade>() != null)
+                if (VisionConfig.EnableLastKnownSuppression.Value &&
+                    (!_nextSuppressiveGrenadeTime.TryGetValue(soldier.Pointer, out float nextGren) || now >= nextGren) &&
+                    (board.BreacherPtr == IntPtr.Zero || board.BreacherPtr == soldier.Pointer || now >= board.BreachUntil) &&
+                    soldier.inventory.FindItemOfType<VirtualGrenade>() != null)
+                {
                     ws |= GoapStateBits.HasFragGrenade;
-                if (soldier.inventory.FindItemOfType<VirtualSmokeGrenade>() != null)
-                    ws |= GoapStateBits.HasSmokeGrenade;
-            }
+                }
 
-            if (board.HasActiveThreat)
-            {
-                float dToThreatSq = (board.ThreatPosition - myPos).sqrMagnitude;
-                if (dToThreatSq >= 10f * 10f && dToThreatSq <= 29f * 29f)
-                    ws |= GoapStateBits.InGrenadeRange;
+                if (board.HasActiveThreat &&
+                    dToThreatSq >= 12f * 12f &&
+                    dToThreatSq <= 38f * 38f &&
+                    !AiCore.HasLowCeilingOverhead(myPos, 3.2f) &&
+                    soldier.inventory.FindItemOfType<VirtualSmokeGrenade>() != null)
+                {
+                    ws |= GoapStateBits.HasSmokeGrenade;
+                }
             }
 
             if ((board.FlankLeftCover != null && (board.FlankerLeftPtr == IntPtr.Zero || board.FlankerLeftPtr == soldier.Pointer)) ||
@@ -2305,20 +2332,29 @@ namespace EasyRed2HumanAI
                 }
             }
 
+            // Authentic Field Bandage Tracking: Soldier.hasSyringe (0x502) is strictly the Medic's revive syringe!
+            // Personal self-bleed dressings live in soldier.inventory as VirtualBandages (consumed by Soldier.UseBandages).
+            bool hasBandage = soldier.inventory != null && soldier.inventory.FindItemOfType<VirtualBandages>() != null;
+            if (hasBandage)
+                ws |= GoapStateBits.HasBandage;
+
             // Battlefield Scavenging, Buddy Resupply, Wearable Scavenging & Role-Smart Weapon Upgrades:
-            // 1) Out of reserve ammo for primary weapon OR out of bandages (!hasSyringe) when not fighting a visible foot enemy.
+            // 1) Out of reserve ammo for primary/stowed weapon OR out of VirtualBandages when not fighting a visible foot enemy.
             // 2) Need an Anti-Tank weapon/AT grenade when enemy armor is threatening the squad (or bot is an AT trooper whose launcher is dry).
             // 3) Pistol-only on foot (merged tankers/pilots/officers), fallen Squad MG inheritance, or role-matched primary upgrade!
-            // 4) Emergent Field Radio Inheritance/Capture (when squad lost its Radioman) & Knocked-Off / Player-Gifted Helmet Recovery!
+            // 4) Emergent Field Radio / Fallen Medic Syringe Inheritance & Knocked-Off / Player-Gifted Helmet Recovery!
             // 5) Support Ammo-Bearer proactively feeding a dry MG or AT squadmate!
-            if (!soldier.isBleeding && suppression < 28f && !isOnBridge)
+            bool urgentBandageWhileBleeding = soldier.isBleeding && !hasBandage;
+            if ((!soldier.isBleeding || urgentBandageWhileBleeding) && suppression < 28f && !isOnBridge)
             {
                 GenericGun gun0 = soldier.GetHeldGun(0);
                 GenericGun gun1 = soldier.GetHeldGun(1);
                 GenericGun gun2 = soldier.GetHeldGun(2);
-                bool outOfAmmo = (gun0 != null && soldier.IsOutOfAmmosFor(gun0)) ||
-                                 (gun2 != null && !gun2.IsPistol() && !gun2.IsAtWeapon() && soldier.IsOutOfAmmosFor(gun2));
-                bool outOfBandage = !soldier.hasSyringe;
+                bool casualScavengeAllowed = !urgentBandageWhileBleeding && !isEvadingArmor;
+                bool outOfAmmo = casualScavengeAllowed &&
+                                 ((gun0 != null && soldier.IsOutOfAmmosFor(gun0)) ||
+                                  (gun2 != null && !gun2.IsPistol() && !gun2.IsAtWeapon() && soldier.IsOutOfAmmosFor(gun2)));
+                bool outOfBandage = !isEvadingArmor && !hasBandage;
 
                 bool armorThreatPresent = (ws & GoapStateBits.ArmorThreatClose) != 0 ||
                                           (board.HasActiveThreat && board.PrimaryTarget != null && board.PrimaryTarget.TryCast<Vehicle>() != null) ||
@@ -2331,7 +2367,8 @@ namespace EasyRed2HumanAI
                                    pers == SoldierPersonality.Medic_Combat ||
                                    pers == SoldierPersonality.Medic_Triage;
                 bool needAtWeapon = false;
-                if ((armorThreatPresent || isAtRole) &&
+                if (!urgentBandageWhileBleeding &&
+                    (armorThreatPresent || isAtRole) &&
                     !onRetreatTask && !soldier.IsSquadLeader() && !soldier.IsRadioman() && !isMedicRole)
                 {
                     bool hasUsableAtGun = (gun0 != null && gun0.IsAtWeapon() && (gun0.GetCurrentAmmoCount() > 0 || !soldier.IsOutOfAmmosFor(gun0))) ||
@@ -2341,20 +2378,27 @@ namespace EasyRed2HumanAI
                     needAtWeapon = !hasUsableAtGun && !hasAtGrenade;
                 }
 
-                EvaluateRoleWeaponUpgradeNeed(
-                    soldier,
-                    sq,
-                    pers,
-                    isMedicRole,
-                    onRetreatTask,
-                    ref board,
-                    now,
-                    out bool needUrgentPrimary,
-                    out bool wantSquadMg,
-                    out bool wantRoleUpgrade);
+                bool needUrgentPrimary = false;
+                bool wantSquadMg = false;
+                bool wantRoleUpgrade = false;
+                if (casualScavengeAllowed)
+                {
+                    EvaluateRoleWeaponUpgradeNeed(
+                        soldier,
+                        sq,
+                        pers,
+                        isMedicRole,
+                        onRetreatTask,
+                        ref board,
+                        now,
+                        out needUrgentPrimary,
+                        out wantSquadMg,
+                        out wantRoleUpgrade);
+                }
                 bool wantAnyWeaponUpgrade = needUrgentPrimary || wantSquadMg || wantRoleUpgrade;
 
-                bool wantRadioPack = VisionConfig.EnableEmergentWearableScavenge.Value &&
+                bool wantRadioPack = casualScavengeAllowed &&
+                                     VisionConfig.EnableEmergentWearableScavenge.Value &&
                                      !onRetreatTask &&
                                      sq != null &&
                                      !sq.IsVehicleCrew &&
@@ -2363,19 +2407,30 @@ namespace EasyRed2HumanAI
                                      !isMedicRole &&
                                      (soldier.vest_Obj == null || !soldier.vest_Obj.isFuelTank);
 
-                bool wantHelmet = VisionConfig.EnableEmergentWearableScavenge.Value &&
+                bool wantMedicSyringe = casualScavengeAllowed &&
+                                        !onRetreatTask &&
+                                        sq != null &&
+                                        !sq.IsVehicleCrew &&
+                                        !board.HasAliveMedic &&
+                                        !soldier.hasSyringe &&
+                                        !isRad &&
+                                        !soldier.IsSquadLeader();
+
+                bool wantHelmet = casualScavengeAllowed &&
+                                  VisionConfig.EnableEmergentWearableScavenge.Value &&
                                   !onRetreatTask &&
                                   !soldier.hasHeadgear &&
                                   suppression < 12f;
 
-                bool canFeedNeedyAlly = VisionConfig.EnableBuddyResupply.Value &&
+                bool canFeedNeedyAlly = casualScavengeAllowed &&
+                                        VisionConfig.EnableBuddyResupply.Value &&
                                         !onRetreatTask &&
                                         !outOfAmmo &&
                                         soldier.IsAmmoBoxCarrier();
 
                 bool hasVisibleFootEnemy = ai.HasEnemyAndCanFireAtHim && (ai.visibleTarget == null || ai.visibleTarget.TryCast<Vehicle>() == null);
                 if (!hasVisibleFootEnemy &&
-                    (needAtWeapon || wantAnyWeaponUpgrade || outOfAmmo || outOfBandage || wantRadioPack || wantHelmet || canFeedNeedyAlly) &&
+                    (needAtWeapon || wantAnyWeaponUpgrade || outOfAmmo || outOfBandage || wantRadioPack || wantMedicSyringe || wantHelmet || canFeedNeedyAlly) &&
                     TryGetNearbyScavengeTarget(
                         soldier,
                         myPos,
@@ -2387,6 +2442,7 @@ namespace EasyRed2HumanAI
                         wantSquadMg,
                         wantRoleUpgrade,
                         wantRadioPack,
+                        wantMedicSyringe,
                         wantHelmet,
                         canFeedNeedyAlly,
                         now,
@@ -2454,6 +2510,10 @@ namespace EasyRed2HumanAI
             {
                 desiredGoalBit = GoapStateBits.SquadSupported;
             }
+            else if ((ws & GoapStateBits.IsEntirelyAlone) != 0 && (ws & GoapStateBits.CanFireAtVisibleEnemy) == 0)
+            {
+                desiredGoalBit = GoapStateBits.SquadSupported;
+            }
             else if ((ws & GoapStateBits.ComradeNeedsLiberation) != 0 && (ws & GoapStateBits.HasVisibleEnemy) == 0)
             {
                 desiredGoalBit = GoapStateBits.SquadSupported;
@@ -2484,8 +2544,9 @@ namespace EasyRed2HumanAI
             GoapActionId bestStep0 = GoapActionId.None;
             GoapActionId bestStep1 = GoapActionId.None;
             float bestCost = 999f;
+            IntPtr soldierPtr = soldier.Pointer;
             FactionCommandProfile factionProfile = GetFactionCommandProfile(soldier.faction);
-            BotMicroVariance micro = BotMicroVariance.FromSoldier(soldier.Pointer);
+            BotMicroVariance micro = BotMicroVariance.FromSoldier(soldierPtr);
 
             int actionCount = _goapActions.Length;
             for (int i = 0; i < actionCount; i++)
@@ -2494,7 +2555,7 @@ namespace EasyRed2HumanAI
                 if ((ws & a0.Required) != a0.Required || (ws & a0.Forbidden) != 0)
                     continue;
 
-                float cost0 = GetPersonalityAndDirectiveAdjustedCost(a0, ws, ref board, personality, vet01, ref factionProfile, ref micro);
+                float cost0 = GetPersonalityAndDirectiveAdjustedCost(a0, ws, soldierPtr, ref board, personality, vet01, ref factionProfile, ref micro);
                 // Plan Commitment Hysteresis (-0.35f inertia bonus) prevents stuttering/flip-flopping between nearly-tied actions
                 if (a0.Id == prevActiveAction)
                     cost0 = Mathf.Max(0.05f, cost0 - 0.35f);
@@ -2511,10 +2572,12 @@ namespace EasyRed2HumanAI
                     }
                     // Allow 2-step tactical chains to compete even when Step 0 partially satisfies the goal bit:
                     //  1) MoveToFlankCover -> FlushThreatWithFrag (when carrying frag grenade)
-                    //  2) SeekEmergencyCover / RepositionBehindWall -> BandageInCover (when bleeding out of cover)
+                    //  2) SeekEmergencyCover / RepositionBehindWall / ScavengeSupplyFromCorpse -> BandageInCover (when bleeding)
                     //  3) ThrowSmokeScreen -> MoveToFlankCover / BoundWithOverwatch (when smoking to mask an unpinned advance)
                     bool canChainFlankFrag = a0.Id == GoapActionId.MoveToFlankCover && (ws & GoapStateBits.HasFragGrenade) != 0;
-                    bool canChainCoverBandage = (a0.Id == GoapActionId.SeekEmergencyCover || a0.Id == GoapActionId.RepositionBehindWall) &&
+                    bool canChainCoverBandage = (a0.Id == GoapActionId.SeekEmergencyCover ||
+                                                 a0.Id == GoapActionId.RepositionBehindWall ||
+                                                 a0.Id == GoapActionId.ScavengeSupplyFromCorpse) &&
                                                 (ws & GoapStateBits.IsBleeding) != 0;
                     bool canChainSmokePush = a0.Id == GoapActionId.ThrowSmokeScreen &&
                                              (ws & GoapStateBits.HasSmokeGrenade) != 0 &&
@@ -2536,11 +2599,13 @@ namespace EasyRed2HumanAI
                     if ((wsAfter1 & desiredGoalBit) == 0)
                         continue;
 
-                    float cost1 = GetPersonalityAndDirectiveAdjustedCost(a1, wsAfter0, ref board, personality, vet01, ref factionProfile, ref micro);
+                    float cost1 = GetPersonalityAndDirectiveAdjustedCost(a1, wsAfter0, soldierPtr, ref board, personality, vet01, ref factionProfile, ref micro);
                     // Synergy bonuses for intentional 2-step tactical chains:
                     if (a0.Id == GoapActionId.MoveToFlankCover && a1.Id == GoapActionId.FlushThreatWithFrag)
                         cost1 -= 1.45f;
-                    else if ((a0.Id == GoapActionId.SeekEmergencyCover || a0.Id == GoapActionId.RepositionBehindWall) &&
+                    else if ((a0.Id == GoapActionId.SeekEmergencyCover ||
+                              a0.Id == GoapActionId.RepositionBehindWall ||
+                              a0.Id == GoapActionId.ScavengeSupplyFromCorpse) &&
                              a1.Id == GoapActionId.BandageInCover)
                         cost1 -= 0.85f;
                     else if (a0.Id == GoapActionId.ThrowSmokeScreen &&
@@ -2583,6 +2648,7 @@ namespace EasyRed2HumanAI
         private static float GetPersonalityAndDirectiveAdjustedCost(
             GoapActionDef def,
             GoapStateBits ws,
+            IntPtr soldierPtr,
             ref SquadBlackboard board,
             SoldierPersonality personality,
             float vet01,
@@ -2726,9 +2792,13 @@ namespace EasyRed2HumanAI
                     cost *= factionProfile.ScavengeAndResupplyMult * micro.CautionCostMult;
                     if (lowTicketConservation)
                         cost -= 0.40f;
-                    // Urgently prioritize grabbing a nearby fallen Bazooka/Panzerfaust/AT grenade when enemy armor is closing in!
+                    // Urgently prioritize grabbing a nearby fallen Bazooka/Panzerfaust/AT grenade when enemy armor is closing in,
+                    // while heavily penalizing any non-AT scavenging until out of immediate armor danger!
                     if ((ws & GoapStateBits.ArmorThreatClose) != 0)
-                        cost -= 0.70f;
+                    {
+                        bool isAtPickup = _botScavengeCaches.TryGetValue(soldierPtr, out BotScavengeCache sc) && sc.IsAtWeaponPickup;
+                        cost += isAtPickup ? -0.70f : 1.50f;
+                    }
                     // Prioritize inheriting a fallen radio pack when the squad is cut off from its Radioman!
                     if (!board.PreviouslyHadAliveRadioman && !factionProfile.AllowDisconnectedLocalFlank)
                         cost -= 0.45f;
@@ -2780,7 +2850,7 @@ namespace EasyRed2HumanAI
                 case GoapActionId.BandageInCover:
                     plan.LockUnitCoverChange = true;
                     SetBotPose(ai, soldier, SoldierPose.Crouch);
-                    if (soldier.isBleeding && soldier.hasSyringe && !soldier.isInHandsAnimation && !soldier.isInBodyAnimation)
+                    if (soldier.isBleeding && !soldier.isInHandsAnimation && !soldier.isInBodyAnimation)
                     {
                         ai.TryStopBleeding();
                     }
@@ -2929,7 +2999,38 @@ namespace EasyRed2HumanAI
                     {
                         board.BreacherPtr = ptr;
                         board.BreachUntil = now + 4.0f;
-                        TryFlushLastKnownEnemyWithGrenade(ai, soldier);
+                        if (!TryFlushLastKnownEnemyWithGrenade(ai, soldier) &&
+                            board.HasActiveThreat &&
+                            board.PrimaryTarget != null &&
+                            board.PrimaryTarget.Pointer != IntPtr.Zero &&
+                            !ai.HasEnemyAndCanFireAtHim &&
+                            !ai.IsMoving() &&
+                            !soldier.isInHandsAnimation &&
+                            !soldier.isInBodyAnimation &&
+                            !soldier.IsReloading &&
+                            soldier.inventory != null &&
+                            now > soldier.throw_end_time + 6.0f &&
+                            (!_nextSuppressiveGrenadeTime.TryGetValue(ptr, out float nextG) || now >= nextG))
+                        {
+                            Soldier targetSol = board.PrimaryTarget.TryCast<Soldier>();
+                            if (targetSol != null && targetSol.IsAlive && targetSol.faction != soldier.faction)
+                            {
+                                Vector3 tPos = targetSol.GetCenterOfUnit();
+                                float dFrag = Vector3.Distance(myPos, tPos);
+                                VirtualItem fragItem = soldier.inventory.FindItemOfType<VirtualGrenade>();
+                                if (fragItem != null &&
+                                    dFrag >= 10.0f &&
+                                    dFrag <= Mathf.Min(29.0f, soldier.GetGrenadeThrowRange(fragItem)) &&
+                                    IsSafeToThrowGrenadeAt(soldier, tPos, dFrag, 11.5f) &&
+                                    AiCore.TryConsumeBotRpcBudget(0.45f))
+                                {
+                                    _nextSuppressiveGrenadeTime[ptr] = now + 14.0f;
+                                    soldier.Throw(fragItem, board.PrimaryTarget);
+                                    GoapPlansExecutedCount++;
+                                    TrySayTacticalVoice(soldier, sq, VoiceManager.VoiceClip.granade, 0.05f);
+                                }
+                            }
+                        }
                     }
                     break;
 
@@ -3065,7 +3166,7 @@ namespace EasyRed2HumanAI
                                                                   !soldier.isInHandsAnimation &&
                                                                   !soldier.isInBodyAnimation &&
                                                                   soldier.CanSwitchHeldItem &&
-                                                                  now >= _nextGlobalBotWeaponPickupTime;
+                                                                  (now >= _nextGlobalBotWeaponPickupTime || now + 5.0f < _nextGlobalBotWeaponPickupTime);
 
                                         if (canSwitchWeaponNow && (!Photon.Pun.PhotonNetwork.InRoom || AiCore.TryConsumeBotRpcBudget(0.35f)))
                                         {
@@ -3123,10 +3224,12 @@ namespace EasyRed2HumanAI
                                     {
                                         if (outOfAmmo)
                                             RefillSoldierPrimaryAndStowedWeapons(soldier, 2);
-                                        if (outOfBandage && soldier.inventory.FindItemOfType<VirtualSyringe>() != null)
+                                        if (scavCache.IsMedicSyringePickup && soldier.inventory.FindItemOfType<VirtualSyringe>() != null)
                                             soldier.hasSyringe = true;
                                         looted = true;
-                                        lootedDesc = scavCache.IsAtWeaponPickup ? "floor AT grenade" : "floor ammo/supply";
+                                        lootedDesc = scavCache.IsAtWeaponPickup
+                                            ? "floor AT grenade"
+                                            : (scavCache.IsMedicSyringePickup ? "fallen medic syringe" : "floor ammo/bandage");
                                     }
                                 }
                                 // 2. Scavenge from verified dead corpse inventory or supply crate
@@ -3134,7 +3237,7 @@ namespace EasyRed2HumanAI
                                              scavCache.TargetInventory,
                                              soldier.faction,
                                              outOfAmmo,
-                                             outOfBandage,
+                                             outOfBandage || scavCache.IsMedicSyringePickup,
                                              out _,
                                              out bool ownerStillDeadOrCrate))
                                 {
@@ -3144,7 +3247,7 @@ namespace EasyRed2HumanAI
                                                               !soldier.isInHandsAnimation &&
                                                               !soldier.isInBodyAnimation &&
                                                               soldier.CanSwitchHeldItem &&
-                                                              now >= _nextGlobalBotWeaponPickupTime;
+                                                              (now >= _nextGlobalBotWeaponPickupTime || now + 5.0f < _nextGlobalBotWeaponPickupTime);
 
                                     if ((scavCache.IsRadioPackPickup || scavCache.IsHelmetPickup) &&
                                         ownerStillDeadOrCrate &&
@@ -3230,7 +3333,7 @@ namespace EasyRed2HumanAI
                                         }
                                     }
 
-                                    if (outOfBandage && soldier.inventory != null)
+                                    if (scavCache.IsMedicSyringePickup && soldier.inventory != null)
                                     {
                                         VirtualItem syr = targetInv.FindItemOfType<VirtualSyringe>();
                                         if (syr != null)
@@ -3239,6 +3342,21 @@ namespace EasyRed2HumanAI
                                             if (!targetInv.Contains(syr))
                                             {
                                                 soldier.hasSyringe = true;
+                                                looted = true;
+                                                if (lootedDesc == "supply")
+                                                    lootedDesc = "fallen medic syringe";
+                                            }
+                                        }
+                                    }
+
+                                    if (outOfBandage && soldier.inventory != null)
+                                    {
+                                        VirtualItem bnd = targetInv.FindItemOfType<VirtualBandages>();
+                                        if (bnd != null)
+                                        {
+                                            soldier.inventory.TakeIntoInventory(bnd, targetInv);
+                                            if (soldier.inventory.FindItemOfType<VirtualBandages>() != null)
+                                            {
                                                 looted = true;
                                                 if (lootedDesc == "supply")
                                                     lootedDesc = "bandage";
@@ -3259,6 +3377,8 @@ namespace EasyRed2HumanAI
                                 if (looted)
                                 {
                                     GoapPlansExecutedCount++;
+                                    if (plan.StepCount > 1 && plan.StepIndex == 0)
+                                        plan.StepIndex = 1;
                                     if (VisionConfig.DebugLogging.Value)
                                     {
                                         AiCore.LogDebug(
@@ -3726,13 +3846,19 @@ namespace EasyRed2HumanAI
             bool wantSquadMg,
             bool wantRoleUpgrade,
             bool wantRadioPack,
+            bool wantMedicSyringe,
             bool wantHelmet,
             bool canFeedNeedyAlly,
             float now,
             out BotScavengeCache result)
         {
             IntPtr ptr = soldier.Pointer;
-            if (_botScavengeCaches.TryGetValue(ptr, out result) && now < result.NextScanTime)
+            bool onlyUrgentAt = needAtWeapon && !needAmmo && !needBandage && !needUrgentPrimary && !wantSquadMg && !wantRoleUpgrade && !wantRadioPack && !wantMedicSyringe && !wantHelmet && !canFeedNeedyAlly;
+            bool onlyUrgentBandage = needBandage && !needAmmo && !needAtWeapon && !needUrgentPrimary && !wantSquadMg && !wantRoleUpgrade && !wantRadioPack && !wantMedicSyringe && !wantHelmet && !canFeedNeedyAlly;
+            if (_botScavengeCaches.TryGetValue(ptr, out result) &&
+                now < result.NextScanTime &&
+                (!onlyUrgentAt || result.IsAtWeaponPickup) &&
+                (!onlyUrgentBandage || result.IsBuddyBandageRefill || result.NeedBandage))
             {
                 if ((result.IsBuddyBandageRefill || result.IsBuddyAmmoBorrow) &&
                     result.TargetBuddyDonor != null &&
@@ -3765,7 +3891,7 @@ namespace EasyRed2HumanAI
                     // Someone else already picked up or claimed the floor item while we were walking toward it; rescan immediately!
                 }
                 else if (result.TargetInventory != null &&
-                         IsInventoryValidCorpseOrCrate(result.TargetInventory, soldier.faction, result.NeedAmmo, result.NeedBandage, out _, out _) &&
+                         IsInventoryValidCorpseOrCrate(result.TargetInventory, soldier.faction, result.NeedAmmo, result.NeedBandage || result.IsMedicSyringePickup, out _, out _) &&
                          !IsScavengeTargetClaimedByOtherBot(ptr, result.TargetInventory.Pointer, now))
                 {
                     result.TargetPosition = result.TargetInventory.InventoryPosition;
@@ -3779,7 +3905,7 @@ namespace EasyRed2HumanAI
 
             FactionCommandProfile factionProfile = GetFactionCommandProfile(soldier.faction);
             BotMicroVariance micro = BotMicroVariance.FromSoldier(ptr);
-            float scanInterval = (needAtWeapon || needUrgentPrimary || needAmmo || wantRadioPack)
+            float scanInterval = (needAtWeapon || needUrgentPrimary || needAmmo || wantRadioPack || onlyUrgentBandage)
                 ? (2.8f + micro.ReactionJitterSeconds)
                 : (5.2f + micro.ReactionJitterSeconds);
             result = new BotScavengeCache
@@ -4010,7 +4136,7 @@ namespace EasyRed2HumanAI
                         TargetPosition = itemPos
                     };
                 }
-                else if (needBandage && (vi.TryCast<VirtualSyringe>() != null || vi.TryCast<VirtualBandages>() != null))
+                else if (needBandage && vi.TryCast<VirtualBandages>() != null)
                 {
                     bestDistSq = dSq;
                     result = new BotScavengeCache
@@ -4020,6 +4146,19 @@ namespace EasyRed2HumanAI
                         NeedBandage = needBandage,
                         TargetFloorItem = item,
                         TargetPosition = itemPos
+                    };
+                }
+                else if (wantMedicSyringe && vi.TryCast<VirtualSyringe>() != null)
+                {
+                    bestDistSq = dSq;
+                    result = new BotScavengeCache
+                    {
+                        NextScanTime = now + 2.8f,
+                        NeedAmmo = needAmmo,
+                        NeedBandage = needBandage,
+                        TargetFloorItem = item,
+                        TargetPosition = itemPos,
+                        IsMedicSyringePickup = true
                     };
                 }
             }
@@ -4037,7 +4176,7 @@ namespace EasyRed2HumanAI
                     if (inv == null || inv.Pointer == IntPtr.Zero || inv.Pointer == myInvPtr)
                         continue;
 
-                    if (!IsInventoryValidCorpseOrCrate(inv, soldier.faction, needAmmo, needBandage, out Soldier owner, out bool isDeadBodyOrCrate))
+                    if (!IsInventoryValidCorpseOrCrate(inv, soldier.faction, needAmmo, needBandage || wantMedicSyringe, out Soldier owner, out bool isDeadBodyOrCrate))
                         continue;
 
                     Vector3 invPos = inv.InventoryPosition;
@@ -4162,10 +4301,25 @@ namespace EasyRed2HumanAI
                         }
                     }
 
+                    if (wantMedicSyringe && isDeadBodyOrCrate && inv.FindItemOfType<VirtualSyringe>() != null)
+                    {
+                        bestDistSq = dSq;
+                        result = new BotScavengeCache
+                        {
+                            NextScanTime = now + 2.8f,
+                            NeedAmmo = needAmmo,
+                            NeedBandage = needBandage,
+                            TargetInventory = inv,
+                            TargetPosition = invPos,
+                            IsMedicSyringePickup = true
+                        };
+                        continue;
+                    }
+
                     if (!needAmmo && !needBandage)
                         continue;
 
-                    if (needBandage && !needAmmo && inv.FindItemOfType<VirtualSyringe>() == null)
+                    if (needBandage && !needAmmo && inv.FindItemOfType<VirtualBandages>() == null)
                         continue;
 
                     bestDistSq = dSq;

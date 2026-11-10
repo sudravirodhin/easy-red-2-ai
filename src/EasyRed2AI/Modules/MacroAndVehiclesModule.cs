@@ -740,6 +740,9 @@ namespace EasyRed2HumanAI
             _knownEnemyClusters.Clear();
             _airborneAircraft.Clear();
             _activeRepairStations.Clear();
+            _vehiclesSeekingRepairStation.Clear();
+            _squadOrderedToVehicle.Clear();
+            _unreachableEmplacementUntil.Clear();
             _cachedRepairStationsPhasePtr = IntPtr.Zero;
             _emplacementScanCursor = 0;
             _activeKamikazePlanes.Clear();
@@ -749,30 +752,25 @@ namespace EasyRed2HumanAI
             _hotStartedPlayerPlanes.Clear();
             _lastTurretTargetWasVehicle.Clear();
             _nextCombinedArmsIntelRefreshTime = 0f;
-            if (_nextVehicleSupportSteerTime.Count > 128)
-                _nextVehicleSupportSteerTime.Clear();
-            if (_nextPlaneOrbitSteerTime.Count > 64)
-                _nextPlaneOrbitSteerTime.Clear();
-            if (_nextCombinedArmsAssistCountTime.Count > 128)
-                _nextCombinedArmsAssistCountTime.Clear();
-            if (_squadTaskCommittedUntil.Count > 128)
-                _squadTaskCommittedUntil.Clear();
-            if (_nextTurretFFCheckTime.Count > 128)
-            {
-                _nextTurretFFCheckTime.Clear();
-                _turretFFBlockedUntil.Clear();
-            }
-            if (_cachedVehicleExtents.Count > 128)
-                _cachedVehicleExtents.Clear();
-            if (_nextVehiclePedestrianScanTime.Count > 128)
-            {
-                _nextVehiclePedestrianScanTime.Clear();
-                _vehicleYieldUntilTime.Clear();
-                _vehicleContinuousYieldStart.Clear();
-                _nextFriendlyYieldCountTime.Clear();
-            }
-            if (_remoteVehicleMotion.Count > 64)
-                _remoteVehicleMotion.Clear();
+            _nextMacroDirectorTime = 0f;
+            _garrisonAssignedObjectiveBySquad.Clear();
+            _assignedEmplacementUntil.Clear();
+            _nextApcCheckTime.Clear();
+            _nextApcDismountCooldown.Clear();
+            _nextTankStandoffCountTime.Clear();
+            _cachedVehicleExtents.Clear();
+            _nextVehiclePedestrianScanTime.Clear();
+            _vehicleYieldUntilTime.Clear();
+            _vehicleContinuousYieldStart.Clear();
+            _nextFriendlyStepAsideTime.Clear();
+            _nextFriendlyYieldCountTime.Clear();
+            _nextVehicleSupportSteerTime.Clear();
+            _nextPlaneOrbitSteerTime.Clear();
+            _nextCombinedArmsAssistCountTime.Clear();
+            _squadTaskCommittedUntil.Clear();
+            _nextTurretFFCheckTime.Clear();
+            _turretFFBlockedUntil.Clear();
+            _remoteVehicleMotion.Clear();
         }
 
         private static void RecordCombinedArmsAssist(IntPtr unitPtr, float now, string tag, string msg)
@@ -859,7 +857,7 @@ namespace EasyRed2HumanAI
         private static void RefreshCombinedArmsIntelIfNeeded()
         {
             float now = Time.time;
-            if (now < _nextCombinedArmsIntelRefreshTime)
+            if (now < _nextCombinedArmsIntelRefreshTime && _nextCombinedArmsIntelRefreshTime - now <= 5.0f)
                 return;
 
             _nextCombinedArmsIntelRefreshTime = now + 1.0f;
@@ -2478,7 +2476,7 @@ namespace EasyRed2HumanAI
                 return;
 
             float now = Time.time;
-            if (now < _nextMacroDirectorTime)
+            if (now < _nextMacroDirectorTime && _nextMacroDirectorTime - now <= 10.0f)
                 return;
 
             // Never run global squad/vehicle directors on a slow frame or on the same frame as dictionary pruning

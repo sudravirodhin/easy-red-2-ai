@@ -960,7 +960,7 @@ namespace EasyRed2HumanAI
 
             MaintainSpectatorHudVisibility();
 
-            if (Time.time > _nextStateCleanupTime && AiCore.TryClaimHeavyFrameWorkSlot())
+            if ((Time.time > _nextStateCleanupTime || Time.time + 2.0f < _nextStateCleanupTime) && AiCore.TryClaimHeavyFrameWorkSlot())
             {
                 _nextStateCleanupTime = Time.time + 3.0f;
                 CleanupDictionaries(false);
@@ -1067,6 +1067,7 @@ namespace EasyRed2HumanAI
                 forceFull = true;
                 _coverExposureCache.Clear();
                 _medicPatientClaims.Clear();
+                VisionPatches.ClearVisionCaches();
                 AiCore.ClearSpatialCaches();
                 ClearBallisticsCaches();
                 ClearDoorCaches();
@@ -1089,8 +1090,21 @@ namespace EasyRed2HumanAI
                         vetCount++;
                 }
             }
+            // CRITICAL: Include incapacitated (!IsDead && IsInjured) soldiers in _reusableAlivePtrs so downed veterans
+            // keep their XP/rank while awaiting a Medic revive, active _medicPatientClaims aren't wiped mid-rescue,
+            // and incapacitated players keep _lastDamageByVictim attribution until the Death Screen!
+            int injCount = AiCore.WorldInjuredSoldierCount;
+            var injured = AiCore.WorldInjuredSoldiers;
+            for (int i = 0; i < injCount; i++)
+            {
+                ref AiCore.SoldierSnapshot inj = ref injured[i];
+                if (inj.Ptr != IntPtr.Zero)
+                {
+                    _reusableAlivePtrs.Add(inj.Ptr);
+                }
+            }
             Soldier controlled = Soldier.CurrentControlledSoldierOrNull();
-            if (controlled != null && controlled.IsAlive && controlled.Pointer != IntPtr.Zero)
+            if (controlled != null && !controlled.IsDead && controlled.Pointer != IntPtr.Zero)
                 _reusableAlivePtrs.Add(controlled.Pointer);
 
             ActiveVeteransCount = vetCount;
@@ -1162,6 +1176,11 @@ namespace EasyRed2HumanAI
                 AiCore.PruneDict(_botScavengeCaches, _reusableAlivePtrs);
                 AiCore.PruneDict(_nextWeaponUpgradeAllowedTime, _reusableAlivePtrs);
                 AiCore.PruneDict(_nextBuddyBandageRefillTime, _reusableAlivePtrs);
+                AiCore.PruneDict(_nextBuddyAmmoResupplyTime, _reusableAlivePtrs);
+                AiCore.PruneDict(_nextSoldierVoiceTime, _reusableAlivePtrs);
+                AiCore.PruneDict(_nextFlankCoverAssignTime, _reusableAlivePtrs);
+                AiCore.PruneDict(_medicHealStartTime, _reusableAlivePtrs);
+                AiCore.PruneDict(_medicHealTargetPtr, _reusableAlivePtrs);
                 AiCore.PruneDict(_casualtyDragStates, _reusableAlivePtrs);
                 AiCore.PruneDict(_medicPatientClaims, _reusableAlivePtrs);
                 AiCore.PruneDict(_cornerPieCache, _reusableAlivePtrs);
@@ -1169,6 +1188,26 @@ namespace EasyRed2HumanAI
                 AiCore.PruneDict(_lastDamageByVictim, _reusableAlivePtrs);
                 AiCore.PruneSet(_bayonetCheckedSoldiers, _reusableAlivePtrs);
                 AiCore.PruneSet(_isTurningToWatchSector, _reusableAlivePtrs);
+
+                if (_cachedInventoryOwners.Count > 1024)
+                    _cachedInventoryOwners.Clear();
+
+                // Reuse _reusableAlivePtrs to prune per-squad dictionaries against active squads in zero extra allocations
+                _reusableAlivePtrs.Clear();
+                int sqCount = AiCore.WorldSquadCount;
+                var squads = AiCore.WorldSquads;
+                for (int i = 0; i < sqCount; i++)
+                {
+                    if (squads[i].Ptr != IntPtr.Zero)
+                        _reusableAlivePtrs.Add(squads[i].Ptr);
+                }
+                AiCore.PruneDict(_squadBlackboards, _reusableAlivePtrs);
+                AiCore.PruneDict(_nextSquadVoiceTime, _reusableAlivePtrs);
+                AiCore.PruneDict(_pincerOrderedTaskBySquad, _reusableAlivePtrs);
+                AiCore.PruneDict(_garrisonAssignedObjectiveBySquad, _reusableAlivePtrs);
+                AiCore.PruneDict(_squadTaskCommittedUntil, _reusableAlivePtrs);
+                AiCore.PruneDict(_squadOrderedToVehicle, _reusableAlivePtrs);
+                AiCore.PruneSet(_initialHqSpawnBriefingConsumed, _reusableAlivePtrs);
 
                 if (_coverExposureCache.Count > 4096)
                     _coverExposureCache.Clear();
