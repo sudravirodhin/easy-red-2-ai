@@ -3608,33 +3608,33 @@ namespace EasyRed2HumanAI
         [HarmonyPatch(typeof(Squad), nameof(Squad.MedicRoutine))]
         public static class Squad_MedicRoutine_Patch
         {
-            public static bool Prefix(Soldier __0)
+            public static bool Prefix(SoldierAI ai, Soldier character)
             {
                 try
                 {
                     if (!VisionConfig.EnableMod.Value ||
                         !VisionConfig.EnableAntiDogpileMedicTriage.Value ||
-                        __0 == null ||
-                        __0.Pointer == IntPtr.Zero ||
-                        !AiCore.IsLocallyOwnedBot(__0))
+                        character == null ||
+                        character.Pointer == IntPtr.Zero ||
+                        !AiCore.IsLocallyOwnedBot(character))
                     {
                         return true;
                     }
 
-                    IntPtr medicPtr = __0.Pointer;
+                    IntPtr medicPtr = character.Pointer;
                     PruneAndValidateMedicClaims(medicPtr, out IntPtr activePatientPtr);
 
                     // Match vanilla Squad.MedicRoutine (@ 0x1808079B0): only soldiers with hasSyringe who are alive,
                     // not charging, not in a body animation, not mounted, and not carrying a body can seek casualties!
-                    if (!__0.IsAlive ||
-                        __0.IsInjured ||
-                        !__0.hasSyringe ||
-                        __0.IsCharging() ||
-                        __0.isInBodyAnimation ||
-                        __0.HasSurrended() ||
-                        __0.IsOnVehicle() ||
-                        __0.IsCarryingBody() ||
-                        __0.transform == null)
+                    if (!character.IsAlive ||
+                        character.IsInjured ||
+                        !character.hasSyringe ||
+                        character.IsCharging() ||
+                        character.isInBodyAnimation ||
+                        character.HasSurrended() ||
+                        character.IsOnVehicle() ||
+                        character.IsCarryingBody() ||
+                        character.transform == null)
                     {
                         return false;
                     }
@@ -3642,7 +3642,7 @@ namespace EasyRed2HumanAI
                     // If this medic is already actively heading to a valid incapacitated (!IsDead && IsInjured) patient, let him continue!
                     if (activePatientPtr != IntPtr.Zero)
                     {
-                        AiDestination curDest = __0.targetDestination;
+                        AiDestination curDest = character.targetDestination;
                         MedicHealingDestination curHeal = curDest != null ? curDest.TryCast<MedicHealingDestination>() : null;
                         if (curHeal != null &&
                             curHeal.soldierToHealUp != null &&
@@ -3654,8 +3654,8 @@ namespace EasyRed2HumanAI
                         }
                     }
 
-                    Vector3 medicPos = __0.transform.position;
-                    string myFaction = __0.faction;
+                    Vector3 medicPos = character.transform.position;
+                    string myFaction = character.faction;
                     if (string.IsNullOrEmpty(myFaction))
                         return true;
 
@@ -3721,13 +3721,13 @@ namespace EasyRed2HumanAI
                         IntPtr bestPtr = bestPatient.Pointer;
                         _medicPatientClaims.TryGetValue(bestPtr, out MedicPatientClaim claim);
                         if (claim.PrimaryMedic == null || claim.PrimaryMedic.Pointer == medicPtr)
-                            claim.PrimaryMedic = __0;
+                            claim.PrimaryMedic = character;
                         else
-                            claim.BackupMedic = __0;
+                            claim.BackupMedic = character;
                         _medicPatientClaims[bestPtr] = claim;
 
-                        MedicHealingDestination newHealDest = new MedicHealingDestination(bestPatient, __0);
-                        __0.CoverPosition(newHealDest.Cast<AiDestination>());
+                        MedicHealingDestination newHealDest = new MedicHealingDestination(bestPatient, character);
+                        character.CoverPosition(newHealDest.Cast<AiDestination>());
 
                         if (skippedDogpiledNearest)
                         {
@@ -3737,9 +3737,9 @@ namespace EasyRed2HumanAI
                     }
                     else
                     {
-                        if (__0.targetDestination != null && __0.targetDestination.TryCast<MedicHealingDestination>() != null)
+                        if (character.targetDestination != null && character.targetDestination.TryCast<MedicHealingDestination>() != null)
                         {
-                            __0.CoverPosition(null);
+                            character.CoverPosition(null);
                         }
                         if (skippedDogpiledNearest)
                         {

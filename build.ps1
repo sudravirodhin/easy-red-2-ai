@@ -152,6 +152,32 @@ if ($LASTEXITCODE -ne 0) {
     throw "Compilation failed with exit code $LASTEXITCODE"
 }
 
+$verifySrc = Join-Path $workspace "tools\verify_patches\VerifyPatches.cs"
+if (Test-Path $verifySrc) {
+    $verifyDll = Join-Path $buildDir "VerifyPatches.dll"
+    $cscRuntimeConfig = Join-Path (Split-Path $csc -Parent) "csc.runtimeconfig.json"
+    if (-not (Test-Path $verifyDll) -or ((Get-Item $verifySrc).LastWriteTimeUtc -gt (Get-Item $verifyDll).LastWriteTimeUtc)) {
+        & dotnet $csc /nologo /target:exe /optimize+ /nostdlib `
+            "/r:$dotnetDir\System.Private.CoreLib.dll" `
+            "/r:$dotnetDir\System.Runtime.dll" `
+            "/r:$dotnetDir\System.Console.dll" `
+            "/r:$dotnetDir\System.Collections.dll" `
+            "/r:$dotnetDir\System.Linq.dll" `
+            "/r:$dotnetDir\System.Reflection.dll" `
+            "/r:$dotnetDir\System.IO.FileSystem.dll" `
+            "/r:$dotnetDir\netstandard.dll" `
+            "/out:$verifyDll" `
+            $verifySrc
+        if ($LASTEXITCODE -ne 0) {
+            throw "Failed to compile HarmonyPatch signature verifier"
+        }
+    }
+    & dotnet exec --runtimeconfig $cscRuntimeConfig $verifyDll "$buildDir\EasyRed2HumanAI.dll" $interopDir $coreDir $dotnetDir
+    if ($LASTEXITCODE -ne 0) {
+        throw "HarmonyPatch signature verification failed! Fix parameter types/indices before deploying."
+    }
+}
+
 if (Test-Path (Join-Path $workspace "tools\bepinex\extracted")) {
     Copy-Item "$buildDir\EasyRed2HumanAI.dll" "$pluginsDir\EasyRed2HumanAI.dll" -Force
 }
