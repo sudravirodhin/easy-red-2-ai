@@ -248,6 +248,95 @@ namespace EasyRed2HumanAI
 
         internal static readonly Dictionary<IntPtr, BotScavengeCache> _botScavengeCaches = new Dictionary<IntPtr, BotScavengeCache>(128);
         internal static readonly Dictionary<IntPtr, float> _nextWeaponUpgradeAllowedTime = new Dictionary<IntPtr, float>(128);
+        private static float _nextGlobalBotWeaponPickupTime;
+
+        private struct CachedInventoryOwner
+        {
+            public Soldier SoldierOwner;
+            public Vehicle VehicleOwner;
+        }
+
+        private struct CachedWeaponArchetype
+        {
+            public bool Valid;
+            public bool IsPistol;
+            public bool IsAtWeapon;
+            public bool IsMg;
+            public bool IsScopedOrSniper;
+            public bool IsManualBoltOnly;
+        }
+
+        private static readonly Dictionary<IntPtr, CachedInventoryOwner> _cachedInventoryOwners = new Dictionary<IntPtr, CachedInventoryOwner>(256);
+        private static readonly Dictionary<string, CachedWeaponArchetype> _cachedWeaponArchetypes = new Dictionary<string, CachedWeaponArchetype>(128);
+
+        private static bool IsFloorItemFreeToPickUp(ItemObject item)
+        {
+            // CRITICAL: ItemObject.Awake (0x180513F41) adds EVERY ItemObject in the scene—including equipped
+            // firearms/grenades/syringes in live soldiers' hands—into ItemObject.spawnedItems!
+            // Vanilla InventoryManager.GetNearItems (0x1807E2468) checks ItemObject.IsPhysicEnabled() (rb != null).
+            // Require IsPhysicEnabled(), CanInteract(), activeInHierarchy, and parent == null so bots NEVER steal
+            // an equipped weapon or item out of a live soldier's or player's hands!
+            return item != null &&
+                   item.Pointer != IntPtr.Zero &&
+                   item.IsPhysicEnabled() &&
+                   item.CanInteract() &&
+                   item.gameObject != null &&
+                   item.gameObject.activeInHierarchy &&
+                   item.transform != null &&
+                   item.transform.parent == null;
+        }
+
+        private static CachedInventoryOwner GetCachedInventoryOwner(InventoryManager inv)
+        {
+            IntPtr invPtr = inv.Pointer;
+            if (_cachedInventoryOwners.TryGetValue(invPtr, out CachedInventoryOwner cached))
+                return cached;
+
+            if (_cachedInventoryOwners.Count > 1024)
+                _cachedInventoryOwners.Clear();
+
+            cached = new CachedInventoryOwner
+            {
+                SoldierOwner = inv.GetComponent<Soldier>(),
+                VehicleOwner = inv.GetComponent<Vehicle>()
+            };
+            _cachedInventoryOwners[invPtr] = cached;
+            return cached;
+        }
+
+        private static bool TryGetVirtualWeaponArchetype(VirtualItem vw, out CachedWeaponArchetype arch)
+        {
+            arch = default;
+            if (vw == null || vw.Pointer == IntPtr.Zero)
+                return false;
+
+            string itemId = vw.item_id;
+            if (!string.IsNullOrEmpty(itemId) && _cachedWeaponArchetypes.TryGetValue(itemId, out arch))
+                return arch.Valid;
+
+            ItemObject prefab = vw.GetItemPrefab();
+            GenericGun gun = prefab != null ? prefab.TryCast<GenericGun>() : null;
+            if (gun != null)
+            {
+                arch = new CachedWeaponArchetype
+                {
+                    Valid = true,
+                    IsPistol = gun.IsPistol(),
+                    IsAtWeapon = gun.IsAtWeapon(),
+                    IsMg = gun.integratedBipod != null || gun.IsHeavyMg(),
+                    IsScopedOrSniper = gun.IsSniperRifle() || gun.IsUsingScope || gun.HasScopeWithMagnification(),
+                    IsManualBoltOnly = gun.isManualBoltOperated && !gun.IsFullAuto()
+                };
+            }
+
+            if (!string.IsNullOrEmpty(itemId))
+            {
+                if (_cachedWeaponArchetypes.Count > 512)
+                    _cachedWeaponArchetypes.Clear();
+                _cachedWeaponArchetypes[itemId] = arch;
+            }
+            return arch.Valid;
+        }
 
         internal struct SquadBlackboard
         {
@@ -669,29 +758,19 @@ namespace EasyRed2HumanAI
 
         public static void ClearGoapCaches()
         {
-            if (_squadBlackboards.Count > 128)
-                _squadBlackboards.Clear();
-            if (_botGoapPlans.Count > 512)
-                _botGoapPlans.Clear();
-            if (_botScavengeCaches.Count > 256)
-                _botScavengeCaches.Clear();
-            if (_nextWeaponUpgradeAllowedTime.Count > 256)
-                _nextWeaponUpgradeAllowedTime.Clear();
-            if (_initialHqSpawnBriefingConsumed.Count > 256)
-                _initialHqSpawnBriefingConsumed.Clear();
-            if (_nextSquadVoiceTime.Count > 128)
-                _nextSquadVoiceTime.Clear();
-            if (_nextSoldierVoiceTime.Count > 512)
-                _nextSoldierVoiceTime.Clear();
-            if (_nextFlankCoverAssignTime.Count > 512)
-                _nextFlankCoverAssignTime.Clear();
-            if (_medicHealStartTime.Count > 128)
-            {
-                _medicHealStartTime.Clear();
-                _medicHealTargetPtr.Clear();
-            }
-            if (_pincerOrderedTaskBySquad.Count > 128)
-                _pincerOrderedTaskBySquad.Clear();
+            _squadBlackboards.Clear();
+            _botGoapPlans.Clear();
+            _botScavengeCaches.Clear();
+            _nextWeaponUpgradeAllowedTime.Clear();
+            _cachedInventoryOwners.Clear();
+            _initialHqSpawnBriefingConsumed.Clear();
+            _nextSquadVoiceTime.Clear();
+            _nextSoldierVoiceTime.Clear();
+            _nextFlankCoverAssignTime.Clear();
+            _medicHealStartTime.Clear();
+            _medicHealTargetPtr.Clear();
+            _pincerOrderedTaskBySquad.Clear();
+            _nextGlobalBotWeaponPickupTime = 0f;
         }
 
         internal static bool IsActivelyHealingTeammate(Soldier soldier, out MedicHealingDestination healDest)
@@ -838,6 +917,10 @@ namespace EasyRed2HumanAI
             if (!VisionConfig.EnableRadiomanIntelNet.Value)
                 return true;
 
+            // O(1) lookup from AiCore's flat 0.35s WorldSnapshot (eliminates nested O(N^2)/O(N^3) Squad.AllSquads scans!)
+            if (AiCore.TryGetSquadSnapshot(sq.Pointer, out AiCore.SquadSnapshot snap))
+                return snap.HasRadioOrRelay;
+
             if (sq.RadioRequestActiveAndConfirmed())
                 return true;
 
@@ -845,9 +928,6 @@ namespace EasyRed2HumanAI
             if (leader == null || !leader.IsAlive || leader.transform == null)
                 return false;
 
-            // Mounted ground vehicles (Tanks, Armored Cars, Halftracks/APCs) and aircraft have onboard radios.
-            // If a vehicle crew or pilot bails out on foot/parachute, they lose their vehicle radio
-            // unless they link up within 45m of a friendly ground radio squad or operational ground vehicle!
             if (leader.IsOnVehicle())
             {
                 Vehicle veh = leader.GetCurrentVehicle();
@@ -855,46 +935,12 @@ namespace EasyRed2HumanAI
                     return true;
             }
 
-            Vector3 leaderPos = leader.transform.position;
-
-            // 1. Direct squad Radioman within 32m of Squad Leader
             Soldier rad = sq.GetRadioman();
-            if (rad != null && rad.IsAlive && !rad.HasSurrended() && rad.transform != null)
-            {
-                if ((rad.transform.position - leaderPos).sqrMagnitude <= 32f * 32f)
-                    return true;
-            }
-
-            // 2. Within faction-specific voice/visual relay of another friendly squad with a Radioman or a friendly manned GROUND vehicle
-            string myFaction = leader.faction;
-            float relayRadius = GetFactionCommandProfile(myFaction).RadioRelayRadius;
-            float relayRadiusSq = relayRadius * relayRadius;
-            var allSquads = Squad.AllSquads;
-            if (allSquads != null)
-            {
-                foreach (var kvp in allSquads)
-                {
-                    Squad other = kvp.Value;
-                    if (other == null || other.Pointer == IntPtr.Zero || other.Pointer == sq.Pointer)
-                        continue;
-
-                    Soldier otherLeader = other.Leader;
-                    if (otherLeader == null || !otherLeader.IsAlive || otherLeader.faction != myFaction || otherLeader.transform == null)
-                        continue;
-
-                    if ((otherLeader.transform.position - leaderPos).sqrMagnitude > relayRadiusSq)
-                        continue;
-
-                    if (IsMountedOnGroundVehicle(otherLeader))
-                        return true;
-
-                    Soldier otherRad = other.GetRadioman();
-                    if (otherRad != null && otherRad.IsAlive && !otherRad.HasSurrended())
-                        return true;
-                }
-            }
-
-            return false;
+            return rad != null &&
+                   rad.IsAlive &&
+                   !rad.HasSurrended() &&
+                   rad.transform != null &&
+                   (rad.transform.position - leader.transform.position).sqrMagnitude <= 32f * 32f;
         }
 
         internal static bool IsSquadConnectedToRadioNet(Squad sq)
@@ -946,25 +992,22 @@ namespace EasyRed2HumanAI
                 }
             }
 
-            var allSquads = Squad.AllSquads;
-            if (allSquads == null)
+            AiCore.EnsureWorldSnapshot();
+            int sqCount = AiCore.WorldSquadCount;
+            if (sqCount == 0)
                 return true;
 
-            foreach (var kvp in allSquads)
+            var squads = AiCore.WorldSquads;
+            for (int i = 0; i < sqCount; i++)
             {
-                Squad friendlySq = kvp.Value;
-                if (friendlySq == null || friendlySq.Pointer == IntPtr.Zero)
+                ref AiCore.SquadSnapshot fSnap = ref squads[i];
+                if (!fSnap.LeaderIsAlive || string.IsNullOrEmpty(fSnap.Faction) || fSnap.Faction == enemyFaction)
                     continue;
 
-                Soldier fLeader = friendlySq.Leader;
-                if (fLeader == null || !fLeader.IsAlive || string.IsNullOrEmpty(fLeader.faction) || fLeader.faction == enemyFaction || fLeader.transform == null)
+                if ((fSnap.RefPos - enemyPos).sqrMagnitude > 190f * 190f)
                     continue;
 
-                float distSq = (fLeader.transform.position - enemyPos).sqrMagnitude;
-                if (distSq > 190f * 190f)
-                    continue;
-
-                if (HasLiveRadioOrRelayLink(friendlySq))
+                if (fSnap.HasRadioOrRelay)
                     return true;
             }
 
@@ -990,8 +1033,9 @@ namespace EasyRed2HumanAI
             if (!VisionConfig.EnableTacticalGoapPlanner.Value)
                 return;
 
-            var allSquads = Squad.AllSquads;
-            if (allSquads == null || allSquads.Count < 1)
+            AiCore.EnsureWorldSnapshot();
+            int sqCount = AiCore.WorldSquadCount;
+            if (sqCount < 1)
                 return;
 
             var connectedInfantrySquads = _reusableConnectedInfantrySquads;
@@ -999,14 +1043,16 @@ namespace EasyRed2HumanAI
             connectedInfantrySquads.Clear();
             activeVehicleAnvils.Clear();
 
-            foreach (var kvp in allSquads)
+            var squads = AiCore.WorldSquads;
+            for (int sIdx = 0; sIdx < sqCount; sIdx++)
             {
-                Squad sq = kvp.Value;
-                if (sq == null || sq.Pointer == IntPtr.Zero)
+                ref AiCore.SquadSnapshot sqSnap = ref squads[sIdx];
+                if (!sqSnap.LeaderIsAlive)
                     continue;
 
-                Soldier leader = sq.Leader;
-                if (leader == null || !leader.IsAlive || leader.transform == null)
+                Squad sq = sqSnap.Ref;
+                Soldier leader = sqSnap.Leader;
+                if (sq == null || sq.Pointer == IntPtr.Zero || leader == null || !leader.IsAlive || leader.transform == null)
                     continue;
 
                 // If the Human Player is the Squad Leader, never issue movement orders to their squad,
@@ -1026,7 +1072,7 @@ namespace EasyRed2HumanAI
                     continue;
 
                 // Mounted Ground Combat Vehicles have onboard radios and can act as Heavy Anvils for nearby infantry!
-                if (leader.IsOnVehicle())
+                if (sqSnap.LeaderOnVehicle)
                 {
                     if (IsMountedOnGroundVehicle(leader))
                     {
@@ -2562,21 +2608,29 @@ namespace EasyRed2HumanAI
                                 string lootedDesc = "supply";
 
                                 // 1. Pick up physical floor items (dropped AT launchers, primary rifles/SMGs/MGs, ammo boxes, magazines, syringes)
-                                if (scavCache.TargetFloorItem != null && scavCache.TargetFloorItem.Pointer != IntPtr.Zero &&
-                                    scavCache.TargetFloorItem.gameObject != null && scavCache.TargetFloorItem.gameObject.activeInHierarchy)
+                                if (IsFloorItemFreeToPickUp(scavCache.TargetFloorItem))
                                 {
                                     GenericGun floorGun = scavCache.TargetFloorItem.TryCast<GenericGun>();
                                     if (floorGun != null)
                                     {
-                                        if (!Photon.Pun.PhotonNetwork.InRoom || AiCore.TryConsumeBotRpcBudget(0.30f))
+                                        bool canSwitchWeaponNow = !soldier.IsPlayer() &&
+                                                                  !soldier.isInHandsAnimation &&
+                                                                  !soldier.isInBodyAnimation &&
+                                                                  soldier.CanSwitchHeldItem &&
+                                                                  now >= _nextGlobalBotWeaponPickupTime;
+
+                                        if (canSwitchWeaponNow && (!Photon.Pun.PhotonNetwork.InRoom || AiCore.TryConsumeBotRpcBudget(0.35f)))
                                         {
                                             int slot = floorGun.IsAtWeapon() ? 1 : 0;
+                                            soldier.SetGunTriggerPressed(false);
                                             soldier.PickUpItem(scavCache.TargetFloorItem.gameObject, slot);
                                             soldier.RefillAmmoForWearedWeapon(slot, true, null, false, 3);
+                                            _nextGlobalBotWeaponPickupTime = now + 2.20f;
+                                            _nextWeaponUpgradeAllowedTime[ptr] = now + (scavCache.IsRoleWeaponUpgrade ? 90.0f : 20.0f);
+                                            plan.NextReplanTime = Mathf.Max(plan.NextReplanTime, now + 2.50f);
                                             looted = true;
                                             if (scavCache.IsRoleWeaponUpgrade)
                                             {
-                                                _nextWeaponUpgradeAllowedTime[ptr] = now + 75.0f;
                                                 RoleWeaponUpgradesCount++;
                                                 lootedDesc = $"upgraded primary ({floorGun.name})";
                                             }
@@ -2597,17 +2651,31 @@ namespace EasyRed2HumanAI
                                     }
                                 }
                                 // 2. Scavenge from corpse inventory, supply crate, or friendly ammo carrier
-                                else if (scavCache.TargetInventory != null && scavCache.TargetInventory.Pointer != IntPtr.Zero)
+                                else if (scavCache.TargetInventory != null && scavCache.TargetInventory.Pointer != IntPtr.Zero && !scavCache.TargetInventory.IsPlayersInventory())
                                 {
                                     InventoryManager targetInv = scavCache.TargetInventory;
-                                    if (scavCache.IsAtWeaponPickup)
+                                    CachedInventoryOwner invOwner = GetCachedInventoryOwner(targetInv);
+                                    bool ownerStillDeadOrCrate = (invOwner.SoldierOwner == null || !invOwner.SoldierOwner.IsAlive) &&
+                                                                 (invOwner.VehicleOwner == null || invOwner.VehicleOwner.IsDisabled());
+                                    bool canSwitchWeaponNow = ownerStillDeadOrCrate &&
+                                                              !soldier.IsPlayer() &&
+                                                              !soldier.isInHandsAnimation &&
+                                                              !soldier.isInBodyAnimation &&
+                                                              soldier.CanSwitchHeldItem &&
+                                                              now >= _nextGlobalBotWeaponPickupTime;
+
+                                    if (scavCache.IsAtWeaponPickup && ownerStillDeadOrCrate)
                                     {
-                                        if (scavCache.TargetInventoryAtWeapon != null)
+                                        if (scavCache.TargetInventoryAtWeapon != null && targetInv.Contains(scavCache.TargetInventoryAtWeapon))
                                         {
-                                            if (!Photon.Pun.PhotonNetwork.InRoom || AiCore.TryConsumeBotRpcBudget(0.30f))
+                                            if (canSwitchWeaponNow && (!Photon.Pun.PhotonNetwork.InRoom || AiCore.TryConsumeBotRpcBudget(0.35f)))
                                             {
+                                                soldier.SetGunTriggerPressed(false);
                                                 soldier.PickUpItemFromInventory(scavCache.TargetInventoryAtWeapon, targetInv, 1);
                                                 soldier.RefillAmmoForWearedWeapon(1, true, null, false, 2);
+                                                _nextGlobalBotWeaponPickupTime = now + 2.20f;
+                                                _nextWeaponUpgradeAllowedTime[ptr] = now + 20.0f;
+                                                plan.NextReplanTime = Mathf.Max(plan.NextReplanTime, now + 2.50f);
                                                 looted = true;
                                                 lootedDesc = "AT launcher from body/crate";
                                             }
@@ -2622,13 +2690,18 @@ namespace EasyRed2HumanAI
                                             }
                                         }
                                     }
-                                    else if (scavCache.IsRoleWeaponUpgrade && scavCache.TargetInventoryPrimaryWeapon != null)
+                                    else if (scavCache.IsRoleWeaponUpgrade &&
+                                             scavCache.TargetInventoryPrimaryWeapon != null &&
+                                             targetInv.Contains(scavCache.TargetInventoryPrimaryWeapon))
                                     {
-                                        if (!Photon.Pun.PhotonNetwork.InRoom || AiCore.TryConsumeBotRpcBudget(0.30f))
+                                        if (canSwitchWeaponNow && (!Photon.Pun.PhotonNetwork.InRoom || AiCore.TryConsumeBotRpcBudget(0.35f)))
                                         {
+                                            soldier.SetGunTriggerPressed(false);
                                             soldier.PickUpItemFromInventory(scavCache.TargetInventoryPrimaryWeapon, targetInv, 0);
                                             soldier.RefillAmmoForWearedWeapon(0, true, null, false, 3);
-                                            _nextWeaponUpgradeAllowedTime[ptr] = now + 75.0f;
+                                            _nextGlobalBotWeaponPickupTime = now + 2.20f;
+                                            _nextWeaponUpgradeAllowedTime[ptr] = now + 90.0f;
+                                            plan.NextReplanTime = Mathf.Max(plan.NextReplanTime, now + 2.50f);
                                             RoleWeaponUpgradesCount++;
                                             looted = true;
                                             lootedDesc = "role-matched primary from body/crate";
@@ -2833,14 +2906,22 @@ namespace EasyRed2HumanAI
             wantSquadMg = false;
             wantRoleUpgrade = false;
 
+            if (soldier.isInHandsAnimation || soldier.isInBodyAnimation || !soldier.CanSwitchHeldItem)
+                return;
+
+            IntPtr ptr = soldier.Pointer;
+            if (_nextWeaponUpgradeAllowedTime.TryGetValue(ptr, out float nextAllowed) && now < nextAllowed)
+                return;
+
             GenericGun g0 = soldier.GetHeldGun(0);
             GenericGun g1 = soldier.GetHeldGun(1);
 
-            bool g0RealPrimary = g0 != null && !g0.IsPistol() && !g0.IsAtWeapon() && (g0.GetCurrentAmmoCount() > 0 || !soldier.IsOutOfAmmosFor(g0));
-            bool g1RealPrimary = g1 != null && !g1.IsPistol() && !g1.IsAtWeapon() && (g1.GetCurrentAmmoCount() > 0 || !soldier.IsOutOfAmmosFor(g1));
+            // Check actual firearm type regardless of remaining ammo (dry rifles use outOfAmmo ammo-refill scavenging,
+            // NEVER weapon-replacement prefab swaps!). needUrgentPrimary is strictly for pistol-only / unarmed soldiers
+            // (e.g. bailed-out pilots/tank crews merged into a squad, or pistol-armed officers/medics).
+            bool g0RealPrimary = g0 != null && !g0.IsPistol() && !g0.IsAtWeapon();
+            bool g1RealPrimary = g1 != null && !g1.IsPistol() && !g1.IsAtWeapon();
 
-            // 1. Pistol-only on foot (merged tankers/pilots, pistol officers/medics, or completely dry primary):
-            //    Urgently look for any real primary firearm unless actively running a rear-spawn retreat!
             if (!g0RealPrimary && !g1RealPrimary)
             {
                 if (!onRetreatTask || board.HasActiveThreat || soldier.GetSuppressionValue() >= 8)
@@ -2849,10 +2930,6 @@ namespace EasyRed2HumanAI
             }
 
             if (onRetreatTask)
-                return;
-
-            IntPtr ptr = soldier.Pointer;
-            if (_nextWeaponUpgradeAllowedTime.TryGetValue(ptr, out float nextAllowed) && now < nextAllowed)
                 return;
 
             bool holdingMg = soldier.hasMg ||
@@ -2891,25 +2968,24 @@ namespace EasyRed2HumanAI
             }
         }
 
-        private static bool IsCandidateGunValidUpgrade(
-            GenericGun cand,
+        private static bool IsWeaponArchetypeValidUpgrade(
+            bool isPistol,
+            bool isAtWeapon,
+            bool isMg,
+            bool isScopedOrSniper,
+            bool isManualBoltOnly,
             SoldierPersonality pers,
             bool needUrgentPrimary,
             bool wantSquadMg,
-            bool wantRoleUpgrade,
-            bool requireLoadedChamberOrMag)
+            bool wantRoleUpgrade)
         {
-            if (cand == null || cand.IsPistol() || cand.IsAtWeapon())
-                return false;
-
-            if (requireLoadedChamberOrMag && cand.GetCurrentAmmoCount() <= 0)
+            if (isPistol || isAtWeapon)
                 return false;
 
             if (needUrgentPrimary)
                 return true;
 
-            bool candIsMg = cand.integratedBipod != null || cand.IsHeavyMg();
-            if (wantSquadMg && candIsMg)
+            if (wantSquadMg && isMg)
                 return true;
 
             if (!wantRoleUpgrade)
@@ -2919,24 +2995,50 @@ namespace EasyRed2HumanAI
                 pers == SoldierPersonality.Gunner_AssaultMG ||
                 pers == SoldierPersonality.Gunner_Overwatch)
             {
-                return candIsMg;
+                return isMg;
             }
 
             if (pers == SoldierPersonality.Marksman_Deadeye ||
                 pers == SoldierPersonality.Marksman_Stalker ||
                 pers == SoldierPersonality.Marksman_Spotter)
             {
-                return cand.IsSniperRifle() || cand.IsUsingScope;
+                return isScopedOrSniper;
             }
 
             if (pers == SoldierPersonality.Assaulter_Shock ||
                 pers == SoldierPersonality.Assaulter_Breacher ||
                 pers == SoldierPersonality.Assaulter_Skirmisher)
             {
-                return !cand.isManualBoltOperated && !candIsMg;
+                return !isManualBoltOnly && !isMg;
             }
 
             return false;
+        }
+
+        private static bool IsCandidateGunValidUpgrade(
+            GenericGun cand,
+            SoldierPersonality pers,
+            bool needUrgentPrimary,
+            bool wantSquadMg,
+            bool wantRoleUpgrade,
+            bool requireLoadedChamberOrMag)
+        {
+            if (cand == null)
+                return false;
+
+            if (requireLoadedChamberOrMag && cand.GetCurrentAmmoCount() <= 0)
+                return false;
+
+            return IsWeaponArchetypeValidUpgrade(
+                cand.IsPistol(),
+                cand.IsAtWeapon(),
+                cand.integratedBipod != null || cand.IsHeavyMg(),
+                cand.IsSniperRifle() || cand.IsUsingScope || cand.HasScopeWithMagnification(),
+                cand.isManualBoltOperated && !cand.IsFullAuto(),
+                pers,
+                needUrgentPrimary,
+                wantSquadMg,
+                wantRoleUpgrade);
         }
 
         private static void TryAdvanceBoundTowardThreat(
@@ -3054,28 +3156,35 @@ namespace EasyRed2HumanAI
             IntPtr ptr = soldier.Pointer;
             if (_botScavengeCaches.TryGetValue(ptr, out result) && now < result.NextScanTime)
             {
-                if (result.TargetFloorItem != null && result.TargetFloorItem.Pointer != IntPtr.Zero &&
-                    result.TargetFloorItem.gameObject != null && result.TargetFloorItem.gameObject.activeInHierarchy)
+                if (result.TargetFloorItem != null)
                 {
-                    result.TargetPosition = result.TargetFloorItem.transform.position;
-                    return true;
+                    if (IsFloorItemFreeToPickUp(result.TargetFloorItem))
+                    {
+                        result.TargetPosition = result.TargetFloorItem.transform.position;
+                        return true;
+                    }
+                    // Someone else already picked up the floor item while we were walking toward it; rescan immediately!
                 }
-                if (result.TargetInventory != null && result.TargetInventory.Pointer != IntPtr.Zero)
+                else if (result.TargetInventory != null && result.TargetInventory.Pointer != IntPtr.Zero && !result.TargetInventory.IsPlayersInventory())
                 {
                     result.TargetPosition = result.TargetInventory.InventoryPosition;
                     return true;
                 }
-                return false;
+                else
+                {
+                    return false;
+                }
             }
 
-            result = new BotScavengeCache { NextScanTime = now + 2.5f };
+            result = new BotScavengeCache { NextScanTime = now + 2.8f };
             bool wantAnyUpgrade = needUrgentPrimary || wantSquadMg || wantRoleUpgrade;
-            float maxSearchRadius = (needAtWeapon || needUrgentPrimary) ? 21.0f : (wantSquadMg ? 15.5f : 13.5f);
+            float maxSearchRadius = (needAtWeapon || needUrgentPrimary) ? 20.0f : (wantSquadMg ? 15.0f : 12.5f);
             float bestDistSq = maxSearchRadius * maxSearchRadius;
             GenericGun heldGun = soldier.GetHeldGun();
-            bool isPrimaryCompletelyDry = needAmmo && heldGun != null && heldGun.GetCurrentAmmoCount() <= 0 && !heldGun.IsAtWeapon();
+            bool canPickUpNewWeapon = (! _nextWeaponUpgradeAllowedTime.TryGetValue(ptr, out float nextWepT) || now >= nextWepT);
+            bool isPrimaryCompletelyDry = canPickUpNewWeapon && needAmmo && heldGun != null && heldGun.GetCurrentAmmoCount() <= 0 && !heldGun.IsAtWeapon();
 
-            // 1. Scan physical items dropped on the floor (ItemObject.spawnedItems)
+            // 1. Scan ONLY genuinely dropped physical floor items (IsPhysicEnabled() == true && parent == null)
             var floorItems = ItemObject.spawnedItems;
             if (floorItems != null)
             {
@@ -3083,7 +3192,7 @@ namespace EasyRed2HumanAI
                 for (int i = 0; i < fCount; i++)
                 {
                     ItemObject item = floorItems[i];
-                    if (item == null || item.Pointer == IntPtr.Zero || item.gameObject == null || !item.gameObject.activeInHierarchy || item.transform == null)
+                    if (!IsFloorItemFreeToPickUp(item))
                         continue;
 
                     Vector3 itemPos = item.transform.position;
@@ -3097,7 +3206,7 @@ namespace EasyRed2HumanAI
                     GenericGun floorGun = item.TryCast<GenericGun>();
                     if (floorGun != null)
                     {
-                        if (needAtWeapon && floorGun.IsAtWeapon() && floorGun.GetCurrentAmmoCount() > 0)
+                        if (needAtWeapon && canPickUpNewWeapon && floorGun.IsAtWeapon() && floorGun.GetCurrentAmmoCount() > 0)
                         {
                             bestDistSq = dSq;
                             result.TargetFloorItem = item;
@@ -3107,7 +3216,7 @@ namespace EasyRed2HumanAI
                             result.IsRoleWeaponUpgrade = false;
                             continue;
                         }
-                        if (wantAnyUpgrade && IsCandidateGunValidUpgrade(floorGun, pers, needUrgentPrimary, wantSquadMg, wantRoleUpgrade, false))
+                        if (wantAnyUpgrade && canPickUpNewWeapon && IsCandidateGunValidUpgrade(floorGun, pers, needUrgentPrimary, wantSquadMg, wantRoleUpgrade, true))
                         {
                             bestDistSq = dSq;
                             result.TargetFloorItem = item;
@@ -3117,7 +3226,7 @@ namespace EasyRed2HumanAI
                             result.IsRoleWeaponUpgrade = true;
                             continue;
                         }
-                        if (isPrimaryCompletelyDry && !floorGun.IsAtWeapon() && floorGun.GetCurrentAmmoCount() > 0)
+                        if (isPrimaryCompletelyDry && !floorGun.IsPistol() && !floorGun.IsAtWeapon() && floorGun.GetCurrentAmmoCount() > 0)
                         {
                             bestDistSq = dSq;
                             result.TargetFloorItem = item;
@@ -3196,11 +3305,24 @@ namespace EasyRed2HumanAI
                     if (dSq >= bestDistSq)
                         continue;
 
-                    Soldier owner = inv.GetComponent<Soldier>();
+                    CachedInventoryOwner invOwner = GetCachedInventoryOwner(inv);
+                    Soldier owner = invOwner.SoldierOwner;
+                    Vehicle vehOwner = invOwner.VehicleOwner;
+
+                    // Never loot enemy vehicles or active manned vehicles
+                    if (vehOwner != null && vehOwner.Pointer != IntPtr.Zero)
+                    {
+                        string vf = vehOwner.GetVehicleFaction();
+                        if (!string.IsNullOrEmpty(vf) && ResourcesManager.IsEnemyFaction(vf, soldier.faction))
+                            continue;
+                        if (!needAmmo && !needBandage && !vehOwner.IsDisabled())
+                            continue;
+                    }
+
                     if (owner != null && owner.IsAlive && (!needAmmo || !owner.IsAmmoBoxCarrier() || owner.faction != soldier.faction))
                         continue;
 
-                    if ((needAtWeapon || wantAnyUpgrade) && (owner == null || !owner.IsAlive))
+                    if (canPickUpNewWeapon && (needAtWeapon || wantAnyUpgrade) && (owner == null || !owner.IsAlive) && (vehOwner == null || vehOwner.IsDisabled()))
                     {
                         if (needAtWeapon)
                         {
@@ -3220,36 +3342,41 @@ namespace EasyRed2HumanAI
                         }
 
                         VirtualItem vw = inv.FindItemOfType<VirtualWeapon>();
-                        if (vw != null)
+                        if (vw != null && TryGetVirtualWeaponArchetype(vw, out CachedWeaponArchetype arch))
                         {
-                            ItemObject prefab = vw.GetItemPrefab();
-                            GenericGun prefabGun = prefab != null ? prefab.TryCast<GenericGun>() : null;
-                            if (prefabGun != null)
+                            if (needAtWeapon && arch.IsAtWeapon)
                             {
-                                if (needAtWeapon && prefabGun.IsAtWeapon())
-                                {
-                                    bestDistSq = dSq;
-                                    result.TargetFloorItem = null;
-                                    result.TargetInventory = inv;
-                                    result.TargetInventoryAtWeapon = vw;
-                                    result.TargetInventoryPrimaryWeapon = null;
-                                    result.TargetPosition = invPos;
-                                    result.IsAtWeaponPickup = true;
-                                    result.IsRoleWeaponUpgrade = false;
-                                    continue;
-                                }
-                                if (wantAnyUpgrade && IsCandidateGunValidUpgrade(prefabGun, pers, needUrgentPrimary, wantSquadMg, wantRoleUpgrade, false))
-                                {
-                                    bestDistSq = dSq;
-                                    result.TargetFloorItem = null;
-                                    result.TargetInventory = inv;
-                                    result.TargetInventoryAtWeapon = null;
-                                    result.TargetInventoryPrimaryWeapon = vw;
-                                    result.TargetPosition = invPos;
-                                    result.IsAtWeaponPickup = false;
-                                    result.IsRoleWeaponUpgrade = true;
-                                    continue;
-                                }
+                                bestDistSq = dSq;
+                                result.TargetFloorItem = null;
+                                result.TargetInventory = inv;
+                                result.TargetInventoryAtWeapon = vw;
+                                result.TargetInventoryPrimaryWeapon = null;
+                                result.TargetPosition = invPos;
+                                result.IsAtWeaponPickup = true;
+                                result.IsRoleWeaponUpgrade = false;
+                                continue;
+                            }
+                            if (wantAnyUpgrade &&
+                                IsWeaponArchetypeValidUpgrade(
+                                    arch.IsPistol,
+                                    arch.IsAtWeapon,
+                                    arch.IsMg,
+                                    arch.IsScopedOrSniper,
+                                    arch.IsManualBoltOnly,
+                                    pers,
+                                    needUrgentPrimary,
+                                    wantSquadMg,
+                                    wantRoleUpgrade))
+                            {
+                                bestDistSq = dSq;
+                                result.TargetFloorItem = null;
+                                result.TargetInventory = inv;
+                                result.TargetInventoryAtWeapon = null;
+                                result.TargetInventoryPrimaryWeapon = vw;
+                                result.TargetPosition = invPos;
+                                result.IsAtWeaponPickup = false;
+                                result.IsRoleWeaponUpgrade = true;
+                                continue;
                             }
                         }
                     }
@@ -3277,8 +3404,9 @@ namespace EasyRed2HumanAI
 
         private static bool TryLinkUpOrJoinFriendlySquad(SoldierAI ai, Soldier self, Vector3 myPos, float maxRadius)
         {
-            var allSquads = Squad.AllSquads;
-            if (allSquads == null)
+            AiCore.EnsureWorldSnapshot();
+            int sqCount = AiCore.WorldSquadCount;
+            if (sqCount == 0)
                 return false;
 
             float bestSq = maxRadius * maxRadius;
@@ -3287,22 +3415,19 @@ namespace EasyRed2HumanAI
             string myFaction = self.faction;
             IntPtr mySqPtr = self.joinedSquad != null ? self.joinedSquad.Pointer : IntPtr.Zero;
 
-            foreach (var kvp in allSquads)
+            var squads = AiCore.WorldSquads;
+            for (int i = 0; i < sqCount; i++)
             {
-                Squad other = kvp.Value;
-                if (other == null || other.Pointer == IntPtr.Zero || other.Pointer == mySqPtr || other.IsVehicleCrew || other.IsPlayerInSquad())
+                ref AiCore.SquadSnapshot other = ref squads[i];
+                if (!other.LeaderIsAlive || other.Ptr == mySqPtr || other.IsVehicleCrew || other.IsPlayerInSquad || other.LeaderOnVehicle || other.Faction != myFaction)
                     continue;
 
-                Soldier leader = other.Leader;
-                if (leader == null || !leader.IsAlive || leader.IsOnVehicle() || leader.faction != myFaction || leader.transform == null)
-                    continue;
-
-                float dSq = (leader.transform.position - myPos).sqrMagnitude;
+                float dSq = (other.RefPos - myPos).sqrMagnitude;
                 if (dSq < bestSq)
                 {
                     bestSq = dSq;
-                    bestSquad = other;
-                    linkUpPos = leader.transform.position;
+                    bestSquad = other.Ref;
+                    linkUpPos = other.RefPos;
                 }
             }
 
@@ -3347,38 +3472,33 @@ namespace EasyRed2HumanAI
             out Vector3 hubPos)
         {
             hubPos = Vector3.zero;
-            var allSquads = Squad.AllSquads;
-            if (allSquads == null || selfSq == null)
+            if (selfSq == null)
+                return false;
+
+            AiCore.EnsureWorldSnapshot();
+            int sqCount = AiCore.WorldSquadCount;
+            if (sqCount == 0)
                 return false;
 
             float bestSq = maxRadius * maxRadius;
             bool found = false;
+            IntPtr selfPtr = selfSq.Pointer;
+            var squads = AiCore.WorldSquads;
 
-            foreach (var kvp in allSquads)
+            for (int i = 0; i < sqCount; i++)
             {
-                Squad other = kvp.Value;
-                if (other == null || other.Pointer == IntPtr.Zero || other.Pointer == selfSq.Pointer)
+                ref AiCore.SquadSnapshot other = ref squads[i];
+                if (!other.LeaderIsAlive || other.Ptr == selfPtr || other.Faction != myFaction)
                     continue;
 
-                Soldier otherLeader = other.Leader;
-                if (otherLeader == null || !otherLeader.IsAlive || otherLeader.faction != myFaction || otherLeader.transform == null)
+                if (!other.HasIntrinsicRadio && !other.LeaderOnGroundVehicle && !other.IsPlayerInSquad)
                     continue;
 
-                bool isHub = IsMountedOnGroundVehicle(otherLeader) || other.IsPlayerInSquad();
-                if (!isHub)
-                {
-                    Soldier rad = other.GetRadioman();
-                    isHub = rad != null && rad.IsAlive && !rad.HasSurrended();
-                }
-
-                if (!isHub)
-                    continue;
-
-                float dSq = (otherLeader.transform.position - myPos).sqrMagnitude;
+                float dSq = (other.RefPos - myPos).sqrMagnitude;
                 if (dSq < bestSq && dSq > 45f * 45f)
                 {
                     bestSq = dSq;
-                    hubPos = otherLeader.transform.position;
+                    hubPos = other.RefPos;
                     found = true;
                 }
             }

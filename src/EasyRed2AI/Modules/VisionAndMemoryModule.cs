@@ -85,6 +85,8 @@ namespace EasyRed2HumanAI
             return 0f;
         }
 
+        private static readonly List<IntPtr> _reusableExpiredFirePtrs = new List<IntPtr>(64);
+
         public static void CleanupExpiredFiringRecords()
         {
             if (Time.time <= _nextCleanupTime)
@@ -92,15 +94,16 @@ namespace EasyRed2HumanAI
 
             _nextCleanupTime = Time.time + 15f;
             float cutoff = Time.time - Mathf.Max(10f, VisionConfig.FiringRevealDuration.Value);
-            var toRemove = new List<IntPtr>();
+            _reusableExpiredFirePtrs.Clear();
             foreach (var kvp in _lastFiredTime)
             {
-                if (kvp.Value < cutoff) toRemove.Add(kvp.Key);
+                if (kvp.Value < cutoff) _reusableExpiredFirePtrs.Add(kvp.Key);
             }
-            for (int i = 0; i < toRemove.Count; i++)
+            for (int i = 0; i < _reusableExpiredFirePtrs.Count; i++)
             {
-                _lastFiredTime.Remove(toRemove[i]);
+                _lastFiredTime.Remove(_reusableExpiredFirePtrs[i]);
             }
+            _reusableExpiredFirePtrs.Clear();
 
             if (VisionConfig.DebugLogging.Value && TotalSightChecks > 0)
             {
@@ -555,7 +558,10 @@ namespace EasyRed2HumanAI
             public float NextRefreshTime;
             public bool IsPieing;
             public bool RaiseRifle;
+            public bool HasVerifiedCorner;
             public Vector3 PieLookDir;
+            public Vector3 CachedNode0;
+            public Vector3 CachedNode1;
         }
 
         internal static readonly Dictionary<IntPtr, CornerPieState> _cornerPieCache = new Dictionary<IntPtr, CornerPieState>(256);
@@ -635,38 +641,39 @@ namespace EasyRed2HumanAI
                 }
             }
 
-            // In multiplayer with remote players or when the spotter already alerted squadmates,
-            // skip scanning Squad.AllSquads (avoids IL2CPP dictionary enumerator overhead across 150+ bots).
             if (!isMpWithPlayers && sharedWith == 0)
             {
-                var allSquads = Squad.AllSquads;
-                if (allSquads != null)
+                AiCore.EnsureWorldSnapshot();
+                int sqCount = AiCore.WorldSquadCount;
+                if (sqCount > 0)
                 {
-                    foreach (var kvp in allSquads)
+                    IntPtr mySqPtr = mySquad != null ? mySquad.Pointer : IntPtr.Zero;
+                    var squads = AiCore.WorldSquads;
+                    var soldiers = AiCore.WorldSoldiers;
+
+                    for (int s = 0; s < sqCount; s++)
                     {
-                        Squad sq = kvp.Value;
-                        if (sq == null || sq == mySquad || sq.units == null)
+                        ref AiCore.SquadSnapshot sqSnap = ref squads[s];
+                        if (sqSnap.Ptr == mySqPtr || sqSnap.UnitCount == 0 || sqSnap.Faction != myFaction)
                             continue;
 
-                        Soldier leader = sq.Leader;
-                        if (leader == null || leader.faction != myFaction)
+                        if ((sqSnap.RefPos - spotterPos).sqrMagnitude > 36f * 36f)
                             continue;
 
-                        if ((leader.transform.position - spotterPos).sqrMagnitude > 36f * 36f)
-                            continue;
-
-                        var units = sq.units;
-                        int c = units.Count;
-                        for (int i = 0; i < c; i++)
+                        int end = sqSnap.UnitStartIndex + sqSnap.UnitCount;
+                        for (int i = sqSnap.UnitStartIndex; i < end; i++)
                         {
-                            Soldier ally = units[i];
-                            if (ally == null || !ally.IsAlive || ally.Pointer == spotterPtr || ally.IsPlayer() || ally.IsOnVehicle())
+                            ref AiCore.SoldierSnapshot allySnap = ref soldiers[i];
+                            if (allySnap.Ptr == spotterPtr || allySnap.IsPlayer || allySnap.IsOnVehicle)
                                 continue;
 
-                            if ((ally.transform.position - spotterPos).sqrMagnitude <= calloutRadiusSq)
+                            if ((allySnap.Pos - spotterPos).sqrMagnitude <= calloutRadiusSq)
                             {
-                                IntPtr allyPtr = ally.Pointer;
-                                _localCalloutCache[allyPtr] = new LocalCalloutRecord
+                                Soldier ally = allySnap.Ref;
+                                if (ally == null || !ally.IsAlive)
+                                    continue;
+
+                                _localCalloutCache[allySnap.Ptr] = new LocalCalloutRecord
                                 {
                                     EnemyPos = enemyPos,
                                     ExpireTime = now + 5.5f
@@ -767,26 +774,26 @@ namespace EasyRed2HumanAI
                 }
             }
 
-            var allSquads = Squad.AllSquads;
-            if (allSquads != null)
+            AiCore.EnsureWorldSnapshot();
+            int sqCount = AiCore.WorldSquadCount;
+            if (sqCount > 0)
             {
-                foreach (var kvp in allSquads)
+                var squads = AiCore.WorldSquads;
+                var soldiers = AiCore.WorldSoldiers;
+                for (int s = 0; s < sqCount; s++)
                 {
-                    Squad sq = kvp.Value;
-                    if (sq == null || sq.units == null) continue;
-                    Soldier leader = sq.Leader;
-                    if (leader == null || leader.faction != myFaction || leader.transform == null) continue;
-                    if ((leader.transform.position - targetPos).sqrMagnitude > 52f * 52f) continue;
+                    ref AiCore.SquadSnapshot sqSnap = ref squads[s];
+                    if (sqSnap.UnitCount == 0 || sqSnap.Faction != myFaction) continue;
+                    if ((sqSnap.RefPos - targetPos).sqrMagnitude > 52f * 52f) continue;
 
-                    var units = sq.units;
-                    int c = units.Count;
-                    for (int i = 0; i < c; i++)
+                    int end = sqSnap.UnitStartIndex + sqSnap.UnitCount;
+                    for (int i = sqSnap.UnitStartIndex; i < end; i++)
                     {
-                        Soldier f = units[i];
-                        if (f == null || f.Pointer == throwerPtr || !f.IsAlive || f.transform == null)
+                        ref AiCore.SoldierSnapshot fSnap = ref soldiers[i];
+                        if (fSnap.Ptr == throwerPtr)
                             continue;
 
-                        Vector3 fPos = f.transform.position;
+                        Vector3 fPos = fSnap.Pos;
                         if ((fPos - targetPos).sqrMagnitude <= aiSafeRadiusSq)
                         {
                             VeteranAndTacticsPatches.FriendlyFirePrevented++;
@@ -1323,68 +1330,41 @@ namespace EasyRed2HumanAI
                 }
             }
 
-            var allSquads = Squad.AllSquads;
-            if (allSquads != null)
+            AiCore.EnsureWorldSnapshot();
+            int sqCount = AiCore.WorldSquadCount;
+            if (sqCount > 0)
             {
-                foreach (var kvp in allSquads)
+                IntPtr mySqPtr = mySquad != null ? mySquad.Pointer : IntPtr.Zero;
+                var squads = AiCore.WorldSquads;
+                var soldiers = AiCore.WorldSoldiers;
+
+                for (int s = 0; s < sqCount; s++)
                 {
-                    Squad sq = kvp.Value;
-                    if (sq == null || sq == mySquad || sq.units == null) continue;
-
-                    Soldier enemyRef = sq.Leader;
-                    if (enemyRef == null || !enemyRef.IsAlive)
-                    {
-                        var units = sq.units;
-                        int uCount = units.Count;
-                        for (int i = 0; i < uCount; i++)
-                        {
-                            Soldier u = units[i];
-                            if (u != null && u.IsAlive)
-                            {
-                                enemyRef = u;
-                                break;
-                            }
-                        }
-                    }
-
-                    if (enemyRef == null || enemyRef.faction == myFaction)
+                    ref AiCore.SquadSnapshot sqSnap = ref squads[s];
+                    if (sqSnap.Ptr == mySqPtr || sqSnap.UnitCount == 0 || sqSnap.Faction == myFaction || sqSnap.RefOnPlane)
                         continue;
 
-                    if (enemyRef.IsOnVehicle())
-                    {
-                        Vehicle v = enemyRef.GetCurrentVehicle();
-                        if (v != null && v.TryCast<VehiclePlane>() != null)
-                            continue;
-                    }
-
-                    Vector3 toSquad = enemyRef.transform.position - myPos;
+                    Vector3 toSquad = sqSnap.RefPos - myPos;
                     toSquad.y = 0f;
                     float dSq = toSquad.sqrMagnitude;
                     // Allow stationary defenders to hear distant gunfire/battles up to 320m away so idle troops face the audible battle!
                     if (dSq > 320f * 320f || dSq < 0.25f)
                         continue;
 
-                    bool isKnownContact = dSq <= 195f * 195f &&
-                                          (sq.IsEnemyAwareOfThisSquad ||
-                                           sq.isMarked ||
-                                           sq.isHalfMarked ||
-                                           sq.isMarkedPinPoint ||
-                                           enemyRef.IsSpotted);
-
+                    bool isKnownContact = dSq <= 195f * 195f && sqSnap.IsSpottedOrAware;
                     Vector3 contactVector = toSquad;
 
                     if (!isKnownContact)
                     {
-                        var units = sq.units;
-                        int uCount = units.Count;
-                        for (int i = 0; i < uCount; i++)
+                        int end = sqSnap.UnitStartIndex + sqSnap.UnitCount;
+                        for (int i = sqSnap.UnitStartIndex; i < end; i++)
                         {
-                            Soldier u = units[i];
-                            if (u == null || !u.IsAlive) continue;
-                            if ((dSq <= 180f * 180f && u.IsSpotted) || VisionPatches.HasFiredRecently(u, 6.0f))
+                            ref AiCore.SoldierSnapshot uSnap = ref soldiers[i];
+                            if ((dSq <= 180f * 180f && uSnap.IsSpotted) ||
+                                (uSnap.Ref != null && VisionPatches.HasFiredRecently(uSnap.Ref, 6.0f)))
                             {
                                 isKnownContact = true;
-                                contactVector = u.transform.position - myPos;
+                                contactVector = uSnap.Pos - myPos;
                                 contactVector.y = 0f;
                                 dSq = contactVector.sqrMagnitude;
                                 if (dSq > 165f * 165f)
@@ -1396,7 +1376,7 @@ namespace EasyRed2HumanAI
 
                     if (!isKnownContact && myTask != null && dSq <= 55f * 55f)
                     {
-                        if (myTask.IsInsideTaskArea(enemyRef.transform.position, 1.05f))
+                        if (myTask.IsInsideTaskArea(sqSnap.RefPos, 1.05f))
                         {
                             isKnownContact = true;
                         }
@@ -1490,7 +1470,7 @@ namespace EasyRed2HumanAI
                 watchDir = cached.WatchDir;
             }
 
-            float sectorJitter = (AiCore.GetDeterministicHash(ptr, 53) % 55) * 0.01f;
+            float sectorJitter = (AiCore.GetDeterministicHash(ptr, 53) % 160) * 0.01f;
             float cacheDuration = hasActiveContact ? 2.80f : 4.50f;
             _threatSectorCache[ptr] = new ThreatSectorCache
             {
@@ -1514,7 +1494,8 @@ namespace EasyRed2HumanAI
             IntPtr ptr = soldier.Pointer;
             float now = Time.time;
 
-            if (_cornerPieCache.TryGetValue(ptr, out CornerPieState cached) && now < cached.NextRefreshTime)
+            bool hadCache = _cornerPieCache.TryGetValue(ptr, out CornerPieState cached);
+            if (hadCache && now < cached.NextRefreshTime)
             {
                 if (!cached.IsPieing)
                     return false;
@@ -1527,7 +1508,7 @@ namespace EasyRed2HumanAI
             var path = ai.path;
             if (path == null || path.NodesCount < 2 || soldier.transform == null)
             {
-                _cornerPieCache[ptr] = new CornerPieState { NextRefreshTime = now + 0.30f, IsPieing = false };
+                _cornerPieCache[ptr] = new CornerPieState { NextRefreshTime = now + 0.32f, IsPieing = false };
                 return false;
             }
 
@@ -1536,9 +1517,9 @@ namespace EasyRed2HumanAI
             Vector3 toCorner = node0 - myPos;
             toCorner.y = 0f;
             float distToCornerSq = toCorner.sqrMagnitude;
-            if (distToCornerSq < 0.35f * 0.35f || distToCornerSq > 4.6f * 4.6f)
+            if (distToCornerSq < 0.35f * 0.35f || distToCornerSq > 4.2f * 4.2f)
             {
-                _cornerPieCache[ptr] = new CornerPieState { NextRefreshTime = now + 0.26f, IsPieing = false };
+                _cornerPieCache[ptr] = new CornerPieState { NextRefreshTime = now + 0.28f, IsPieing = false };
                 return false;
             }
 
@@ -1547,43 +1528,64 @@ namespace EasyRed2HumanAI
             bool hasThreatContact = HasActiveThreatSectorContact(soldier);
             if (!alerted && !indoor && !hasThreatContact)
             {
-                _cornerPieCache[ptr] = new CornerPieState { NextRefreshTime = now + 0.32f, IsPieing = false };
-                return false;
-            }
-
-            Vector3 node1 = path.A(1);
-            Vector3 seg1 = node1 - node0;
-            seg1.y = 0f;
-            if (seg1.sqrMagnitude < 0.64f)
-            {
-                _cornerPieCache[ptr] = new CornerPieState { NextRefreshTime = now + 0.28f, IsPieing = false };
+                _cornerPieCache[ptr] = new CornerPieState { NextRefreshTime = now + 0.34f, IsPieing = false };
                 return false;
             }
 
             float distToCorner = Mathf.Sqrt(distToCornerSq);
             Vector3 seg0 = toCorner / distToCorner;
+            Vector3 node1;
+
+            // Reuse cached node1 when approaching the exact same corner node0 so path.A(1) (Stack.GetEnumerator)
+            // and the blind-corner raycast only run ONCE per corner instead of every 0.16s!
+            if (hadCache && cached.HasVerifiedCorner && (node0 - cached.CachedNode0).sqrMagnitude <= 0.09f)
+            {
+                if (!cached.IsPieing)
+                {
+                    cached.NextRefreshTime = now + 0.30f;
+                    _cornerPieCache[ptr] = cached;
+                    return false;
+                }
+                node1 = cached.CachedNode1;
+            }
+            else
+            {
+                node1 = path.A(1);
+                Vector3 checkSeg1 = node1 - node0;
+                checkSeg1.y = 0f;
+                if (checkSeg1.sqrMagnitude < 0.64f)
+                {
+                    _cornerPieCache[ptr] = new CornerPieState { NextRefreshTime = now + 0.30f, IsPieing = false, HasVerifiedCorner = true, CachedNode0 = node0, CachedNode1 = node1 };
+                    return false;
+                }
+
+                float bendAngle = Vector3.Angle(seg0, checkSeg1.normalized);
+                if (bendAngle < 28f || bendAngle > 158f)
+                {
+                    _cornerPieCache[ptr] = new CornerPieState { NextRefreshTime = now + 0.30f, IsPieing = false, HasVerifiedCorner = true, CachedNode0 = node0, CachedNode1 = node1 };
+                    return false;
+                }
+
+                // Confirm an actual solid wall/doorframe/trench corner blocks direct sight to node1 ("blind corner")!
+                Vector3 eyePos = myPos + Vector3.up * 0.95f;
+                Vector3 toBeyond = (node1 + Vector3.up * 0.95f) - eyePos;
+                float beyondDist = toBeyond.magnitude;
+                if (beyondDist < 1.2f ||
+                    !AiCore.IsDirectionBlockedByEnvironment(eyePos, toBeyond / beyondDist, Mathf.Min(beyondDist - 0.3f, 6.2f), soldier.transform.root))
+                {
+                    _cornerPieCache[ptr] = new CornerPieState { NextRefreshTime = now + 0.30f, IsPieing = false, HasVerifiedCorner = true, CachedNode0 = node0, CachedNode1 = node1 };
+                    return false;
+                }
+            }
+
+            Vector3 seg1 = node1 - node0;
+            seg1.y = 0f;
+            if (seg1.sqrMagnitude < 0.04f)
+                return false;
             seg1.Normalize();
 
-            float bendAngle = Vector3.Angle(seg0, seg1);
-            if (bendAngle < 28f || bendAngle > 158f)
-            {
-                _cornerPieCache[ptr] = new CornerPieState { NextRefreshTime = now + 0.28f, IsPieing = false };
-                return false;
-            }
-
-            // Confirm an actual solid wall/doorframe/trench corner blocks direct sight to node1 ("blind corner")!
-            Vector3 eyePos = myPos + Vector3.up * 0.95f;
-            Vector3 toBeyond = (node1 + Vector3.up * 0.95f) - eyePos;
-            float beyondDist = toBeyond.magnitude;
-            if (beyondDist < 1.2f ||
-                !AiCore.IsDirectionBlockedByEnvironment(eyePos, toBeyond / beyondDist, Mathf.Min(beyondDist - 0.3f, 6.2f), soldier.transform.root))
-            {
-                _cornerPieCache[ptr] = new CornerPieState { NextRefreshTime = now + 0.28f, IsPieing = false };
-                return false;
-            }
-
             // Smoothly "slice the pie" from approach vector seg0 into around-the-corner vector seg1 as distance closes!
-            float pieT = Mathf.Clamp01(1.0f - (distToCorner - 0.55f) / 4.05f);
+            float pieT = Mathf.Clamp01(1.0f - (distToCorner - 0.55f) / 3.65f);
             pieLookDir = Vector3.Slerp(seg0, seg1, 0.36f + 0.58f * pieT).normalized;
             raiseRifle = indoor || (alerted && hasThreatContact);
 
@@ -1592,7 +1594,10 @@ namespace EasyRed2HumanAI
                 NextRefreshTime = now + 0.16f,
                 IsPieing = true,
                 RaiseRifle = raiseRifle,
-                PieLookDir = pieLookDir
+                HasVerifiedCorner = true,
+                PieLookDir = pieLookDir,
+                CachedNode0 = node0,
+                CachedNode1 = node1
             };
 
             if (!_nextCornerPieCountTime.TryGetValue(ptr, out float nextCount) || now >= nextCount)

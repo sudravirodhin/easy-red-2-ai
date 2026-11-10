@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using HarmonyLib;
 using Photon.Pun;
 using UnityEngine;
@@ -31,7 +32,7 @@ namespace EasyRed2HumanAI
 
         public static int TotalPingGovernorSkippedCycles;
 
-        public static void LogDebug(string category, string message, float minInterval = 2.0f)
+        public static void LogDebug(string category, string message, float minInterval = 4.0f)
         {
             if (!VisionConfig.DebugLogging.Value || Plugin.Log == null)
                 return;
@@ -622,11 +623,254 @@ namespace EasyRed2HumanAI
 
         public static int TotalAdaptiveAiExtraTicks;
 
+        // =====================================================================
+        // Zero-GC Flat Battlefield World Snapshot (Eliminates Per-Frame & O(N^2)/O(N^3) Squad.AllSquads Scans)
+        // =====================================================================
+        public struct SquadSnapshot
+        {
+            public IntPtr Ptr;
+            public Squad Ref;
+            public Soldier Leader;
+            public Soldier RefSoldier;
+            public Vector3 RefPos;
+            public string Faction;
+            public int UnitStartIndex;
+            public int UnitCount;
+            public bool LeaderIsAlive;
+            public bool IsVehicleCrew;
+            public bool IsPlayerInSquad;
+            public bool LeaderOnVehicle;
+            public bool LeaderOnGroundVehicle;
+            public bool RefOnPlane;
+            public bool HasIntrinsicRadio;
+            public bool HasRadioOrRelay;
+            public bool IsSpottedOrAware;
+        }
+
+        public struct SoldierSnapshot
+        {
+            public IntPtr Ptr;
+            public Soldier Ref;
+            public IntPtr SquadPtr;
+            public Vector3 Pos;
+            public string Faction;
+            public bool IsPlayer;
+            public bool IsOnVehicle;
+            public bool IsSquadLeader;
+            public bool HasSurrendered;
+            public bool IsSpotted;
+        }
+
+        public static SquadSnapshot[] WorldSquads = new SquadSnapshot[96];
+        public static int WorldSquadCount;
+        public static SoldierSnapshot[] WorldSoldiers = new SoldierSnapshot[384];
+        public static int WorldSoldierCount;
+
+        private static readonly Dictionary<IntPtr, int> _worldSquadIndexByPtr = new Dictionary<IntPtr, int>(96);
+        private static float _lastWorldSnapshotTime = -999f;
+
+        public static bool TryGetSquadSnapshot(IntPtr sqPtr, out SquadSnapshot snap)
+        {
+            EnsureWorldSnapshot();
+            if (sqPtr != IntPtr.Zero && _worldSquadIndexByPtr.TryGetValue(sqPtr, out int idx) && idx >= 0 && idx < WorldSquadCount)
+            {
+                snap = WorldSquads[idx];
+                return true;
+            }
+            snap = default;
+            return false;
+        }
+
+        public static void EnsureWorldSnapshot(float maxAge = 0.35f)
+        {
+            float now = Time.time;
+            if (now >= _lastWorldSnapshotTime && (now - _lastWorldSnapshotTime) < maxAge)
+                return;
+
+            _lastWorldSnapshotTime = now;
+            int prevSqCount = WorldSquadCount;
+            int prevSolCount = WorldSoldierCount;
+            WorldSquadCount = 0;
+            WorldSoldierCount = 0;
+            _worldSquadIndexByPtr.Clear();
+
+            try
+            {
+                var allSquads = Squad.AllSquads;
+                if (allSquads != null && allSquads.Count > 0)
+                {
+                    bool radioNetEnabled = VisionConfig.EnableRadiomanIntelNet != null && VisionConfig.EnableRadiomanIntelNet.Value;
+
+                    foreach (var kvp in allSquads)
+                    {
+                        Squad sq = kvp.Value;
+                        if (sq == null || sq.Pointer == IntPtr.Zero)
+                            continue;
+
+                        var units = sq.units;
+                        int uCount = units != null ? units.Count : 0;
+                        Soldier leader = sq.Leader;
+                        bool leaderAlive = leader != null && leader.IsAlive && leader.transform != null;
+
+                        Soldier refSoldier = leaderAlive ? leader : null;
+                        int unitStart = WorldSoldierCount;
+                        int addedUnits = 0;
+                        bool hasAliveRadiomanNear = false;
+                        Vector3 leaderPos = leaderAlive ? leader.transform.position : Vector3.zero;
+
+                        for (int i = 0; i < uCount; i++)
+                        {
+                            Soldier u = units[i];
+                            if (u == null || !u.IsAlive || u.Pointer == IntPtr.Zero || u.transform == null)
+                                continue;
+
+                            if (refSoldier == null)
+                                refSoldier = u;
+
+                            Vector3 uPos = u.transform.position;
+                            if (leaderAlive && radioNetEnabled && !hasAliveRadiomanNear && u.IsRadioman() && !u.HasSurrended())
+                            {
+                                if ((uPos - leaderPos).sqrMagnitude <= 32f * 32f)
+                                    hasAliveRadiomanNear = true;
+                            }
+
+                            if (WorldSoldierCount >= WorldSoldiers.Length)
+                                Array.Resize(ref WorldSoldiers, WorldSoldiers.Length * 2);
+
+                            WorldSoldiers[WorldSoldierCount++] = new SoldierSnapshot
+                            {
+                                Ptr = u.Pointer,
+                                Ref = u,
+                                SquadPtr = sq.Pointer,
+                                Pos = uPos,
+                                Faction = u.faction,
+                                IsPlayer = u.IsPlayer(),
+                                IsOnVehicle = u.IsOnVehicle(),
+                                IsSquadLeader = leaderAlive && u.Pointer == leader.Pointer,
+                                HasSurrendered = u.HasSurrended(),
+                                IsSpotted = u.IsSpotted
+                            };
+                            addedUnits++;
+                        }
+
+                        if (refSoldier == null)
+                            continue;
+
+                        Vector3 refPos = leaderAlive ? leaderPos : refSoldier.transform.position;
+                        string faction = refSoldier.faction;
+                        bool leaderOnVeh = leaderAlive && leader.IsOnVehicle();
+                        bool leaderOnGroundVeh = false;
+                        bool leaderHasOnboardRadio = false;
+                        if (leaderOnVeh)
+                        {
+                            Vehicle lv = leader.GetCurrentVehicle();
+                            if (lv != null && lv.Pointer != IntPtr.Zero && lv.TryCast<VehicleParachute>() == null)
+                            {
+                                leaderHasOnboardRadio = true;
+                                if (!lv.IsAirVehicle())
+                                    leaderOnGroundVeh = true;
+                            }
+                        }
+
+                        bool refOnPlane = false;
+                        if (refSoldier.IsOnVehicle())
+                        {
+                            Vehicle rv = refSoldier.GetCurrentVehicle();
+                            if (rv != null && rv.IsAirVehicle())
+                                refOnPlane = true;
+                        }
+
+                        bool isPlayerInSq = sq.IsPlayerInSquad();
+                        bool hasIntrinsicRadio = !radioNetEnabled ||
+                                                 (leaderAlive && (leaderHasOnboardRadio || hasAliveRadiomanNear || sq.RadioRequestActiveAndConfirmed()));
+
+                        bool spottedOrAware = sq.IsEnemyAwareOfThisSquad ||
+                                              sq.isMarked ||
+                                              sq.isHalfMarked ||
+                                              sq.isMarkedPinPoint ||
+                                              refSoldier.IsSpotted;
+
+                        if (WorldSquadCount >= WorldSquads.Length)
+                            Array.Resize(ref WorldSquads, WorldSquads.Length * 2);
+
+                        int sqIdx = WorldSquadCount++;
+                        _worldSquadIndexByPtr[sq.Pointer] = sqIdx;
+                        WorldSquads[sqIdx] = new SquadSnapshot
+                        {
+                            Ptr = sq.Pointer,
+                            Ref = sq,
+                            Leader = leader,
+                            RefSoldier = refSoldier,
+                            RefPos = refPos,
+                            Faction = faction,
+                            UnitStartIndex = unitStart,
+                            UnitCount = addedUnits,
+                            LeaderIsAlive = leaderAlive,
+                            IsVehicleCrew = sq.IsVehicleCrew,
+                            IsPlayerInSquad = isPlayerInSq,
+                            LeaderOnVehicle = leaderOnVeh,
+                            LeaderOnGroundVehicle = leaderOnGroundVeh,
+                            RefOnPlane = refOnPlane,
+                            HasIntrinsicRadio = hasIntrinsicRadio,
+                            HasRadioOrRelay = hasIntrinsicRadio,
+                            IsSpottedOrAware = spottedOrAware
+                        };
+                    }
+
+                    // Pass 2: Pure C# L1-cache Radio Relay propagation (< 2 microseconds, zero IL2CPP boundary crossings)
+                    if (radioNetEnabled && WorldSquadCount > 1)
+                    {
+                        for (int i = 0; i < WorldSquadCount; i++)
+                        {
+                            if (WorldSquads[i].HasRadioOrRelay || !WorldSquads[i].LeaderIsAlive || string.IsNullOrEmpty(WorldSquads[i].Faction))
+                                continue;
+
+                            string myFaction = WorldSquads[i].Faction;
+                            float relayR = VeteranAndTacticsPatches.GetFactionCommandProfile(myFaction).RadioRelayRadius;
+                            float relayRSq = relayR * relayR;
+                            Vector3 myPos = WorldSquads[i].RefPos;
+
+                            for (int j = 0; j < WorldSquadCount; j++)
+                            {
+                                if (i == j || !WorldSquads[j].LeaderIsAlive || WorldSquads[j].Faction != myFaction)
+                                    continue;
+
+                                if (!WorldSquads[j].HasIntrinsicRadio && !WorldSquads[j].LeaderOnGroundVehicle)
+                                    continue;
+
+                                if ((WorldSquads[j].RefPos - myPos).sqrMagnitude <= relayRSq)
+                                {
+                                    WorldSquads[i].HasRadioOrRelay = true;
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            catch
+            {
+            }
+
+            if (prevSqCount > WorldSquadCount)
+                Array.Clear(WorldSquads, WorldSquadCount, prevSqCount - WorldSquadCount);
+            if (prevSolCount > WorldSoldierCount)
+                Array.Clear(WorldSoldiers, WorldSoldierCount, prevSolCount - WorldSoldierCount);
+        }
+
         public static void ClearSpatialCaches()
         {
             _turretVehicleCache.Clear();
             _ceilingCache.Clear();
             _bridgeCellCache.Clear();
+            _worldSquadIndexByPtr.Clear();
+            if (WorldSquadCount > 0)
+                Array.Clear(WorldSquads, 0, WorldSquadCount);
+            if (WorldSoldierCount > 0)
+                Array.Clear(WorldSoldiers, 0, WorldSoldierCount);
+            WorldSquadCount = 0;
+            WorldSoldierCount = 0;
+            _lastWorldSnapshotTime = -999f;
             _nextAllowedBotRpcTime = 0f;
             TotalAdaptiveAiExtraTicks = 0;
             TotalPingGovernorSkippedCycles = 0;
@@ -686,6 +930,7 @@ namespace EasyRed2HumanAI
                         lastIdx = count - 1;
 
                     int activeFootSoldiersTicked = 0;
+                    bool squadLeaderTicked = false;
                     Creature lastCreature = list[lastIdx];
                     if (lastCreature != null && lastCreature.IsAlive)
                     {
@@ -693,6 +938,8 @@ namespace EasyRed2HumanAI
                         if (lastSoldier != null && lastSoldier.isActiveAndEnabled && !lastSoldier.IsOnVehicle())
                         {
                             activeFootSoldiersTicked = 1;
+                            if (lastSoldier.IsSquadLeader())
+                                squadLeaderTicked = true;
                         }
                     }
 
@@ -715,16 +962,10 @@ namespace EasyRed2HumanAI
                     }
                     else
                     {
-                        // Singleplayer:
-                        //   <= 45 units : 1 active foot soldier / frame (~0.5s full cycle at 60 FPS)
-                        //   46..95 units: 2 active foot soldiers / frame (~0.6s full cycle at 60 FPS)
-                        //   96+ units   : 3 active foot soldiers / frame (~0.65s full cycle at 60 FPS)
-                        targetFootTicks = count > 95 ? 3 : (count > 45 ? 2 : 1);
-                        if (dt > 0.019f && targetFootTicks > 2)
-                        {
-                            targetFootTicks = 2;
-                        }
-                        maxScanSteps = Mathf.Min(count - 1, 8);
+                        // Singleplayer: cap at 2 active foot soldiers per frame (1 vanilla + at most 1 extra within 0.45ms CPU budget)
+                        // so multiple SquadLeaderRoutine octree/pathfinding bursts NEVER stack onto the same frame!
+                        targetFootTicks = (count > 55 && dt < 0.0175f) ? 2 : 1;
+                        maxScanSteps = Mathf.Min(count - 1, 6);
                     }
 
                     if (activeFootSoldiersTicked >= targetFootTicks)
@@ -732,23 +973,41 @@ namespace EasyRed2HumanAI
 
                     _isRunningExtraTicks = true;
                     int scanned = 0;
+                    long startStamp = Stopwatch.GetTimestamp();
+                    long budgetTicks = (long)(Stopwatch.Frequency * 0.00045); // Strict 0.45ms ceiling for extra AI ticks
 
                     while (activeFootSoldiersTicked < targetFootTicks && scanned < maxScanSteps)
                     {
+                        if ((Stopwatch.GetTimestamp() - startStamp) >= budgetTicks)
+                            break;
+
                         int idx = Creature.sequentialUpdateIndex;
                         if (idx < 0 || idx >= count)
                             idx = 0;
 
-                        Creature.sequentialUpdateIndex = idx + 1;
-                        scanned++;
-
                         Creature c = list[idx];
                         if (c == null)
+                        {
+                            Creature.sequentialUpdateIndex = idx + 1;
+                            scanned++;
                             continue;
+                        }
 
                         Soldier s = c.TryCast<Soldier>();
                         if (s == null || !s.isActiveAndEnabled)
+                        {
+                            Creature.sequentialUpdateIndex = idx + 1;
+                            scanned++;
                             continue;
+                        }
+
+                        // Never run two Squad Leaders (SquadOrdersRoutine -> 8x CoverManager octree searches) in the same frame!
+                        bool isLeader = s.IsAlive && !s.IsOnVehicle() && s.IsSquadLeader();
+                        if (isLeader && squadLeaderTicked)
+                            break;
+
+                        Creature.sequentialUpdateIndex = idx + 1;
+                        scanned++;
 
                         s.SequentialUpdate();
 
@@ -762,6 +1021,8 @@ namespace EasyRed2HumanAI
                         {
                             activeFootSoldiersTicked++;
                             TotalAdaptiveAiExtraTicks++;
+                            if (isLeader)
+                                squadLeaderTicked = true;
                         }
                     }
                 }

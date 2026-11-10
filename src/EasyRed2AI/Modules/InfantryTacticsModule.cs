@@ -179,25 +179,41 @@ namespace EasyRed2HumanAI
                 }
             }
 
-            var allSquads = Squad.AllSquads;
-            if (allSquads != null)
+            AiCore.EnsureWorldSnapshot();
+            int sqCount = AiCore.WorldSquadCount;
+            if (sqCount > 0)
             {
-                foreach (var kvp in allSquads)
-                {
-                    Squad sq = kvp.Value;
-                    if (sq == null || sq == mySquad || sq.units == null) continue;
-                    Soldier leader = sq.Leader;
-                    if (leader == null || leader.faction != myFaction) continue;
+                IntPtr mySqPtr = mySquad != null ? mySquad.Pointer : IntPtr.Zero;
+                float maxDistWithMarginSq = (maxCheckDist + 2.2f) * (maxCheckDist + 2.2f);
+                var squads = AiCore.WorldSquads;
+                var soldiers = AiCore.WorldSoldiers;
 
-                    if ((leader.transform.position - gunPos).sqrMagnitude > 75f * 75f)
+                for (int s = 0; s < sqCount; s++)
+                {
+                    ref AiCore.SquadSnapshot sqSnap = ref squads[s];
+                    if (sqSnap.Ptr == mySqPtr || sqSnap.UnitCount == 0 || sqSnap.Faction != myFaction)
                         continue;
 
-                    var units = sq.units;
-                    int c = units.Count;
-                    for (int i = 0; i < c; i++)
+                    if ((sqSnap.RefPos - gunPos).sqrMagnitude > 75f * 75f)
+                        continue;
+
+                    int end = sqSnap.UnitStartIndex + sqSnap.UnitCount;
+                    for (int i = sqSnap.UnitStartIndex; i < end; i++)
                     {
-                        Soldier f = units[i];
-                        if (f == null || !f.IsAlive || f.Pointer == myPtr) continue;
+                        ref AiCore.SoldierSnapshot solSnap = ref soldiers[i];
+                        if (solSnap.Ptr == myPtr)
+                            continue;
+
+                        // Pure C# L1-cache cull before crossing the IL2CPP boundary for GetCenterOfUnit()
+                        Vector3 approxDelta = (solSnap.Pos + new Vector3(0f, 0.9f, 0f)) - gunPos;
+                        float approxSq = approxDelta.sqrMagnitude;
+                        if (approxSq > maxDistWithMarginSq || Vector3.Dot(approxDelta, fireDir) <= -0.5f)
+                            continue;
+
+                        Soldier f = solSnap.Ref;
+                        if (f == null || !f.IsAlive)
+                            continue;
+
                         if (CheckSingleFriendlyInCone(gunPos, fireDir, maxCheckDist, allowedConeDeg, corridorWidth, shooter, f, out sidestepDir))
                         {
                             blockingFriend = f;
@@ -774,10 +790,10 @@ namespace EasyRed2HumanAI
             Transform myRoot = soldier.transform.root;
             bool preferRight = (AiCore.GetDeterministicHash(ptr, 61) & 1) == 0;
 
-            float[] stepDistances = { 1.25f, 1.80f };
-            for (int dIdx = 0; dIdx < stepDistances.Length; dIdx++)
+            int envMask = AiCore.GetSolidEnvironmentMask();
+            for (int dIdx = 0; dIdx < 2; dIdx++)
             {
-                float stepDist = stepDistances[dIdx];
+                float stepDist = dIdx == 0 ? 1.25f : 1.80f;
                 for (int side = 0; side < 2; side++)
                 {
                     Vector3 sideDir = ((side == 0) == preferRight) ? right : -right;
@@ -786,10 +802,10 @@ namespace EasyRed2HumanAI
 
                     Vector3 candidateXZ = curPos + sideDir * stepDist;
                     Vector3 groundProbe = new Vector3(candidateXZ.x, curPos.y + 1.25f, candidateXZ.z);
-                    if (!Physics.Raycast(groundProbe, Vector3.down, out RaycastHit groundHit, 2.6f))
+                    if (!Physics.Raycast(groundProbe, Vector3.down, out RaycastHit groundHit, 2.6f, envMask, QueryTriggerInteraction.Ignore))
                         continue;
 
-                    if (groundHit.collider == null || groundHit.collider.isTrigger || groundHit.normal.y < 0.65f)
+                    if (groundHit.normal.y < 0.65f)
                         continue;
 
                     Vector3 stepPos = groundHit.point;
@@ -2132,8 +2148,9 @@ namespace EasyRed2HumanAI
 
             private static void TryLiberateNearbyComrade(SoldierAI ai, Soldier rescuer, SoldierPersonality personality)
             {
-                var allSquads = Squad.AllSquads;
-                if (allSquads == null) return;
+                AiCore.EnsureWorldSnapshot();
+                int solCount = AiCore.WorldSoldierCount;
+                if (solCount == 0) return;
 
                 IntPtr rescuerPtr = rescuer.Pointer;
                 string myFaction = rescuer.faction;
@@ -2146,30 +2163,23 @@ namespace EasyRed2HumanAI
 
                 float bestDistSq = searchRadius * searchRadius;
                 Soldier bestSurrendered = null;
+                var soldiers = AiCore.WorldSoldiers;
 
-                foreach (var kvp in allSquads)
+                for (int i = 0; i < solCount; i++)
                 {
-                    Squad sq = kvp.Value;
-                    if (sq == null || sq.units == null) continue;
-                    var units = sq.units;
-                    int c = units.Count;
-                    for (int i = 0; i < c; i++)
+                    ref AiCore.SoldierSnapshot sol = ref soldiers[i];
+                    if (!sol.HasSurrendered || sol.Ptr == rescuerPtr || sol.Faction != myFaction)
+                        continue;
+
+                    // Ignore surrendered teammates on a different building floor or cliff level
+                    if (Mathf.Abs(sol.Pos.y - myPos.y) > 2.4f)
+                        continue;
+
+                    float dSq = (sol.Pos - myPos).sqrMagnitude;
+                    if (dSq < bestDistSq && sol.Ref != null && sol.Ref.IsAlive && sol.Ref.HasSurrended())
                     {
-                        Soldier f = units[i];
-                        if (f == null || !f.IsAlive || f.Pointer == rescuerPtr) continue;
-                        if (f.faction != myFaction || !f.HasSurrended() || f.transform == null) continue;
-
-                        Vector3 fPos = f.transform.position;
-                        // Ignore surrendered teammates on a different building floor or cliff level
-                        if (Mathf.Abs(fPos.y - myPos.y) > 2.4f)
-                            continue;
-
-                        float dSq = (fPos - myPos).sqrMagnitude;
-                        if (dSq < bestDistSq)
-                        {
-                            bestDistSq = dSq;
-                            bestSurrendered = f;
-                        }
+                        bestDistSq = dSq;
+                        bestSurrendered = sol.Ref;
                     }
                 }
 
@@ -2315,8 +2325,9 @@ namespace EasyRed2HumanAI
             }
             _nextSurrenderCheckTime[ptr] = now + 1.50f;
 
-            var allSquads = Squad.AllSquads;
-            if (allSquads == null)
+            AiCore.EnsureWorldSnapshot();
+            int sqCount = AiCore.WorldSquadCount;
+            if (sqCount == 0)
             {
                 return false;
             }
@@ -2326,40 +2337,38 @@ namespace EasyRed2HumanAI
             int enemyCloseCount = 0;
             int friendlyCloseCount = 0;
             float closestEnemyDistSq = 9999f;
+            var squads = AiCore.WorldSquads;
+            var soldiers = AiCore.WorldSoldiers;
 
-            foreach (var kvp in allSquads)
+            for (int s = 0; s < sqCount; s++)
             {
-                Squad sq = kvp.Value;
-                if (sq == null || sq.units == null)
+                ref AiCore.SquadSnapshot sqSnap = ref squads[s];
+                if (sqSnap.UnitCount == 0 || (sqSnap.RefPos - myPos).sqrMagnitude > 65f * 65f)
                     continue;
 
-                Soldier sqLeader = sq.Leader;
-                if (sqLeader != null && sqLeader.transform != null)
+                int end = sqSnap.UnitStartIndex + sqSnap.UnitCount;
+                for (int i = sqSnap.UnitStartIndex; i < end; i++)
                 {
-                    if ((sqLeader.transform.position - myPos).sqrMagnitude > 65f * 65f)
-                        continue;
-                }
-
-                var units = sq.units;
-                int c = units.Count;
-                for (int i = 0; i < c; i++)
-                {
-                    Soldier u = units[i];
-                    if (u == null || !u.IsAlive || u.Pointer == ptr || u.HasSurrended() || u.transform == null)
+                    ref AiCore.SoldierSnapshot uSnap = ref soldiers[i];
+                    if (uSnap.Ptr == ptr || uSnap.HasSurrendered)
                         continue;
 
-                    float dSq = (u.transform.position - myPos).sqrMagnitude;
-                    if (u.faction == myFaction)
+                    float dSq = (uSnap.Pos - myPos).sqrMagnitude;
+                    if (uSnap.Faction == myFaction)
                     {
                         if (dSq <= 22f * 22f)
                         {
-                            SoldierPersonality allyPers = GetPersonality(u);
-                            if (u.IsSquadLeader() ||
-                                allyPers == SoldierPersonality.Leader_Spearhead ||
-                                allyPers == SoldierPersonality.Leader_OldGuard)
+                            Soldier u = uSnap.Ref;
+                            if (u != null)
                             {
-                                // Inspiring officer nearby keeps wavering soldiers in the fight
-                                return false;
+                                SoldierPersonality allyPers = GetPersonality(u);
+                                if (uSnap.IsSquadLeader ||
+                                    allyPers == SoldierPersonality.Leader_Spearhead ||
+                                    allyPers == SoldierPersonality.Leader_OldGuard)
+                                {
+                                    // Inspiring officer nearby keeps wavering soldiers in the fight
+                                    return false;
+                                }
                             }
                         }
 
@@ -2370,7 +2379,7 @@ namespace EasyRed2HumanAI
                                 return false;
                         }
                     }
-                    else if (dSq <= 18f * 18f && Mathf.Abs(u.transform.position.y - myPos.y) <= 6.5f)
+                    else if (dSq <= 18f * 18f && Mathf.Abs(uSnap.Pos.y - myPos.y) <= 6.5f)
                     {
                         enemyCloseCount++;
                         if (dSq < closestEnemyDistSq)
@@ -3418,6 +3427,35 @@ namespace EasyRed2HumanAI
                 {
                     return true;
                 }
+            }
+        }
+
+        // =====================================================================
+        // Player Hot-Swap Clean Trigger & GOAP State Reset (Soldier.OnSetPlayer)
+        // Vanilla Soldier.OnSetPlayer (0x180758890) destroys soldier.aiController
+        // without calling SetGunTriggerPressed(false)! Ensure trigger & bot locks
+        // are cleanly released whenever the player takes control of an AI unit.
+        // =====================================================================
+        [HarmonyPatch(typeof(Soldier), nameof(Soldier.OnSetPlayer))]
+        public static class Soldier_OnSetPlayer_Patch
+        {
+            public static void Postfix(Soldier __instance)
+            {
+                try
+                {
+                    if (__instance == null || __instance.Pointer == IntPtr.Zero)
+                        return;
+
+                    __instance.SetGunTriggerPressed(false);
+                    IntPtr ptr = __instance.Pointer;
+                    _botGoapPlans.Remove(ptr);
+                    _botScavengeCaches.Remove(ptr);
+                    _localCoverProtectedUntil.Remove(ptr);
+                    _isTurningToWatchSector.Remove(ptr);
+                    _ffBlockedUntil.Remove(ptr);
+                    _wallBlockedUntil.Remove(ptr);
+                }
+                catch { }
             }
         }
     }

@@ -524,8 +524,8 @@ namespace EasyRed2HumanAI
 
             if (Time.time > _nextStateCleanupTime && AiCore.TryClaimHeavyFrameWorkSlot())
             {
-                _nextStateCleanupTime = Time.time + 4.5f;
-                CleanupDictionaries();
+                _nextStateCleanupTime = Time.time + 3.0f;
+                CleanupDictionaries(false);
             }
 
             if (!VisionConfig.EnableVeteranSystem.Value || !VisionConfig.ShowVeteran3DIcons.Value)
@@ -615,8 +615,9 @@ namespace EasyRed2HumanAI
         private static readonly HashSet<IntPtr> _reusableAlivePtrs = new HashSet<IntPtr>(256);
         private static readonly List<IntPtr> _reusableExpiredTasks = new List<IntPtr>(32);
         private static float _lastSceneTimeObserved;
+        private static int _cleanupSlice;
 
-        public static void CleanupDictionaries()
+        public static void CleanupDictionaries(bool forceFull = true)
         {
             float now = Time.time;
             // Detect match/scene restart (Time.time reset) and perform a full cache reset only then
@@ -625,6 +626,7 @@ namespace EasyRed2HumanAI
 
             if (sceneRestarted)
             {
+                forceFull = true;
                 _coverExposureCache.Clear();
                 AiCore.ClearSpatialCaches();
                 ClearBallisticsCaches();
@@ -633,109 +635,121 @@ namespace EasyRed2HumanAI
                 ClearGoapCaches();
             }
 
+            AiCore.EnsureWorldSnapshot();
             _reusableAlivePtrs.Clear();
             int vetCount = 0;
-            var allSquads = Squad.AllSquads;
-            if (allSquads != null)
+            int solCount = AiCore.WorldSoldierCount;
+            var soldiers = AiCore.WorldSoldiers;
+            for (int i = 0; i < solCount; i++)
             {
-                foreach (var kvp in allSquads)
+                ref AiCore.SoldierSnapshot sol = ref soldiers[i];
+                if (sol.Ptr != IntPtr.Zero)
                 {
-                    Squad sq = kvp.Value;
-                    if (sq == null || sq.units == null) continue;
-                    var units = sq.units;
-                    int c = units.Count;
-                    for (int i = 0; i < c; i++)
-                    {
-                        Soldier s = units[i];
-                        if (s != null && s.IsAlive && s.Pointer != IntPtr.Zero)
-                        {
-                            _reusableAlivePtrs.Add(s.Pointer);
-                            if (!s.IsPlayer() && GetVeteranTier(s) > 0)
-                                vetCount++;
-                        }
-                    }
+                    _reusableAlivePtrs.Add(sol.Ptr);
+                    if (!sol.IsPlayer && sol.Ref != null && GetVeteranTier(sol.Ref) > 0)
+                        vetCount++;
                 }
             }
+            Soldier controlled = Soldier.CurrentControlledSoldierOrNull();
+            if (controlled != null && controlled.IsAlive && controlled.Pointer != IntPtr.Zero)
+                _reusableAlivePtrs.Add(controlled.Pointer);
+
             ActiveVeteransCount = vetCount;
 
-            AiCore.PruneDict(_records, _reusableAlivePtrs);
-            AiCore.PruneDict(_stanceDropHoldFireUntil, _reusableAlivePtrs);
-            AiCore.PruneDict(_nextStanceDropAllowed, _reusableAlivePtrs);
-            AiCore.PruneDict(_combatStanceHoldUntil, _reusableAlivePtrs);
-            AiCore.PruneDict(_combatCrouchLockUntil, _reusableAlivePtrs);
-            AiCore.PruneDict(_noProneUntil, _reusableAlivePtrs);
-            AiCore.PruneDict(_nextWallCheckTime, _reusableAlivePtrs);
-            AiCore.PruneDict(_wallBlockedUntil, _reusableAlivePtrs);
-            AiCore.PruneDict(_peekRestoreTime, _reusableAlivePtrs);
-            AiCore.PruneDict(_nextPeekAllowedTime, _reusableAlivePtrs);
-            AiCore.PruneDict(_nextFFCheckTime, _reusableAlivePtrs);
-            AiCore.PruneDict(_ffBlockedUntil, _reusableAlivePtrs);
-            AiCore.PruneDict(_nextAntiStackTime, _reusableAlivePtrs);
-            AiCore.PruneDict(_nextVaultCheckTime, _reusableAlivePtrs);
-            AiCore.PruneDict(_nextLiberateCheckTime, _reusableAlivePtrs);
-            AiCore.PruneDict(_liberateMoveStartTime, _reusableAlivePtrs);
-            AiCore.PruneDict(_liberateMoveCooldownUntil, _reusableAlivePtrs);
-            AiCore.PruneDict(_bleedCoverDeadline, _reusableAlivePtrs);
-            AiCore.PruneDict(_nextBipodSeekTime, _reusableAlivePtrs);
-            AiCore.PruneDict(_nextBipodDeployCheckTime, _reusableAlivePtrs);
-            AiCore.PruneDict(_bipodStandUntil, _reusableAlivePtrs);
-            AiCore.PruneDict(_nextWallSideCheckTime, _reusableAlivePtrs);
-            AiCore.PruneDict(_nextWallSidestepTime, _reusableAlivePtrs);
-            AiCore.PruneDict(_nextTankDisciplineCountTime, _reusableAlivePtrs);
-            AiCore.PruneDict(_poseLockUntil, _reusableAlivePtrs);
-            AiCore.PruneDict(_nextBayonetCheckTime, _reusableAlivePtrs);
-            AiCore.PruneDict(_nextMeleeAttemptTime, _reusableAlivePtrs);
-            AiCore.PruneDict(_nextMeleeStepTime, _reusableAlivePtrs);
-            AiCore.PruneDict(_nextPromotionCheckTime, _reusableAlivePtrs);
-            AiCore.PruneDict(_vehicleAimCache, _reusableAlivePtrs);
-            AiCore.PruneDict(_threatSectorCache, _reusableAlivePtrs);
-            AiCore.PruneDict(_watchWindowCache, _reusableAlivePtrs);
-            AiCore.PruneDict(_localCalloutCache, _reusableAlivePtrs);
-            AiCore.PruneDict(_nextSpotterCalloutTime, _reusableAlivePtrs);
-            AiCore.PruneDict(_lastKnownTargets, _reusableAlivePtrs);
-            AiCore.PruneDict(_nextSuppressiveGrenadeTime, _reusableAlivePtrs);
-            AiCore.PruneDict(_nextSuppressiveBurstCountTime, _reusableAlivePtrs);
-            AiCore.PruneDict(_nextIndoorCeilingCountTime, _reusableAlivePtrs);
-            AiCore.PruneDict(_nextBoundingHoldCountTime, _reusableAlivePtrs);
-            AiCore.PruneDict(_nextBridgeAssistCountTime, _reusableAlivePtrs);
-            AiCore.PruneDict(_nextSurrenderCheckTime, _reusableAlivePtrs);
-            AiCore.PruneDict(_nextLocalCoverSeekTime, _reusableAlivePtrs);
-            AiCore.PruneDict(_localCoverProtectedUntil, _reusableAlivePtrs);
-            AiCore.PruneDict(_nextBotDoorCheckTime, _reusableAlivePtrs);
-            AiCore.PruneDict(_assignedEmplacementUntil, _reusableAlivePtrs);
-            AiCore.PruneDict(_nextFriendlyStepAsideTime, _reusableAlivePtrs);
-            AiCore.PruneDict(_botGoapPlans, _reusableAlivePtrs);
-            AiCore.PruneDict(_botScavengeCaches, _reusableAlivePtrs);
-            AiCore.PruneDict(_nextWeaponUpgradeAllowedTime, _reusableAlivePtrs);
-            AiCore.PruneDict(_cornerPieCache, _reusableAlivePtrs);
-            AiCore.PruneDict(_nextCornerPieCountTime, _reusableAlivePtrs);
-            AiCore.PruneDict(_lastDamageByVictim, _reusableAlivePtrs);
+            int slice = _cleanupSlice;
+            _cleanupSlice = (slice + 1) & 3;
 
-            AiCore.PruneSet(_bayonetCheckedSoldiers, _reusableAlivePtrs);
-            AiCore.PruneSet(_isTurningToWatchSector, _reusableAlivePtrs);
-            _reusableAlivePtrs.Clear();
-
-            // Never wipe spatial/cover caches on a 60s timer mid-match (which caused a 150-bot cache-miss lag spike);
-            // only cap oversized caches individually.
-            if (_coverExposureCache.Count > 4096)
-                _coverExposureCache.Clear();
-            AiCore.PruneSpatialCachesIfOversized();
-
-            if (_repairTaskStartTime.Count > 0)
+            if (forceFull || slice == 0)
             {
-                _reusableExpiredTasks.Clear();
-                foreach (var kvp in _repairTaskStartTime)
-                {
-                    if (now - kvp.Value > 60f)
-                        _reusableExpiredTasks.Add(kvp.Key);
-                }
-                for (int i = 0; i < _reusableExpiredTasks.Count; i++)
-                {
-                    _repairTaskStartTime.Remove(_reusableExpiredTasks[i]);
-                    _countedRepairTasks.Remove(_reusableExpiredTasks[i]);
-                }
-                _reusableExpiredTasks.Clear();
+                AiCore.PruneDict(_records, _reusableAlivePtrs);
+                AiCore.PruneDict(_stanceDropHoldFireUntil, _reusableAlivePtrs);
+                AiCore.PruneDict(_nextStanceDropAllowed, _reusableAlivePtrs);
+                AiCore.PruneDict(_combatStanceHoldUntil, _reusableAlivePtrs);
+                AiCore.PruneDict(_combatCrouchLockUntil, _reusableAlivePtrs);
+                AiCore.PruneDict(_noProneUntil, _reusableAlivePtrs);
+                AiCore.PruneDict(_nextWallCheckTime, _reusableAlivePtrs);
+                AiCore.PruneDict(_wallBlockedUntil, _reusableAlivePtrs);
+                AiCore.PruneDict(_peekRestoreTime, _reusableAlivePtrs);
+                AiCore.PruneDict(_nextPeekAllowedTime, _reusableAlivePtrs);
+                AiCore.PruneDict(_nextFFCheckTime, _reusableAlivePtrs);
+                AiCore.PruneDict(_ffBlockedUntil, _reusableAlivePtrs);
+                AiCore.PruneDict(_nextAntiStackTime, _reusableAlivePtrs);
+                AiCore.PruneDict(_nextVaultCheckTime, _reusableAlivePtrs);
             }
+
+            if (forceFull || slice == 1)
+            {
+                AiCore.PruneDict(_nextLiberateCheckTime, _reusableAlivePtrs);
+                AiCore.PruneDict(_liberateMoveStartTime, _reusableAlivePtrs);
+                AiCore.PruneDict(_liberateMoveCooldownUntil, _reusableAlivePtrs);
+                AiCore.PruneDict(_bleedCoverDeadline, _reusableAlivePtrs);
+                AiCore.PruneDict(_nextBipodSeekTime, _reusableAlivePtrs);
+                AiCore.PruneDict(_nextBipodDeployCheckTime, _reusableAlivePtrs);
+                AiCore.PruneDict(_bipodStandUntil, _reusableAlivePtrs);
+                AiCore.PruneDict(_nextWallSideCheckTime, _reusableAlivePtrs);
+                AiCore.PruneDict(_nextWallSidestepTime, _reusableAlivePtrs);
+                AiCore.PruneDict(_nextTankDisciplineCountTime, _reusableAlivePtrs);
+                AiCore.PruneDict(_poseLockUntil, _reusableAlivePtrs);
+                AiCore.PruneDict(_nextBayonetCheckTime, _reusableAlivePtrs);
+                AiCore.PruneDict(_nextMeleeAttemptTime, _reusableAlivePtrs);
+                AiCore.PruneDict(_nextMeleeStepTime, _reusableAlivePtrs);
+            }
+
+            if (forceFull || slice == 2)
+            {
+                AiCore.PruneDict(_nextPromotionCheckTime, _reusableAlivePtrs);
+                AiCore.PruneDict(_vehicleAimCache, _reusableAlivePtrs);
+                AiCore.PruneDict(_threatSectorCache, _reusableAlivePtrs);
+                AiCore.PruneDict(_watchWindowCache, _reusableAlivePtrs);
+                AiCore.PruneDict(_localCalloutCache, _reusableAlivePtrs);
+                AiCore.PruneDict(_nextSpotterCalloutTime, _reusableAlivePtrs);
+                AiCore.PruneDict(_lastKnownTargets, _reusableAlivePtrs);
+                AiCore.PruneDict(_nextSuppressiveGrenadeTime, _reusableAlivePtrs);
+                AiCore.PruneDict(_nextSuppressiveBurstCountTime, _reusableAlivePtrs);
+                AiCore.PruneDict(_nextIndoorCeilingCountTime, _reusableAlivePtrs);
+                AiCore.PruneDict(_nextBoundingHoldCountTime, _reusableAlivePtrs);
+                AiCore.PruneDict(_nextBridgeAssistCountTime, _reusableAlivePtrs);
+                AiCore.PruneDict(_nextSurrenderCheckTime, _reusableAlivePtrs);
+                AiCore.PruneDict(_nextLocalCoverSeekTime, _reusableAlivePtrs);
+            }
+
+            if (forceFull || slice == 3)
+            {
+                AiCore.PruneDict(_localCoverProtectedUntil, _reusableAlivePtrs);
+                AiCore.PruneDict(_nextBotDoorCheckTime, _reusableAlivePtrs);
+                AiCore.PruneDict(_assignedEmplacementUntil, _reusableAlivePtrs);
+                AiCore.PruneDict(_nextFriendlyStepAsideTime, _reusableAlivePtrs);
+                AiCore.PruneDict(_botGoapPlans, _reusableAlivePtrs);
+                AiCore.PruneDict(_botScavengeCaches, _reusableAlivePtrs);
+                AiCore.PruneDict(_nextWeaponUpgradeAllowedTime, _reusableAlivePtrs);
+                AiCore.PruneDict(_cornerPieCache, _reusableAlivePtrs);
+                AiCore.PruneDict(_nextCornerPieCountTime, _reusableAlivePtrs);
+                AiCore.PruneDict(_lastDamageByVictim, _reusableAlivePtrs);
+                AiCore.PruneSet(_bayonetCheckedSoldiers, _reusableAlivePtrs);
+                AiCore.PruneSet(_isTurningToWatchSector, _reusableAlivePtrs);
+
+                if (_coverExposureCache.Count > 4096)
+                    _coverExposureCache.Clear();
+                AiCore.PruneSpatialCachesIfOversized();
+
+                if (_repairTaskStartTime.Count > 0)
+                {
+                    _reusableExpiredTasks.Clear();
+                    foreach (var kvp in _repairTaskStartTime)
+                    {
+                        if (now - kvp.Value > 60f)
+                            _reusableExpiredTasks.Add(kvp.Key);
+                    }
+                    for (int i = 0; i < _reusableExpiredTasks.Count; i++)
+                    {
+                        _repairTaskStartTime.Remove(_reusableExpiredTasks[i]);
+                        _countedRepairTasks.Remove(_reusableExpiredTasks[i]);
+                    }
+                    _reusableExpiredTasks.Clear();
+                }
+            }
+
+            _reusableAlivePtrs.Clear();
         }
 
         // =====================================================================
