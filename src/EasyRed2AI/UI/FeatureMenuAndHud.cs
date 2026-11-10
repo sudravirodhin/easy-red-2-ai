@@ -13,6 +13,28 @@ namespace EasyRed2HumanAI
         private static string _toastMessage = "";
         private static float _toastExpireTime;
         private static bool _showConfigMenu;
+        private static bool _showMapPicker;
+        private static int _activeConfigTab;
+
+        private struct PickerBattleEntry
+        {
+            public string DisplayName;
+            public string UniqueId;
+            public ICampaignTreeBattleData BattleRef;
+        }
+
+        private struct PickerCampaignEntry
+        {
+            public string CampaignName;
+            public List<PickerBattleEntry> Battles;
+        }
+
+        private static readonly List<PickerCampaignEntry> _mapPickerCampaigns = new List<PickerCampaignEntry>(24);
+        private static bool _mapPickerInitialized;
+        private static int _selectedCampaignIdx;
+        private static int _selectedBattleIdx;
+        private static int _campaignPage;
+        private static int _battlePage;
 
         public static void ShowToast(string msg, float duration = 4.0f)
         {
@@ -22,7 +44,7 @@ namespace EasyRed2HumanAI
         }
 
         // =====================================================================
-        // In-Game Hotkeys (F6 Menu, F8 Toggle, F9 Reload, F10 Stats) & HUD Toast
+        // In-Game Hotkeys (F5 Map Picker, F6 Menu, F8 Toggle, F9 Reload, F10 Stats)
         // =====================================================================
         [HarmonyPatch(typeof(BattleManager), nameof(BattleManager.Update))]
         public static class BattleManager_Update_Patch
@@ -34,16 +56,29 @@ namespace EasyRed2HumanAI
                     CleanupExpiredFiringRecords();
                     VeteranAndTacticsPatches.RenderVeteran3DMarkersAndCleanup();
                     VeteranAndTacticsPatches.UpdateMacroObjectiveAndEmplacementDirector();
-                    VeteranAndTacticsPatches.UpdateQuickTapSpot(_showConfigMenu);
+                    VeteranAndTacticsPatches.UpdateQuickTapSpot(_showConfigMenu || _showMapPicker);
 
                     var input = UnityInput.Current;
                     if (input != null)
                     {
-                        if (input.GetKeyDown(KeyCode.F6))
+                        KeyCode mapPickerKey = VisionConfig.MapPickerHotkey != null ? VisionConfig.MapPickerHotkey.Value : KeyCode.F5;
+                        if (mapPickerKey != KeyCode.None && input.GetKeyDown(mapPickerKey))
+                        {
+                            _showMapPicker = !_showMapPicker;
+                            if (_showMapPicker)
+                            {
+                                _showConfigMenu = false;
+                                BattleManager_OnGUI_Patch.EnsureMapPickerCatalog();
+                                Cursor.visible = true;
+                                Cursor.lockState = CursorLockMode.None;
+                            }
+                        }
+                        else if (input.GetKeyDown(KeyCode.F6))
                         {
                             _showConfigMenu = !_showConfigMenu;
                             if (_showConfigMenu)
                             {
+                                _showMapPicker = false;
                                 Cursor.visible = true;
                                 Cursor.lockState = CursorLockMode.None;
                             }
@@ -66,12 +101,12 @@ namespace EasyRed2HumanAI
                         {
                             VeteranAndTacticsPatches.CleanupDictionaries();
                             ShowToast(
-                                $"[Battle Hardened] Vets:{VeteranAndTacticsPatches.ActiveVeteransCount} (Prom:{VeteranAndTacticsPatches.FieldPromotionsCount}) | " +
-                                $"GOAP:{VeteranAndTacticsPatches.GoapPlansExecutedCount} (Anvil:{VeteranAndTacticsPatches.TeamNetAnvilHammerCount} Flank:{VeteranAndTacticsPatches.GoapPinAndFlankCount} Smoke:{VeteranAndTacticsPatches.GoapSmokeScreensCount} RadioCut:{VeteranAndTacticsPatches.RadioNetCutoffsCount}) | " +
-                                $"Drops:{VeteranAndTacticsPatches.SelfPreservationDrops} | Callouts:{VeteranAndTacticsPatches.LocalCalloutsSharedCount} | Supp:{VeteranAndTacticsPatches.SuppressiveEventsCount} | Bounds:{VeteranAndTacticsPatches.BoundingOverwatchHoldsCount} | " +
-                                $"Garrisons:{VeteranAndTacticsPatches.MacroGarrisonsAssignedCount} | Emplace:{VeteranAndTacticsPatches.StaticGunsStaffedCount} | APC:{VeteranAndTacticsPatches.SmartApcDismountsCount} | TankHold:{VeteranAndTacticsPatches.TankStandoffHoldsCount} | " +
-                                $"CombArms:{VeteranAndTacticsPatches.CombinedArmsPriorityAssistsCount} (Kamikaze:{VeteranAndTacticsPatches.KamikazeDivesTriggeredCount}) | Surr:{VeteranAndTacticsPatches.ShellShockSurrendersCount}/{VeteranAndTacticsPatches.ComradesLiberated} | Ticks:{AiCore.TotalAdaptiveAiExtraTicks} (PingSkip:{AiCore.TotalPingGovernorSkippedCycles}) | FFSaved:{VeteranAndTacticsPatches.FriendlyFirePrevented}",
-                                6.5f);
+                                $"[Battle Hardened v{Plugin.PluginVersion} Telemetry] Vets:{VeteranAndTacticsPatches.ActiveVeteransCount} (Prom:{VeteranAndTacticsPatches.FieldPromotionsCount}) | ExtraTicks:{AiCore.TotalAdaptiveAiExtraTicks} (PingSkip:{AiCore.TotalPingGovernorSkippedCycles}) | FFSaved:{VeteranAndTacticsPatches.FriendlyFirePrevented} | MedRedirect:{VeteranAndTacticsPatches.MedicTriageRedirectsCount}\n" +
+                                $"GOAP:{VeteranAndTacticsPatches.GoapPlansExecutedCount} (Anvil:{VeteranAndTacticsPatches.TeamNetAnvilHammerCount} Flank:{VeteranAndTacticsPatches.GoapPinAndFlankCount} Smoke:{VeteranAndTacticsPatches.GoapSmokeScreensCount} RadioCut:{VeteranAndTacticsPatches.RadioNetCutoffsCount}) | WepUp:{VeteranAndTacticsPatches.RoleWeaponUpgradesCount} | BuddyResup:{VeteranAndTacticsPatches.BuddyResuppliesCount} | RadioLoot:{VeteranAndTacticsPatches.FieldRadiosInheritedCount} | Helmets:{VeteranAndTacticsPatches.HelmetsRecoveredCount} | Dragged:{VeteranAndTacticsPatches.CasualtiesDraggedCount}\n" +
+                                $"Drops:{VeteranAndTacticsPatches.SelfPreservationDrops} | IndoorCrouch:{VeteranAndTacticsPatches.IndoorPronePreventedCount} | Pies:{VeteranAndTacticsPatches.CornerPiesExecutedCount} | TankCov:{VeteranAndTacticsPatches.TankHullCoverUsesCount} | Bounds:{VeteranAndTacticsPatches.BoundingOverwatchHoldsCount} | Doors:{VeteranAndTacticsPatches.DoorsStrategicallyClosedCount} | Bipods:{VeteranAndTacticsPatches.BipodsDeployed} | WallBlk:{VeteranAndTacticsPatches.WallsBlocked} | Melee:{VeteranAndTacticsPatches.MeleeAttacksTriggered} | Surr:{VeteranAndTacticsPatches.ShellShockSurrendersCount}/Lib:{VeteranAndTacticsPatches.ComradesLiberated}\n" +
+                                $"Garrisons:{VeteranAndTacticsPatches.MacroGarrisonsAssignedCount} | Emplace:{VeteranAndTacticsPatches.StaticGunsStaffedCount} | APC:{VeteranAndTacticsPatches.SmartApcDismountsCount} | TankHold:{VeteranAndTacticsPatches.TankStandoffHoldsCount} | SmartAmmo:{VeteranAndTacticsPatches.SmartAmmoSwitchesCount} | Unsticks:{VeteranAndTacticsPatches.TankRockUnsticksCount} | Repairs:{VeteranAndTacticsPatches.ShelteredRepairsCount} | RoadkillSaved:{VeteranAndTacticsPatches.FriendlyRoadkillsPreventedCount} (ClientRK:{VeteranAndTacticsPatches.RemoteClientRoadkillsAssistedCount})\n" +
+                                $"CombArms:{VeteranAndTacticsPatches.CombinedArmsPriorityAssistsCount} (Kamikaze:{VeteranAndTacticsPatches.KamikazeDivesTriggeredCount}) | Callouts:{VeteranAndTacticsPatches.LocalCalloutsSharedCount} | Supp:{VeteranAndTacticsPatches.SuppressiveEventsCount} | WoodPen:{VeteranAndTacticsPatches.ThinCoverPenetrationsCount} | TopAP:{VeteranAndTacticsPatches.AircraftTopAttackPenetrationsAssistedCount} (HostAssist:{VeteranAndTacticsPatches.HostVanillaClientApAssistsCount}) | CrewBlastBlk:{VeteranAndTacticsPatches.EnclosedCrewExplosionHitsBlockedCount} | AirMgBlk:{VeteranAndTacticsPatches.AirplanePilotMgHitsBlockedCount} | Chutes:{VeteranAndTacticsPatches.ParachutesDriftedCount}",
+                                9.5f);
                         }
                     }
 
@@ -82,12 +117,12 @@ namespace EasyRed2HumanAI
                         AiCore.LogDebug(
                             "Heartbeat",
                             $"FPS:{fps:F0} ({dtMs:F1}ms) | Vets:{VeteranAndTacticsPatches.ActiveVeteransCount} (Prom:{VeteranAndTacticsPatches.FieldPromotionsCount}) | " +
-                            $"GOAP:{VeteranAndTacticsPatches.GoapPlansExecutedCount} (Anvil:{VeteranAndTacticsPatches.TeamNetAnvilHammerCount} PinFlank:{VeteranAndTacticsPatches.GoapPinAndFlankCount} Smoke:{VeteranAndTacticsPatches.GoapSmokeScreensCount} WepUp:{VeteranAndTacticsPatches.RoleWeaponUpgradesCount} RadioCut:{VeteranAndTacticsPatches.RadioNetCutoffsCount}) | " +
+                            $"GOAP:{VeteranAndTacticsPatches.GoapPlansExecutedCount} (Anvil:{VeteranAndTacticsPatches.TeamNetAnvilHammerCount} PinFlank:{VeteranAndTacticsPatches.GoapPinAndFlankCount} Smoke:{VeteranAndTacticsPatches.GoapSmokeScreensCount} WepUp:{VeteranAndTacticsPatches.RoleWeaponUpgradesCount} BuddyResup:{VeteranAndTacticsPatches.BuddyResuppliesCount} RadioLoot:{VeteranAndTacticsPatches.FieldRadiosInheritedCount} Helmets:{VeteranAndTacticsPatches.HelmetsRecoveredCount} Dragged:{VeteranAndTacticsPatches.CasualtiesDraggedCount} RadioCut:{VeteranAndTacticsPatches.RadioNetCutoffsCount}) | " +
                             $"Drops:{VeteranAndTacticsPatches.SelfPreservationDrops} | IndoorCrouch:{VeteranAndTacticsPatches.IndoorPronePreventedCount} | Pies:{VeteranAndTacticsPatches.CornerPiesExecutedCount} | TankCov:{VeteranAndTacticsPatches.TankHullCoverUsesCount} | " +
                             $"Callouts:{VeteranAndTacticsPatches.LocalCalloutsSharedCount} (KillVoice:{VeteranAndTacticsPatches.BotKillCalloutsCount}) | Supp:{VeteranAndTacticsPatches.SuppressiveEventsCount} | " +
                             $"Bounds:{VeteranAndTacticsPatches.BoundingOverwatchHoldsCount} | Garrisons:{VeteranAndTacticsPatches.MacroGarrisonsAssignedCount} | " +
                             $"Emplace:{VeteranAndTacticsPatches.StaticGunsStaffedCount} | APC:{VeteranAndTacticsPatches.SmartApcDismountsCount} | " +
-                            $"TankHold:{VeteranAndTacticsPatches.TankStandoffHoldsCount} | RoadkillSaved:{VeteranAndTacticsPatches.FriendlyRoadkillsPreventedCount} (ClientRK:{VeteranAndTacticsPatches.RemoteClientRoadkillsAssistedCount}) | CombArms:{VeteranAndTacticsPatches.CombinedArmsPriorityAssistsCount} (Kamikaze:{VeteranAndTacticsPatches.KamikazeDivesTriggeredCount}) | " +
+                            $"TankHold:{VeteranAndTacticsPatches.TankStandoffHoldsCount} | SmartAmmo:{VeteranAndTacticsPatches.SmartAmmoSwitchesCount} | Unsticks:{VeteranAndTacticsPatches.TankRockUnsticksCount} | MedRedirect:{VeteranAndTacticsPatches.MedicTriageRedirectsCount} | RoadkillSaved:{VeteranAndTacticsPatches.FriendlyRoadkillsPreventedCount} (ClientRK:{VeteranAndTacticsPatches.RemoteClientRoadkillsAssistedCount}) | CombArms:{VeteranAndTacticsPatches.CombinedArmsPriorityAssistsCount} (Kamikaze:{VeteranAndTacticsPatches.KamikazeDivesTriggeredCount}) | " +
                             $"Bridges:{VeteranAndTacticsPatches.BridgeCrossingsAssistedCount} | Surr:{VeteranAndTacticsPatches.ShellShockSurrendersCount} (Lib:{VeteranAndTacticsPatches.ComradesLiberated}) | " +
                             $"WoodPen:{VeteranAndTacticsPatches.ThinCoverPenetrationsCount} | TopAP:{VeteranAndTacticsPatches.AircraftTopAttackPenetrationsAssistedCount} (HostAssist:{VeteranAndTacticsPatches.HostVanillaClientApAssistsCount}) | CrewBlastBlk:{VeteranAndTacticsPatches.EnclosedCrewExplosionHitsBlockedCount} | AirMgBlk:{VeteranAndTacticsPatches.AirplanePilotMgHitsBlockedCount} | PlaneAudio:{VeteranAndTacticsPatches.PlaneAudioLoopsDesyncedCount} | Chutes:{VeteranAndTacticsPatches.ParachutesDriftedCount} | " +
                             $"Doors:{VeteranAndTacticsPatches.DoorsStrategicallyClosedCount} | Bipods:{VeteranAndTacticsPatches.BipodsDeployed} | WallBlk:{VeteranAndTacticsPatches.WallsBlocked} | " +
@@ -109,10 +144,38 @@ namespace EasyRed2HumanAI
                 {
                     if (Time.unscaledTime < _toastExpireTime && !string.IsNullOrEmpty(_toastMessage))
                     {
-                        GUI.color = new Color(0f, 0f, 0f, 0.78f);
-                        GUI.Box(new Rect(20f, 20f, 980f, 38f), "");
+                        int lineCount = 1;
+                        for (int i = 0; i < _toastMessage.Length; i++)
+                        {
+                            if (_toastMessage[i] == '\n')
+                                lineCount++;
+                        }
+                        bool isMultiLine = lineCount > 1 || _toastMessage.Length > 120;
+                        float toastW = isMultiLine ? Mathf.Min(Screen.width - 40f, 1240f) : 980f;
+                        float toastH = isMultiLine ? Mathf.Max(42f, 16f + lineCount * 21f) : 38f;
+
+                        GUI.color = new Color(0.03f, 0.04f, 0.05f, 0.88f);
+                        GUI.Box(new Rect(20f, 20f, toastW, toastH), "");
+
+                        GUIStyle lblStyle = GUI.skin != null ? GUI.skin.label : null;
+                        bool oldWrap = false;
+                        int oldSize = 0;
+                        if (lblStyle != null)
+                        {
+                            oldWrap = lblStyle.wordWrap;
+                            oldSize = lblStyle.fontSize;
+                            lblStyle.wordWrap = true;
+                            lblStyle.fontSize = isMultiLine ? 13 : 14;
+                        }
+
                         GUI.color = Color.Lerp(Color.yellow, Color.white, 0.35f);
-                        GUI.Label(new Rect(30f, 28f, 960f, 26f), _toastMessage);
+                        GUI.Label(new Rect(30f, 26f, toastW - 20f, toastH - 10f), _toastMessage);
+
+                        if (lblStyle != null)
+                        {
+                            lblStyle.wordWrap = oldWrap;
+                            lblStyle.fontSize = oldSize;
+                        }
                         GUI.color = Color.white;
                     }
 
@@ -194,191 +257,566 @@ namespace EasyRed2HumanAI
                         Cursor.lockState = CursorLockMode.None;
                         DrawConfigMenu();
                     }
+                    else if (_showMapPicker)
+                    {
+                        Cursor.visible = true;
+                        Cursor.lockState = CursorLockMode.None;
+                        DrawMapPickerWindow();
+                    }
                 }
                 catch { }
             }
 
             private static void DrawConfigMenu()
             {
-                float panelW = 780f;
-                float panelH = 838f;
+                float panelW = 820f;
+                float panelH = 660f;
                 float panelX = (Screen.width - panelW) * 0.5f;
                 float panelY = (Screen.height - panelH) * 0.5f;
 
-                GUI.color = new Color(0.06f, 0.07f, 0.09f, 0.94f);
+                GUI.color = new Color(0.06f, 0.07f, 0.09f, 0.95f);
                 GUI.Box(new Rect(panelX, panelY, panelW, panelH), "");
 
                 GUI.color = new Color(1.0f, 0.88f, 0.35f, 1.0f);
-                GUI.Label(new Rect(panelX + 20f, panelY + 10f, panelW - 40f, 22f),
-                    $"Easy Red 2: Battle Hardened v{Plugin.PluginVersion}  |  Feature Bundles (F6 to Close)");
+                GUI.Label(new Rect(panelX + 20f, panelY + 10f, panelW - 240f, 22f),
+                    $"Easy Red 2: Battle Hardened v{Plugin.PluginVersion}  |  Modular Feature Menu (F6)");
 
-                GUI.color = new Color(0.75f, 0.78f, 0.82f, 1.0f);
-                GUI.Label(new Rect(panelX + 20f, panelY + 29f, panelW - 40f, 20f),
-                    "Click any feature or [ALL] / [OFF] bundle button below to toggle live in-game (saves to com.antigravity.easyred2.humanai.cfg):");
+                KeyCode mpKey = VisionConfig.MapPickerHotkey != null ? VisionConfig.MapPickerHotkey.Value : KeyCode.F5;
+                GUI.color = new Color(0.55f, 0.90f, 1.0f, 1.0f);
+                if (GUI.Button(new Rect(panelX + panelW - 210f, panelY + 8f, 190f, 24f), $"Open Map Picker ({mpKey})"))
+                {
+                    _showConfigMenu = false;
+                    _showMapPicker = true;
+                    EnsureMapPickerCatalog();
+                }
+
+                // 5 Overarching Concept Tabs
+                string[] tabNames =
+                {
+                    "1. GOAP & Bot Behaviors",
+                    "2. Vanilla Fixes",
+                    "3. Vision & Realism",
+                    "4. Vets & Roles",
+                    "5. Optimizations & QoL"
+                };
+
+                float tabY = panelY + 38f;
+                float tabW = (panelW - 40f - 16f) / 5f;
+                for (int t = 0; t < tabNames.Length; t++)
+                {
+                    bool active = _activeConfigTab == t;
+                    GUI.color = active
+                        ? new Color(1.0f, 0.86f, 0.32f, 1.0f)
+                        : new Color(0.68f, 0.74f, 0.82f, 0.92f);
+                    if (GUI.Button(new Rect(panelX + 20f + t * (tabW + 4f), tabY, tabW, 26f), tabNames[t]))
+                    {
+                        _activeConfigTab = t;
+                    }
+                }
 
                 float colLeftX = panelX + 20f;
-                float colRightX = panelX + 398f;
-                float colW = 362f;
-                float rowH = 21f;
-                float startY = panelY + 52f;
-
-                // Left Column: Bundle 1 (Vision & Memory), Bundle 3 (Macro & Vehicles), Bundle 4A (Veterancy)
+                float colRightX = panelX + 418f;
+                float colW = 382f;
+                float rowH = 23f;
+                float startY = panelY + 74f;
                 float yL = startY;
-                DrawSectionHeaderWithBundle(colLeftX, ref yL, colW, "Bundle 1: Vision, Memory & Suppression",
-                    VisionConfig.EnableAdaptiveAiTickScaling,
-                    VisionConfig.PreserveStanceStealthInCombat,
-                    VisionConfig.EnforceHumanFOVWhenAlerted,
-                    VisionConfig.EnableThreatSectorConcentration,
-                    VisionConfig.EnableLocalContactCallouts,
-                    VisionConfig.EnableLastKnownSuppression,
-                    VisionConfig.EnableScopeVisionScaling,
-                    VisionConfig.LimitAircraftInfantrySpotting);
-                DrawToggleButton(colLeftX, ref yL, colW, rowH, "Master Mod Toggle (F8)", VisionConfig.EnableMod);
-                DrawToggleButton(colLeftX, ref yL, colW, rowH, "Adaptive AI Brain Tick Scaling (SP & Co-op)", VisionConfig.EnableAdaptiveAiTickScaling);
-                DrawToggleButton(colLeftX, ref yL, colW, rowH, "Preserve Stance Stealth in Combat", VisionConfig.PreserveStanceStealthInCombat);
-                DrawToggleButton(colLeftX, ref yL, colW, rowH, "Enforce Human FOV Cones", VisionConfig.EnforceHumanFOVWhenAlerted);
-                DrawToggleButton(colLeftX, ref yL, colW, rowH, "Threat-Sector Gaze & Window Alignment", VisionConfig.EnableThreatSectorConcentration);
-                DrawToggleButton(colLeftX, ref yL, colW, rowH, "Local Contact Callouts (15m Radius)", VisionConfig.EnableLocalContactCallouts);
-                DrawToggleButton(colLeftX, ref yL, colW, rowH, "Last-Known Suppressive Fire & Grenades", VisionConfig.EnableLastKnownSuppression);
-                DrawToggleButton(colLeftX, ref yL, colW, rowH, "Scope & Turret Optic Scaling", VisionConfig.EnableScopeVisionScaling);
-                DrawToggleButton(colLeftX, ref yL, colW, rowH, "Limit Aircraft Infantry Spotting", VisionConfig.LimitAircraftInfantrySpotting);
-
-                yL += 4f;
-                DrawSectionHeaderWithBundle(colLeftX, ref yL, colW, "Bundle 3: Macro, Radio Net & Armor",
-                    VisionConfig.EnableRadiomanIntelNet,
-                    VisionConfig.EnableFactionNetDoctrines,
-                    VisionConfig.EnableMacroObjectiveDirector,
-                    VisionConfig.EnableProactiveEmplacementStaffing,
-                    VisionConfig.EnableCombinedArmsPrioritySupport,
-                    VisionConfig.EnableSmartApcDismount,
-                    VisionConfig.EnableTankStandoffAndReverse,
-                    VisionConfig.EnableFriendlyVehicleRightOfWay,
-                    VisionConfig.PreventSmallArmsFireAtTanks,
-                    VisionConfig.EnableSmartTankCrewRepair);
-                DrawToggleButton(colLeftX, ref yL, colW, rowH, "Radioman-Gated Team Intel Net", VisionConfig.EnableRadiomanIntelNet);
-                DrawToggleButton(colLeftX, ref yL, colW, rowH, "20-Nation Historical Command Doctrines", VisionConfig.EnableFactionNetDoctrines);
-                DrawToggleButton(colLeftX, ref yL, colW, rowH, "Objective Garrison & Counterattack Director", VisionConfig.EnableMacroObjectiveDirector);
-                DrawToggleButton(colLeftX, ref yL, colW, rowH, "Proactive Static Gun & Halftrack Staffing", VisionConfig.EnableProactiveEmplacementStaffing);
-                DrawToggleButton(colLeftX, ref yL, colW, rowH, "Combined-Arms Known Target Priority", VisionConfig.EnableCombinedArmsPrioritySupport);
-                DrawToggleButton(colLeftX, ref yL, colW, rowH, "Smart APC / Transport Dismount Under Fire", VisionConfig.EnableSmartApcDismount);
-                DrawToggleButton(colLeftX, ref yL, colW, rowH, "Tank Standoff & Reverse Discipline", VisionConfig.EnableTankStandoffAndReverse);
-                DrawToggleButton(colLeftX, ref yL, colW, rowH, "Friendly Infantry Right-of-Way (No Roadkill)", VisionConfig.EnableFriendlyVehicleRightOfWay);
-                DrawToggleButton(colLeftX, ref yL, colW, rowH, "Stop Small-Arms Fire at Tanks / Aim Crew", VisionConfig.PreventSmallArmsFireAtTanks);
-                DrawToggleButton(colLeftX, ref yL, colW, rowH, "Sheltered Leeward Tank Crew Repairs", VisionConfig.EnableSmartTankCrewRepair);
-
-                yL += 4f;
-                DrawSectionHeaderWithBundle(colLeftX, ref yL, colW, "Bundle 4A: 15-Min Veteran System",
-                    VisionConfig.EnableVeteranSystem,
-                    VisionConfig.PromoteVeteranRanks,
-                    VisionConfig.ShowVeteran3DIcons,
-                    VisionConfig.ShowVeteranSquadRosterTags);
-                DrawToggleButton(colLeftX, ref yL, colW, rowH, "15-Minute Veteran Progression", VisionConfig.EnableVeteranSystem);
-                DrawToggleButton(colLeftX, ref yL, colW, rowH, "Field Rank Promotions & Decals", VisionConfig.PromoteVeteranRanks);
-                DrawToggleButton(colLeftX, ref yL, colW, rowH, "3D Overhead Veteran Icons", VisionConfig.ShowVeteran3DIcons);
-                DrawToggleButton(colLeftX, ref yL, colW, rowH, "Squad Roster Veteran Tags", VisionConfig.ShowVeteranSquadRosterTags);
-
-                yL += 4f;
-                DrawSectionHeaderWithBundle(colLeftX, ref yL, colW, "Bundle 4B: 30 Role Personalities",
-                    VisionConfig.EnableRolePersonalities,
-                    VisionConfig.EnableInfantryPersonalities,
-                    VisionConfig.EnableVehicleAndPilotPersonalities,
-                    VisionConfig.VeterancyCuresSkittishness,
-                    VisionConfig.ShowPersonalityInSquadRoster);
-                DrawToggleButton(colLeftX, ref yL, colW, rowH, "Enable AI Role Personalities (Master)", VisionConfig.EnableRolePersonalities);
-                DrawToggleButton(colLeftX, ref yL, colW, rowH, "Infantry Role Personalities (21 Types)", VisionConfig.EnableInfantryPersonalities);
-                DrawToggleButton(colLeftX, ref yL, colW, rowH, "Vehicle & Pilot Personalities (9 Types)", VisionConfig.EnableVehicleAndPilotPersonalities);
-                DrawToggleButton(colLeftX, ref yL, colW, rowH, "Veterancy Cures Skittishness", VisionConfig.VeterancyCuresSkittishness);
-                DrawToggleButton(colLeftX, ref yL, colW, rowH, "Show Personalities in Squad Roster", VisionConfig.ShowPersonalityInSquadRoster);
-
-                // Right Column: Bundle 2 (Infantry Combat & Cover) & Bundle 5 (QoL & Diagnostics)
                 float yR = startY;
-                DrawSectionHeaderWithBundle(colRightX, ref yR, colW, "Bundle 2: GOAP, Infantry Combat & Cover",
-                    VisionConfig.EnableTacticalGoapPlanner,
-                    VisionConfig.EnableTacticalVoiceCallouts,
-                    VisionConfig.EnableSelfPreservationStance,
-                    VisionConfig.EnableIndoorCeilingPronePrevention,
-                    VisionConfig.EnableStrategicDoorDiscipline,
-                    VisionConfig.EnableBridgeCrossingDiscipline,
-                    VisionConfig.EnableBoundingOverwatch,
-                    VisionConfig.EnforceStandingWhenOutOfCombat,
-                    VisionConfig.NeverShootStandingInOpen,
-                    VisionConfig.BandageOnlyAfterFindingCover,
-                    VisionConfig.EnableSmartWallSideCover,
-                    VisionConfig.EnablePointBlankMelee,
-                    VisionConfig.EnableGunnerBipodWallMounting,
-                    VisionConfig.EnableWallShootingPrevention,
-                    VisionConfig.EnableAutoPeekOverCover,
-                    VisionConfig.EnableFriendlyFireAvoidance,
-                    VisionConfig.EnableAntiStacking,
-                    VisionConfig.EnableWallVaulting,
-                    VisionConfig.EnableShellShockSurrender,
-                    VisionConfig.EnableComradeLiberation);
-                DrawToggleButton(colRightX, ref yR, colW, rowH, "3-Tier GOAP Planner & Squad Blackboard", VisionConfig.EnableTacticalGoapPlanner);
-                DrawToggleButton(colRightX, ref yR, colW, rowH, "Audible GOAP Plan Voice Callouts", VisionConfig.EnableTacticalVoiceCallouts);
-                DrawToggleButton(colRightX, ref yR, colW, rowH, "Self-Preservation Stances", VisionConfig.EnableSelfPreservationStance);
-                DrawToggleButton(colRightX, ref yR, colW, rowH, "Indoor Ceiling Prone Prevention", VisionConfig.EnableIndoorCeilingPronePrevention);
-                DrawToggleButton(colRightX, ref yR, colW, rowH, "Strategic Door & Shutter Discipline", VisionConfig.EnableStrategicDoorDiscipline);
-                DrawToggleButton(colRightX, ref yR, colW, rowH, "Bridge & Narrow Crossing Discipline", VisionConfig.EnableBridgeCrossingDiscipline);
-                DrawToggleButton(colRightX, ref yR, colW, rowH, "Attacker Bounding Overwatch", VisionConfig.EnableBoundingOverwatch);
-                DrawToggleButton(colRightX, ref yR, colW, rowH, "Enforce Standing Out of Combat", VisionConfig.EnforceStandingWhenOutOfCombat);
-                DrawToggleButton(colRightX, ref yR, colW, rowH, "Never Shoot Standing in Open", VisionConfig.NeverShootStandingInOpen);
-                DrawToggleButton(colRightX, ref yR, colW, rowH, "Seek Cover Before Bandaging", VisionConfig.BandageOnlyAfterFindingCover);
-                DrawToggleButton(colRightX, ref yR, colW, rowH, "Stand BEHIND Walls (Smart Wall Cover)", VisionConfig.EnableSmartWallSideCover);
-                DrawToggleButton(colRightX, ref yR, colW, rowH, "Point-Blank Bayonet & Melee CQB", VisionConfig.EnablePointBlankMelee);
-                DrawToggleButton(colRightX, ref yR, colW, rowH, "Gunner Bipod Wall & Ground Mounting", VisionConfig.EnableGunnerBipodWallMounting);
-                DrawToggleButton(colRightX, ref yR, colW, rowH, "Wall-Shooting Prevention", VisionConfig.EnableWallShootingPrevention);
-                DrawToggleButton(colRightX, ref yR, colW, rowH, "Auto-Peek Over Low Cover", VisionConfig.EnableAutoPeekOverCover);
-                DrawToggleButton(colRightX, ref yR, colW, rowH, "Friendly Fire Avoidance", VisionConfig.EnableFriendlyFireAvoidance);
-                DrawToggleButton(colRightX, ref yR, colW, rowH, "Anti-Stacking Personal Spacing", VisionConfig.EnableAntiStacking);
-                DrawToggleButton(colRightX, ref yR, colW, rowH, "Wall & Fence Vaulting", VisionConfig.EnableWallVaulting);
-                DrawToggleButton(colRightX, ref yR, colW, rowH, "Shell-Shocked & Skittish Surrender", VisionConfig.EnableShellShockSurrender);
-                DrawToggleButton(colRightX, ref yR, colW, rowH, "Surrendered Comrade Liberation", VisionConfig.EnableComradeLiberation);
 
-                yR += 4f;
-                DrawSectionHeaderWithBundle(colRightX, ref yR, colW, "Bundle 5: Player QoL, Obituary & Logs",
-                    VisionConfig.EnableQuickTapSpot,
-                    VisionConfig.EnableDeathScreenAttribution,
-                    VisionConfig.EnableExtendedRoomNames,
-                    VisionConfig.DebugLogging);
-                DrawToggleButton(colRightX, ref yR, colW, rowH, "Short-Press Orders Key to Spot", VisionConfig.EnableQuickTapSpot);
-                DrawToggleButton(colRightX, ref yR, colW, rowH, "Death Screen Kill Attribution + Age", VisionConfig.EnableDeathScreenAttribution);
-                DrawToggleButton(colRightX, ref yR, colW, rowH, "64-Char Multiplayer Room Names", VisionConfig.EnableExtendedRoomNames);
-                DrawToggleButton(colRightX, ref yR, colW, rowH, "Diagnostic Debug Logs (BepInEx Console)", VisionConfig.DebugLogging);
+                switch (_activeConfigTab)
+                {
+                    case 0: // 1. GOAP & Bot Behaviors
+                        DrawSectionHeaderWithBundle(colLeftX, ref yL, colW, "GOAP Planner & Macro Command",
+                            VisionConfig.EnableTacticalGoapPlanner,
+                            VisionConfig.EnableTacticalVoiceCallouts,
+                            VisionConfig.EnableRadiomanIntelNet,
+                            VisionConfig.EnableMacroObjectiveDirector,
+                            VisionConfig.EnableProactiveEmplacementStaffing,
+                            VisionConfig.EnableCombinedArmsPrioritySupport);
+                        DrawToggleButton(colLeftX, ref yL, colW, rowH, "3-Tier GOAP Planner & Squad Blackboard", VisionConfig.EnableTacticalGoapPlanner);
+                        DrawToggleButton(colLeftX, ref yL, colW, rowH, "Audible GOAP Plan Voice Callouts", VisionConfig.EnableTacticalVoiceCallouts);
+                        DrawToggleButton(colLeftX, ref yL, colW, rowH, "Radioman-Gated Team Intel Net", VisionConfig.EnableRadiomanIntelNet);
+                        DrawToggleButton(colLeftX, ref yL, colW, rowH, "Objective Garrison & Counterattack Director", VisionConfig.EnableMacroObjectiveDirector);
+                        DrawToggleButton(colLeftX, ref yL, colW, rowH, "Proactive Static Gun & Halftrack Staffing", VisionConfig.EnableProactiveEmplacementStaffing);
+                        DrawToggleButton(colLeftX, ref yL, colW, rowH, "Combined-Arms Known Target Priority", VisionConfig.EnableCombinedArmsPrioritySupport);
 
-                yR += 4f;
-                DrawSectionHeaderWithBundle(colRightX, ref yR, colW, "Bundle 6: Ballistics, Audio & Immersion",
-                    VisionConfig.EnablePlaneAudioSmoothing,
-                    VisionConfig.EnableThinCoverBulletPenetration,
-                    VisionConfig.EnableParachuteWindDrift,
-                    VisionConfig.EnableSpectatorHudRetention);
-                DrawToggleButton(colRightX, ref yR, colW, rowH, "Plane Engine Loop De-Throbber (Client)", VisionConfig.EnablePlaneAudioSmoothing);
-                DrawToggleButton(colRightX, ref yR, colW, rowH, "Thin-Cover Wood Bullet Penetration", VisionConfig.EnableThinCoverBulletPenetration);
-                DrawToggleButton(colRightX, ref yR, colW, rowH, "Parachute Wind Drift & Slower Descent", VisionConfig.EnableParachuteWindDrift);
-                DrawToggleButton(colRightX, ref yR, colW, rowH, "Keep Tactical HUD in Free Camera (F)", VisionConfig.EnableSpectatorHudRetention);
+                        yL += 8f;
+                        DrawSectionHeaderWithBundle(colLeftX, ref yL, colW, "Emergent Squad & Battlefield Actions",
+                            VisionConfig.EnableBuddyResupply,
+                            VisionConfig.EnableEmergentWearableScavenge,
+                            VisionConfig.EnableBuddyCasualtyDragging,
+                            VisionConfig.EnableShellShockSurrender,
+                            VisionConfig.EnableComradeLiberation);
+                        DrawToggleButton(colLeftX, ref yL, colW, rowH, "Buddy Resupply (Medic Bandage & Ammo Share)", VisionConfig.EnableBuddyResupply);
+                        DrawToggleButton(colLeftX, ref yL, colW, rowH, "Field Radio Inheritance & Helmet Gifting", VisionConfig.EnableEmergentWearableScavenge);
+                        DrawToggleButton(colLeftX, ref yL, colW, rowH, "Buddy Casualty Dragging to Cover / Medic", VisionConfig.EnableBuddyCasualtyDragging);
+                        DrawToggleButton(colLeftX, ref yL, colW, rowH, "Shell-Shocked & Skittish Surrender", VisionConfig.EnableShellShockSurrender);
+                        DrawToggleButton(colLeftX, ref yL, colW, rowH, "Surrendered Comrade Liberation", VisionConfig.EnableComradeLiberation);
+
+                        DrawSectionHeaderWithBundle(colRightX, ref yR, colW, "Infantry Combat, Cover & CQB",
+                            VisionConfig.EnableBoundingOverwatch,
+                            VisionConfig.EnableSelfPreservationStance,
+                            VisionConfig.EnableSmartWallSideCover,
+                            VisionConfig.BandageOnlyAfterFindingCover,
+                            VisionConfig.EnableAutoPeekOverCover,
+                            VisionConfig.EnableGunnerBipodWallMounting,
+                            VisionConfig.EnablePointBlankMelee,
+                            VisionConfig.EnableStrategicDoorDiscipline,
+                            VisionConfig.EnableBridgeCrossingDiscipline,
+                            VisionConfig.EnableWallVaulting,
+                            VisionConfig.EnableAntiStacking,
+                            VisionConfig.EnableSmartApcDismount,
+                            VisionConfig.EnableTankStandoffAndReverse);
+                        DrawToggleButton(colRightX, ref yR, colW, rowH, "Attacker Bounding Overwatch", VisionConfig.EnableBoundingOverwatch);
+                        DrawToggleButton(colRightX, ref yR, colW, rowH, "Self-Preservation Stances Under Fire", VisionConfig.EnableSelfPreservationStance);
+                        DrawToggleButton(colRightX, ref yR, colW, rowH, "Stand BEHIND Walls (Smart Wall Cover)", VisionConfig.EnableSmartWallSideCover);
+                        DrawToggleButton(colRightX, ref yR, colW, rowH, "Seek Cover Before Bandaging", VisionConfig.BandageOnlyAfterFindingCover);
+                        DrawToggleButton(colRightX, ref yR, colW, rowH, "Auto-Peek Over Low Cover", VisionConfig.EnableAutoPeekOverCover);
+                        DrawToggleButton(colRightX, ref yR, colW, rowH, "Gunner Bipod Wall & Ground Mounting", VisionConfig.EnableGunnerBipodWallMounting);
+                        DrawToggleButton(colRightX, ref yR, colW, rowH, "Point-Blank Bayonet & Melee CQB", VisionConfig.EnablePointBlankMelee);
+                        DrawToggleButton(colRightX, ref yR, colW, rowH, "Strategic Door & Shutter Discipline", VisionConfig.EnableStrategicDoorDiscipline);
+                        DrawToggleButton(colRightX, ref yR, colW, rowH, "Bridge & Narrow Crossing Discipline", VisionConfig.EnableBridgeCrossingDiscipline);
+                        DrawToggleButton(colRightX, ref yR, colW, rowH, "Wall & Fence Vaulting", VisionConfig.EnableWallVaulting);
+                        DrawToggleButton(colRightX, ref yR, colW, rowH, "Anti-Stacking Personal Spacing", VisionConfig.EnableAntiStacking);
+                        DrawToggleButton(colRightX, ref yR, colW, rowH, "Smart APC / Transport Dismount Under Fire", VisionConfig.EnableSmartApcDismount);
+                        DrawToggleButton(colRightX, ref yR, colW, rowH, "Tank Standoff & Reverse Discipline", VisionConfig.EnableTankStandoffAndReverse);
+                        break;
+
+                    case 1: // 2. Vanilla Fixes
+                        DrawSectionHeaderWithBundle(colLeftX, ref yL, colW, "Vanilla Infantry & Camera Bugfixes",
+                            VisionConfig.EnableFirstPersonShadowFix,
+                            VisionConfig.NeverShootStandingInOpen,
+                            VisionConfig.EnforceStandingWhenOutOfCombat,
+                            VisionConfig.EnableIndoorCeilingPronePrevention,
+                            VisionConfig.EnableWallShootingPrevention,
+                            VisionConfig.EnableFriendlyFireAvoidance,
+                            VisionConfig.EnableAntiDogpileMedicTriage);
+                        DrawToggleButton(colLeftX, ref yL, colW, rowH, "First-Person Self-Shadow Fix (Body/Gun)", VisionConfig.EnableFirstPersonShadowFix);
+                        DrawToggleButton(colLeftX, ref yL, colW, rowH, "Never Shoot Standing Upright in Open", VisionConfig.NeverShootStandingInOpen);
+                        DrawToggleButton(colLeftX, ref yL, colW, rowH, "Enforce Standing Speed Out of Combat", VisionConfig.EnforceStandingWhenOutOfCombat);
+                        DrawToggleButton(colLeftX, ref yL, colW, rowH, "Indoor Low-Ceiling Prone Prevention", VisionConfig.EnableIndoorCeilingPronePrevention);
+                        DrawToggleButton(colLeftX, ref yL, colW, rowH, "Wall-Muzzle Shooting Prevention", VisionConfig.EnableWallShootingPrevention);
+                        DrawToggleButton(colLeftX, ref yL, colW, rowH, "Friendly Fire Line-of-Fire Avoidance", VisionConfig.EnableFriendlyFireAvoidance);
+                        DrawToggleButton(colLeftX, ref yL, colW, rowH, "Anti-Dogpile Medic Triage & Claim Release", VisionConfig.EnableAntiDogpileMedicTriage);
+
+                        DrawSectionHeaderWithBundle(colRightX, ref yR, colW, "Vanilla Vehicle, Armor & Plane Fixes",
+                            VisionConfig.EnableSmartVehicleAmmoSelection,
+                            VisionConfig.EnableSmartTankCrewRepair,
+                            VisionConfig.EnableTankRockUnstickAssist,
+                            VisionConfig.EnableCoopAirborneSpawnFix,
+                            VisionConfig.EnableFriendlyVehicleRightOfWay,
+                            VisionConfig.PreventSmallArmsFireAtTanks,
+                            VisionConfig.EnablePlaneAudioSmoothing);
+                        DrawToggleButton(colRightX, ref yR, colW, rowH, "Smart Vehicle & Plane Ammo (HE vs AP)", VisionConfig.EnableSmartVehicleAmmoSelection);
+                        DrawToggleButton(colRightX, ref yR, colW, rowH, "Sheltered Tank Crew Repair & Remount Fix", VisionConfig.EnableSmartTankCrewRepair);
+                        DrawToggleButton(colRightX, ref yR, colW, rowH, "Tank Rock / Obstacle Unstick Assist", VisionConfig.EnableTankRockUnstickAssist);
+                        DrawToggleButton(colRightX, ref yR, colW, rowH, "Co-op Airborne Plane Spawn Hot-Start Fix", VisionConfig.EnableCoopAirborneSpawnFix);
+                        DrawToggleButton(colRightX, ref yR, colW, rowH, "Friendly Right-of-Way & Client Roadkill Fix", VisionConfig.EnableFriendlyVehicleRightOfWay);
+                        DrawToggleButton(colRightX, ref yR, colW, rowH, "Stop Small-Arms Fire at Tanks / Aim Crew", VisionConfig.PreventSmallArmsFireAtTanks);
+                        DrawToggleButton(colRightX, ref yR, colW, rowH, "Plane Engine Audio Loop De-Throbber", VisionConfig.EnablePlaneAudioSmoothing);
+                        break;
+
+                    case 2: // 3. Vision & Realism
+                        DrawSectionHeaderWithBundle(colLeftX, ref yL, colW, "Human Vision, Gaze & Memory",
+                            VisionConfig.PreserveStanceStealthInCombat,
+                            VisionConfig.EnforceHumanFOVWhenAlerted,
+                            VisionConfig.EnableThreatSectorConcentration,
+                            VisionConfig.EnableLocalContactCallouts,
+                            VisionConfig.EnableLastKnownSuppression,
+                            VisionConfig.EnableScopeVisionScaling,
+                            VisionConfig.LimitAircraftInfantrySpotting);
+                        DrawToggleButton(colLeftX, ref yL, colW, rowH, "Preserve Stance Stealth in Combat", VisionConfig.PreserveStanceStealthInCombat);
+                        DrawToggleButton(colLeftX, ref yL, colW, rowH, "Enforce Human FOV Cones When Alerted", VisionConfig.EnforceHumanFOVWhenAlerted);
+                        DrawToggleButton(colLeftX, ref yL, colW, rowH, "Threat-Sector Gaze & Window Alignment", VisionConfig.EnableThreatSectorConcentration);
+                        DrawToggleButton(colLeftX, ref yL, colW, rowH, "Local Contact Callouts (15m Radius)", VisionConfig.EnableLocalContactCallouts);
+                        DrawToggleButton(colLeftX, ref yL, colW, rowH, "Last-Known Suppressive Fire & Grenades", VisionConfig.EnableLastKnownSuppression);
+                        DrawToggleButton(colLeftX, ref yL, colW, rowH, "Scope & Turret Optic Vision Scaling", VisionConfig.EnableScopeVisionScaling);
+                        DrawToggleButton(colLeftX, ref yL, colW, rowH, "Limit Aircraft Infantry Spotting", VisionConfig.LimitAircraftInfantrySpotting);
+
+                        DrawSectionHeaderWithBundle(colRightX, ref yR, colW, "Ballistics, Armor & Environment Realism",
+                            VisionConfig.EnableThinCoverBulletPenetration,
+                            VisionConfig.EnableRealisticVehicleArmorAndTopAttack,
+                            VisionConfig.EnableParachuteWindDrift);
+                        DrawToggleButton(colRightX, ref yR, colW, rowH, "Thin-Cover Wood Bullet Penetration", VisionConfig.EnableThinCoverBulletPenetration);
+                        DrawToggleButton(colRightX, ref yR, colW, rowH, "Realistic Vehicle Armor & Top-Attack AP", VisionConfig.EnableRealisticVehicleArmorAndTopAttack);
+                        DrawToggleButton(colRightX, ref yR, colW, rowH, "Parachute Wind Drift & Slower Descent", VisionConfig.EnableParachuteWindDrift);
+                        break;
+
+                    case 3: // 4. Vets & Roles
+                        DrawSectionHeaderWithBundle(colLeftX, ref yL, colW, "15-Minute Veteran Progression",
+                            VisionConfig.EnableVeteranSystem,
+                            VisionConfig.PromoteVeteranRanks,
+                            VisionConfig.ShowVeteran3DIcons,
+                            VisionConfig.ShowVeteranSquadRosterTags);
+                        DrawToggleButton(colLeftX, ref yL, colW, rowH, "15-Minute Veteran Progression (Master)", VisionConfig.EnableVeteranSystem);
+                        DrawToggleButton(colLeftX, ref yL, colW, rowH, "Field Rank Promotions & Uniform Decals", VisionConfig.PromoteVeteranRanks);
+                        DrawToggleButton(colLeftX, ref yL, colW, rowH, "3D Overhead Veteran Chevron Icons", VisionConfig.ShowVeteran3DIcons);
+                        DrawToggleButton(colLeftX, ref yL, colW, rowH, "Squad Roster Veteran Tags", VisionConfig.ShowVeteranSquadRosterTags);
+
+                        DrawSectionHeaderWithBundle(colRightX, ref yR, colW, "30 Role Personalities & Doctrines",
+                            VisionConfig.EnableRolePersonalities,
+                            VisionConfig.EnableInfantryPersonalities,
+                            VisionConfig.EnableVehicleAndPilotPersonalities,
+                            VisionConfig.VeterancyCuresSkittishness,
+                            VisionConfig.ShowPersonalityInSquadRoster,
+                            VisionConfig.EnableFactionNetDoctrines);
+                        DrawToggleButton(colRightX, ref yR, colW, rowH, "Enable AI Role Personalities (Master)", VisionConfig.EnableRolePersonalities);
+                        DrawToggleButton(colRightX, ref yR, colW, rowH, "Infantry Role Personalities (21 Types)", VisionConfig.EnableInfantryPersonalities);
+                        DrawToggleButton(colRightX, ref yR, colW, rowH, "Vehicle & Pilot Personalities (9 Types)", VisionConfig.EnableVehicleAndPilotPersonalities);
+                        DrawToggleButton(colRightX, ref yR, colW, rowH, "Veterancy Cures Skittishness", VisionConfig.VeterancyCuresSkittishness);
+                        DrawToggleButton(colRightX, ref yR, colW, rowH, "Show Personalities in Squad Roster", VisionConfig.ShowPersonalityInSquadRoster);
+                        DrawToggleButton(colRightX, ref yR, colW, rowH, "20-Nation Historical Command Doctrines", VisionConfig.EnableFactionNetDoctrines);
+                        break;
+
+                    case 4: // 5. Optimizations & QoL
+                        DrawSectionHeaderWithBundle(colLeftX, ref yL, colW, "CPU & Network Frame-Time Optimizations",
+                            VisionConfig.EnableAdaptiveAiTickScaling);
+                        DrawToggleButton(colLeftX, ref yL, colW, rowH, "Adaptive AI Brain Tick Scaling (SP & Co-op)", VisionConfig.EnableAdaptiveAiTickScaling);
+
+                        DrawSectionHeaderWithBundle(colRightX, ref yR, colW, "Player QoL, Obituary & Diagnostics",
+                            VisionConfig.EnableQuickTapSpot,
+                            VisionConfig.EnableDeathScreenAttribution,
+                            VisionConfig.EnableSpectatorHudRetention,
+                            VisionConfig.EnableExtendedRoomNames,
+                            VisionConfig.DebugLogging);
+                        DrawToggleButton(colRightX, ref yR, colW, rowH, "Master Mod Toggle (F8)", VisionConfig.EnableMod);
+                        DrawToggleButton(colRightX, ref yR, colW, rowH, "Short-Press Orders Key to Spot", VisionConfig.EnableQuickTapSpot);
+                        DrawToggleButton(colRightX, ref yR, colW, rowH, "Death Screen Kill Attribution + Age", VisionConfig.EnableDeathScreenAttribution);
+                        DrawToggleButton(colRightX, ref yR, colW, rowH, "Keep Tactical HUD in Free Camera (F)", VisionConfig.EnableSpectatorHudRetention);
+                        DrawToggleButton(colRightX, ref yR, colW, rowH, "64-Char Multiplayer Room Names", VisionConfig.EnableExtendedRoomNames);
+                        DrawToggleButton(colRightX, ref yR, colW, rowH, "Diagnostic Debug Logs (BepInEx Console)", VisionConfig.DebugLogging);
+                        break;
+                }
 
                 // Bottom Action Buttons
                 float bottomY = panelY + panelH - 38f;
                 GUI.color = new Color(0.75f, 0.90f, 1.0f, 1.0f);
-                if (GUI.Button(new Rect(panelX + 20f, bottomY, 220f, 26f), "Reload .cfg from Disk (F9)"))
+                if (GUI.Button(new Rect(panelX + 20f, bottomY, 240f, 26f), "Reload .cfg from Disk (F9)"))
                 {
                     Plugin.Instance.Config.Reload();
                     ShowToast($"[Battle Hardened v{Plugin.PluginVersion}] Reloaded configuration from disk!");
                 }
 
                 GUI.color = new Color(0.85f, 1.0f, 0.85f, 1.0f);
-                if (GUI.Button(new Rect(panelX + 260f, bottomY, 220f, 26f), "Save to .cfg File"))
+                if (GUI.Button(new Rect(panelX + 290f, bottomY, 240f, 26f), "Save to .cfg File"))
                 {
                     Plugin.Instance.Config.Save();
                     ShowToast($"[Battle Hardened v{Plugin.PluginVersion}] Saved configuration to com.antigravity.easyred2.humanai.cfg!");
                 }
 
                 GUI.color = new Color(1.0f, 0.80f, 0.80f, 1.0f);
-                if (GUI.Button(new Rect(panelX + 520f, bottomY, 220f, 26f), "Close Menu (F6)"))
+                if (GUI.Button(new Rect(panelX + 560f, bottomY, 240f, 26f), "Close Menu (F6)"))
                 {
                     _showConfigMenu = false;
                 }
 
                 GUI.color = Color.white;
+            }
+
+            internal static void EnsureMapPickerCatalog()
+            {
+                if (_mapPickerInitialized && _mapPickerCampaigns.Count > 0)
+                    return;
+
+                _mapPickerCampaigns.Clear();
+                try
+                {
+                    var rawCampaigns = VanillaCampaignsList.vanilla_campaign_data;
+                    if (rawCampaigns != null)
+                    {
+                        for (int i = 0; i < rawCampaigns.Length; i++)
+                        {
+                            CampaignTreeData camp = rawCampaigns[i];
+                            if (camp == null || camp.battles == null || camp.battles.Count == 0)
+                                continue;
+
+                            string campName = camp.GetName();
+                            if (string.IsNullOrEmpty(campName))
+                                campName = camp.campaing_id ?? $"Campaign #{i + 1}";
+
+                            List<PickerBattleEntry> bList = new List<PickerBattleEntry>(camp.battles.Count);
+                            for (int j = 0; j < camp.battles.Count; j++)
+                            {
+                                ICampaignTreeBattleData bRef = camp.battles[j];
+                                if (bRef == null)
+                                    continue;
+
+                                string uid = bRef.GetUniqueId() ?? $"Mission_{j + 1}";
+                                string bName = Language.GetBattleName(uid);
+                                if (string.IsNullOrEmpty(bName))
+                                    bName = Language.GetText(uid);
+                                if (string.IsNullOrEmpty(bName))
+                                    bName = uid;
+
+                                bList.Add(new PickerBattleEntry
+                                {
+                                    DisplayName = bName,
+                                    UniqueId = uid,
+                                    BattleRef = bRef
+                                });
+                            }
+
+                            if (bList.Count > 0)
+                            {
+                                _mapPickerCampaigns.Add(new PickerCampaignEntry
+                                {
+                                    CampaignName = campName,
+                                    Battles = bList
+                                });
+                            }
+                        }
+                    }
+                }
+                catch { }
+
+                _mapPickerInitialized = true;
+                _selectedCampaignIdx = Mathf.Clamp(_selectedCampaignIdx, 0, Mathf.Max(0, _mapPickerCampaigns.Count - 1));
+                _selectedBattleIdx = 0;
+            }
+
+            private static void DrawMapPickerWindow()
+            {
+                EnsureMapPickerCatalog();
+
+                float panelW = 820f;
+                float panelH = 620f;
+                float panelX = (Screen.width - panelW) * 0.5f;
+                float panelY = (Screen.height - panelH) * 0.5f;
+
+                GUI.color = new Color(0.05f, 0.06f, 0.08f, 0.95f);
+                GUI.Box(new Rect(panelX, panelY, panelW, panelH), "");
+
+                KeyCode mpKey = VisionConfig.MapPickerHotkey != null ? VisionConfig.MapPickerHotkey.Value : KeyCode.F5;
+                GUI.color = new Color(1.0f, 0.88f, 0.35f, 1.0f);
+                GUI.Label(new Rect(panelX + 20f, panelY + 10f, panelW - 240f, 22f),
+                    $"Easy Red 2: Battle Hardened  |  In-Game Campaign & Mission Picker ({mpKey})");
+
+                GUI.color = new Color(0.75f, 0.90f, 1.0f, 1.0f);
+                if (GUI.Button(new Rect(panelX + panelW - 210f, panelY + 8f, 190f, 24f), "Back to Feature Menu (F6)"))
+                {
+                    _showMapPicker = false;
+                    _showConfigMenu = true;
+                }
+
+                bool canControlMatch = !Photon.Pun.PhotonNetwork.InRoom || Photon.Pun.PhotonNetwork.IsMasterClient;
+                GUI.color = canControlMatch
+                    ? new Color(0.75f, 0.88f, 0.78f, 1.0f)
+                    : new Color(1.0f, 0.65f, 0.55f, 1.0f);
+                string roleNote = canControlMatch
+                    ? "Select a Campaign on the left and a Mission on the right to Switch Immediately or Queue Next:"
+                    : "Note: In Multiplayer Co-op, only the Room Host (MasterClient) can switch or queue missions.";
+                GUI.Label(new Rect(panelX + 20f, panelY + 34f, panelW - 40f, 20f), roleNote);
+
+                float colCampX = panelX + 20f;
+                float colCampW = 310f;
+                float colBatX = panelX + 346f;
+                float colBatW = 454f;
+                float listTopY = panelY + 60f;
+                int rowsPerPage = 17;
+                float rowH = 24f;
+
+                // Left Column: Campaigns
+                int campCount = _mapPickerCampaigns.Count;
+                int totalCampPages = Mathf.Max(1, (campCount + rowsPerPage - 1) / rowsPerPage);
+                _campaignPage = Mathf.Clamp(_campaignPage, 0, totalCampPages - 1);
+
+                GUI.color = new Color(0.55f, 0.82f, 1.0f, 1.0f);
+                GUI.Label(new Rect(colCampX, listTopY, colCampW - 110f, 20f), $"=== Campaigns ({campCount}) ===");
+                if (totalCampPages > 1)
+                {
+                    GUI.color = new Color(0.85f, 0.90f, 1.0f, 1.0f);
+                    if (GUI.Button(new Rect(colCampX + colCampW - 104f, listTopY - 1f, 48f, 20f), "< Prev"))
+                        _campaignPage = (_campaignPage - 1 + totalCampPages) % totalCampPages;
+                    if (GUI.Button(new Rect(colCampX + colCampW - 52f, listTopY - 1f, 52f, 20f), "Next >"))
+                        _campaignPage = (_campaignPage + 1) % totalCampPages;
+                }
+
+                float yC = listTopY + 24f;
+                int cStart = _campaignPage * rowsPerPage;
+                int cEnd = Mathf.Min(campCount, cStart + rowsPerPage);
+                for (int i = cStart; i < cEnd; i++)
+                {
+                    bool selected = i == _selectedCampaignIdx;
+                    GUI.color = selected
+                        ? new Color(1.0f, 0.86f, 0.32f, 1.0f)
+                        : new Color(0.82f, 0.86f, 0.92f, 0.92f);
+
+                    string prefix = selected ? ">> " : "   ";
+                    PickerCampaignEntry cEntry = _mapPickerCampaigns[i];
+                    if (GUI.Button(new Rect(colCampX, yC, colCampW, rowH - 2f), $"{prefix}{cEntry.CampaignName} ({cEntry.Battles.Count})"))
+                    {
+                        _selectedCampaignIdx = i;
+                        _selectedBattleIdx = 0;
+                        _battlePage = 0;
+                    }
+                    yC += rowH;
+                }
+
+                // Right Column: Missions in Selected Campaign
+                List<PickerBattleEntry> curBattles = (_selectedCampaignIdx >= 0 && _selectedCampaignIdx < campCount)
+                    ? _mapPickerCampaigns[_selectedCampaignIdx].Battles
+                    : null;
+                int batCount = curBattles != null ? curBattles.Count : 0;
+                int totalBatPages = Mathf.Max(1, (batCount + rowsPerPage - 1) / rowsPerPage);
+                _battlePage = Mathf.Clamp(_battlePage, 0, totalBatPages - 1);
+                _selectedBattleIdx = Mathf.Clamp(_selectedBattleIdx, 0, Mathf.Max(0, batCount - 1));
+
+                GUI.color = new Color(0.55f, 0.82f, 1.0f, 1.0f);
+                GUI.Label(new Rect(colBatX, listTopY, colBatW - 110f, 20f), $"=== Missions ({batCount}) ===");
+                if (totalBatPages > 1)
+                {
+                    GUI.color = new Color(0.85f, 0.90f, 1.0f, 1.0f);
+                    if (GUI.Button(new Rect(colBatX + colBatW - 104f, listTopY - 1f, 48f, 20f), "< Prev"))
+                        _battlePage = (_battlePage - 1 + totalBatPages) % totalBatPages;
+                    if (GUI.Button(new Rect(colBatX + colBatW - 52f, listTopY - 1f, 52f, 20f), "Next >"))
+                        _battlePage = (_battlePage + 1) % totalBatPages;
+                }
+
+                float yB = listTopY + 24f;
+                if (curBattles != null)
+                {
+                    int bStart = _battlePage * rowsPerPage;
+                    int bEnd = Mathf.Min(batCount, bStart + rowsPerPage);
+                    for (int j = bStart; j < bEnd; j++)
+                    {
+                        bool selected = j == _selectedBattleIdx;
+                        GUI.color = selected
+                            ? new Color(0.45f, 0.95f, 0.52f, 1.0f)
+                            : new Color(0.82f, 0.86f, 0.92f, 0.92f);
+
+                        string prefix = selected ? "[SELECTED] " : $"#{j + 1}. ";
+                        PickerBattleEntry bEntry = curBattles[j];
+                        if (GUI.Button(new Rect(colBatX, yB, colBatW, rowH - 2f), $"{prefix}{bEntry.DisplayName}"))
+                        {
+                            _selectedBattleIdx = j;
+                        }
+                        yB += rowH;
+                    }
+                }
+
+                // Bottom Selection Summary & Action Buttons
+                float summaryY = panelY + panelH - 72f;
+                string selSummary = "No mission selected.";
+                PickerBattleEntry chosenBattle = default;
+                bool hasChosen = false;
+                if (curBattles != null && _selectedBattleIdx >= 0 && _selectedBattleIdx < curBattles.Count)
+                {
+                    chosenBattle = curBattles[_selectedBattleIdx];
+                    hasChosen = chosenBattle.BattleRef != null;
+                    string campTitle = _mapPickerCampaigns[_selectedCampaignIdx].CampaignName;
+                    int playlistCount = MatchData.data != null && MatchData.data.battles != null ? MatchData.data.battles.Count : 0;
+                    int curIdx = MatchData.data != null ? MatchData.data.currentBattleId + 1 : 1;
+                    selSummary = $"Selected: [{campTitle}]  {chosenBattle.DisplayName}   |   Active Playlist: Battle {curIdx} of {playlistCount}";
+                }
+
+                GUI.color = new Color(0.95f, 0.92f, 0.78f, 1.0f);
+                GUI.Label(new Rect(panelX + 20f, summaryY, panelW - 40f, 22f), selSummary);
+
+                float bottomY = panelY + panelH - 42f;
+                GUI.color = (hasChosen && canControlMatch)
+                    ? new Color(0.45f, 0.95f, 0.52f, 1.0f)
+                    : new Color(0.55f, 0.55f, 0.55f, 0.75f);
+                if (GUI.Button(new Rect(panelX + 20f, bottomY, 260f, 28f), "Switch to Mission Now") && hasChosen && canControlMatch)
+                {
+                    TriggerMapPickerMission(chosenBattle.BattleRef, chosenBattle.DisplayName, switchNow: true);
+                }
+
+                GUI.color = (hasChosen && canControlMatch)
+                    ? new Color(0.55f, 0.85f, 1.0f, 1.0f)
+                    : new Color(0.55f, 0.55f, 0.55f, 0.75f);
+                if (GUI.Button(new Rect(panelX + 295f, bottomY, 260f, 28f), "Queue as Next Mission") && hasChosen && canControlMatch)
+                {
+                    TriggerMapPickerMission(chosenBattle.BattleRef, chosenBattle.DisplayName, switchNow: false);
+                }
+
+                GUI.color = new Color(1.0f, 0.80f, 0.80f, 1.0f);
+                if (GUI.Button(new Rect(panelX + 570f, bottomY, 230f, 28f), $"Close Picker ({mpKey})"))
+                {
+                    _showMapPicker = false;
+                }
+
+                GUI.color = Color.white;
+            }
+
+            private static void TriggerMapPickerMission(ICampaignTreeBattleData battleRef, string displayName, bool switchNow)
+            {
+                if (battleRef == null)
+                    return;
+
+                try
+                {
+                    MatchData md = MatchData.data;
+                    if (md == null)
+                    {
+                        ShowToast("[Battle Hardened] MatchData is not active yet.");
+                        return;
+                    }
+
+                    if (Photon.Pun.PhotonNetwork.InRoom && !Photon.Pun.PhotonNetwork.IsMasterClient)
+                    {
+                        ShowToast("[Battle Hardened] Only the Multiplayer Host can change or queue missions.");
+                        return;
+                    }
+
+                    MatchBattle newMb = new MatchBattle(battleRef);
+                    MatchBattle curMb = md.CurrentBattle;
+                    if (curMb != null)
+                    {
+                        newMb.ticketsMultiplier = curMb.ticketsMultiplier;
+                        newMb.maxAllies = curMb.maxAllies;
+                        newMb.maxAxis = curMb.maxAxis;
+                        newMb.proportionalAlliesRefValue = curMb.proportionalAlliesRefValue;
+                        newMb.proportionalAxisRefValue = curMb.proportionalAxisRefValue;
+                        newMb.proportionalSliderRefValue = curMb.proportionalSliderRefValue;
+                        newMb.allowAchievements = curMb.allowAchievements;
+                    }
+
+                    if (md.battles == null)
+                        md.ResetSelectedBattles();
+
+                    int insertIdx = Mathf.Clamp(md.currentBattleId + 1, 0, md.battles.Count);
+                    md.battles.Insert(insertIdx, newMb);
+
+                    if (!switchNow)
+                    {
+                        if (Photon.Pun.PhotonNetwork.InRoom && Photon.Pun.PhotonNetwork.IsMasterClient)
+                        {
+                            md.UpdateNetworkMatchInfo();
+                        }
+                        ShowToast($"[Battle Hardened] Queued '{displayName}' as Next Mission (#{insertIdx + 1} in playlist)!");
+                        return;
+                    }
+
+                    _showMapPicker = false;
+                    _showConfigMenu = false;
+                    md.currentBattleId = insertIdx;
+                    md.loadedBattle = null;
+
+                    if (Photon.Pun.PhotonNetwork.InRoom)
+                    {
+                        md.UpdateNetworkMatchInfo();
+                        BattleLoader bl = BattleLoader.instance;
+                        if (bl != null && bl.photonView != null)
+                        {
+                            var rawBytes = ResourcesManager.SerializeToByteArray(md.Cast<Il2CppSystem.Object>());
+                            var waitArr = new Il2CppInterop.Runtime.InteropTypes.Arrays.Il2CppStructArray<float>(1);
+                            waitArr[0] = 1.5f;
+                            var rpcArgs = new Il2CppInterop.Runtime.InteropTypes.Arrays.Il2CppReferenceArray<Il2CppSystem.Object>(2);
+                            rpcArgs[0] = rawBytes.Cast<Il2CppSystem.Object>();
+                            rpcArgs[1] = waitArr.Cast<Il2CppSystem.Array>().GetValue(0);
+                            bl.photonView.RPC("ConnectToNextMatch", Photon.Pun.RpcTarget.Others, rpcArgs);
+                            bl.LoadNextMpMatch();
+                            ShowToast($"[Battle Hardened] Switching Multiplayer Room to '{displayName}'...");
+                            return;
+                        }
+                    }
+
+                    md.StartBattleLoading();
+                    ShowToast($"[Battle Hardened] Loading '{displayName}'...");
+                }
+                catch (Exception ex)
+                {
+                    ShowToast($"[Battle Hardened] Map Picker error: {ex.Message}");
+                }
             }
 
             private static void DrawSectionHeaderWithBundle(float x, ref float y, float width, string title, params ConfigEntry<bool>[] bundleEntries)
@@ -628,6 +1066,7 @@ namespace EasyRed2HumanAI
             {
                 forceFull = true;
                 _coverExposureCache.Clear();
+                _medicPatientClaims.Clear();
                 AiCore.ClearSpatialCaches();
                 ClearBallisticsCaches();
                 ClearDoorCaches();
@@ -722,6 +1161,9 @@ namespace EasyRed2HumanAI
                 AiCore.PruneDict(_botGoapPlans, _reusableAlivePtrs);
                 AiCore.PruneDict(_botScavengeCaches, _reusableAlivePtrs);
                 AiCore.PruneDict(_nextWeaponUpgradeAllowedTime, _reusableAlivePtrs);
+                AiCore.PruneDict(_nextBuddyBandageRefillTime, _reusableAlivePtrs);
+                AiCore.PruneDict(_casualtyDragStates, _reusableAlivePtrs);
+                AiCore.PruneDict(_medicPatientClaims, _reusableAlivePtrs);
                 AiCore.PruneDict(_cornerPieCache, _reusableAlivePtrs);
                 AiCore.PruneDict(_nextCornerPieCountTime, _reusableAlivePtrs);
                 AiCore.PruneDict(_lastDamageByVictim, _reusableAlivePtrs);

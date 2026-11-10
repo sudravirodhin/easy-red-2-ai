@@ -659,6 +659,11 @@ namespace EasyRed2HumanAI
             public bool IsSquadLeader;
             public bool HasSurrendered;
             public bool IsSpotted;
+            public bool IsInjured;
+            public bool IsMedic;
+            public bool IsAmmoCarrier;
+            public bool CanBorrowAmmo;
+            public bool HasHeadgear;
         }
 
         public static SquadSnapshot[] WorldSquads = new SquadSnapshot[96];
@@ -667,6 +672,7 @@ namespace EasyRed2HumanAI
         public static int WorldSoldierCount;
 
         private static readonly Dictionary<IntPtr, int> _worldSquadIndexByPtr = new Dictionary<IntPtr, int>(96);
+        private static readonly HashSet<IntPtr> _seenWorldSoldierPtrs = new HashSet<IntPtr>(384);
         private static float _lastWorldSnapshotTime = -999f;
 
         public static bool TryGetSquadSnapshot(IntPtr sqPtr, out SquadSnapshot snap)
@@ -693,6 +699,7 @@ namespace EasyRed2HumanAI
             WorldSquadCount = 0;
             WorldSoldierCount = 0;
             _worldSquadIndexByPtr.Clear();
+            _seenWorldSoldierPtrs.Clear();
 
             try
             {
@@ -728,7 +735,8 @@ namespace EasyRed2HumanAI
                                 refSoldier = u;
 
                             Vector3 uPos = u.transform.position;
-                            if (leaderAlive && radioNetEnabled && !hasAliveRadiomanNear && u.IsRadioman() && !u.HasSurrended())
+                            bool uSurr = u.HasSurrended();
+                            if (leaderAlive && radioNetEnabled && !hasAliveRadiomanNear && u.IsRadioman() && !uSurr)
                             {
                                 if ((uPos - leaderPos).sqrMagnitude <= 32f * 32f)
                                     hasAliveRadiomanNear = true;
@@ -737,6 +745,7 @@ namespace EasyRed2HumanAI
                             if (WorldSoldierCount >= WorldSoldiers.Length)
                                 Array.Resize(ref WorldSoldiers, WorldSoldiers.Length * 2);
 
+                            _seenWorldSoldierPtrs.Add(u.Pointer);
                             WorldSoldiers[WorldSoldierCount++] = new SoldierSnapshot
                             {
                                 Ptr = u.Pointer,
@@ -747,8 +756,13 @@ namespace EasyRed2HumanAI
                                 IsPlayer = u.IsPlayer(),
                                 IsOnVehicle = u.IsOnVehicle(),
                                 IsSquadLeader = leaderAlive && u.Pointer == leader.Pointer,
-                                HasSurrendered = u.HasSurrended(),
-                                IsSpotted = u.IsSpotted
+                                HasSurrendered = uSurr,
+                                IsSpotted = u.IsSpotted,
+                                IsInjured = u.IsInjured,
+                                IsMedic = u.IsMedic(),
+                                IsAmmoCarrier = u.IsAmmoBoxCarrier(),
+                                CanBorrowAmmo = u.CanBorrowAmmo,
+                                HasHeadgear = u.hasHeadgear
                             };
                             addedUnits++;
                         }
@@ -844,6 +858,46 @@ namespace EasyRed2HumanAI
                                     break;
                                 }
                             }
+                        }
+                    }
+                    // Pass 3: Append any live soldiers detached from Squad.units (e.g. surrendered soldiers whose
+                    // joinedSquad was cleared by vanilla Soldier.Surrender(), or lone players/pilots)
+                    var allCreatures = Creature.allCreatures;
+                    if (allCreatures != null)
+                    {
+                        int cCount = allCreatures.Count;
+                        for (int cIdx = 0; cIdx < cCount; cIdx++)
+                        {
+                            Creature c = allCreatures[cIdx];
+                            if (c == null || !c.IsAlive || c.Pointer == IntPtr.Zero || _seenWorldSoldierPtrs.Contains(c.Pointer))
+                                continue;
+
+                            Soldier u = c.TryCast<Soldier>();
+                            if (u == null || !u.IsAlive || u.Pointer == IntPtr.Zero || _seenWorldSoldierPtrs.Contains(u.Pointer) || u.transform == null)
+                                continue;
+
+                            if (WorldSoldierCount >= WorldSoldiers.Length)
+                                Array.Resize(ref WorldSoldiers, WorldSoldiers.Length * 2);
+
+                            _seenWorldSoldierPtrs.Add(u.Pointer);
+                            WorldSoldiers[WorldSoldierCount++] = new SoldierSnapshot
+                            {
+                                Ptr = u.Pointer,
+                                Ref = u,
+                                SquadPtr = u.joinedSquad != null ? u.joinedSquad.Pointer : IntPtr.Zero,
+                                Pos = u.transform.position,
+                                Faction = u.faction,
+                                IsPlayer = u.IsPlayer(),
+                                IsOnVehicle = u.IsOnVehicle(),
+                                IsSquadLeader = false,
+                                HasSurrendered = u.HasSurrended(),
+                                IsSpotted = u.IsSpotted,
+                                IsInjured = u.IsInjured,
+                                IsMedic = u.IsMedic(),
+                                IsAmmoCarrier = u.IsAmmoBoxCarrier(),
+                                CanBorrowAmmo = u.CanBorrowAmmo,
+                                HasHeadgear = u.hasHeadgear
+                            };
                         }
                     }
                 }

@@ -1,4 +1,5 @@
 using BepInEx.Configuration;
+using UnityEngine;
 
 namespace EasyRed2HumanAI
 {
@@ -10,6 +11,7 @@ namespace EasyRed2HumanAI
         public static ConfigEntry<bool> EnableQuickTapSpot;
         public static ConfigEntry<bool> EnableExtendedRoomNames;
         public static ConfigEntry<bool> EnableAdaptiveAiTickScaling;
+        public static ConfigEntry<KeyCode> MapPickerHotkey;
 
         // 1. Infantry Sight & Stance
         public static ConfigEntry<float> StandingSightRange;
@@ -84,6 +86,13 @@ namespace EasyRed2HumanAI
         public static ConfigEntry<bool> EnableRadiomanIntelNet;
         public static ConfigEntry<bool> EnableTacticalVoiceCallouts;
         public static ConfigEntry<bool> EnableFactionNetDoctrines;
+        public static ConfigEntry<bool> EnableCoopAirborneSpawnFix;
+        public static ConfigEntry<bool> EnableTankRockUnstickAssist;
+        public static ConfigEntry<bool> EnableSmartVehicleAmmoSelection;
+        public static ConfigEntry<bool> EnableAntiDogpileMedicTriage;
+        public static ConfigEntry<bool> EnableBuddyResupply;
+        public static ConfigEntry<bool> EnableEmergentWearableScavenge;
+        public static ConfigEntry<bool> EnableBuddyCasualtyDragging;
 
         // 7. Phase 3: Role-Based AI Personalities (3 Archetypes per Infantry & Vehicle Role)
         public static ConfigEntry<bool> EnableRolePersonalities;
@@ -96,8 +105,10 @@ namespace EasyRed2HumanAI
         // 8. Phase 4: Ballistics, Plane Audio De-Throbber & Battlefield Immersion
         public static ConfigEntry<bool> EnablePlaneAudioSmoothing;
         public static ConfigEntry<bool> EnableThinCoverBulletPenetration;
+        public static ConfigEntry<bool> EnableRealisticVehicleArmorAndTopAttack;
         public static ConfigEntry<bool> EnableParachuteWindDrift;
         public static ConfigEntry<bool> EnableSpectatorHudRetention;
+        public static ConfigEntry<bool> EnableFirstPersonShadowFix;
 
         public static void Init(ConfigFile config)
         {
@@ -136,6 +147,12 @@ namespace EasyRed2HumanAI
                 "EnableAdaptiveAiTickScaling",
                 true,
                 "Performance & Responsiveness (SP & Co-op): Dynamically scales Creature.ProcessSequentialUpdates from vanilla's hardcoded 1 slot/frame up to 2-3 active on-foot SoldierAI brain ticks/frame in large battles (while skipping non-soldier vehicle/dead slots without wasting a frame tick, and backing off automatically if frame time exceeds 25ms).");
+
+            MapPickerHotkey = config.Bind(
+                "0. General",
+                "MapPickerHotkey",
+                KeyCode.F5,
+                "Hotkey to open the standalone In-Game Campaign & Mission Picker window (default F5).");
 
             // 1. Infantry Sight & Stance
             StandingSightRange = config.Bind(
@@ -515,6 +532,48 @@ namespace EasyRed2HumanAI
                 true,
                 "Nation-Specific Team Net & GOAP Doctrines: gives all 20 Easy Red 2 factions (USA, Germany, USSR, UK, Japan, France, Italy, Poland, China, Finland, Mongolia, Manchukuo, Canada, Australia, New Zealand, India, Gurkha, Greece, Romania, Hungary + balanced default fallback) historically authentic radio net, flanking, emplacement, and GOAP cost habits.");
 
+            EnableCoopAirborneSpawnFix = config.Bind(
+                "6. Tactical Self-Preservation & Muzzle Discipline",
+                "EnableCoopAirborneSpawnFix",
+                true,
+                "Vanilla Co-op Fix: hot-starts aircraft engine, throttle, and cruise velocity when a multiplayer client spawns into an airborne plane, and keeps remote client aircraft isGrounded state synced on the Host so enemy AI fighters intercept them.");
+
+            EnableTankRockUnstickAssist = config.Bind(
+                "6. Tactical Self-Preservation & Muzzle Discipline",
+                "EnableTankRockUnstickAssist",
+                true,
+                "Vanilla Physics Fix: applies a smooth sprocket/track crawl impulse when a tank's discrete WheelCollider rays get high-centered on a rock, stump, or trench lip while throttle is held.");
+
+            EnableSmartVehicleAmmoSelection = config.Bind(
+                "6. Tactical Self-Preservation & Muzzle Discipline",
+                "EnableSmartVehicleAmmoSelection",
+                true,
+                "Vanilla AI Fix: prevents tanks and attack planes from wasting heavy AP/APHE/HEAT cannon rounds on foot infantry when they have a loaded Coaxial, Hull, or Wing Machine Gun.");
+
+            EnableAntiDogpileMedicTriage = config.Bind(
+                "6. Tactical Self-Preservation & Muzzle Discipline",
+                "EnableAntiDogpileMedicTriage",
+                true,
+                "Vanilla AI Fix: prevents 3-4 medics from dogpiling the same wounded soldier (caps at 1 medic, or 2 max if the first is distant/suppressed), releases the claim immediately if the medic dies or goes down, and fans extra medics out to other wounded allies.");
+
+            EnableBuddyResupply = config.Bind(
+                "6. Tactical Self-Preservation & Muzzle Discipline",
+                "EnableBuddyResupply",
+                true,
+                "Emergent GOAP Buddy Resupply: bots visit live Medics for extra bandages (RefillBandages), borrow ammo from Riflemen/Support carriers (BorrowAmmos), and Support carriers proactively feed dry MG/AT squadmates.");
+
+            EnableEmergentWearableScavenge = config.Bind(
+                "6. Tactical Self-Preservation & Muzzle Discipline",
+                "EnableEmergentWearableScavenge",
+                true,
+                "Emergent GOAP Radio Inheritance & Helmet Recovery: squads that lost their Radioman can loot and equip (SetWerable) a fallen friendly or enemy radio backpack to reconnect to the Team Radio Net, and helmetless bots pick up knocked-off or player-gifted helmets.");
+
+            EnableBuddyCasualtyDragging = config.Bind(
+                "6. Tactical Self-Preservation & Muzzle Discipline",
+                "EnableBuddyCasualtyDragging",
+                true,
+                "Emergent GOAP Buddy Casualty Dragging: nearby riflemen drag/carry (CarryBodySynched) wounded teammates out of open fire into cover or directly to a nearby friendly/player Medic.");
+
             // 7. AI Role Personalities (3 Archetypes per Infantry & Vehicle Role)
             EnableRolePersonalities = config.Bind(
                 "7. AI Role Personalities",
@@ -565,6 +624,12 @@ namespace EasyRed2HumanAI
                 true,
                 "Material-aware thin-cover bullet penetration: allows full-power rifle, MG, and high-caliber rounds to penetrate thin wooden fences, doors, shutters, and light planks once with reduced velocity while solid terrain, masonry, and armor still stop rounds.");
 
+            EnableRealisticVehicleArmorAndTopAttack = config.Bind(
+                "8. Ballistics & Immersion",
+                "EnableRealisticVehicleArmorAndTopAttack",
+                true,
+                "Realistic aircraft top-attack AP roof penetration, cockpit MG spall protection, and enclosed tank crew external blast protection.");
+
             EnableParachuteWindDrift = config.Bind(
                 "8. Ballistics & Immersion",
                 "EnableParachuteWindDrift",
@@ -576,6 +641,12 @@ namespace EasyRed2HumanAI
                 "EnableSpectatorHudRetention",
                 true,
                 "Keep tactical HUD and 3D unit markers visible when entering Free/Spectator Camera (F) until you explicitly press the Cinematic Camera Hide/Show GUI toggle.");
+
+            EnableFirstPersonShadowFix = config.Bind(
+                "8. Ballistics & Immersion",
+                "EnableFirstPersonShadowFix",
+                true,
+                "Vanilla Visual Fix: disables duplicate shadows from disembodied first-person camera arms (FPSGunManager) and renders a full-head/body shadow proxy on the local player so first-person shadows match third-person.");
         }
 
         public static void SetBundleEntries(bool state, params ConfigEntry<bool>[] entries)

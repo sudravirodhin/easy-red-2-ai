@@ -1618,18 +1618,35 @@ namespace EasyRed2HumanAI
             {
                 try
                 {
-                    if (!VisionConfig.EnableMod.Value ||
-                        !VisionConfig.EnableThreatSectorConcentration.Value ||
-                        __instance == null ||
-                        !__instance.IsMoving() ||
-                        __instance.HasEnemyAndCanFireAtHim ||
-                        __instance.HeldMortar != null)
-                    {
+                    if (!VisionConfig.EnableMod.Value || __instance == null)
                         return true;
-                    }
 
                     Soldier soldier = __instance.character;
-                    if (!AiCore.IsLocallyOwnedBot(soldier) ||
+                    if (!AiCore.IsLocallyOwnedBot(soldier))
+                        return true;
+
+                    // Tank Crew Repair Priority: while assigned to a VehicleRepairTask, keep allowFireAtEnemy false
+                    // (unless an enemy is point-blank <= 6.0m) so the crewman sprints to the sheltered hull side and
+                    // repairs immediately without stopping to duel with a pistol/SMG!
+                    if (VisionConfig.EnableSmartTankCrewRepair.Value &&
+                        soldier.targetDestination != null &&
+                        soldier.targetDestination.TryCast<VehicleRepairTask>() != null)
+                    {
+                        bool pointBlankSelfDefense = __instance.HasEnemyAndCanFireAtHim &&
+                                                     __instance.distFromTarget > 0.1f &&
+                                                     __instance.distFromTarget <= 6.0f;
+                        if (!pointBlankSelfDefense)
+                        {
+                            __instance.allowFireAtEnemy = false;
+                            __instance.shotFiresEnd = 0f;
+                            soldier.SetGunTriggerPressed(false);
+                        }
+                    }
+
+                    if (!VisionConfig.EnableThreatSectorConcentration.Value ||
+                        !__instance.IsMoving() ||
+                        __instance.HasEnemyAndCanFireAtHim ||
+                        __instance.HeldMortar != null ||
                         soldier.IsOnVehicle() ||
                         soldier.IsCharging() ||
                         soldier.UsingBipod() ||
@@ -1678,7 +1695,10 @@ namespace EasyRed2HumanAI
                         soldier.isInHandsAnimation ||
                         soldier.HasSurrended() ||
                         soldier.IsCarried() ||
-                        soldier.IsCarryingBody())
+                        soldier.IsCarryingBody() ||
+                        (soldier.targetDestination != null &&
+                         (soldier.targetDestination.TryCast<VehicleRepairTask>() != null ||
+                          soldier.targetDestination.TryCast<MedicHealingDestination>() != null)))
                     {
                         _isTurningToWatchSector.Remove(ptr);
                         return;

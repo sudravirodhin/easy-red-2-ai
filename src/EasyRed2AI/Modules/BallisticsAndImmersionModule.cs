@@ -378,10 +378,14 @@ namespace EasyRed2HumanAI
                     if (col.GetComponentInParent<Vehicle>() != null)
                         return ImpactUnknownOrBlocked;
 
-                    ImpactSpecifier spec = col.GetComponent<ImpactSpecifier>();
-                    if (spec == null)
-                        spec = col.GetComponentInParent<ImpactSpecifier>();
+                    // CRITICAL IL2CPP FIX: ImpactSpecifier is an IL2CPP interface (Il2CppObjectBase), so generic
+                    // col.GetComponent<ImpactSpecifier>() fails in IL2CPP! Use Il2CppType.Of<ImpactSpecifier>() + TryCast.
+                    var specType = Il2CppInterop.Runtime.Il2CppType.Of<ImpactSpecifier>();
+                    Component specComp = col.GetComponent(specType);
+                    if (specComp == null)
+                        specComp = col.GetComponentInParent(specType);
 
+                    ImpactSpecifier spec = specComp != null ? specComp.TryCast<ImpactSpecifier>() : null;
                     if (spec != null)
                     {
                         ImpactType t = spec.ImpactType;
@@ -469,8 +473,14 @@ namespace EasyRed2HumanAI
 
                 try
                 {
-                    if (!VisionConfig.EnableMod.Value || __instance == null || __instance.Pointer == IntPtr.Zero || __0 == null)
+                    if (!VisionConfig.EnableMod.Value ||
+                        !VisionConfig.EnableRealisticVehicleArmorAndTopAttack.Value ||
+                        __instance == null ||
+                        __instance.Pointer == IntPtr.Zero ||
+                        __0 == null)
+                    {
                         return;
+                    }
 
                     Vehicle rootVeh = __instance.rootVeh;
                     bool targetIsAir = rootVeh != null && rootVeh.Pointer != IntPtr.Zero && rootVeh.IsAirVehicle();
@@ -663,8 +673,13 @@ namespace EasyRed2HumanAI
             {
                 try
                 {
-                    if (!VisionConfig.EnableMod.Value || __instance == null || __instance.unit == null)
+                    if (!VisionConfig.EnableMod.Value ||
+                        !VisionConfig.EnableRealisticVehicleArmorAndTopAttack.Value ||
+                        __instance == null ||
+                        __instance.unit == null)
+                    {
                         return true;
+                    }
 
                     Soldier victim = __instance.unit.TryCast<Soldier>();
                     if (victim == null || victim.Pointer == IntPtr.Zero || !victim.IsOnVehicle() || !victim.IsAlive)
@@ -841,6 +856,169 @@ namespace EasyRed2HumanAI
                 try
                 {
                     MaintainSpectatorHudVisibility();
+                }
+                catch { }
+            }
+        }
+
+        // ============================================================================
+        // 5. VANILLA VISUAL FIX: FIRST-PERSON SELF-SHADOW FIX
+        // In vanilla First Person:
+        //  1) SoldierLodManager.SetBodyHeadVisibility (0x18079C040) swaps the player's
+        //     head submesh materials to ResourcesManager.hideMaterial (which casts ZERO shadow)
+        //     while ItemHelmet.SetHidden() uses ShadowCastingMode.ShadowsOnly—producing a
+        //     headless torso shadow with a floating helmet hovering over an empty neck!
+        //  2) FPSGunManager leaves shadowCastingMode = On on the disembodied camera viewmodel
+        //     arms (hands_mesh, uniform_mesh, and FPS handheld weapon renderers), casting a
+        //     second giant pair of floating arms on top of the 3P body shadow!
+        // Fix (Local Player Only — Zero Bot Overhead):
+        //  - Turn ShadowCastingMode.Off on FPSGunManager viewmodel renderers.
+        //  - When !showHead (First Person), set bodyMesh.shadowCastingMode = Off (keeping
+        //    hideMaterial so the head never clips into the FPS camera) and drive a cached
+        //    ShadowsOnly child SkinnedMeshRenderer with full FaceData materials so 1st-person
+        //    shadows match 3rd-person!
+        // ============================================================================
+        private static readonly Dictionary<IntPtr, SkinnedMeshRenderer> _fpsHeadShadowProxies = new Dictionary<IntPtr, SkinnedMeshRenderer>(4);
+
+        private static void ApplyFpsViewmodelShadowMode(FPSGunManager mgr)
+        {
+            if (mgr == null || mgr.Pointer == IntPtr.Zero)
+                return;
+
+            var mode = (VisionConfig.EnableMod.Value && VisionConfig.EnableFirstPersonShadowFix.Value)
+                ? UnityEngine.Rendering.ShadowCastingMode.Off
+                : UnityEngine.Rendering.ShadowCastingMode.On;
+
+            SkinnedMeshRenderer hands = mgr.hands_mesh;
+            if (hands != null)
+                hands.shadowCastingMode = mode;
+
+            SkinnedMeshRenderer uni = mgr.uniform_mesh;
+            if (uni != null)
+                uni.shadowCastingMode = mode;
+
+            SkinnedMeshRenderer cachedUni = mgr.cachedUniformMesh;
+            if (cachedUni != null)
+                cachedUni.shadowCastingMode = mode;
+
+            Transform wJnt = mgr.WeaponJNT;
+            if (wJnt != null)
+            {
+                var renderers = wJnt.GetComponentsInChildren<Renderer>(true);
+                if (renderers != null)
+                {
+                    for (int i = 0; i < renderers.Length; i++)
+                    {
+                        if (renderers[i] != null)
+                            renderers[i].shadowCastingMode = mode;
+                    }
+                }
+            }
+
+            Transform wJntGen = mgr.WeaponJNT_generic;
+            if (wJntGen != null)
+            {
+                var renderers = wJntGen.GetComponentsInChildren<Renderer>(true);
+                if (renderers != null)
+                {
+                    for (int i = 0; i < renderers.Length; i++)
+                    {
+                        if (renderers[i] != null)
+                            renderers[i].shadowCastingMode = mode;
+                    }
+                }
+            }
+        }
+
+        [HarmonyPatch(typeof(FPSGunManager), nameof(FPSGunManager.RefreshSkin))]
+        public static class FPSGunManager_RefreshSkin_Patch
+        {
+            public static void Postfix(FPSGunManager __instance)
+            {
+                try
+                {
+                    ApplyFpsViewmodelShadowMode(__instance);
+                }
+                catch { }
+            }
+        }
+
+        [HarmonyPatch(typeof(FPSGunManager), nameof(FPSGunManager.UpdateItemInFPSHands))]
+        public static class FPSGunManager_UpdateItemInFPSHands_Patch
+        {
+            public static void Postfix(FPSGunManager __instance)
+            {
+                try
+                {
+                    ApplyFpsViewmodelShadowMode(__instance);
+                }
+                catch { }
+            }
+        }
+
+        [HarmonyPatch(typeof(SoldierLodManager), nameof(SoldierLodManager.ApplyBodyHeadVisibility))]
+        public static class SoldierLodManager_ApplyBodyHeadVisibility_Patch
+        {
+            public static void Postfix(
+                SoldierLodManager __instance,
+                Corvostudio.EasyRed2.Characters.FaceData __0,
+                bool __1,
+                bool __2)
+            {
+                try
+                {
+                    if (__instance == null || __instance.Pointer == IntPtr.Zero)
+                        return;
+
+                    SkinnedMeshRenderer bodyMesh = __instance.bodyMesh;
+                    if (bodyMesh == null || bodyMesh.Pointer == IntPtr.Zero || bodyMesh.transform == null)
+                        return;
+
+                    IntPtr lodPtr = __instance.Pointer;
+                    bool wantFpsShadowProxy = VisionConfig.EnableMod.Value &&
+                                              VisionConfig.EnableFirstPersonShadowFix.Value &&
+                                              __1 &&  // showBody == true
+                                              !__2 && // showHead == false (First-Person camera!)
+                                              __0 != null &&
+                                              __0.materials != null;
+
+                    if (!wantFpsShadowProxy)
+                    {
+                        bodyMesh.shadowCastingMode = UnityEngine.Rendering.ShadowCastingMode.On;
+                        if (_fpsHeadShadowProxies.TryGetValue(lodPtr, out SkinnedMeshRenderer existingProxy) &&
+                            existingProxy != null && existingProxy.Pointer != IntPtr.Zero)
+                        {
+                            existingProxy.enabled = false;
+                        }
+                        return;
+                    }
+
+                    if (!_fpsHeadShadowProxies.TryGetValue(lodPtr, out SkinnedMeshRenderer proxy) ||
+                        proxy == null ||
+                        proxy.Pointer == IntPtr.Zero)
+                    {
+                        if (_fpsHeadShadowProxies.Count > 16)
+                            _fpsHeadShadowProxies.Clear();
+
+                        GameObject proxyGo = new GameObject("BH_FpsHeadShadowProxy");
+                        proxyGo.transform.SetParent(bodyMesh.transform, false);
+                        proxyGo.layer = bodyMesh.gameObject.layer;
+                        proxy = proxyGo.AddComponent<SkinnedMeshRenderer>();
+                        _fpsHeadShadowProxies[lodPtr] = proxy;
+                    }
+
+                    proxy.sharedMesh = bodyMesh.sharedMesh;
+                    proxy.bones = bodyMesh.bones;
+                    proxy.rootBone = bodyMesh.rootBone;
+                    proxy.localBounds = bodyMesh.localBounds;
+                    proxy.updateWhenOffscreen = bodyMesh.updateWhenOffscreen;
+                    proxy.shadowCastingMode = UnityEngine.Rendering.ShadowCastingMode.ShadowsOnly;
+                    proxy.receiveShadows = false;
+                    SoldierLodManager.SetBodyHeadVisibility(proxy, __0.materials, 0, true, true);
+                    proxy.enabled = true;
+
+                    // Prevent duplicate body shadow from bodyMesh while keeping its visible body submesh + hidden head submesh intact
+                    bodyMesh.shadowCastingMode = UnityEngine.Rendering.ShadowCastingMode.Off;
                 }
                 catch { }
             }

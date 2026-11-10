@@ -596,6 +596,34 @@ namespace EasyRed2HumanAI
         [HarmonyPatch(typeof(TurretAI), nameof(TurretAI.AutoPilot))]
         public static class TurretAI_AutoPilot_Patch
         {
+            public static void Prefix(TurretAI __instance)
+            {
+                try
+                {
+                    if (!VisionConfig.EnableMod.Value ||
+                        !VisionConfig.EnableSmartVehicleAmmoSelection.Value ||
+                        __instance == null ||
+                        __instance.turret == null)
+                    {
+                        return;
+                    }
+
+                    Spottable curTarget = __instance.CurrentVisibleTarget;
+                    if (curTarget != null && curTarget.Pointer != IntPtr.Zero)
+                    {
+                        bool isVehOrAir = curTarget.IsWheeledVehicleOrTank() || curTarget.IsAirVehicle();
+                        IntPtr turretPtr = __instance.turret.Pointer;
+                        if (!_lastTurretTargetWasVehicle.TryGetValue(turretPtr, out bool prevWasVeh) || prevWasVeh != isVehOrAir)
+                        {
+                            _lastTurretTargetWasVehicle[turretPtr] = isVehOrAir;
+                            __instance.nextSwitchAmmoCheck = 0f;
+                            __instance.turret.SelectBestAmmo(curTarget);
+                        }
+                    }
+                }
+                catch { }
+            }
+
             public static void Postfix(TurretAI __instance, Soldier __0)
             {
                 try

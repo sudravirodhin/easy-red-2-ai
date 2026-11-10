@@ -532,7 +532,9 @@ namespace EasyRed2HumanAI
                 if (dest == null || dest.Pointer == IntPtr.Zero)
                     continue;
 
-                Vehicle v = dest.TryCast<Vehicle>();
+                Vehicle v = dest.GetCoverConnectedVehicle();
+                if (v == null || v.Pointer == IntPtr.Zero)
+                    v = dest.TryCast<Vehicle>();
                 if (v == null || v.Pointer == IntPtr.Zero || v.transform == null || v.IsAirVehicle())
                     continue;
 
@@ -2515,9 +2517,27 @@ namespace EasyRed2HumanAI
                         !soldier.IsOnVehicle() &&
                         !soldier.IsCharging())
                     {
-                        TrySeekNearbyCover(__instance, soldier);
+                        bool soughtCover = TrySeekNearbyCover(__instance, soldier);
 
-                        if (!__instance.IsMoving())
+                        // Prevent open-ground belly crawling: if TrySeekNearbyCover just assigned a cover spot > 3.5m away,
+                        // keep the soldier in Crouch (or Standing) while sprinting to that cover instead of dropping Prone
+                        // before __instance.IsMoving() updates on the next frame!
+                        bool hasPendingCoverSprint =
+                            soughtCover &&
+                            !soldier.IsOnCover() &&
+                            soldier.HasDestinationAssigned &&
+                            soldier.targetDestination != null &&
+                            soldier.transform != null &&
+                            (soldier.targetDestination.GetCoverPosition() - soldier.transform.position).sqrMagnitude > 3.5f * 3.5f;
+
+                        if (hasPendingCoverSprint)
+                        {
+                            if (soldier.m_pose != SoldierPose.Crouch)
+                            {
+                                SetBotPose(__instance, soldier, SoldierPose.Crouch);
+                            }
+                        }
+                        else if (!__instance.IsMoving())
                         {
                             bool canGoProne = (!_noProneUntil.TryGetValue(ptr, out float noProne) || Time.time >= noProne) &&
                                               !soldier.IsOnCover() &&
@@ -3074,6 +3094,9 @@ namespace EasyRed2HumanAI
         [HarmonyPatch(typeof(CombatCover), nameof(CombatCover.IsCoverAvailable))]
         public static class CombatCover_IsCoverAvailable_Patch
         {
+            private static int _coverExposureProbeFrame = -1;
+            private static int _coverExposureUncachedProbesThisFrame;
+
             public static void Postfix(CombatCover __instance, Vector3 __0, ref bool __result)
             {
                 try
@@ -3111,6 +3134,18 @@ namespace EasyRed2HumanAI
 
                     if (!_coverExposureCache.TryGetValue(cacheKey, out bool isExposed))
                     {
+                        // Cap uncached IsPositionOnExposedSideOfWall raycast sweeps to <= 12 per frame
+                        // so a CoverManager.GetCovers sweep in a virgin area never spikes frame time!
+                        int curFrame = Time.frameCount;
+                        if (curFrame != _coverExposureProbeFrame)
+                        {
+                            _coverExposureProbeFrame = curFrame;
+                            _coverExposureUncachedProbesThisFrame = 0;
+                        }
+                        if (_coverExposureUncachedProbesThisFrame >= 12)
+                            return;
+
+                        _coverExposureUncachedProbesThisFrame++;
                         Vector3 coverPos = __instance.GetCoverPosition();
                         isExposed = IsPositionOnExposedSideOfWall(coverPos, threatDir, null, out _);
                         _coverExposureCache[cacheKey] = isExposed;
@@ -3454,8 +3489,243 @@ namespace EasyRed2HumanAI
                     _isTurningToWatchSector.Remove(ptr);
                     _ffBlockedUntil.Remove(ptr);
                     _wallBlockedUntil.Remove(ptr);
+
+                    if (__instance.IsOnVehicle())
+                    {
+                        Vehicle veh = __instance.GetCurrentVehicle();
+                        if (veh != null && veh.IsAirVehicle())
+                        {
+                            VehiclePlane vp = veh.TryCast<VehiclePlane>();
+                            if (vp != null)
+                            {
+                                TryHotStartAirborneLocalPlayerPlane(vp);
+                            }
+                        }
+                    }
                 }
                 catch { }
+            }
+        }
+
+        // =====================================================================
+        // Vanilla AI Fix: Anti-Dogpile Medic Triage Reservation (Squad.MedicRoutine)
+        // In vanilla Squad.MedicRoutine (0x1808079B0), every medic calls character.GetNearestInjured()
+        // and creates a new MedicHealingDestination(injured, character) with ZERO reservation check,
+        // causing 3-4 medics to dogpile the same wounded soldier while other casualties bleed out.
+        // This patch caps each casualty to 1 medic (or 2 max ONLY if the primary medic is > 20m away
+        // or heavily suppressed >= 40f), IMMEDIATELY releases claims if the medic dies, goes down
+        // (IsInjured), surrenders, or drops the task, and spreads extra medics to other wounded allies!
+        // =====================================================================
+        internal struct MedicPatientClaim
+        {
+            public Soldier PrimaryMedic;
+            public Soldier BackupMedic;
+        }
+
+        internal static readonly Dictionary<IntPtr, MedicPatientClaim> _medicPatientClaims = new Dictionary<IntPtr, MedicPatientClaim>(32);
+        private static readonly List<IntPtr> _reusableDeadPatientPtrs = new List<IntPtr>(32);
+        public static int MedicTriageRedirectsCount;
+
+        private static bool IsMedicClaimStillActiveForPatient(Soldier medic, IntPtr patientPtr)
+        {
+            if (medic == null ||
+                medic.Pointer == IntPtr.Zero ||
+                !medic.IsAlive ||
+                medic.IsInjured ||
+                medic.HasSurrended() ||
+                medic.IsOnVehicle() ||
+                medic.IsCarried())
+            {
+                return false;
+            }
+
+            AiDestination dest = medic.targetDestination;
+            if (dest == null || dest.Pointer == IntPtr.Zero)
+                return false;
+
+            MedicHealingDestination healDest = dest.TryCast<MedicHealingDestination>();
+            if (healDest == null || healDest.soldierToHealUp == null || healDest.soldierToHealUp.Pointer != patientPtr)
+                return false;
+
+            return true;
+        }
+
+        private static void PruneAndValidateMedicClaims(IntPtr selfMedicPtr, out IntPtr alreadyClaimedPatientPtr)
+        {
+            alreadyClaimedPatientPtr = IntPtr.Zero;
+            if (_medicPatientClaims.Count == 0)
+                return;
+
+            _reusableDeadPatientPtrs.Clear();
+            foreach (var kvp in _medicPatientClaims)
+            {
+                IntPtr patPtr = kvp.Key;
+                MedicPatientClaim claim = kvp.Value;
+
+                bool p1Valid = IsMedicClaimStillActiveForPatient(claim.PrimaryMedic, patPtr);
+                bool p2Valid = IsMedicClaimStillActiveForPatient(claim.BackupMedic, patPtr);
+
+                if (!p1Valid && p2Valid)
+                {
+                    claim.PrimaryMedic = claim.BackupMedic;
+                    claim.BackupMedic = null;
+                    p1Valid = true;
+                    p2Valid = false;
+                }
+                else if (!p2Valid)
+                {
+                    claim.BackupMedic = null;
+                }
+
+                if (!p1Valid)
+                {
+                    _reusableDeadPatientPtrs.Add(patPtr);
+                }
+                else
+                {
+                    _medicPatientClaims[patPtr] = claim;
+                    if (claim.PrimaryMedic != null && claim.PrimaryMedic.Pointer == selfMedicPtr)
+                        alreadyClaimedPatientPtr = patPtr;
+                    else if (claim.BackupMedic != null && claim.BackupMedic.Pointer == selfMedicPtr)
+                        alreadyClaimedPatientPtr = patPtr;
+                }
+            }
+
+            for (int i = 0; i < _reusableDeadPatientPtrs.Count; i++)
+            {
+                _medicPatientClaims.Remove(_reusableDeadPatientPtrs[i]);
+            }
+            _reusableDeadPatientPtrs.Clear();
+        }
+
+        [HarmonyPatch(typeof(Squad), nameof(Squad.MedicRoutine))]
+        public static class Squad_MedicRoutine_Patch
+        {
+            public static bool Prefix(Soldier __0)
+            {
+                try
+                {
+                    if (!VisionConfig.EnableMod.Value ||
+                        !VisionConfig.EnableAntiDogpileMedicTriage.Value ||
+                        __0 == null ||
+                        __0.Pointer == IntPtr.Zero ||
+                        !AiCore.IsLocallyOwnedBot(__0))
+                    {
+                        return true;
+                    }
+
+                    IntPtr medicPtr = __0.Pointer;
+                    PruneAndValidateMedicClaims(medicPtr, out IntPtr activePatientPtr);
+
+                    // If this medic is dead, downed, surrendered, or carrying someone, release and skip
+                    if (!__0.IsAlive || __0.IsInjured || __0.HasSurrended() || __0.IsOnVehicle() || __0.IsCarryingBody() || __0.transform == null)
+                        return false;
+
+                    // If this medic is already actively heading to a valid living injured patient, let him continue!
+                    if (activePatientPtr != IntPtr.Zero)
+                    {
+                        AiDestination curDest = __0.targetDestination;
+                        MedicHealingDestination curHeal = curDest != null ? curDest.TryCast<MedicHealingDestination>() : null;
+                        if (curHeal != null &&
+                            curHeal.soldierToHealUp != null &&
+                            curHeal.soldierToHealUp.IsAlive &&
+                            curHeal.soldierToHealUp.IsInjured)
+                        {
+                            return false;
+                        }
+                    }
+
+                    Vector3 medicPos = __0.transform.position;
+                    string myFaction = __0.faction;
+                    if (string.IsNullOrEmpty(myFaction))
+                        return true;
+
+                    AiCore.EnsureWorldSnapshot();
+                    int solCount = AiCore.WorldSoldierCount;
+                    var soldiers = AiCore.WorldSoldiers;
+
+                    Soldier bestPatient = null;
+                    float bestScoreDistSq = 55.0f * 55.0f;
+                    bool skippedDogpiledNearest = false;
+
+                    for (int i = 0; i < solCount; i++)
+                    {
+                        ref AiCore.SoldierSnapshot sSnap = ref soldiers[i];
+                        if (!sSnap.IsInjured || sSnap.Ptr == medicPtr || sSnap.IsOnVehicle || sSnap.Ref == null)
+                            continue;
+
+                        if (sSnap.Faction != myFaction && !ResourcesManager.IsSameFaction(myFaction, sSnap.Faction))
+                            continue;
+
+                        Soldier pat = sSnap.Ref;
+                        if (!pat.IsAlive || !pat.IsInjured || pat.IsCarried())
+                            continue;
+
+                        float dSq = (sSnap.Pos - medicPos).sqrMagnitude;
+                        if (dSq > 55.0f * 55.0f)
+                            continue;
+
+                        bool isBackupSlot = false;
+                        if (_medicPatientClaims.TryGetValue(sSnap.Ptr, out MedicPatientClaim existingClaim) &&
+                            existingClaim.PrimaryMedic != null &&
+                            existingClaim.PrimaryMedic.Pointer != medicPtr)
+                        {
+                            // Hard cap of 2 medics max per casualty (and only allow a 2nd medic if the 1st medic is > 20m away or heavily suppressed >= 40f!)
+                            if (existingClaim.BackupMedic != null && existingClaim.BackupMedic.Pointer != medicPtr)
+                            {
+                                skippedDogpiledNearest = true;
+                                continue;
+                            }
+
+                            Soldier p1 = existingClaim.PrimaryMedic;
+                            float p1DistSq = p1.transform != null ? (p1.transform.position - sSnap.Pos).sqrMagnitude : 0f;
+                            bool p1NeedsBackup = p1DistSq > 20.0f * 20.0f || p1.GetSuppressionValue() >= 40.0f;
+                            if (!p1NeedsBackup)
+                            {
+                                skippedDogpiledNearest = true;
+                                continue;
+                            }
+                            isBackupSlot = true;
+                        }
+
+                        // Strongly prefer completely unclaimed casualties over adding a 2nd backup medic
+                        float effectiveDistSq = isBackupSlot ? (dSq * 2.5f + 225.0f) : dSq;
+                        if (effectiveDistSq < bestScoreDistSq)
+                        {
+                            bestScoreDistSq = effectiveDistSq;
+                            bestPatient = pat;
+                        }
+                    }
+
+                    if (bestPatient != null)
+                    {
+                        IntPtr bestPtr = bestPatient.Pointer;
+                        _medicPatientClaims.TryGetValue(bestPtr, out MedicPatientClaim claim);
+                        if (claim.PrimaryMedic == null || claim.PrimaryMedic.Pointer == medicPtr)
+                            claim.PrimaryMedic = __0;
+                        else
+                            claim.BackupMedic = __0;
+                        _medicPatientClaims[bestPtr] = claim;
+
+                        MedicHealingDestination newHealDest = new MedicHealingDestination(bestPatient, __0);
+                        __0.CoverPosition(newHealDest.Cast<AiDestination>());
+
+                        if (skippedDogpiledNearest)
+                        {
+                            MedicTriageRedirectsCount++;
+                            AiCore.LogDebug("MedicTriage", $"{myFaction} medic redirected to secondary casualty (avoided dogpile).");
+                        }
+                    }
+                    else if (skippedDogpiledNearest)
+                    {
+                        // All nearby wounded already have a healthy nearby medic (or 2 max): keep rifle up in cover!
+                        MedicTriageRedirectsCount++;
+                    }
+
+                    return false;
+                }
+                catch { }
+                return true;
             }
         }
     }

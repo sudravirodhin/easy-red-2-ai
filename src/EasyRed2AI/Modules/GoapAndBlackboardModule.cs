@@ -241,14 +241,65 @@ namespace EasyRed2HumanAI
             public ItemObject TargetFloorItem;
             public VirtualItem TargetInventoryAtWeapon;
             public VirtualItem TargetInventoryPrimaryWeapon;
+            public VirtualItem TargetInventoryWearable;
+            public Soldier TargetBuddyDonor;
+            public Soldier TargetNeedyAllyToFeed;
             public Vector3 TargetPosition;
             public bool IsAtWeaponPickup;
             public bool IsRoleWeaponUpgrade;
+            public bool IsBuddyBandageRefill;
+            public bool IsBuddyAmmoBorrow;
+            public bool IsFeedingNeedyAlly;
+            public bool IsRadioPackPickup;
+            public bool IsHelmetPickup;
         }
 
         internal static readonly Dictionary<IntPtr, BotScavengeCache> _botScavengeCaches = new Dictionary<IntPtr, BotScavengeCache>(128);
         internal static readonly Dictionary<IntPtr, float> _nextWeaponUpgradeAllowedTime = new Dictionary<IntPtr, float>(128);
+        internal static readonly Dictionary<IntPtr, float> _nextBuddyBandageRefillTime = new Dictionary<IntPtr, float>(128);
         private static float _nextGlobalBotWeaponPickupTime;
+
+        private struct CachedWearableInfo
+        {
+            public bool Valid;
+            public bool IsRadio;
+            public bool IsHelmet;
+        }
+
+        private static readonly Dictionary<string, CachedWearableInfo> _cachedWearableInfo = new Dictionary<string, CachedWearableInfo>(64);
+
+        private static bool TryGetVirtualWearableInfo(VirtualItem vi, out CachedWearableInfo info)
+        {
+            info = default;
+            if (vi == null || vi.Pointer == IntPtr.Zero)
+                return false;
+
+            string itemId = vi.item_id;
+            if (!string.IsNullOrEmpty(itemId) && _cachedWearableInfo.TryGetValue(itemId, out info))
+                return info.Valid;
+
+            if (vi.TryCast<VirtualHelmet>() != null)
+            {
+                info = new CachedWearableInfo { Valid = true, IsRadio = false, IsHelmet = true };
+            }
+            else if (vi.TryCast<VirtualClothing>() != null)
+            {
+                ItemObject prefab = vi.GetItemPrefab();
+                ItemClothing clothing = prefab != null ? prefab.TryCast<ItemClothing>() : null;
+                if (clothing != null && clothing.isRadio)
+                {
+                    info = new CachedWearableInfo { Valid = true, IsRadio = true, IsHelmet = false };
+                }
+            }
+
+            if (!string.IsNullOrEmpty(itemId))
+            {
+                if (_cachedWearableInfo.Count > 256)
+                    _cachedWearableInfo.Clear();
+                _cachedWearableInfo[itemId] = info;
+            }
+            return info.Valid;
+        }
 
         private struct CachedInventoryOwner
         {
@@ -754,7 +805,21 @@ namespace EasyRed2HumanAI
         public static int RadioNetCutoffsCount { get; private set; }
         public static int TeamNetAnvilHammerCount { get; private set; }
         public static int RoleWeaponUpgradesCount { get; private set; }
+        public static int BuddyResuppliesCount { get; private set; }
+        public static int FieldRadiosInheritedCount { get; private set; }
+        public static int HelmetsRecoveredCount { get; private set; }
+        public static int CasualtiesDraggedCount { get; private set; }
         public static int BotKillCalloutsCount { get; set; }
+
+        internal struct CasualtyDragState
+        {
+            public Soldier Patient;
+            public Vector3 DropSpot;
+            public float DragEndTime;
+            public float NextScanTime;
+        }
+
+        internal static readonly Dictionary<IntPtr, CasualtyDragState> _casualtyDragStates = new Dictionary<IntPtr, CasualtyDragState>(32);
 
         public static void ClearGoapCaches()
         {
@@ -762,6 +827,8 @@ namespace EasyRed2HumanAI
             _botGoapPlans.Clear();
             _botScavengeCaches.Clear();
             _nextWeaponUpgradeAllowedTime.Clear();
+            _nextBuddyBandageRefillTime.Clear();
+            _casualtyDragStates.Clear();
             _cachedInventoryOwners.Clear();
             _initialHqSpawnBriefingConsumed.Clear();
             _nextSquadVoiceTime.Clear();
@@ -791,7 +858,7 @@ namespace EasyRed2HumanAI
                 patient.IsOnVehicle() ||
                 patient.HasSurrended() ||
                 healDest.coverReached ||
-                !(patient.isBleeding || patient.GetBleedValue() > 0.01f))
+                !(patient.IsInjured || patient.isBleeding || patient.GetBleedValue() > 0.01f))
             {
                 _medicHealStartTime.Remove(medicPtr);
                 _medicHealTargetPtr.Remove(medicPtr);
@@ -1042,6 +1109,7 @@ namespace EasyRed2HumanAI
             var activeVehicleAnvils = _reusableActiveVehicleAnvils;
             connectedInfantrySquads.Clear();
             activeVehicleAnvils.Clear();
+            bool issuedSquadCoverOrderThisTick = false;
 
             var squads = AiCore.WorldSquads;
             for (int sIdx = 0; sIdx < sqCount; sIdx++)
@@ -1120,11 +1188,16 @@ namespace EasyRed2HumanAI
                                 board.NetDirectiveTargetPos = board.ThreatPosition;
                                 _squadBlackboards[sq.Pointer] = board;
 
-                                try
+                                if (!issuedSquadCoverOrderThisTick &&
+                                    (!Photon.Pun.PhotonNetwork.InRoom || AiCore.TryConsumeBotRpcBudget(0.45f)))
                                 {
-                                    sq.AttackFromSide(localFlankDir, board.ThreatPosition, 18.0f);
+                                    issuedSquadCoverOrderThisTick = true;
+                                    try
+                                    {
+                                        sq.AttackFromSide(localFlankDir, board.ThreatPosition, 18.0f);
+                                    }
+                                    catch { }
                                 }
-                                catch { }
 
                                 TrySayTacticalVoice(leader, sq, VoiceManager.VoiceClip.attackThere, 0.2f);
                                 TeamNetAnvilHammerCount++;
@@ -1138,10 +1211,13 @@ namespace EasyRed2HumanAI
 
                         // If an unengaged disconnected squad (e.g. an AT squad after finishing its initial order)
                         // is within 95m of a friendly Radio-Connected squad/vehicle, move toward them to reconnect!
-                        if (!board.HasActiveThreat &&
+                        if (!issuedSquadCoverOrderThisTick &&
+                            !board.HasActiveThreat &&
                             leader.Params != null && leader.Params.canGiveOrders && leader.Params.canMove &&
-                            TryFindNearestRadioHubPosition(sq, leader.transform.position, leader.faction, 95f, out Vector3 hubPos))
+                            TryFindNearestRadioHubPosition(sq, leader.transform.position, leader.faction, 95f, out Vector3 hubPos) &&
+                            (!Photon.Pun.PhotonNetwork.InRoom || AiCore.TryConsumeBotRpcBudget(0.45f)))
                         {
+                            issuedSquadCoverOrderThisTick = true;
                             try
                             {
                                 sq.SendUnitsToCovers(hubPos, 18.0f);
@@ -1190,7 +1266,7 @@ namespace EasyRed2HumanAI
                 Vector3 perpRight = new Vector3(axisDir.z, 0f, -axisDir.x);
                 IntPtr vehTaskPtr = vehSq.currentTask != null ? vehSq.currentTask.Pointer : IntPtr.Zero;
 
-                Squad bestHammerSq = FindBestAvailableHammerSquad(connectedInfantrySquads, -1, vehLeader.faction, vehTaskPtr, threatPos, 115f, now);
+                Squad bestHammerSq = FindBestAvailableHammerSquad(connectedInfantrySquads, -1, vehSq.Pointer, vehLeader.faction, vehTaskPtr, threatPos, 115f, now);
                 if (bestHammerSq != null)
                 {
                     IssueHammerFlankDirective(bestHammerSq, vehPos, threatPos, axisDir, perpRight, now, $"Tank/Vehicle Anvil ('{vehSq.squadName}')");
@@ -1226,7 +1302,7 @@ namespace EasyRed2HumanAI
                 IntPtr anvilTaskPtr = anvilSq.currentTask != null ? anvilSq.currentTask.Pointer : IntPtr.Zero;
 
                 // Find best nearby Radio-Connected friendly squad within 115m on the same objective/sector to act as the HAMMER
-                Squad bestHammerSq = FindBestAvailableHammerSquad(connectedInfantrySquads, i, anvilLeader.faction, anvilTaskPtr, threatPos, 115f, now);
+                Squad bestHammerSq = FindBestAvailableHammerSquad(connectedInfantrySquads, i, anvilSq.Pointer, anvilLeader.faction, anvilTaskPtr, threatPos, 115f, now);
 
                 if (bestHammerSq != null)
                 {
@@ -1322,27 +1398,33 @@ namespace EasyRed2HumanAI
                 _squadBlackboards[sq.Pointer] = board;
                 ConsumeInitialHqSpawnBriefingIfNoRadio(sq);
 
-                // Only issue the squad-level AttackFromSide waypoint ONCE per objective assignment so the Squad Leader
-                // doesn't re-shout move orders and reset the waypoint every 18 seconds mid-march!
+                // Only issue the squad-level AttackFromSide waypoint ONCE per objective assignment, AND cap at 1 AttackFromSide
+                // call per TeamNetGOAP tick (gated by TryConsumeBotRpcBudget) so multiple squads never stack CoverManager sweeps
+                // or burst 12-20 reliable PhotonView.RPCs on a single frame!
                 if (!_pincerOrderedTaskBySquad.TryGetValue(sq.Pointer, out IntPtr prevPincerTask) || prevPincerTask != taskPtr)
                 {
-                    _pincerOrderedTaskBySquad[sq.Pointer] = taskPtr;
-                    try
+                    if (!issuedSquadCoverOrderThisTick &&
+                        (!Photon.Pun.PhotonNetwork.InRoom || AiCore.TryConsumeBotRpcBudget(0.45f)))
                     {
-                        sq.AttackFromSide(pincerFlankDir, taskPos, 22.0f);
-                        if (sq.timed_order_end < now + 28.0f)
-                            sq.timed_order_end = now + 28.0f;
-                    }
-                    catch { }
+                        issuedSquadCoverOrderThisTick = true;
+                        _pincerOrderedTaskBySquad[sq.Pointer] = taskPtr;
+                        try
+                        {
+                            sq.AttackFromSide(pincerFlankDir, taskPos, 22.0f);
+                            if (sq.timed_order_end < now + 28.0f)
+                                sq.timed_order_end = now + 28.0f;
+                        }
+                        catch { }
 
-                    TeamNetAnvilHammerCount++;
-                    GoapPlansExecutedCount++;
-                    if (VisionConfig.DebugLogging.Value)
-                    {
-                        AiCore.LogDebug(
-                            "TeamNetPincer",
-                            $"{leader.faction} squad '{sq.squadName}' executing objective pincer (latBias:{latBias:F2}, dist:{distToTask:F0}m).",
-                            4.0f);
+                        TeamNetAnvilHammerCount++;
+                        GoapPlansExecutedCount++;
+                        if (VisionConfig.DebugLogging.Value)
+                        {
+                            AiCore.LogDebug(
+                                "TeamNetPincer",
+                                $"{leader.faction} squad '{sq.squadName}' executing objective pincer (latBias:{latBias:F2}, dist:{distToTask:F0}m).",
+                                4.0f);
+                        }
                     }
                 }
             }
@@ -1351,6 +1433,7 @@ namespace EasyRed2HumanAI
         private static Squad FindBestAvailableHammerSquad(
             List<Squad> connectedInfantrySquads,
             int excludeIndex,
+            IntPtr anvilSqPtr,
             string faction,
             IntPtr anvilTaskPtr,
             Vector3 threatPos,
@@ -1367,6 +1450,8 @@ namespace EasyRed2HumanAI
                     continue;
 
                 Squad candSq = connectedInfantrySquads[j];
+                if (candSq == null || candSq.Pointer == anvilSqPtr)
+                    continue;
                 Soldier candLeader = candSq.Leader;
                 if (candLeader == null || candLeader.faction != faction || candLeader.transform == null)
                     continue;
@@ -1617,6 +1702,36 @@ namespace EasyRed2HumanAI
                 }
             }
 
+            // Vanilla Soldier.Surrender() detaches the soldier from sq.units (joinedSquad = null), so scan
+            // AiCore.WorldSoldiers (O(N) flat struct array) for any surrendered friendly comrade within LiberateSearchRadius!
+            if (board.SurrenderedComrade == null &&
+                VisionConfig.EnableComradeLiberation.Value &&
+                !string.IsNullOrEmpty(leader.faction))
+            {
+                AiCore.EnsureWorldSnapshot();
+                int solCount = AiCore.WorldSoldierCount;
+                var soldiers = AiCore.WorldSoldiers;
+                float maxLibR = Mathf.Max(16.0f, VisionConfig.LiberateSearchRadius.Value);
+                float bestSurrDistSq = maxLibR * maxLibR;
+
+                for (int i = 0; i < solCount; i++)
+                {
+                    ref AiCore.SoldierSnapshot sSnap = ref soldiers[i];
+                    if (!sSnap.HasSurrendered || sSnap.Faction != leader.faction || sSnap.Ref == null)
+                        continue;
+
+                    if (Mathf.Abs(sSnap.Pos.y - sqCenter.y) > 2.8f)
+                        continue;
+
+                    float dSq = (sSnap.Pos - sqCenter).sqrMagnitude;
+                    if (dSq < bestSurrDistSq)
+                    {
+                        bestSurrDistSq = dSq;
+                        board.SurrenderedComrade = sSnap.Ref;
+                    }
+                }
+            }
+
             if (board.HasActiveThreat)
             {
                 Vector3 toThreat = board.ThreatPosition - sqCenter;
@@ -1771,6 +1886,18 @@ namespace EasyRed2HumanAI
             Squad sq = soldier.joinedSquad;
             SquadBlackboard board = GetOrUpdateSquadBlackboard(sq, soldier);
 
+            // Emergent Buddy Casualty Dragging (Soldier.CarryBodySynched):
+            // If this soldier is currently carrying a wounded buddy to cover/Medic (or spots an unclaimed wounded buddy
+            // in the open nearby while not in direct point-blank combat), handle the carry & drop-off cleanly!
+            if (VisionConfig.EnableBuddyCasualtyDragging.Value &&
+                !inPointBlankMelee &&
+                !isOnBridge &&
+                soldier.transform != null &&
+                TryExecuteBuddyCasualtyDrag(ai, soldier, sq, ref board, soldier.transform.position, now))
+            {
+                return;
+            }
+
             // Build 32-Bit WorldState in O(1)
             GoapStateBits ws = BuildSoldierWorldState(
                 ai,
@@ -1832,7 +1959,18 @@ namespace EasyRed2HumanAI
             GoapStateBits ws = GoapStateBits.None;
             Vector3 myPos = soldier.transform.position;
             bool isRad = soldier.IsRadioman();
-            bool isBailedVehicleCrew = sq != null && sq.IsVehicleCrew && !soldier.IsOnVehicle() && !sq.SomeoneIsRepairing();
+
+            // Never classify a crewman as "bailed out" while he is actively repairing OR walking to remount his vehicle!
+            bool isRemountingOrRepairing =
+                soldier.IsReachingVehicleToMount() ||
+                soldier.IsEnteringVehicle ||
+                soldier.VehicleToOperate() != null ||
+                (soldier.targetDestination != null && soldier.targetDestination.TryCast<VehicleRepairTask>() != null);
+            bool isBailedVehicleCrew = sq != null &&
+                                       sq.IsVehicleCrew &&
+                                       !soldier.IsOnVehicle() &&
+                                       !sq.SomeoneIsRepairing() &&
+                                       !isRemountingOrRepairing;
 
             if (soldier.isBleeding)
                 ws |= GoapStateBits.IsBleeding;
@@ -1938,7 +2076,7 @@ namespace EasyRed2HumanAI
                 board.SurrenderedComrade.IsAlive &&
                 board.SurrenderedComrade.HasSurrended() &&
                 (board.RescuerPtr == IntPtr.Zero || board.RescuerPtr == soldier.Pointer) &&
-                (board.SurrenderedComrade.transform.position - myPos).sqrMagnitude <= 14.0f * 14.0f)
+                (board.SurrenderedComrade.transform.position - myPos).sqrMagnitude <= 22.0f * 22.0f)
             {
                 ws |= GoapStateBits.ComradeNeedsLiberation;
             }
@@ -1972,10 +2110,12 @@ namespace EasyRed2HumanAI
                 }
             }
 
-            // Battlefield Scavenging & Role-Smart Weapon Upgrades:
+            // Battlefield Scavenging, Buddy Resupply, Wearable Scavenging & Role-Smart Weapon Upgrades:
             // 1) Out of reserve ammo for primary weapon OR out of bandages (!hasSyringe) when not fighting a visible foot enemy.
             // 2) Need an Anti-Tank weapon/AT grenade when enemy armor is threatening the squad (or bot is an AT trooper whose launcher is dry).
             // 3) Pistol-only on foot (merged tankers/pilots/officers), fallen Squad MG inheritance, or role-matched primary upgrade!
+            // 4) Emergent Field Radio Inheritance/Capture (when squad lost its Radioman) & Knocked-Off / Player-Gifted Helmet Recovery!
+            // 5) Support Ammo-Bearer proactively feeding a dry MG or AT squadmate!
             if (!soldier.isBleeding && suppression < 28f && !isOnBridge)
             {
                 GenericGun heldGun = soldier.GetHeldGun();
@@ -2017,9 +2157,25 @@ namespace EasyRed2HumanAI
                     out bool wantRoleUpgrade);
                 bool wantAnyWeaponUpgrade = needUrgentPrimary || wantSquadMg || wantRoleUpgrade;
 
+                bool wantRadioPack = VisionConfig.EnableEmergentWearableScavenge.Value &&
+                                     !onRetreatTask &&
+                                     sq != null &&
+                                     !sq.IsVehicleCrew &&
+                                     !board.PreviouslyHadAliveRadioman &&
+                                     !isRad &&
+                                     (soldier.vest_Obj == null || !soldier.vest_Obj.isFuelTank);
+
+                bool wantHelmet = VisionConfig.EnableEmergentWearableScavenge.Value &&
+                                  !soldier.hasHeadgear &&
+                                  suppression < 12f;
+
+                bool canFeedNeedyAlly = VisionConfig.EnableBuddyResupply.Value &&
+                                        !onRetreatTask &&
+                                        soldier.IsAmmoBoxCarrier();
+
                 bool hasVisibleFootEnemy = ai.HasEnemyAndCanFireAtHim && (ai.visibleTarget == null || ai.visibleTarget.TryCast<Vehicle>() == null);
                 if (!hasVisibleFootEnemy &&
-                    (needAtWeapon || wantAnyWeaponUpgrade || outOfAmmo || outOfBandage) &&
+                    (needAtWeapon || wantAnyWeaponUpgrade || outOfAmmo || outOfBandage || wantRadioPack || wantHelmet || canFeedNeedyAlly) &&
                     TryGetNearbyScavengeTarget(
                         soldier,
                         myPos,
@@ -2030,6 +2186,9 @@ namespace EasyRed2HumanAI
                         needUrgentPrimary,
                         wantSquadMg,
                         wantRoleUpgrade,
+                        wantRadioPack,
+                        wantHelmet,
+                        canFeedNeedyAlly,
                         now,
                         out _))
                 {
@@ -2397,6 +2556,8 @@ namespace EasyRed2HumanAI
                         DestinationWithoutCover newDest = new DestinationWithoutCover(shelteredPos, SoldierPose.Crouch);
                         soldier.CoverPosition(newDest.Cast<AiDestination>());
                         ai.MoveDestination = shelteredPos;
+                        if (soldier.m_pose == SoldierPose.Prone && (shelteredPos - myPos).sqrMagnitude > 3.5f * 3.5f)
+                            SetBotPose(ai, soldier, SoldierPose.Crouch);
                         plan.LockUnitCoverChange = true;
                         plan.PlanExpireTime = now + 4.0f;
                         plan.NextReplanTime = Mathf.Max(plan.NextReplanTime, now + 3.2f);
@@ -2585,7 +2746,17 @@ namespace EasyRed2HumanAI
                             out bool wantRoleUpgrade);
                         bool wantAnyWeaponUpgrade = needUrgentPrimary || wantSquadMg || wantRoleUpgrade;
 
-                        if ((needAtWeapon || wantAnyWeaponUpgrade || outOfAmmo || outOfBandage) &&
+                        bool wantRadioPack = VisionConfig.EnableEmergentWearableScavenge.Value &&
+                                             sq != null && !sq.IsVehicleCrew &&
+                                             !board.PreviouslyHadAliveRadioman && !soldier.IsRadioman() &&
+                                             !isMedicRole && !onRetreat;
+                        bool wantHelmet = VisionConfig.EnableEmergentWearableScavenge.Value &&
+                                          !soldier.hasHeadgear && !onRetreat;
+                        bool canFeedNeedyAlly = VisionConfig.EnableBuddyResupply.Value &&
+                                                !outOfAmmo && !onRetreat &&
+                                                (soldier.IsAmmoBoxCarrier() || soldier.CanBorrowAmmo);
+
+                        if ((needAtWeapon || wantAnyWeaponUpgrade || outOfAmmo || outOfBandage || wantRadioPack || wantHelmet || canFeedNeedyAlly) &&
                             TryGetNearbyScavengeTarget(
                                 soldier,
                                 myPos,
@@ -2596,19 +2767,67 @@ namespace EasyRed2HumanAI
                                 needUrgentPrimary,
                                 wantSquadMg,
                                 wantRoleUpgrade,
+                                wantRadioPack,
+                                wantHelmet,
+                                canFeedNeedyAlly,
                                 now,
                                 out BotScavengeCache scavCache))
                         {
                             Vector3 targetPos = scavCache.TargetPosition;
                             float dSq = (targetPos - myPos).sqrMagnitude;
                             SetBotPose(ai, soldier, SoldierPose.Crouch);
-                            if (dSq <= 3.0f * 3.0f)
+                            if (dSq <= 3.3f * 3.3f)
                             {
                                 bool looted = false;
                                 string lootedDesc = "supply";
 
-                                // 1. Pick up physical floor items (dropped AT launchers, primary rifles/SMGs/MGs, ammo boxes, magazines, syringes)
-                                if (IsFloorItemFreeToPickUp(scavCache.TargetFloorItem))
+                                // 0A. Buddy Bandage Refill from living friendly Medic
+                                if (scavCache.IsBuddyBandageRefill &&
+                                    scavCache.TargetBuddyDonor != null &&
+                                    scavCache.TargetBuddyDonor.Pointer != IntPtr.Zero &&
+                                    scavCache.TargetBuddyDonor.IsAlive)
+                                {
+                                    if (!Photon.Pun.PhotonNetwork.InRoom || AiCore.TryConsumeBotRpcBudget(0.25f))
+                                    {
+                                        soldier.RefillBandages();
+                                        _nextBuddyBandageRefillTime[ptr] = now + 45.0f;
+                                        BuddyResuppliesCount++;
+                                        looted = true;
+                                        lootedDesc = "buddy bandage from medic";
+                                        TrySayTacticalVoice(soldier, sq, VoiceManager.VoiceClip.thankYou, 0.25f);
+                                    }
+                                }
+                                // 0B. Buddy Ammo Borrow from living friendly Ammo Carrier / Support rifleman
+                                else if (scavCache.IsBuddyAmmoBorrow &&
+                                         scavCache.TargetBuddyDonor != null &&
+                                         scavCache.TargetBuddyDonor.Pointer != IntPtr.Zero &&
+                                         scavCache.TargetBuddyDonor.IsAlive)
+                                {
+                                    if (!Photon.Pun.PhotonNetwork.InRoom || AiCore.TryConsumeBotRpcBudget(0.30f))
+                                    {
+                                        scavCache.TargetBuddyDonor.BorrowAmmos(soldier);
+                                        BuddyResuppliesCount++;
+                                        looted = true;
+                                        lootedDesc = "buddy ammo from carrier";
+                                        TrySayTacticalVoice(soldier, sq, VoiceManager.VoiceClip.thankYou, 0.25f);
+                                    }
+                                }
+                                // 0C. Support / Ammo Carrier proactively feeding a dry MG gunner or AT specialist
+                                else if (scavCache.IsFeedingNeedyAlly &&
+                                         scavCache.TargetNeedyAllyToFeed != null &&
+                                         scavCache.TargetNeedyAllyToFeed.Pointer != IntPtr.Zero &&
+                                         scavCache.TargetNeedyAllyToFeed.IsAlive)
+                                {
+                                    if (!Photon.Pun.PhotonNetwork.InRoom || AiCore.TryConsumeBotRpcBudget(0.30f))
+                                    {
+                                        soldier.BorrowAmmos(scavCache.TargetNeedyAllyToFeed);
+                                        BuddyResuppliesCount++;
+                                        looted = true;
+                                        lootedDesc = "fed ammo to needy MG/AT squadmate";
+                                    }
+                                }
+                                // 1. Pick up physical floor items (dropped AT launchers, primary rifles/SMGs/MGs, helmets, radios, ammo boxes, magazines, syringes)
+                                else if (IsFloorItemFreeToPickUp(scavCache.TargetFloorItem))
                                 {
                                     GenericGun floorGun = scavCache.TargetFloorItem.TryCast<GenericGun>();
                                     if (floorGun != null)
@@ -2640,6 +2859,33 @@ namespace EasyRed2HumanAI
                                             }
                                         }
                                     }
+                                    else if ((scavCache.IsHelmetPickup || scavCache.IsRadioPackPickup) && soldier.inventory != null)
+                                    {
+                                        if (!Photon.Pun.PhotonNetwork.InRoom || AiCore.TryConsumeBotRpcBudget(0.35f))
+                                        {
+                                            VirtualItem addedWearable = soldier.inventory.AddItemToInventory(scavCache.TargetFloorItem);
+                                            if (addedWearable != null)
+                                            {
+                                                ResourcesManager.SynchDestroy(scavCache.TargetFloorItem.gameObject, true);
+                                                soldier.SetWerable(addedWearable, true);
+                                                looted = true;
+                                                if (scavCache.IsRadioPackPickup)
+                                                {
+                                                    FieldRadiosInheritedCount++;
+                                                    lootedDesc = "floor radio pack";
+                                                }
+                                                else
+                                                {
+                                                    HelmetsRecoveredCount++;
+                                                    lootedDesc = "helmet from ground";
+                                                    if (IsFriendlyPlayerWithinDistance(soldier, myPos, 7.5f))
+                                                    {
+                                                        TrySayTacticalVoice(soldier, sq, VoiceManager.VoiceClip.thankYou, 0.05f);
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
                                     else if (soldier.inventory != null && soldier.inventory.AddItemToInventoryAndDestroyInstance(scavCache.TargetFloorItem))
                                     {
                                         if (outOfAmmo)
@@ -2664,7 +2910,33 @@ namespace EasyRed2HumanAI
                                                               soldier.CanSwitchHeldItem &&
                                                               now >= _nextGlobalBotWeaponPickupTime;
 
-                                    if (scavCache.IsAtWeaponPickup && ownerStillDeadOrCrate)
+                                    if ((scavCache.IsRadioPackPickup || scavCache.IsHelmetPickup) &&
+                                        ownerStillDeadOrCrate &&
+                                        soldier.inventory != null &&
+                                        scavCache.TargetInventoryWearable != null &&
+                                        targetInv.Contains(scavCache.TargetInventoryWearable))
+                                    {
+                                        if (!Photon.Pun.PhotonNetwork.InRoom || AiCore.TryConsumeBotRpcBudget(0.35f))
+                                        {
+                                            VirtualItem wearable = scavCache.TargetInventoryWearable;
+                                            if (soldier.inventory.TakeIntoInventory(wearable, targetInv))
+                                            {
+                                                soldier.SetWerable(wearable, true);
+                                                looted = true;
+                                                if (scavCache.IsRadioPackPickup)
+                                                {
+                                                    FieldRadiosInheritedCount++;
+                                                    lootedDesc = "field radio pack from fallen soldier";
+                                                }
+                                                else
+                                                {
+                                                    HelmetsRecoveredCount++;
+                                                    lootedDesc = "helmet from fallen comrade";
+                                                }
+                                            }
+                                        }
+                                    }
+                                    else if (scavCache.IsAtWeaponPickup && ownerStillDeadOrCrate)
                                     {
                                         if (scavCache.TargetInventoryAtWeapon != null && targetInv.Contains(scavCache.TargetInventoryAtWeapon))
                                         {
@@ -2770,7 +3042,7 @@ namespace EasyRed2HumanAI
                                 AddCombatExperienceBonus(soldier, 30f);
                             }
                         }
-                        else if (dSq <= 11.0f * 11.0f && !soldier.IsSquadLeader() && !soldier.IsOnCover() && !ai.HasEnemyAndCanFireAtHim)
+                        else if (dSq <= 22.0f * 22.0f && !soldier.IsSquadLeader() && !ai.HasEnemyAndCanFireAtHim && soldier.GetSuppressionValue() < 35f)
                         {
                             if (!_liberateMoveCooldownUntil.TryGetValue(ptr, out float cdUntil) || now >= cdUntil)
                             {
@@ -2778,12 +3050,14 @@ namespace EasyRed2HumanAI
                                 {
                                     _liberateMoveStartTime[ptr] = now;
                                 }
-                                else if (now - startT > 5.5f)
+                                else if (now - startT > 8.5f)
                                 {
                                     _liberateMoveStartTime.Remove(ptr);
                                     _liberateMoveCooldownUntil[ptr] = now + 20.0f;
                                     break;
                                 }
+                                plan.LockUnitCoverChange = true;
+                                SetBotPose(ai, soldier, SoldierPose.Crouch);
                                 ai.MoveDirectlyToward(targetSurr.transform.position, 1.35f);
                             }
                         }
@@ -2792,14 +3066,33 @@ namespace EasyRed2HumanAI
 
                 case GoapActionId.LoneWolfLinkUpOrAmbush:
                     {
-                        // Bailed-out Pilots & Tank/Vehicle Crews prioritize retreating to survive toward friendly rear lines!
-                        // Only merge into a frontline infantry squad if no friendly retreat spawn exists or retreat is impossible.
+                        // Bailed-out Pilots & Tank/Vehicle Crews follow a 3-step hierarchy:
+                        // 1. Remount a nearby operable friendly crew vehicle with a free seat (e.g., just repaired tank!)
+                        // 2. If unarmed/pistol-only or squad on retreat, fall back to friendly rear spawn
+                        // 3. Otherwise, if armed with a primary firearm, link up and join the nearest friendly infantry squad!
                         SoldierPersonality lonePers = GetPersonality(soldier);
                         bool isBailedCrewOrPilot = (sq != null && sq.IsVehicleCrew) || IsPilotOrVehicleCrewPersonality(lonePers);
-                        if (isBailedCrewOrPilot && TryRetreatBailedCrewTowardFriendlySpawn(ai, soldier, sq, myPos))
+                        if (isBailedCrewOrPilot)
                         {
-                            SetBotPose(ai, soldier, SoldierPose.Crouch);
-                            break;
+                            if (TryRemountNearbyOperableCrewVehicle(ai, soldier, sq, myPos, 28f))
+                            {
+                                SetBotPose(ai, soldier, SoldierPose.Crouch);
+                                break;
+                            }
+
+                            if (ShouldBailedCrewRetreatOverJoinSquad(soldier, sq, myPos))
+                            {
+                                if (TryRetreatBailedCrewTowardFriendlySpawn(ai, soldier, sq, myPos))
+                                {
+                                    SetBotPose(ai, soldier, SoldierPose.Crouch);
+                                    break;
+                                }
+                            }
+                            else if (TryLinkUpOrJoinFriendlySquad(ai, soldier, myPos, 85f))
+                            {
+                                SetBotPose(ai, soldier, SoldierPose.Crouch);
+                                break;
+                            }
                         }
 
                         bool preferAmbush = !isBailedCrewOrPilot && GetFactionCommandProfile(soldier.faction).PreferAmbushWhenAlone;
@@ -3150,12 +3443,33 @@ namespace EasyRed2HumanAI
             bool needUrgentPrimary,
             bool wantSquadMg,
             bool wantRoleUpgrade,
+            bool wantRadioPack,
+            bool wantHelmet,
+            bool canFeedNeedyAlly,
             float now,
             out BotScavengeCache result)
         {
             IntPtr ptr = soldier.Pointer;
             if (_botScavengeCaches.TryGetValue(ptr, out result) && now < result.NextScanTime)
             {
+                if ((result.IsBuddyBandageRefill || result.IsBuddyAmmoBorrow) &&
+                    result.TargetBuddyDonor != null &&
+                    result.TargetBuddyDonor.Pointer != IntPtr.Zero &&
+                    result.TargetBuddyDonor.IsAlive &&
+                    result.TargetBuddyDonor.transform != null)
+                {
+                    result.TargetPosition = result.TargetBuddyDonor.transform.position;
+                    return true;
+                }
+                if (result.IsFeedingNeedyAlly &&
+                    result.TargetNeedyAllyToFeed != null &&
+                    result.TargetNeedyAllyToFeed.Pointer != IntPtr.Zero &&
+                    result.TargetNeedyAllyToFeed.IsAlive &&
+                    result.TargetNeedyAllyToFeed.transform != null)
+                {
+                    result.TargetPosition = result.TargetNeedyAllyToFeed.transform.position;
+                    return true;
+                }
                 if (result.TargetFloorItem != null)
                 {
                     if (IsFloorItemFreeToPickUp(result.TargetFloorItem))
@@ -3178,11 +3492,80 @@ namespace EasyRed2HumanAI
 
             result = new BotScavengeCache { NextScanTime = now + 2.8f };
             bool wantAnyUpgrade = needUrgentPrimary || wantSquadMg || wantRoleUpgrade;
-            float maxSearchRadius = (needAtWeapon || needUrgentPrimary) ? 20.0f : (wantSquadMg ? 15.0f : 12.5f);
+            float maxSearchRadius = (needAtWeapon || needUrgentPrimary) ? 20.0f : ((wantSquadMg || wantRadioPack) ? 16.0f : 12.5f);
             float bestDistSq = maxSearchRadius * maxSearchRadius;
             GenericGun heldGun = soldier.GetHeldGun();
-            bool canPickUpNewWeapon = (! _nextWeaponUpgradeAllowedTime.TryGetValue(ptr, out float nextWepT) || now >= nextWepT);
+            bool canPickUpNewWeapon = (!_nextWeaponUpgradeAllowedTime.TryGetValue(ptr, out float nextWepT) || now >= nextWepT);
             bool isPrimaryCompletelyDry = canPickUpNewWeapon && needAmmo && heldGun != null && heldGun.GetCurrentAmmoCount() <= 0 && !heldGun.IsAtWeapon();
+
+            // 0. Scan living friendly buddies in AiCore.WorldSoldiers for Buddy Resupply (Bandage from Medic, Ammo from Carrier, or Feeding a needy MG/AT squadmate)
+            if (VisionConfig.EnableBuddyResupply.Value && (needBandage || needAmmo || canFeedNeedyAlly))
+            {
+                AiCore.EnsureWorldSnapshot();
+                var wSoldiers = AiCore.WorldSoldiers;
+                int wCount = AiCore.WorldSoldierCount;
+                string myFaction = soldier.faction;
+                IntPtr mySqPtr = soldier.joinedSquad != null ? soldier.joinedSquad.Pointer : IntPtr.Zero;
+                bool canRefillBandageFromMedic = needBandage &&
+                                                 (!_nextBuddyBandageRefillTime.TryGetValue(ptr, out float nextBndT) || now >= nextBndT);
+
+                for (int i = 0; i < wCount; i++)
+                {
+                    ref AiCore.SoldierSnapshot sSnap = ref wSoldiers[i];
+                    if (sSnap.Ptr == ptr || sSnap.Faction != myFaction || sSnap.IsOnVehicle || sSnap.HasSurrendered || sSnap.IsInjured || sSnap.Ref == null)
+                        continue;
+
+                    if (Mathf.Abs(sSnap.Pos.y - myPos.y) > 2.5f)
+                        continue;
+
+                    float dSq = (sSnap.Pos - myPos).sqrMagnitude;
+                    if (dSq >= bestDistSq || dSq > 14.0f * 14.0f)
+                        continue;
+
+                    if (canRefillBandageFromMedic && sSnap.IsMedic)
+                    {
+                        bestDistSq = dSq;
+                        result = new BotScavengeCache
+                        {
+                            NextScanTime = now + 2.8f,
+                            TargetBuddyDonor = sSnap.Ref,
+                            TargetPosition = sSnap.Pos,
+                            IsBuddyBandageRefill = true
+                        };
+                        continue;
+                    }
+
+                    if (needAmmo && (sSnap.IsAmmoCarrier || sSnap.CanBorrowAmmo))
+                    {
+                        bestDistSq = dSq;
+                        result = new BotScavengeCache
+                        {
+                            NextScanTime = now + 2.8f,
+                            TargetBuddyDonor = sSnap.Ref,
+                            TargetPosition = sSnap.Pos,
+                            IsBuddyAmmoBorrow = true
+                        };
+                        continue;
+                    }
+
+                    if (canFeedNeedyAlly && mySqPtr != IntPtr.Zero && sSnap.SquadPtr == mySqPtr)
+                    {
+                        Soldier ally = sSnap.Ref;
+                        GenericGun allyGun = ally.GetHeldGun();
+                        if (allyGun != null && (ally.hasMg || allyGun.IsAtWeapon()) && ally.IsOutOfAmmosFor(allyGun))
+                        {
+                            bestDistSq = dSq;
+                            result = new BotScavengeCache
+                            {
+                                NextScanTime = now + 2.8f,
+                                TargetNeedyAllyToFeed = ally,
+                                TargetPosition = sSnap.Pos,
+                                IsFeedingNeedyAlly = true
+                            };
+                        }
+                    }
+                }
+            }
 
             // 1. Scan ONLY genuinely dropped physical floor items (IsPhysicEnabled() == true && parent == null)
             var floorItems = ItemObject.spawnedItems;
@@ -3209,44 +3592,80 @@ namespace EasyRed2HumanAI
                         if (needAtWeapon && canPickUpNewWeapon && floorGun.IsAtWeapon() && floorGun.GetCurrentAmmoCount() > 0)
                         {
                             bestDistSq = dSq;
-                            result.TargetFloorItem = item;
-                            result.TargetInventory = null;
-                            result.TargetPosition = itemPos;
-                            result.IsAtWeaponPickup = true;
-                            result.IsRoleWeaponUpgrade = false;
+                            result = new BotScavengeCache
+                            {
+                                NextScanTime = now + 2.8f,
+                                TargetFloorItem = item,
+                                TargetPosition = itemPos,
+                                IsAtWeaponPickup = true
+                            };
                             continue;
                         }
                         if (wantAnyUpgrade && canPickUpNewWeapon && IsCandidateGunValidUpgrade(floorGun, pers, needUrgentPrimary, wantSquadMg, wantRoleUpgrade, true))
                         {
                             bestDistSq = dSq;
-                            result.TargetFloorItem = item;
-                            result.TargetInventory = null;
-                            result.TargetPosition = itemPos;
-                            result.IsAtWeaponPickup = false;
-                            result.IsRoleWeaponUpgrade = true;
+                            result = new BotScavengeCache
+                            {
+                                NextScanTime = now + 2.8f,
+                                TargetFloorItem = item,
+                                TargetPosition = itemPos,
+                                IsRoleWeaponUpgrade = true
+                            };
                             continue;
                         }
                         if (isPrimaryCompletelyDry && !floorGun.IsPistol() && !floorGun.IsAtWeapon() && floorGun.GetCurrentAmmoCount() > 0)
                         {
                             bestDistSq = dSq;
-                            result.TargetFloorItem = item;
-                            result.TargetInventory = null;
-                            result.TargetPosition = itemPos;
-                            result.IsAtWeaponPickup = false;
-                            result.IsRoleWeaponUpgrade = false;
+                            result = new BotScavengeCache
+                            {
+                                NextScanTime = now + 2.8f,
+                                TargetFloorItem = item,
+                                TargetPosition = itemPos
+                            };
                             continue;
                         }
                         continue;
                     }
 
+                    if (wantHelmet && dSq <= 9.0f * 9.0f && item.TryCast<ItemHelmet>() != null)
+                    {
+                        bestDistSq = dSq;
+                        result = new BotScavengeCache
+                        {
+                            NextScanTime = now + 2.8f,
+                            TargetFloorItem = item,
+                            TargetPosition = itemPos,
+                            IsHelmetPickup = true
+                        };
+                        continue;
+                    }
+
+                    if (wantRadioPack)
+                    {
+                        ItemClothing floorCloth = item.TryCast<ItemClothing>();
+                        if (floorCloth != null && floorCloth.isRadio)
+                        {
+                            bestDistSq = dSq;
+                            result = new BotScavengeCache
+                            {
+                                NextScanTime = now + 2.8f,
+                                TargetFloorItem = item,
+                                TargetPosition = itemPos,
+                                IsRadioPackPickup = true
+                            };
+                            continue;
+                        }
+                    }
+
                     if (needAmmo && item.TryCast<AmmoItem>() != null)
                     {
                         bestDistSq = dSq;
-                        result.TargetFloorItem = item;
-                        result.TargetInventory = null;
-                        result.TargetPosition = itemPos;
-                        result.IsAtWeaponPickup = false;
-                        result.IsRoleWeaponUpgrade = false;
+                        result = new BotScavengeCache
+                        {
+                            NextScanTime = now + 2.8f,
+                            TargetFloorItem = item,
+                            TargetPosition = itemPos
+                        };
                         continue;
                     }
 
@@ -3257,29 +3676,33 @@ namespace EasyRed2HumanAI
                     if (needAtWeapon && vi.TryCast<VirtualATGrenade>() != null)
                     {
                         bestDistSq = dSq;
-                        result.TargetFloorItem = item;
-                        result.TargetInventory = null;
-                        result.TargetPosition = itemPos;
-                        result.IsAtWeaponPickup = true;
-                        result.IsRoleWeaponUpgrade = false;
+                        result = new BotScavengeCache
+                        {
+                            NextScanTime = now + 2.8f,
+                            TargetFloorItem = item,
+                            TargetPosition = itemPos,
+                            IsAtWeaponPickup = true
+                        };
                     }
                     else if (needAmmo && vi.TryCast<VirtualMagazineItem>() != null)
                     {
                         bestDistSq = dSq;
-                        result.TargetFloorItem = item;
-                        result.TargetInventory = null;
-                        result.TargetPosition = itemPos;
-                        result.IsAtWeaponPickup = false;
-                        result.IsRoleWeaponUpgrade = false;
+                        result = new BotScavengeCache
+                        {
+                            NextScanTime = now + 2.8f,
+                            TargetFloorItem = item,
+                            TargetPosition = itemPos
+                        };
                     }
                     else if (needBandage && (vi.TryCast<VirtualSyringe>() != null || vi.TryCast<VirtualBandages>() != null))
                     {
                         bestDistSq = dSq;
-                        result.TargetFloorItem = item;
-                        result.TargetInventory = null;
-                        result.TargetPosition = itemPos;
-                        result.IsAtWeaponPickup = false;
-                        result.IsRoleWeaponUpgrade = false;
+                        result = new BotScavengeCache
+                        {
+                            NextScanTime = now + 2.8f,
+                            TargetFloorItem = item,
+                            TargetPosition = itemPos
+                        };
                     }
                 }
             }
@@ -3322,7 +3745,49 @@ namespace EasyRed2HumanAI
                     if (owner != null && owner.IsAlive && (!needAmmo || !owner.IsAmmoBoxCarrier() || owner.faction != soldier.faction))
                         continue;
 
-                    if (canPickUpNewWeapon && (needAtWeapon || wantAnyUpgrade) && (owner == null || !owner.IsAlive) && (vehOwner == null || vehOwner.IsDisabled()))
+                    bool isDeadBodyOrCrate = (owner == null || !owner.IsAlive) && (vehOwner == null || vehOwner.IsDisabled());
+
+                    // 2A. Field Radio Pack Inheritance (from dead friendly OR enemy radioman) & Corpse Helmet Recovery (from dead friendly comrade)
+                    if (isDeadBodyOrCrate && (wantRadioPack || wantHelmet))
+                    {
+                        if (wantRadioPack)
+                        {
+                            VirtualItem vCloth = inv.FindItemOfType<VirtualClothing>();
+                            if (vCloth != null && TryGetVirtualWearableInfo(vCloth, out CachedWearableInfo wInfo) && wInfo.IsRadio)
+                            {
+                                bestDistSq = dSq;
+                                result = new BotScavengeCache
+                                {
+                                    NextScanTime = now + 2.8f,
+                                    TargetInventory = inv,
+                                    TargetInventoryWearable = vCloth,
+                                    TargetPosition = invPos,
+                                    IsRadioPackPickup = true
+                                };
+                                continue;
+                            }
+                        }
+
+                        if (wantHelmet && dSq <= 8.5f * 8.5f && owner != null && owner.faction == soldier.faction)
+                        {
+                            VirtualItem vHelm = inv.FindItemOfType<VirtualHelmet>();
+                            if (vHelm != null)
+                            {
+                                bestDistSq = dSq;
+                                result = new BotScavengeCache
+                                {
+                                    NextScanTime = now + 2.8f,
+                                    TargetInventory = inv,
+                                    TargetInventoryWearable = vHelm,
+                                    TargetPosition = invPos,
+                                    IsHelmetPickup = true
+                                };
+                                continue;
+                            }
+                        }
+                    }
+
+                    if (canPickUpNewWeapon && (needAtWeapon || wantAnyUpgrade) && isDeadBodyOrCrate)
                     {
                         if (needAtWeapon)
                         {
@@ -3330,13 +3795,13 @@ namespace EasyRed2HumanAI
                             if (atGren != null)
                             {
                                 bestDistSq = dSq;
-                                result.TargetFloorItem = null;
-                                result.TargetInventory = inv;
-                                result.TargetInventoryAtWeapon = null;
-                                result.TargetInventoryPrimaryWeapon = null;
-                                result.TargetPosition = invPos;
-                                result.IsAtWeaponPickup = true;
-                                result.IsRoleWeaponUpgrade = false;
+                                result = new BotScavengeCache
+                                {
+                                    NextScanTime = now + 2.8f,
+                                    TargetInventory = inv,
+                                    TargetPosition = invPos,
+                                    IsAtWeaponPickup = true
+                                };
                                 continue;
                             }
                         }
@@ -3347,13 +3812,14 @@ namespace EasyRed2HumanAI
                             if (needAtWeapon && arch.IsAtWeapon)
                             {
                                 bestDistSq = dSq;
-                                result.TargetFloorItem = null;
-                                result.TargetInventory = inv;
-                                result.TargetInventoryAtWeapon = vw;
-                                result.TargetInventoryPrimaryWeapon = null;
-                                result.TargetPosition = invPos;
-                                result.IsAtWeaponPickup = true;
-                                result.IsRoleWeaponUpgrade = false;
+                                result = new BotScavengeCache
+                                {
+                                    NextScanTime = now + 2.8f,
+                                    TargetInventory = inv,
+                                    TargetInventoryAtWeapon = vw,
+                                    TargetPosition = invPos,
+                                    IsAtWeaponPickup = true
+                                };
                                 continue;
                             }
                             if (wantAnyUpgrade &&
@@ -3369,13 +3835,14 @@ namespace EasyRed2HumanAI
                                     wantRoleUpgrade))
                             {
                                 bestDistSq = dSq;
-                                result.TargetFloorItem = null;
-                                result.TargetInventory = inv;
-                                result.TargetInventoryAtWeapon = null;
-                                result.TargetInventoryPrimaryWeapon = vw;
-                                result.TargetPosition = invPos;
-                                result.IsAtWeaponPickup = false;
-                                result.IsRoleWeaponUpgrade = true;
+                                result = new BotScavengeCache
+                                {
+                                    NextScanTime = now + 2.8f,
+                                    TargetInventory = inv,
+                                    TargetInventoryPrimaryWeapon = vw,
+                                    TargetPosition = invPos,
+                                    IsRoleWeaponUpgrade = true
+                                };
                                 continue;
                             }
                         }
@@ -3388,18 +3855,314 @@ namespace EasyRed2HumanAI
                         continue;
 
                     bestDistSq = dSq;
-                    result.TargetFloorItem = null;
-                    result.TargetInventory = inv;
-                    result.TargetInventoryAtWeapon = null;
-                    result.TargetInventoryPrimaryWeapon = null;
-                    result.TargetPosition = invPos;
-                    result.IsAtWeaponPickup = false;
-                    result.IsRoleWeaponUpgrade = false;
+                    result = new BotScavengeCache
+                    {
+                        NextScanTime = now + 2.8f,
+                        TargetInventory = inv,
+                        TargetPosition = invPos
+                    };
                 }
             }
 
             _botScavengeCaches[ptr] = result;
-            return result.TargetFloorItem != null || result.TargetInventory != null;
+            return result.TargetFloorItem != null ||
+                   result.TargetInventory != null ||
+                   result.TargetBuddyDonor != null ||
+                   result.TargetNeedyAllyToFeed != null;
+        }
+
+        private static bool IsFriendlyPlayerWithinDistance(Soldier self, Vector3 myPos, float maxDist)
+        {
+            if (self == null)
+                return false;
+
+            AiCore.EnsureWorldSnapshot();
+            var wSoldiers = AiCore.WorldSoldiers;
+            int wCount = AiCore.WorldSoldierCount;
+            float maxSq = maxDist * maxDist;
+            string myFaction = self.faction;
+
+            for (int i = 0; i < wCount; i++)
+            {
+                ref AiCore.SoldierSnapshot sSnap = ref wSoldiers[i];
+                if (!sSnap.IsPlayer || sSnap.Faction != myFaction)
+                    continue;
+                if ((sSnap.Pos - myPos).sqrMagnitude <= maxSq)
+                    return true;
+            }
+            return false;
+        }
+
+        private static bool TryExecuteBuddyCasualtyDrag(
+            SoldierAI ai,
+            Soldier soldier,
+            Squad sq,
+            ref SquadBlackboard board,
+            Vector3 myPos,
+            float now)
+        {
+            if (ai == null || soldier == null)
+                return false;
+
+            IntPtr ptr = soldier.Pointer;
+
+            // 1. If already carrying a casualty, drag them to the sheltered drop spot and release them!
+            if (soldier.IsCarryingBody())
+            {
+                bool hasState = _casualtyDragStates.TryGetValue(ptr, out CasualtyDragState activeDrag);
+                Soldier carried = soldier.carryData != null ? soldier.carryData.carriedSoldier : activeDrag.Patient;
+
+                bool shouldDrop = !VisionConfig.EnableBuddyCasualtyDragging.Value ||
+                                  !hasState ||
+                                  carried == null ||
+                                  !carried.IsAlive ||
+                                  !carried.IsInjured ||
+                                  now >= activeDrag.DragEndTime ||
+                                  (myPos - activeDrag.DropSpot).sqrMagnitude <= 2.25f * 2.25f ||
+                                  soldier.GetSuppressionValue() >= 55f;
+
+                if (shouldDrop)
+                {
+                    if (!Photon.Pun.PhotonNetwork.InRoom || AiCore.TryConsumeBotRpcBudget(0.35f))
+                    {
+                        soldier.CarryBodySynched(null);
+                        _casualtyDragStates.Remove(ptr);
+                    }
+                    return true;
+                }
+
+                SetBotPose(ai, soldier, SoldierPose.Crouch);
+                ai.MoveDirectlyToward(activeDrag.DropSpot, 1.15f);
+                return true;
+            }
+
+            if (!VisionConfig.EnableBuddyCasualtyDragging.Value || sq == null || sq.units == null)
+                return false;
+
+            if (soldier.IsSquadLeader() || soldier.IsRadioman() || soldier.IsMedic() || soldier.carryData != null)
+                return false;
+
+            SoldierPersonality pers = GetPersonality(soldier);
+            if (pers == SoldierPersonality.Medic_Heroic ||
+                pers == SoldierPersonality.Medic_Combat ||
+                pers == SoldierPersonality.Medic_Triage)
+                return false;
+
+            if (soldier.GetSuppressionValue() >= 28f || ai.HasEnemyAndCanFireAtHim)
+                return false;
+
+            if (_casualtyDragStates.TryGetValue(ptr, out CasualtyDragState dragState) && now < dragState.NextScanTime)
+                return false;
+
+            dragState.NextScanTime = now + 3.2f;
+            _casualtyDragStates[ptr] = dragState;
+
+            if (!board.HasActiveThreat)
+                return false;
+
+            int uCount = sq.units.Count;
+            Soldier bestPatient = null;
+            Vector3 bestPatientPos = Vector3.zero;
+            float bestDistSq = 9.5f * 9.5f;
+            Soldier squadMedic = null;
+            Vector3 squadMedicPos = Vector3.zero;
+
+            for (int i = 0; i < uCount; i++)
+            {
+                Soldier u = sq.units[i];
+                if (u == null || !u.IsAlive || u.transform == null)
+                    continue;
+                if (u.IsMedic() && !u.IsInjured)
+                {
+                    squadMedic = u;
+                    squadMedicPos = u.transform.position;
+                    break;
+                }
+            }
+
+            for (int i = 0; i < uCount; i++)
+            {
+                Soldier cand = sq.units[i];
+                if (cand == null || cand.Pointer == ptr || !cand.IsAlive || !cand.IsInjured || cand.IsOnVehicle())
+                    continue;
+                if (cand.carryData != null || cand.IsOnCover() || cand.transform == null)
+                    continue;
+
+                Vector3 cPos = cand.transform.position;
+                if (Mathf.Abs(cPos.y - myPos.y) > 2.2f)
+                    continue;
+
+                // Skip if a squad medic is already right next to the casualty
+                if (squadMedic != null && (squadMedicPos - cPos).sqrMagnitude <= 6.0f * 6.0f)
+                    continue;
+
+                float dSq = (cPos - myPos).sqrMagnitude;
+                if (dSq < bestDistSq)
+                {
+                    bestDistSq = dSq;
+                    bestPatient = cand;
+                    bestPatientPos = cPos;
+                }
+            }
+
+            if (bestPatient == null)
+                return false;
+
+            Vector3 dropSpot;
+            if (squadMedic != null && (squadMedicPos - bestPatientPos).sqrMagnitude <= 14.0f * 14.0f)
+            {
+                dropSpot = squadMedicPos - board.ThreatDirection * 1.8f;
+            }
+            else if (!TryFindShelteredSideOfWall(bestPatientPos, board.ThreatDirection, soldier.transform.root, out dropSpot))
+            {
+                dropSpot = bestPatientPos - board.ThreatDirection * 5.5f;
+            }
+
+            if (bestDistSq <= 2.35f * 2.35f)
+            {
+                if (!Photon.Pun.PhotonNetwork.InRoom || AiCore.TryConsumeBotRpcBudget(0.40f))
+                {
+                    soldier.SetGunTriggerPressed(false);
+                    soldier.CarryBodySynched(bestPatient);
+                    dragState.Patient = bestPatient;
+                    dragState.DropSpot = dropSpot;
+                    dragState.DragEndTime = now + 7.0f;
+                    dragState.NextScanTime = now + 18.0f;
+                    _casualtyDragStates[ptr] = dragState;
+                    CasualtiesDraggedCount++;
+                    GoapPlansExecutedCount++;
+                    TrySayTacticalVoice(soldier, sq, VoiceManager.VoiceClip.imMoving, 0.25f);
+                    if (VisionConfig.DebugLogging.Value)
+                    {
+                        AiCore.LogDebug(
+                            "CasualtyDrag",
+                            $"{soldier.faction} {pers} dragging wounded squadmate out of fire line to shelter.",
+                            3.0f);
+                    }
+                    return true;
+                }
+                return false;
+            }
+
+            SetBotPose(ai, soldier, SoldierPose.Crouch);
+            ai.MoveDirectlyToward(bestPatientPos, 1.35f);
+            dragState.NextScanTime = now + 0.45f;
+            _casualtyDragStates[ptr] = dragState;
+            return true;
+        }
+
+        private static bool TryRemountNearbyOperableCrewVehicle(
+            SoldierAI ai,
+            Soldier soldier,
+            Squad sq,
+            Vector3 myPos,
+            float maxRadius)
+        {
+            if (ai == null || soldier == null || soldier.IsOnVehicle())
+                return false;
+
+            if (soldier.targetDestination != null && soldier.targetDestination.TryCast<VehicleRepairTask>() != null)
+                return false;
+
+            var allVehicles = Vehicle.allVehicles;
+            if (allVehicles == null)
+                return false;
+
+            int vCount = allVehicles.Count;
+            if (vCount == 0)
+                return false;
+
+            float bestDistSq = maxRadius * maxRadius;
+            Vehicle bestVeh = null;
+            string myFaction = soldier.faction;
+
+            for (int i = 0; i < vCount; i++)
+            {
+                Vehicle veh = allVehicles[i];
+                if (veh == null || veh.Pointer == IntPtr.Zero || veh.transform == null)
+                    continue;
+
+                if (veh.IsDisabled() || veh.IsCoverDestroyed() || veh.IsAirVehicle())
+                    continue;
+
+                string vf = GetVehicleCrewFaction(veh);
+                if (!string.IsNullOrEmpty(vf) &&
+                    vf != "Civilian" &&
+                    vf != myFaction)
+                    continue;
+
+                float dSq = (veh.transform.position - myPos).sqrMagnitude;
+                if (dSq >= bestDistSq)
+                    continue;
+
+                bool hasFreeSeat = false;
+                if (veh.seats != null)
+                {
+                    int sCount = veh.seats.Length;
+                    for (int s = 0; s < sCount; s++)
+                    {
+                        Seats seat = veh.seats[s];
+                        if (seat != null && seat.unitSet == null)
+                        {
+                            hasFreeSeat = true;
+                            break;
+                        }
+                    }
+                }
+                if (!hasFreeSeat)
+                    continue;
+
+                bestDistSq = dSq;
+                bestVeh = veh;
+            }
+
+            if (bestVeh == null)
+                return false;
+
+            if (soldier.targetDestination == null || soldier.targetDestination.Pointer != bestVeh.Pointer)
+            {
+                soldier.CoverPosition(bestVeh.Cast<AiDestination>());
+            }
+            ai.MoveDestination = bestVeh.transform.position;
+            return true;
+        }
+
+        private static bool ShouldBailedCrewRetreatOverJoinSquad(Soldier soldier, Squad sq, Vector3 myPos)
+        {
+            if (IsSquadOnRetreatTask(sq))
+                return true;
+
+            SoldierPersonality pers = GetPersonality(soldier);
+            bool isPilot = pers == SoldierPersonality.Pilot_Ace ||
+                           pers == SoldierPersonality.Pilot_Daredevil ||
+                           pers == SoldierPersonality.Pilot_Disciplined;
+
+            GenericGun g0 = soldier.GetHeldGun(0);
+            GenericGun g1 = soldier.GetHeldGun(1);
+            bool hasRealPrimary = (g0 != null && !g0.IsPistol() && !g0.IsAtWeapon() && !soldier.IsOutOfAmmosFor(g0)) ||
+                                  (g1 != null && !g1.IsPistol() && !g1.IsAtWeapon() && !soldier.IsOutOfAmmosFor(g1));
+
+            // Unarmed / pistol-only bailed crew or pilots retreat toward rear spawn to survive
+            if (!hasRealPrimary || isPilot)
+                return true;
+
+            // Armed vehicle crewmen check if a friendly infantry squad is within 85m to link up with; otherwise retreat
+            AiCore.EnsureWorldSnapshot();
+            int sqCount = AiCore.WorldSquadCount;
+            var squads = AiCore.WorldSquads;
+            IntPtr mySqPtr = sq != null ? sq.Pointer : IntPtr.Zero;
+            string myFaction = soldier.faction;
+
+            for (int i = 0; i < sqCount; i++)
+            {
+                ref AiCore.SquadSnapshot other = ref squads[i];
+                if (!other.LeaderIsAlive || other.Ptr == mySqPtr || other.IsVehicleCrew || other.IsPlayerInSquad || other.LeaderOnVehicle || other.Faction != myFaction)
+                    continue;
+                if ((other.RefPos - myPos).sqrMagnitude <= 85f * 85f)
+                    return false;
+            }
+
+            return true;
         }
 
         private static bool TryLinkUpOrJoinFriendlySquad(SoldierAI ai, Soldier self, Vector3 myPos, float maxRadius)

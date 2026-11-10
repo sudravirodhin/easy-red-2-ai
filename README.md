@@ -1,4 +1,4 @@
-# Easy Red 2: Battle Hardened (`v0.6.6`)
+# Easy Red 2: Battle Hardened (`v0.6.7`)
 *3-Tier Tactical GOAP, Squad Blackboard, Radioman Intel Net, Veterancy, Personalities & Combined-Arms Overhaul*
 
 > [!IMPORTANT]
@@ -8,7 +8,7 @@
 > **Credit & Inspiration:**
 > Special credit and thanks to **[AtlasActual (`Easy-Red-2-Realism-Overhaul`)](https://github.com/AtlasActual/Easy-Red-2-Realism-Overhaul)** for pioneering several of the combined-arms, objective-coordination, and tactical realism concepts that inspired parts of this project's roadmap and feature sets.
 
-A comprehensive **BepInEx 6 (IL2CPP)** AI, combined-arms, and fairness overhaul for **Easy Red 2** designed to reduce frustrating *"how did they see me?"* and *"what just killed me?"* moments while making battlefield AI behave like coordinated human squads. It replaces vanilla's robotic X-ray spotting, erratic stance oscillation, indoor floor-clipping prone drops, unguarded rear objectives, suicidal APC charges, and point-blank tank rushes with human-like perception, last-known suppression, bounding overwatch, a `6.0s` Macro Objective & Emplacement Director, Tank Standoff & Reverse discipline, a 15-minute linear Veteran progression system, **30 Role-Based AI Personalities**, **Client-Side Plane Audio Smoothing**, **Thin-Cover Wood Bullet Penetration**, an **in-game `F6` Feature Bundle Menu**, and full Death Screen Kill Attribution.
+A comprehensive **BepInEx 6 (IL2CPP)** AI, combined-arms, and fairness overhaul for **Easy Red 2** designed to reduce frustrating *"how did they see me?"* and *"what just killed me?"* moments while making battlefield AI behave like coordinated human squads. It replaces vanilla's robotic X-ray spotting, erratic stance oscillation, indoor floor-clipping prone drops, unguarded rear objectives, suicidal APC charges, and point-blank tank rushes with human-like perception, last-known suppression, bounding overwatch, a `6.0s` Macro Objective & Emplacement Director, Tank Standoff & Reverse discipline, a 15-minute linear Veteran progression system, **30 Role-Based AI Personalities**, **Client-Side Plane Audio Smoothing**, **Thin-Cover Wood Bullet Penetration**, an **in-game 5-Tab `F6` Feature Menu**, a standalone **`F5` In-Game Campaign & Mission Picker**, and full Death Screen Kill Attribution.
 
 ---
 
@@ -19,7 +19,7 @@ A comprehensive **BepInEx 6 (IL2CPP)** AI, combined-arms, and fairness overhaul 
 | **Target Branch** | Steam `public` (Default Branch) |
 | **Confirmed Game Version** | **Easy Red 2 — Game Build `921`** (Steam Build ID `26375879`, Unity `2022.3.62f3` IL2CPP x64) |
 | **Mod Loader** | **[BepInEx 6 Bleeding Edge (`BepInEx-Unity.IL2CPP-win-x64`, build `#791`+)](https://builds.bepinex.dev/projects/bepinex_be)** |
-| **Last Confirmed Test Date** | **November 9, 2026** (`2026-11-09`) |
+| **Last Confirmed Test Date** | **November 10, 2026** (`2026-11-10`) |
 
 ---
 
@@ -27,22 +27,22 @@ A comprehensive **BepInEx 6 (IL2CPP)** AI, combined-arms, and fairness overhaul 
 
 Download your preferred package from the **[Releases](https://github.com/sudravirodhin/easy-red-2-ai/releases)** page:
 
-### Option A: With BepInEx Included (`EasyRed2HumanAI-v0.6.6-with-BepInEx.zip`) — *Recommended for Fresh Installs*
+### Option A: With BepInEx Included (`EasyRed2HumanAI-v0.6.7-with-BepInEx.zip`) — *Recommended for Fresh Installs*
 Includes **[BepInEx 6.0.0-be.791 (Unity.IL2CPP-win-x64)](https://builds.bepinex.dev/projects/bepinex_be)**, the `.NET 6` runtime, Unity `2022.3.62` base libraries, pre-generated IL2CPP `interop` assemblies for Easy Red 2 Build `921`, and `EasyRed2HumanAI.dll` (with no other third-party mods).
 1. Open your **Easy Red 2** installation folder (e.g. `Steam\steamapps\common\Easy Red 2`, where `Easy Red 2.exe` is located).
-2. Extract all contents of `EasyRed2HumanAI-v0.6.6-with-BepInEx.zip` directly into the `Easy Red 2` folder.
+2. Extract all contents of `EasyRed2HumanAI-v0.6.7-with-BepInEx.zip` directly into the `Easy Red 2` folder.
 3. Launch the game!
 
-### Option B: Without BepInEx / Plugin Only (`EasyRed2HumanAI-v0.6.6-Plugin-Only.zip` or `EasyRed2HumanAI.dll`)
+### Option B: Without BepInEx / Plugin Only (`EasyRed2HumanAI-v0.6.7-Plugin-Only.zip` or `EasyRed2HumanAI.dll`)
 For users who already have **[BepInEx 6 Bleeding Edge (`BepInEx-Unity.IL2CPP-win-x64`)](https://builds.bepinex.dev/projects/bepinex_be)** installed:
-1. Download `EasyRed2HumanAI-v0.6.6-Plugin-Only.zip` (or `EasyRed2HumanAI.dll` directly).
+1. Download `EasyRed2HumanAI-v0.6.7-Plugin-Only.zip` (or `EasyRed2HumanAI.dll` directly).
 2. Place `EasyRed2HumanAI.dll` into:
    ```text
    Easy Red 2\BepInEx\plugins\EasyRed2HumanAI.dll
    ```
 
 ### Switching to Vanilla or Uninstalling (`Uninstall-BepInEx-Mod.bat`)
-Included in `EasyRed2HumanAI-v0.6.6-with-BepInEx.zip` (and in the root of this repository) is **[`Uninstall-BepInEx-Mod.bat`](Uninstall-BepInEx-Mod.bat)**. Double-click it inside your `Easy Red 2` folder when the game is closed to:
+Included in `EasyRed2HumanAI-v0.6.7-with-BepInEx.zip` (and in the root of this repository) is **[`Uninstall-BepInEx-Mod.bat`](Uninstall-BepInEx-Mod.bat)**. Double-click it inside your `Easy Red 2` folder when the game is closed to:
 * **`[1] Play Vanilla Temporarily`**: Moves `BepInEx`, `dotnet`, and `winhttp.dll` into `_BepInEx_Disabled_Backup\` so the game runs 100% pure vanilla without losing your configs or other plugins.
 * **`[2] Restore Modded Game`**: Moves everything back from `_BepInEx_Disabled_Backup\` in one click.
 * **`[3] Uninstall Completely`**: Permanently deletes `BepInEx`, `dotnet`, `winhttp.dll`, `doorstop_config.ini`, `.doorstop_version`, and `changelog.txt`.
@@ -79,6 +79,12 @@ Alongside shared tactical realism goals (some inspired by [`Easy-Red-2-Realism-O
   * **Tank Hull Cover & Walking-Pace Armored Escort**: Infantry use nearby idle or wrecked tanks/armored hulls as physical leeward cover (`CoverManager.vehicleCovers`), and riflemen advancing alongside a slow friendly tank (`0.45–5.2 m/s`) bound in its sheltered rear-quarter wake clear of the tracks.
   * **GOAP De-Confliction, Pilot/Tanker Retreat Survival & Role-Smart Weapon Upgrades**: Protects active GOAP flankers, scavengers, and tank-cover seekers from vanilla's `2.0s` `CalculateMoveOrderDestination` (`IsInsideMoveOrderArea`) reset; preserves `MissionTaskRetreat` so bailed-out pilots and tankers prioritize retreating to friendly lines (only merging into squads if cut off); and enables **Pistol-Only Primary Re-Arming**, **Fallen Squad MG Inheritance** (when a squad loses its MG gunner), and **Opportunistic Role Upgrades** (Assaulters ditching bolt-actions for SMGs/semi-autos, Marksmen picking up scoped rifles, Gunners recovering LMGs).
   * **Unified Spectator-Safe Tactical & Kill Callouts (`VoiceClip.enemyDown` — *"I got him!"*)**: AI bots now use every nation's recorded `VoiceClip.enemyDown` lines (~`25%` roll on confirmed kills, matching the player's own `DamageFeedback` rate)—using camera-relative `Creature.IsLodded2()` locally so **Free/Spectator Camera (`F`)** hears battles anywhere on the map while Co-op `SyncSay` RPCs only fire when a remote client is within `75m`.
+* **Emergent Squad Interactions, Anti-Dogpile Medic Triage, Smart Munition Selection, Co-op Air Superiority & In-Game Map Picker (`v0.6.7`)**:
+  * **Emergent Field Radio Inheritance, Helmet Recovery/Gifting, Buddy Resupply & Casualty Dragging**: When a squad loses its Radioman, a surviving squadmate can scavenge a radio backpack (`VirtualClothing.isRadio` via `Soldier.SetWerable`) from a fallen friendly or enemy Radioman to dynamically become the squad's new Radioman and reconnect to the Team Radio Net! Helmetless bots (`!hasHeadgear`) pick up knocked-off or **player-gifted helmets** from the ground (`ItemHelmet`) and call out *"Thank you!"* (`VoiceClip.thankYou`) if a friendly player is nearby. Squadmates borrow ammo and bandages directly from living Medics and Ammo Carriers (`BorrowAmmos` / `RefillBandages`), Support carriers proactively feed dry MG/AT gunners, and riflemen drag wounded squadmates out of the open to shelter (`Soldier.CarryBodySynched`).
+  * **Anti-Dogpile Medic Triage & Instant Claim Release (`Squad.MedicRoutine`)**: Fixes vanilla's medic dogpiling (where 3–4 medics swarm the same casualty while others bleed out) by capping each wounded soldier to 1 primary medic (up to 2 max only if the primary is `> 20m` away or heavily suppressed) and **immediately releasing the claim** if the medic dies, goes down (`IsInjured`), surrenders, or drops the task.
+  * **Smart Tank & Aircraft Munition Selection (`TurretGun.SelectBestAmmo` — HE vs. AP)**: Fixes vanilla's `GetEfficiencyAgainstInfantry` bug where 75mm/40mm solid AP cannons tied Coaxial/Wing MGs (and ranked `APHE`/`HEAT` above MGs), causing tanks and planes to waste anti-armor shells on foot soldiers instead of firing their Machine Guns.
+  * **Co-op Air Superiority Sync, Airborne Plane Spawn Hot-Start, Tank Rock Unstick & First-Person Shadow Fix**: Syncs `VehiclePlane.isGrounded` on the Host for remote client planes so enemy fighters intercept all airborne human players; hot-starts airborne client planes spawned mid-air with engine off; unsticks tanks high-centered on rocks/stumps (`VehicleTank.FixedUpdate`); fixes tank crew repair distances (`2.35m–3.25m`) and auto-remounting (`getOnVehicleAfter = true`); and restores **First-Person Self-Shadows** (`ShadowCastingMode.On` / `ShadowsOnly`) on your player body, arms, and weapon.
+  * **5-Tab `F6` Concept Menu, Standalone `F5` In-Game Map Picker & Multi-Line `F10` Telemetry Card**: Reorganizes `F6` into 5 clean tabs (`GOAP & Bot Behaviors`, `Vanilla Fixes`, `Vision & Realism`, `Vets & Roles`, `Optimizations & QoL`), expands `F10` into a 5-line auto-sized HUD card, and adds a standalone **`F5` Campaign & Mission Picker** allowing Singleplayer or Co-op Hosts (`BattleLoader.ConnectToNextMatch`) to switch or queue any campaign mission mid-game!
 
 > *(Want the deep-dive engineering breakdown of what vanilla's `GameAssembly.dll` did under the hood and why each change was made? Read **[`docs/design-and-justifications.md`](docs/design-and-justifications.md)**!)*
 
@@ -222,14 +228,15 @@ Whether you are **joining a 100% vanilla server as a modded client**, **hosting 
 
 ---
 
-## In-Game Feature Bundle Menu (`F6`), Hotkeys & `.cfg` File
+## In-Game 5-Tab Feature Menu (`F6`), Map Picker (`F5`), Hotkeys & `.cfg` File
 
-Every feature in this mod is organized into **6 cohesive Feature Bundles** with one-click **`[ALL]` / `[OFF]`** bundle header buttons in the **in-game `F6` GUI menu** (and saved in `BepInEx\config\com.antigravity.easyred2.humanai.cfg`):
+Every feature in this mod is organized into **5 Overarching Concept Tabs** (`1. GOAP & Bot Behaviors`, `2. Vanilla Fixes`, `3. Vision & Realism`, `4. Vets & Roles`, `5. Optimizations & QoL`) with one-click **`[ALL]` / `[OFF]`** section buttons in the **in-game `F6` GUI menu** (and saved in `BepInEx\config\com.antigravity.easyred2.humanai.cfg`):
 
-* **`F6`**: Open/Close the **Interactive Feature Bundle Menu** (toggle individual features or entire bundles ON/OFF live in-game).
+* **`F5`**: Open/Close the standalone **In-Game Campaign & Mission Picker** (Singleplayer & Multiplayer Host: **Switch to Mission Now** or **Queue as Next Mission** across all campaigns without leaving the room!).
+* **`F6`**: Open/Close the **5-Tab Modular Feature Menu** (toggle individual features or entire categories ON/OFF live in-game).
 * **`F8`**: Master Toggle Mod **ENABLED / DISABLED** live in-game.
 * **`F9`**: **Hot-Reload** `com.antigravity.easyred2.humanai.cfg` from disk without restarting.
-* **`F10`**: Display **Live Tactical Telemetry Toast** (Active Veterans, Promotions, Survival Drops, Indoor Crouch Saves, Callouts, Suppressive Bursts, Bounding Holds, Objective Garrisons, Static Guns Staffed, Smart APC Dismounts, Tank Standoff Holds, Wood Penetrations, Plane Audio Loops Desynced, and Friendly Fire Saved).
+* **`F10`**: Display **5-Line Live Tactical Telemetry Card** (Active Veterans, Promotions, Extra Brain Ticks, Ping Governor Skips, GOAP Actions, Buddy Resupplies, Field Radios Inherited, Helmets Recovered, Casualties Dragged, Medic Redirects, Smart Ammo Switches, Tank Unsticks, Wood Penetrations, Top-Attack AP, and Friendly Fire Saved).
 
 ---
 
