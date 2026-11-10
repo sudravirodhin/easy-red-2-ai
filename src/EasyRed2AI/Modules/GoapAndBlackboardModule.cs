@@ -295,6 +295,7 @@ namespace EasyRed2HumanAI
         internal static readonly Dictionary<IntPtr, BotScavengeCache> _botScavengeCaches = new Dictionary<IntPtr, BotScavengeCache>(128);
         internal static readonly Dictionary<IntPtr, float> _nextWeaponUpgradeAllowedTime = new Dictionary<IntPtr, float>(128);
         internal static readonly Dictionary<IntPtr, float> _nextBuddyBandageRefillTime = new Dictionary<IntPtr, float>(128);
+        internal static readonly Dictionary<IntPtr, float> _nextBuddyAmmoResupplyTime = new Dictionary<IntPtr, float>(128);
         private static float _nextGlobalBotWeaponPickupTime;
 
         private struct CachedWearableInfo
@@ -391,6 +392,100 @@ namespace EasyRed2HumanAI
             };
             _cachedInventoryOwners[invPtr] = cached;
             return cached;
+        }
+
+        private static bool IsInventoryValidCorpseOrCrate(
+            InventoryManager inv,
+            string soldierFaction,
+            bool needAmmo,
+            bool needBandage,
+            out Soldier deadSoldierOwner,
+            out bool isDeadBodyOrDisabledCrate)
+        {
+            deadSoldierOwner = null;
+            isDeadBodyOrDisabledCrate = false;
+
+            if (inv == null || inv.Pointer == IntPtr.Zero || inv.IsPlayersInventory())
+                return false;
+
+            CachedInventoryOwner invOwner = GetCachedInventoryOwner(inv);
+            Soldier owner = invOwner.SoldierOwner;
+            Vehicle vehOwner = invOwner.VehicleOwner;
+
+            // CRITICAL: In Easy Red 2 (Creature.get_IsAlive @ 0x180A55260, get_IsInjured @ 0x180A55390, get_IsDead @ 0x180A552F0),
+            // an incapacitated/downed soldier waiting for a medic has IsAlive == false (life_total == 0) AND IsInjured == true,
+            // while their weapons, helmet, and radio pack remain inside owner.inventory so they keep their gear when revived!
+            // Never target living or downed/injured soldiers via InventoryManager (living buddy resupply uses TargetBuddyDonor).
+            if (owner != null)
+            {
+                if (owner.Pointer == IntPtr.Zero || !owner.IsDead || owner.IsInjured || owner.IsAlive)
+                    return false;
+                deadSoldierOwner = owner;
+            }
+
+            if (vehOwner != null && vehOwner.Pointer != IntPtr.Zero)
+            {
+                string vf = vehOwner.GetVehicleFaction();
+                if (!string.IsNullOrEmpty(vf) && ResourcesManager.IsEnemyFaction(vf, soldierFaction))
+                    return false;
+                if (!needAmmo && !needBandage && !vehOwner.IsDisabled())
+                    return false;
+                isDeadBodyOrDisabledCrate = vehOwner.IsDisabled();
+                return true;
+            }
+
+            isDeadBodyOrDisabledCrate = true;
+            return true;
+        }
+
+        private static bool IsScavengeTargetClaimedByOtherBot(IntPtr selfPtr, IntPtr targetPtr, float now)
+        {
+            if (targetPtr == IntPtr.Zero || _botScavengeCaches.Count <= 1)
+                return false;
+
+            foreach (var kvp in _botScavengeCaches)
+            {
+                if (kvp.Key == selfPtr)
+                    continue;
+                BotScavengeCache other = kvp.Value;
+                if (now >= other.NextScanTime)
+                    continue;
+
+                if ((other.TargetFloorItem != null && other.TargetFloorItem.Pointer == targetPtr) ||
+                    (other.TargetInventory != null && other.TargetInventory.Pointer == targetPtr) ||
+                    (other.TargetBuddyDonor != null && other.TargetBuddyDonor.Pointer == targetPtr) ||
+                    (other.TargetNeedyAllyToFeed != null && other.TargetNeedyAllyToFeed.Pointer == targetPtr))
+                {
+                    return true;
+                }
+            }
+            return false;
+        }
+
+        private static void RefillSoldierPrimaryAndStowedWeapons(Soldier soldier, int minRefillQnt)
+        {
+            if (soldier == null)
+                return;
+
+            soldier.RefillAmmoForWearedWeapon(0, true, null, false, minRefillQnt);
+
+            // In ER2 (Soldier.SwitchTo @ 0x18076AD20), when a soldier switches to their sidearm (Slot 2),
+            // their primary weapon is swapped into Slot 2 (or Slot 1). Refill any stowed non-pistol weapon too!
+            GenericGun g1 = soldier.GetHeldGun(1);
+            if (g1 != null && !g1.IsPistol())
+                soldier.RefillAmmoForWearedWeapon(1, true, null, false, minRefillQnt);
+
+            GenericGun g2 = soldier.GetHeldGun(2);
+            if (g2 != null && !g2.IsPistol())
+            {
+                soldier.RefillAmmoForWearedWeapon(2, true, null, false, minRefillQnt);
+                // If currently holding a pistol in Slot 0 because the primary in Slot 2 was dry, switch back to primary!
+                GenericGun g0 = soldier.GetHeldGun(0);
+                if (g0 != null && g0.IsPistol() && !soldier.isInHandsAnimation && !soldier.isInBodyAnimation && soldier.CanSwitchHeldItem)
+                {
+                    soldier.SwitchTo(2);
+                }
+            }
         }
 
         private static bool TryGetVirtualWeaponArchetype(VirtualItem vw, out CachedWeaponArchetype arch)
@@ -919,6 +1014,7 @@ namespace EasyRed2HumanAI
             _nextFreeFloorItemsSnapshotTime = 0f;
             _nextWeaponUpgradeAllowedTime.Clear();
             _nextBuddyBandageRefillTime.Clear();
+            _nextBuddyAmmoResupplyTime.Clear();
             _casualtyDragStates.Clear();
             _cachedInventoryOwners.Clear();
             _initialHqSpawnBriefingConsumed.Clear();
@@ -945,7 +1041,7 @@ namespace EasyRed2HumanAI
             Soldier patient = healDest.soldierToHealUp;
             if (patient == null ||
                 patient.Pointer == IntPtr.Zero ||
-                !patient.IsAlive ||
+                patient.IsDead ||
                 patient.IsOnVehicle() ||
                 patient.HasSurrended() ||
                 healDest.coverReached ||
@@ -2217,8 +2313,11 @@ namespace EasyRed2HumanAI
             // 5) Support Ammo-Bearer proactively feeding a dry MG or AT squadmate!
             if (!soldier.isBleeding && suppression < 28f && !isOnBridge)
             {
-                GenericGun heldGun = soldier.GetHeldGun();
-                bool outOfAmmo = heldGun != null && soldier.IsOutOfAmmosFor(heldGun);
+                GenericGun gun0 = soldier.GetHeldGun(0);
+                GenericGun gun1 = soldier.GetHeldGun(1);
+                GenericGun gun2 = soldier.GetHeldGun(2);
+                bool outOfAmmo = (gun0 != null && soldier.IsOutOfAmmosFor(gun0)) ||
+                                 (gun2 != null && !gun2.IsPistol() && !gun2.IsAtWeapon() && soldier.IsOutOfAmmosFor(gun2));
                 bool outOfBandage = !soldier.hasSyringe;
 
                 bool armorThreatPresent = (ws & GoapStateBits.ArmorThreatClose) != 0 ||
@@ -2235,10 +2334,9 @@ namespace EasyRed2HumanAI
                 if ((armorThreatPresent || isAtRole) &&
                     !onRetreatTask && !soldier.IsSquadLeader() && !soldier.IsRadioman() && !isMedicRole)
                 {
-                    GenericGun gun0 = soldier.GetHeldGun(0);
-                    GenericGun gun1 = soldier.GetHeldGun(1);
                     bool hasUsableAtGun = (gun0 != null && gun0.IsAtWeapon() && (gun0.GetCurrentAmmoCount() > 0 || !soldier.IsOutOfAmmosFor(gun0))) ||
-                                          (gun1 != null && gun1.IsAtWeapon() && (gun1.GetCurrentAmmoCount() > 0 || !soldier.IsOutOfAmmosFor(gun1)));
+                                          (gun1 != null && gun1.IsAtWeapon() && (gun1.GetCurrentAmmoCount() > 0 || !soldier.IsOutOfAmmosFor(gun1))) ||
+                                          (gun2 != null && gun2.IsAtWeapon() && (gun2.GetCurrentAmmoCount() > 0 || !soldier.IsOutOfAmmosFor(gun2)));
                     bool hasAtGrenade = soldier.inventory != null && soldier.inventory.FindItemOfType<VirtualATGrenade>() != null;
                     needAtWeapon = !hasUsableAtGun && !hasAtGrenade;
                 }
@@ -2882,12 +2980,16 @@ namespace EasyRed2HumanAI
                                 scavCache.TargetPosition = scavCache.TargetNeedyAllyToFeed.transform.position;
                             }
 
+                            bool isBuddyHandoff = scavCache.IsBuddyBandageRefill ||
+                                                  scavCache.IsBuddyAmmoBorrow ||
+                                                  scavCache.IsFeedingNeedyAlly;
                             bool outOfAmmo = scavCache.NeedAmmo;
                             bool outOfBandage = scavCache.NeedBandage;
                             Vector3 targetPos = scavCache.TargetPosition;
                             float dSq = (targetPos - myPos).sqrMagnitude;
+                            float triggerRadius = isBuddyHandoff ? 3.8f : 3.3f;
                             SetBotPose(ai, soldier, SoldierPose.Crouch);
-                            if (dSq <= 3.3f * 3.3f)
+                            if (dSq <= triggerRadius * triggerRadius)
                             {
                                 bool looted = false;
                                 string lootedDesc = "supply";
@@ -2896,7 +2998,8 @@ namespace EasyRed2HumanAI
                                 if (scavCache.IsBuddyBandageRefill &&
                                     scavCache.TargetBuddyDonor != null &&
                                     scavCache.TargetBuddyDonor.Pointer != IntPtr.Zero &&
-                                    scavCache.TargetBuddyDonor.IsAlive)
+                                    scavCache.TargetBuddyDonor.IsAlive &&
+                                    !scavCache.TargetBuddyDonor.IsInjured)
                                 {
                                     if (!Photon.Pun.PhotonNetwork.InRoom || AiCore.TryConsumeBotRpcBudget(0.25f))
                                     {
@@ -2912,11 +3015,18 @@ namespace EasyRed2HumanAI
                                 else if (scavCache.IsBuddyAmmoBorrow &&
                                          scavCache.TargetBuddyDonor != null &&
                                          scavCache.TargetBuddyDonor.Pointer != IntPtr.Zero &&
-                                         scavCache.TargetBuddyDonor.IsAlive)
+                                         scavCache.TargetBuddyDonor.IsAlive &&
+                                         !scavCache.TargetBuddyDonor.IsInjured)
                                 {
                                     if (!Photon.Pun.PhotonNetwork.InRoom || AiCore.TryConsumeBotRpcBudget(0.30f))
                                     {
-                                        scavCache.TargetBuddyDonor.BorrowAmmos(soldier);
+                                        Soldier donor = scavCache.TargetBuddyDonor;
+                                        donor.BorrowAmmos(soldier);
+                                        // Creature.BorrowAmmos (0x180A51A60) only transfers ammo if donor.inventory contains a magazine/clip
+                                        // matching soldier.GetHeldGun(0). Always refill primary/stowed weapons when resupplying from an
+                                        // Ammo Box Carrier or if caliber mismatch left the weapon dry, and enforce a 35s cooldown!
+                                        RefillSoldierPrimaryAndStowedWeapons(soldier, 2);
+                                        _nextBuddyAmmoResupplyTime[ptr] = now + 35.0f;
                                         BuddyResuppliesCount++;
                                         looted = true;
                                         lootedDesc = "buddy ammo from carrier";
@@ -2927,11 +3037,19 @@ namespace EasyRed2HumanAI
                                 else if (scavCache.IsFeedingNeedyAlly &&
                                          scavCache.TargetNeedyAllyToFeed != null &&
                                          scavCache.TargetNeedyAllyToFeed.Pointer != IntPtr.Zero &&
-                                         scavCache.TargetNeedyAllyToFeed.IsAlive)
+                                         scavCache.TargetNeedyAllyToFeed.IsAlive &&
+                                         !scavCache.TargetNeedyAllyToFeed.IsInjured)
                                 {
                                     if (!Photon.Pun.PhotonNetwork.InRoom || AiCore.TryConsumeBotRpcBudget(0.30f))
                                     {
-                                        soldier.BorrowAmmos(scavCache.TargetNeedyAllyToFeed);
+                                        Soldier ally = scavCache.TargetNeedyAllyToFeed;
+                                        soldier.BorrowAmmos(ally);
+                                        if (AiCore.IsLocallyOwnedBot(ally))
+                                        {
+                                            RefillSoldierPrimaryAndStowedWeapons(ally, 2);
+                                        }
+                                        _nextBuddyAmmoResupplyTime[ptr] = now + 35.0f;
+                                        _nextBuddyAmmoResupplyTime[ally.Pointer] = now + 35.0f;
                                         BuddyResuppliesCount++;
                                         looted = true;
                                         lootedDesc = "fed ammo to needy MG/AT squadmate";
@@ -2969,6 +3087,10 @@ namespace EasyRed2HumanAI
                                                 lootedDesc = floorGun.IsAtWeapon() ? "dropped AT weapon" : "dropped firearm";
                                             }
                                         }
+                                        else
+                                        {
+                                            _nextWeaponUpgradeAllowedTime[ptr] = now + 8.0f;
+                                        }
                                     }
                                     else if ((scavCache.IsHelmetPickup || scavCache.IsRadioPackPickup) && soldier.inventory != null)
                                     {
@@ -3000,20 +3122,23 @@ namespace EasyRed2HumanAI
                                     else if (soldier.inventory != null && soldier.inventory.AddItemToInventoryAndDestroyInstance(scavCache.TargetFloorItem))
                                     {
                                         if (outOfAmmo)
-                                            soldier.RefillAmmoForWearedWeapon(0, true, null, false, 2);
+                                            RefillSoldierPrimaryAndStowedWeapons(soldier, 2);
                                         if (outOfBandage && soldier.inventory.FindItemOfType<VirtualSyringe>() != null)
                                             soldier.hasSyringe = true;
                                         looted = true;
                                         lootedDesc = scavCache.IsAtWeaponPickup ? "floor AT grenade" : "floor ammo/supply";
                                     }
                                 }
-                                // 2. Scavenge from corpse inventory, supply crate, or friendly ammo carrier
-                                else if (scavCache.TargetInventory != null && scavCache.TargetInventory.Pointer != IntPtr.Zero && !scavCache.TargetInventory.IsPlayersInventory())
+                                // 2. Scavenge from verified dead corpse inventory or supply crate
+                                else if (IsInventoryValidCorpseOrCrate(
+                                             scavCache.TargetInventory,
+                                             soldier.faction,
+                                             outOfAmmo,
+                                             outOfBandage,
+                                             out _,
+                                             out bool ownerStillDeadOrCrate))
                                 {
                                     InventoryManager targetInv = scavCache.TargetInventory;
-                                    CachedInventoryOwner invOwner = GetCachedInventoryOwner(targetInv);
-                                    bool ownerStillDeadOrCrate = (invOwner.SoldierOwner == null || !invOwner.SoldierOwner.IsAlive) &&
-                                                                 (invOwner.VehicleOwner == null || invOwner.VehicleOwner.IsDisabled());
                                     bool canSwitchWeaponNow = ownerStillDeadOrCrate &&
                                                               !soldier.IsPlayer() &&
                                                               !soldier.isInHandsAnimation &&
@@ -3030,9 +3155,11 @@ namespace EasyRed2HumanAI
                                         if (!Photon.Pun.PhotonNetwork.InRoom || AiCore.TryConsumeBotRpcBudget(0.35f))
                                         {
                                             VirtualItem wearable = scavCache.TargetInventoryWearable;
-                                            if (soldier.inventory.TakeIntoInventory(wearable, targetInv))
+                                            // InventoryManager.TakeIntoInventory (0x1807E50E0) always returns false (xor al, al)
+                                            // and automatically calls soldier.SetWerable(copy, true) for VirtualWearable items!
+                                            soldier.inventory.TakeIntoInventory(wearable, targetInv);
+                                            if (!targetInv.Contains(wearable))
                                             {
-                                                soldier.SetWerable(wearable, true);
                                                 looted = true;
                                                 if (scavCache.IsRadioPackPickup)
                                                 {
@@ -3062,14 +3189,22 @@ namespace EasyRed2HumanAI
                                                 looted = true;
                                                 lootedDesc = "AT launcher from body/crate";
                                             }
+                                            else
+                                            {
+                                                _nextWeaponUpgradeAllowedTime[ptr] = now + 8.0f;
+                                            }
                                         }
                                         else if (soldier.inventory != null)
                                         {
                                             VirtualItem atGren = targetInv.FindItemOfType<VirtualATGrenade>();
-                                            if (atGren != null && soldier.inventory.TakeIntoInventory(atGren, targetInv))
+                                            if (atGren != null)
                                             {
-                                                looted = true;
-                                                lootedDesc = "AT grenade from body/crate";
+                                                soldier.inventory.TakeIntoInventory(atGren, targetInv);
+                                                if (!targetInv.Contains(atGren))
+                                                {
+                                                    looted = true;
+                                                    lootedDesc = "AT grenade from body/crate";
+                                                }
                                             }
                                         }
                                     }
@@ -3089,23 +3224,31 @@ namespace EasyRed2HumanAI
                                             looted = true;
                                             lootedDesc = "role-matched primary from body/crate";
                                         }
+                                        else
+                                        {
+                                            _nextWeaponUpgradeAllowedTime[ptr] = now + 8.0f;
+                                        }
                                     }
 
                                     if (outOfBandage && soldier.inventory != null)
                                     {
                                         VirtualItem syr = targetInv.FindItemOfType<VirtualSyringe>();
-                                        if (syr != null && soldier.inventory.TakeIntoInventory(syr, targetInv))
+                                        if (syr != null)
                                         {
-                                            soldier.hasSyringe = true;
-                                            looted = true;
-                                            if (lootedDesc == "supply")
-                                                lootedDesc = "bandage";
+                                            soldier.inventory.TakeIntoInventory(syr, targetInv);
+                                            if (!targetInv.Contains(syr))
+                                            {
+                                                soldier.hasSyringe = true;
+                                                looted = true;
+                                                if (lootedDesc == "supply")
+                                                    lootedDesc = "bandage";
+                                            }
                                         }
                                     }
 
                                     if (outOfAmmo)
                                     {
-                                        soldier.RefillAmmoForWearedWeapon(0, true, null, false, 2);
+                                        RefillSoldierPrimaryAndStowedWeapons(soldier, 2);
                                         looted = true;
                                         if (lootedDesc == "supply")
                                             lootedDesc = "ammo";
@@ -3128,7 +3271,9 @@ namespace EasyRed2HumanAI
                             else
                             {
                                 plan.LockUnitCoverChange = true;
-                                ai.MoveDirectlyToward(targetPos, 1.35f);
+                                // Stop at 2.50m arm's-length handoff distance for living buddies so bots never body-hug teammates!
+                                float stopDist = isBuddyHandoff ? 2.50f : 1.50f;
+                                ai.MoveDirectlyToward(targetPos, stopDist);
                             }
                         }
                     }
@@ -3310,35 +3455,61 @@ namespace EasyRed2HumanAI
             wantSquadMg = false;
             wantRoleUpgrade = false;
 
-            if (soldier.isInHandsAnimation || soldier.isInBodyAnimation || !soldier.CanSwitchHeldItem)
+            if (soldier.isInHandsAnimation || soldier.isInBodyAnimation || !soldier.CanSwitchHeldItem || soldier.HoldsInventoryItem)
                 return;
 
             IntPtr ptr = soldier.Pointer;
             if (_nextWeaponUpgradeAllowedTime.TryGetValue(ptr, out float nextAllowed) && now < nextAllowed)
                 return;
 
+            // CRITICAL: In Easy Red 2 (Soldier.SetItem @ 0x180765D10, Soldier.SwitchTo @ 0x18076AD20),
+            // wearedItems has 3 slots: Slot 0 (hands), Slot 1 (AT/special), and Slot 2 (holster/stowed weapon).
+            // When a Squad Leader or Rifleman switches to their sidearm (Slot 2), Slot 0 and Slot 2 swap—putting
+            // the pistol in Slot 0 (GetHeldGun(0)) and stowing their primary rifle/SMG in Slot 2 (GetHeldGun(2))!
+            // Always inspect all 3 slots (plus GetHeldItem_inventory(0..2)) so a soldier holding a sidearm
+            // NEVER falsely triggers needUrgentPrimary and swaps their pistol for a random bolt-action rifle!
             GenericGun g0 = soldier.GetHeldGun(0);
             GenericGun g1 = soldier.GetHeldGun(1);
+            GenericGun g2 = soldier.GetHeldGun(2);
 
-            // Check actual firearm type regardless of remaining ammo (dry rifles use outOfAmmo ammo-refill scavenging,
-            // NEVER weapon-replacement prefab swaps!). needUrgentPrimary is strictly for pistol-only / unarmed soldiers
-            // (e.g. bailed-out pilots/tank crews merged into a squad, or pistol-armed officers/medics).
             bool g0RealPrimary = g0 != null && !g0.IsPistol() && !g0.IsAtWeapon();
             bool g1RealPrimary = g1 != null && !g1.IsPistol() && !g1.IsAtWeapon();
+            bool g2RealPrimary = g2 != null && !g2.IsPistol() && !g2.IsAtWeapon();
 
-            if (!g0RealPrimary && !g1RealPrimary)
+            bool hasInventoryRealPrimary = false;
+            bool hasInventoryMg = false;
+            if (!g0RealPrimary && !g1RealPrimary && !g2RealPrimary)
+            {
+                for (int slotIdx = 0; slotIdx <= 2; slotIdx++)
+                {
+                    VirtualItem vSlot = soldier.GetHeldItem_inventory(slotIdx);
+                    if (vSlot != null && TryGetVirtualWeaponArchetype(vSlot, out CachedWeaponArchetype slotArch))
+                    {
+                        if (!slotArch.IsPistol && !slotArch.IsAtWeapon)
+                            hasInventoryRealPrimary = true;
+                        if (slotArch.IsMg)
+                            hasInventoryMg = true;
+                    }
+                }
+            }
+
+            if (!g0RealPrimary && !g1RealPrimary && !g2RealPrimary && !hasInventoryRealPrimary)
             {
                 if (!onRetreatTask || board.HasActiveThreat || soldier.GetSuppressionValue() >= 8)
                     needUrgentPrimary = true;
                 return;
             }
 
-            if (onRetreatTask)
+            // Never perform a Slot 0 primary-weapon replacement while a primary weapon is stowed in Slot 2
+            // (which would overwrite the sidearm in Slot 0 and leave the soldier carrying two primaries!).
+            if (onRetreatTask || !g0RealPrimary)
                 return;
 
             bool holdingMg = soldier.hasMg ||
+                             hasInventoryMg ||
                              (g0 != null && (g0.integratedBipod != null || g0.IsHeavyMg())) ||
-                             (g1 != null && (g1.integratedBipod != null || g1.IsHeavyMg()));
+                             (g1 != null && (g1.integratedBipod != null || g1.IsHeavyMg())) ||
+                             (g2 != null && (g2.integratedBipod != null || g2.IsHeavyMg()));
 
             // 2. Fallen Squad MG Inheritance: if the squad has 0 alive MG gunners, a rifleman inherits a nearby MG!
             if (!holdingMg &&
@@ -3359,14 +3530,14 @@ namespace EasyRed2HumanAI
             else if ((pers == SoldierPersonality.Marksman_Deadeye ||
                       pers == SoldierPersonality.Marksman_Stalker ||
                       pers == SoldierPersonality.Marksman_Spotter) &&
-                     g0 != null && !g0.IsSniperRifle() && !g0.IsUsingScope)
+                     !g0.IsSniperRifle() && !g0.IsUsingScope && !g0.HasScopeWithMagnification())
             {
                 wantRoleUpgrade = true;
             }
             else if ((pers == SoldierPersonality.Assaulter_Shock ||
                       pers == SoldierPersonality.Assaulter_Breacher ||
                       pers == SoldierPersonality.Assaulter_Skirmisher) &&
-                     g0 != null && g0.isManualBoltOperated && !g0.IsFullAuto())
+                     g0.isManualBoltOperated && !g0.IsFullAuto())
             {
                 wantRoleUpgrade = true;
             }
@@ -3567,6 +3738,7 @@ namespace EasyRed2HumanAI
                     result.TargetBuddyDonor != null &&
                     result.TargetBuddyDonor.Pointer != IntPtr.Zero &&
                     result.TargetBuddyDonor.IsAlive &&
+                    !result.TargetBuddyDonor.IsInjured &&
                     result.TargetBuddyDonor.transform != null)
                 {
                     result.TargetPosition = result.TargetBuddyDonor.transform.position;
@@ -3576,6 +3748,7 @@ namespace EasyRed2HumanAI
                     result.TargetNeedyAllyToFeed != null &&
                     result.TargetNeedyAllyToFeed.Pointer != IntPtr.Zero &&
                     result.TargetNeedyAllyToFeed.IsAlive &&
+                    !result.TargetNeedyAllyToFeed.IsInjured &&
                     result.TargetNeedyAllyToFeed.transform != null)
                 {
                     result.TargetPosition = result.TargetNeedyAllyToFeed.transform.position;
@@ -3583,19 +3756,22 @@ namespace EasyRed2HumanAI
                 }
                 if (result.TargetFloorItem != null)
                 {
-                    if (IsFloorItemFreeToPickUp(result.TargetFloorItem))
+                    if (IsFloorItemFreeToPickUp(result.TargetFloorItem) &&
+                        !IsScavengeTargetClaimedByOtherBot(ptr, result.TargetFloorItem.Pointer, now))
                     {
                         result.TargetPosition = result.TargetFloorItem.transform.position;
                         return true;
                     }
-                    // Someone else already picked up the floor item while we were walking toward it; rescan immediately!
+                    // Someone else already picked up or claimed the floor item while we were walking toward it; rescan immediately!
                 }
-                else if (result.TargetInventory != null && result.TargetInventory.Pointer != IntPtr.Zero && !result.TargetInventory.IsPlayersInventory())
+                else if (result.TargetInventory != null &&
+                         IsInventoryValidCorpseOrCrate(result.TargetInventory, soldier.faction, result.NeedAmmo, result.NeedBandage, out _, out _) &&
+                         !IsScavengeTargetClaimedByOtherBot(ptr, result.TargetInventory.Pointer, now))
                 {
                     result.TargetPosition = result.TargetInventory.InventoryPosition;
                     return true;
                 }
-                else
+                else if (result.TargetBuddyDonor == null && result.TargetNeedyAllyToFeed == null)
                 {
                     return false;
                 }
@@ -3617,9 +3793,7 @@ namespace EasyRed2HumanAI
             float baseSearchRadius = (needAtWeapon || needUrgentPrimary) ? 20.0f : ((wantSquadMg || wantRadioPack) ? 16.0f : 12.5f);
             float maxSearchRadius = baseSearchRadius * doctrineSearchScale;
             float bestDistSq = maxSearchRadius * maxSearchRadius;
-            GenericGun heldGun = soldier.GetHeldGun();
             bool canPickUpNewWeapon = (!_nextWeaponUpgradeAllowedTime.TryGetValue(ptr, out float nextWepT) || now >= nextWepT);
-            bool isPrimaryCompletelyDry = canPickUpNewWeapon && needAmmo && heldGun != null && heldGun.GetCurrentAmmoCount() <= 0 && !heldGun.IsAtWeapon();
 
             // 0. Scan living friendly buddies in AiCore.WorldSoldiers for Buddy Resupply (Bandage from Medic, Ammo from Carrier, or Feeding a needy MG/AT squadmate)
             if (VisionConfig.EnableBuddyResupply.Value && (needBandage || needAmmo || canFeedNeedyAlly))
@@ -3631,55 +3805,28 @@ namespace EasyRed2HumanAI
                 IntPtr mySqPtr = soldier.joinedSquad != null ? soldier.joinedSquad.Pointer : IntPtr.Zero;
                 bool canRefillBandageFromMedic = needBandage &&
                                                  (!_nextBuddyBandageRefillTime.TryGetValue(ptr, out float nextBndT) || now >= nextBndT);
+                bool canResupplyBuddyAmmo = (needAmmo || canFeedNeedyAlly) &&
+                                            (!_nextBuddyAmmoResupplyTime.TryGetValue(ptr, out float nextAmmoT) || now >= nextAmmoT);
 
-                for (int i = 0; i < wCount; i++)
+                if (canRefillBandageFromMedic || canResupplyBuddyAmmo)
                 {
-                    ref AiCore.SoldierSnapshot sSnap = ref wSoldiers[i];
-                    if (sSnap.Ptr == ptr || sSnap.Faction != myFaction || sSnap.IsOnVehicle || sSnap.HasSurrendered || sSnap.IsInjured || sSnap.Ref == null)
-                        continue;
-
-                    if (Mathf.Abs(sSnap.Pos.y - myPos.y) > 2.5f)
-                        continue;
-
-                    float dSq = (sSnap.Pos - myPos).sqrMagnitude;
-                    if (dSq >= bestDistSq || dSq > 14.0f * 14.0f)
-                        continue;
-
-                    if (canRefillBandageFromMedic && sSnap.IsMedic)
+                    for (int i = 0; i < wCount; i++)
                     {
-                        bestDistSq = dSq;
-                        result = new BotScavengeCache
-                        {
-                            NextScanTime = now + 2.8f,
-                            NeedAmmo = needAmmo,
-                            NeedBandage = needBandage,
-                            TargetBuddyDonor = sSnap.Ref,
-                            TargetPosition = sSnap.Pos,
-                            IsBuddyBandageRefill = true
-                        };
-                        continue;
-                    }
+                        ref AiCore.SoldierSnapshot sSnap = ref wSoldiers[i];
+                        if (sSnap.Ptr == ptr || sSnap.Faction != myFaction || sSnap.IsOnVehicle || sSnap.HasSurrendered || sSnap.IsInjured || sSnap.Ref == null)
+                            continue;
 
-                    if (needAmmo && (sSnap.IsAmmoCarrier || sSnap.CanBorrowAmmo))
-                    {
-                        bestDistSq = dSq;
-                        result = new BotScavengeCache
-                        {
-                            NextScanTime = now + 2.8f,
-                            NeedAmmo = needAmmo,
-                            NeedBandage = needBandage,
-                            TargetBuddyDonor = sSnap.Ref,
-                            TargetPosition = sSnap.Pos,
-                            IsBuddyAmmoBorrow = true
-                        };
-                        continue;
-                    }
+                        if (Mathf.Abs(sSnap.Pos.y - myPos.y) > 2.5f)
+                            continue;
 
-                    if (canFeedNeedyAlly && mySqPtr != IntPtr.Zero && sSnap.SquadPtr == mySqPtr)
-                    {
-                        Soldier ally = sSnap.Ref;
-                        GenericGun allyGun = ally.GetHeldGun();
-                        if (allyGun != null && (ally.hasMg || allyGun.IsAtWeapon()) && ally.IsOutOfAmmosFor(allyGun))
+                        float dSq = (sSnap.Pos - myPos).sqrMagnitude;
+                        if (dSq >= bestDistSq || dSq > 14.0f * 14.0f)
+                            continue;
+
+                        if (IsScavengeTargetClaimedByOtherBot(ptr, sSnap.Ptr, now))
+                            continue;
+
+                        if (canRefillBandageFromMedic && sSnap.IsMedic)
                         {
                             bestDistSq = dSq;
                             result = new BotScavengeCache
@@ -3687,10 +3834,48 @@ namespace EasyRed2HumanAI
                                 NextScanTime = now + 2.8f,
                                 NeedAmmo = needAmmo,
                                 NeedBandage = needBandage,
-                                TargetNeedyAllyToFeed = ally,
+                                TargetBuddyDonor = sSnap.Ref,
                                 TargetPosition = sSnap.Pos,
-                                IsFeedingNeedyAlly = true
+                                IsBuddyBandageRefill = true
                             };
+                            continue;
+                        }
+
+                        if (canResupplyBuddyAmmo && needAmmo && (sSnap.IsAmmoCarrier || sSnap.CanBorrowAmmo))
+                        {
+                            bestDistSq = dSq;
+                            result = new BotScavengeCache
+                            {
+                                NextScanTime = now + 2.8f,
+                                NeedAmmo = needAmmo,
+                                NeedBandage = needBandage,
+                                TargetBuddyDonor = sSnap.Ref,
+                                TargetPosition = sSnap.Pos,
+                                IsBuddyAmmoBorrow = true
+                            };
+                            continue;
+                        }
+
+                        if (canResupplyBuddyAmmo && canFeedNeedyAlly && mySqPtr != IntPtr.Zero && sSnap.SquadPtr == mySqPtr)
+                        {
+                            if (_nextBuddyAmmoResupplyTime.TryGetValue(sSnap.Ptr, out float allyNextT) && now < allyNextT)
+                                continue;
+
+                            Soldier ally = sSnap.Ref;
+                            GenericGun allyGun = ally.GetHeldGun();
+                            if (allyGun != null && (ally.hasMg || allyGun.IsAtWeapon()) && ally.IsOutOfAmmosFor(allyGun))
+                            {
+                                bestDistSq = dSq;
+                                result = new BotScavengeCache
+                                {
+                                    NextScanTime = now + 2.8f,
+                                    NeedAmmo = needAmmo,
+                                    NeedBandage = needBandage,
+                                    TargetNeedyAllyToFeed = ally,
+                                    TargetPosition = sSnap.Pos,
+                                    IsFeedingNeedyAlly = true
+                                };
+                            }
                         }
                     }
                 }
@@ -3711,7 +3896,7 @@ namespace EasyRed2HumanAI
                     continue;
 
                 ItemObject item = fEntry.Item;
-                if (!IsFloorItemFreeToPickUp(item))
+                if (!IsFloorItemFreeToPickUp(item) || IsScavengeTargetClaimedByOtherBot(ptr, item.Pointer, now))
                     continue;
 
                 GenericGun floorGun = item.TryCast<GenericGun>();
@@ -3742,19 +3927,6 @@ namespace EasyRed2HumanAI
                             TargetFloorItem = item,
                             TargetPosition = itemPos,
                             IsRoleWeaponUpgrade = true
-                        };
-                        continue;
-                    }
-                    if (isPrimaryCompletelyDry && !floorGun.IsPistol() && !floorGun.IsAtWeapon() && floorGun.GetCurrentAmmoCount() > 0)
-                    {
-                        bestDistSq = dSq;
-                        result = new BotScavengeCache
-                        {
-                            NextScanTime = now + 2.8f,
-                            NeedAmmo = needAmmo,
-                            NeedBandage = needBandage,
-                            TargetFloorItem = item,
-                            TargetPosition = itemPos
                         };
                         continue;
                     }
@@ -3852,7 +4024,7 @@ namespace EasyRed2HumanAI
                 }
             }
 
-            // 2. Scan nearby corpse inventories, supply crates, and friendly ammo carriers (InventoryManager.activeInventories)
+            // 2. Scan nearby verified dead corpse inventories and supply crates (InventoryManager.activeInventories)
             var activeList = InventoryManager.activeInventories;
             if (activeList != null)
             {
@@ -3862,7 +4034,10 @@ namespace EasyRed2HumanAI
                 for (int i = 0; i < count; i++)
                 {
                     InventoryManager inv = activeList[i];
-                    if (inv == null || inv.Pointer == IntPtr.Zero || inv.Pointer == myInvPtr || inv.IsPlayersInventory())
+                    if (inv == null || inv.Pointer == IntPtr.Zero || inv.Pointer == myInvPtr)
+                        continue;
+
+                    if (!IsInventoryValidCorpseOrCrate(inv, soldier.faction, needAmmo, needBandage, out Soldier owner, out bool isDeadBodyOrCrate))
                         continue;
 
                     Vector3 invPos = inv.InventoryPosition;
@@ -3873,24 +4048,8 @@ namespace EasyRed2HumanAI
                     if (dSq >= bestDistSq)
                         continue;
 
-                    CachedInventoryOwner invOwner = GetCachedInventoryOwner(inv);
-                    Soldier owner = invOwner.SoldierOwner;
-                    Vehicle vehOwner = invOwner.VehicleOwner;
-
-                    // Never loot enemy vehicles or active manned vehicles
-                    if (vehOwner != null && vehOwner.Pointer != IntPtr.Zero)
-                    {
-                        string vf = vehOwner.GetVehicleFaction();
-                        if (!string.IsNullOrEmpty(vf) && ResourcesManager.IsEnemyFaction(vf, soldier.faction))
-                            continue;
-                        if (!needAmmo && !needBandage && !vehOwner.IsDisabled())
-                            continue;
-                    }
-
-                    if (owner != null && owner.IsAlive && (!needAmmo || !owner.IsAmmoBoxCarrier() || owner.faction != soldier.faction))
+                    if (IsScavengeTargetClaimedByOtherBot(ptr, inv.Pointer, now))
                         continue;
-
-                    bool isDeadBodyOrCrate = (owner == null || !owner.IsAlive) && (vehOwner == null || vehOwner.IsDisabled());
 
                     // 2A. Field Radio Pack Inheritance (from dead friendly OR enemy radioman) & Corpse Helmet Recovery (from dead friendly comrade)
                     if (isDeadBodyOrCrate && (wantRadioPack || wantHelmet))
@@ -4072,7 +4231,7 @@ namespace EasyRed2HumanAI
                 bool shouldDrop = !VisionConfig.EnableBuddyCasualtyDragging.Value ||
                                   !hasState ||
                                   carried == null ||
-                                  !carried.IsAlive ||
+                                  carried.IsDead ||
                                   !carried.IsInjured ||
                                   now >= activeDrag.DragEndTime ||
                                   (myPos - activeDrag.DropSpot).sqrMagnitude <= 2.25f * 2.25f ||
@@ -4148,7 +4307,7 @@ namespace EasyRed2HumanAI
             for (int i = 0; i < uCount; i++)
             {
                 Soldier cand = sq.units[i];
-                if (cand == null || cand.Pointer == ptr || !cand.IsAlive || !cand.IsInjured || cand.IsOnVehicle())
+                if (cand == null || cand.Pointer == ptr || cand.IsDead || !cand.IsInjured || cand.IsOnVehicle())
                     continue;
                 if (cand.carryData != null || cand.IsOnCover() || cand.transform == null)
                     continue;
@@ -4308,8 +4467,10 @@ namespace EasyRed2HumanAI
 
             GenericGun g0 = soldier.GetHeldGun(0);
             GenericGun g1 = soldier.GetHeldGun(1);
+            GenericGun g2 = soldier.GetHeldGun(2);
             bool hasRealPrimary = (g0 != null && !g0.IsPistol() && !g0.IsAtWeapon() && !soldier.IsOutOfAmmosFor(g0)) ||
-                                  (g1 != null && !g1.IsPistol() && !g1.IsAtWeapon() && !soldier.IsOutOfAmmosFor(g1));
+                                  (g1 != null && !g1.IsPistol() && !g1.IsAtWeapon() && !soldier.IsOutOfAmmosFor(g1)) ||
+                                  (g2 != null && !g2.IsPistol() && !g2.IsAtWeapon() && !soldier.IsOutOfAmmosFor(g2));
 
             // Unarmed / pistol-only bailed crew or pilots retreat toward rear spawn to survive
             if (!hasRealPrimary || isPilot)

@@ -670,6 +670,8 @@ namespace EasyRed2HumanAI
         public static int WorldSquadCount;
         public static SoldierSnapshot[] WorldSoldiers = new SoldierSnapshot[384];
         public static int WorldSoldierCount;
+        public static SoldierSnapshot[] WorldInjuredSoldiers = new SoldierSnapshot[64];
+        public static int WorldInjuredSoldierCount;
 
         private static readonly Dictionary<IntPtr, int> _worldSquadIndexByPtr = new Dictionary<IntPtr, int>(96);
         private static readonly HashSet<IntPtr> _seenWorldSoldierPtrs = new HashSet<IntPtr>(384);
@@ -696,8 +698,10 @@ namespace EasyRed2HumanAI
             _lastWorldSnapshotTime = now;
             int prevSqCount = WorldSquadCount;
             int prevSolCount = WorldSoldierCount;
+            int prevInjCount = WorldInjuredSoldierCount;
             WorldSquadCount = 0;
             WorldSoldierCount = 0;
+            WorldInjuredSoldierCount = 0;
             _worldSquadIndexByPtr.Clear();
             _seenWorldSoldierPtrs.Clear();
 
@@ -728,8 +732,32 @@ namespace EasyRed2HumanAI
                         for (int i = 0; i < uCount; i++)
                         {
                             Soldier u = units[i];
-                            if (u == null || !u.IsAlive || u.Pointer == IntPtr.Zero || u.transform == null)
+                            if (u == null || u.Pointer == IntPtr.Zero || u.transform == null)
                                 continue;
+
+                            if (!u.IsAlive)
+                            {
+                                // In Easy Red 2, incapacitated casualties waiting for a medic have IsAlive == false (life_total == 0)
+                                // and IsInjured == true (!IsDead). Track them in WorldInjuredSoldiers while keeping WorldSoldiers strictly IsAlive!
+                                if (u.IsInjured && !u.IsDead && _seenWorldSoldierPtrs.Add(u.Pointer))
+                                {
+                                    if (WorldInjuredSoldierCount >= WorldInjuredSoldiers.Length)
+                                        Array.Resize(ref WorldInjuredSoldiers, WorldInjuredSoldiers.Length * 2);
+
+                                    WorldInjuredSoldiers[WorldInjuredSoldierCount++] = new SoldierSnapshot
+                                    {
+                                        Ptr = u.Pointer,
+                                        Ref = u,
+                                        SquadPtr = sq.Pointer,
+                                        Pos = u.transform.position,
+                                        Faction = u.faction,
+                                        IsPlayer = u.IsPlayer(),
+                                        IsOnVehicle = u.IsOnVehicle(),
+                                        IsInjured = true
+                                    };
+                                }
+                                continue;
+                            }
 
                             if (refSoldier == null)
                                 refSoldier = u;
@@ -869,8 +897,34 @@ namespace EasyRed2HumanAI
                         for (int cIdx = 0; cIdx < cCount; cIdx++)
                         {
                             Creature c = allCreatures[cIdx];
-                            if (c == null || !c.IsAlive || c.Pointer == IntPtr.Zero || _seenWorldSoldierPtrs.Contains(c.Pointer))
+                            if (c == null || c.Pointer == IntPtr.Zero || _seenWorldSoldierPtrs.Contains(c.Pointer))
                                 continue;
+
+                            if (!c.IsAlive)
+                            {
+                                if (c.IsInjured && !c.IsDead)
+                                {
+                                    Soldier inj = c.TryCast<Soldier>();
+                                    if (inj != null && inj.Pointer != IntPtr.Zero && inj.transform != null && _seenWorldSoldierPtrs.Add(inj.Pointer))
+                                    {
+                                        if (WorldInjuredSoldierCount >= WorldInjuredSoldiers.Length)
+                                            Array.Resize(ref WorldInjuredSoldiers, WorldInjuredSoldiers.Length * 2);
+
+                                        WorldInjuredSoldiers[WorldInjuredSoldierCount++] = new SoldierSnapshot
+                                        {
+                                            Ptr = inj.Pointer,
+                                            Ref = inj,
+                                            SquadPtr = inj.joinedSquad != null ? inj.joinedSquad.Pointer : IntPtr.Zero,
+                                            Pos = inj.transform.position,
+                                            Faction = inj.faction,
+                                            IsPlayer = inj.IsPlayer(),
+                                            IsOnVehicle = inj.IsOnVehicle(),
+                                            IsInjured = true
+                                        };
+                                    }
+                                }
+                                continue;
+                            }
 
                             Soldier u = c.TryCast<Soldier>();
                             if (u == null || !u.IsAlive || u.Pointer == IntPtr.Zero || _seenWorldSoldierPtrs.Contains(u.Pointer) || u.transform == null)
@@ -910,6 +964,8 @@ namespace EasyRed2HumanAI
                 Array.Clear(WorldSquads, WorldSquadCount, prevSqCount - WorldSquadCount);
             if (prevSolCount > WorldSoldierCount)
                 Array.Clear(WorldSoldiers, WorldSoldierCount, prevSolCount - WorldSoldierCount);
+            if (prevInjCount > WorldInjuredSoldierCount)
+                Array.Clear(WorldInjuredSoldiers, WorldInjuredSoldierCount, prevInjCount - WorldInjuredSoldierCount);
         }
 
         public static void ClearSpatialCaches()
@@ -922,8 +978,11 @@ namespace EasyRed2HumanAI
                 Array.Clear(WorldSquads, 0, WorldSquadCount);
             if (WorldSoldierCount > 0)
                 Array.Clear(WorldSoldiers, 0, WorldSoldierCount);
+            if (WorldInjuredSoldierCount > 0)
+                Array.Clear(WorldInjuredSoldiers, 0, WorldInjuredSoldierCount);
             WorldSquadCount = 0;
             WorldSoldierCount = 0;
+            WorldInjuredSoldierCount = 0;
             _lastWorldSnapshotTime = -999f;
             _nextAllowedBotRpcTime = 0f;
             TotalAdaptiveAiExtraTicks = 0;

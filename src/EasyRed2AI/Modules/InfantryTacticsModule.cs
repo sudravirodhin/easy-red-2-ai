@@ -3544,8 +3544,15 @@ namespace EasyRed2HumanAI
                 return false;
 
             MedicHealingDestination healDest = dest.TryCast<MedicHealingDestination>();
-            if (healDest == null || healDest.soldierToHealUp == null || healDest.soldierToHealUp.Pointer != patientPtr)
+            if (healDest == null ||
+                healDest.soldierToHealUp == null ||
+                healDest.soldierToHealUp.Pointer != patientPtr ||
+                healDest.soldierToHealUp.IsDead ||
+                !healDest.soldierToHealUp.IsInjured ||
+                healDest.soldierToHealUp.IsCarried())
+            {
                 return false;
+            }
 
             return true;
         }
@@ -3617,19 +3624,31 @@ namespace EasyRed2HumanAI
                     IntPtr medicPtr = __0.Pointer;
                     PruneAndValidateMedicClaims(medicPtr, out IntPtr activePatientPtr);
 
-                    // If this medic is dead, downed, surrendered, or carrying someone, release and skip
-                    if (!__0.IsAlive || __0.IsInjured || __0.HasSurrended() || __0.IsOnVehicle() || __0.IsCarryingBody() || __0.transform == null)
+                    // Match vanilla Squad.MedicRoutine (@ 0x1808079B0): only soldiers with hasSyringe who are alive,
+                    // not charging, not in a body animation, not mounted, and not carrying a body can seek casualties!
+                    if (!__0.IsAlive ||
+                        __0.IsInjured ||
+                        !__0.hasSyringe ||
+                        __0.IsCharging() ||
+                        __0.isInBodyAnimation ||
+                        __0.HasSurrended() ||
+                        __0.IsOnVehicle() ||
+                        __0.IsCarryingBody() ||
+                        __0.transform == null)
+                    {
                         return false;
+                    }
 
-                    // If this medic is already actively heading to a valid living injured patient, let him continue!
+                    // If this medic is already actively heading to a valid incapacitated (!IsDead && IsInjured) patient, let him continue!
                     if (activePatientPtr != IntPtr.Zero)
                     {
                         AiDestination curDest = __0.targetDestination;
                         MedicHealingDestination curHeal = curDest != null ? curDest.TryCast<MedicHealingDestination>() : null;
                         if (curHeal != null &&
                             curHeal.soldierToHealUp != null &&
-                            curHeal.soldierToHealUp.IsAlive &&
-                            curHeal.soldierToHealUp.IsInjured)
+                            !curHeal.soldierToHealUp.IsDead &&
+                            curHeal.soldierToHealUp.IsInjured &&
+                            !curHeal.soldierToHealUp.IsCarried())
                         {
                             return false;
                         }
@@ -3641,16 +3660,16 @@ namespace EasyRed2HumanAI
                         return true;
 
                     AiCore.EnsureWorldSnapshot();
-                    int solCount = AiCore.WorldSoldierCount;
-                    var soldiers = AiCore.WorldSoldiers;
+                    int injCount = AiCore.WorldInjuredSoldierCount;
+                    var injuredSoldiers = AiCore.WorldInjuredSoldiers;
 
                     Soldier bestPatient = null;
                     float bestScoreDistSq = 55.0f * 55.0f;
                     bool skippedDogpiledNearest = false;
 
-                    for (int i = 0; i < solCount; i++)
+                    for (int i = 0; i < injCount; i++)
                     {
-                        ref AiCore.SoldierSnapshot sSnap = ref soldiers[i];
+                        ref AiCore.SoldierSnapshot sSnap = ref injuredSoldiers[i];
                         if (!sSnap.IsInjured || sSnap.Ptr == medicPtr || sSnap.IsOnVehicle || sSnap.Ref == null)
                             continue;
 
@@ -3658,7 +3677,7 @@ namespace EasyRed2HumanAI
                             continue;
 
                         Soldier pat = sSnap.Ref;
-                        if (!pat.IsAlive || !pat.IsInjured || pat.IsCarried())
+                        if (pat.IsDead || !pat.IsInjured || pat.IsCarried() || pat.IsOnVehicle())
                             continue;
 
                         float dSq = (sSnap.Pos - medicPos).sqrMagnitude;
