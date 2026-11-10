@@ -1,4 +1,4 @@
-# Easy Red 2: Battle Hardened (`v0.6.4`)
+# Easy Red 2: Battle Hardened (`v0.6.5`)
 *3-Tier Tactical GOAP, Squad Blackboard, Radioman Intel Net, Veterancy, Personalities & Combined-Arms Overhaul*
 
 > [!IMPORTANT]
@@ -27,22 +27,22 @@ A comprehensive **BepInEx 6 (IL2CPP)** AI, combined-arms, and fairness overhaul 
 
 Download your preferred package from the **[Releases](https://github.com/sudravirodhin/easy-red-2-ai/releases)** page:
 
-### Option A: With BepInEx Included (`EasyRed2HumanAI-v0.6.4-with-BepInEx.zip`) — *Recommended for Fresh Installs*
+### Option A: With BepInEx Included (`EasyRed2HumanAI-v0.6.5-with-BepInEx.zip`) — *Recommended for Fresh Installs*
 Includes **[BepInEx 6.0.0-be.791 (Unity.IL2CPP-win-x64)](https://builds.bepinex.dev/projects/bepinex_be)**, the `.NET 6` runtime, Unity `2022.3.62` base libraries, pre-generated IL2CPP `interop` assemblies for Easy Red 2 Build `921`, and `EasyRed2HumanAI.dll` (with no other third-party mods).
 1. Open your **Easy Red 2** installation folder (e.g. `Steam\steamapps\common\Easy Red 2`, where `Easy Red 2.exe` is located).
-2. Extract all contents of `EasyRed2HumanAI-v0.6.4-with-BepInEx.zip` directly into the `Easy Red 2` folder.
+2. Extract all contents of `EasyRed2HumanAI-v0.6.5-with-BepInEx.zip` directly into the `Easy Red 2` folder.
 3. Launch the game!
 
-### Option B: Without BepInEx / Plugin Only (`EasyRed2HumanAI-v0.6.4-Plugin-Only.zip` or `EasyRed2HumanAI.dll`)
+### Option B: Without BepInEx / Plugin Only (`EasyRed2HumanAI-v0.6.5-Plugin-Only.zip` or `EasyRed2HumanAI.dll`)
 For users who already have **[BepInEx 6 Bleeding Edge (`BepInEx-Unity.IL2CPP-win-x64`)](https://builds.bepinex.dev/projects/bepinex_be)** installed:
-1. Download `EasyRed2HumanAI-v0.6.4-Plugin-Only.zip` (or `EasyRed2HumanAI.dll` directly).
+1. Download `EasyRed2HumanAI-v0.6.5-Plugin-Only.zip` (or `EasyRed2HumanAI.dll` directly).
 2. Place `EasyRed2HumanAI.dll` into:
    ```text
    Easy Red 2\BepInEx\plugins\EasyRed2HumanAI.dll
    ```
 
 ### Switching to Vanilla or Uninstalling (`Uninstall-BepInEx-Mod.bat`)
-Included in `EasyRed2HumanAI-v0.6.4-with-BepInEx.zip` (and in the root of this repository) is **[`Uninstall-BepInEx-Mod.bat`](Uninstall-BepInEx-Mod.bat)**. Double-click it inside your `Easy Red 2` folder when the game is closed to:
+Included in `EasyRed2HumanAI-v0.6.5-with-BepInEx.zip` (and in the root of this repository) is **[`Uninstall-BepInEx-Mod.bat`](Uninstall-BepInEx-Mod.bat)**. Double-click it inside your `Easy Red 2` folder when the game is closed to:
 * **`[1] Play Vanilla Temporarily`**: Moves `BepInEx`, `dotnet`, and `winhttp.dll` into `_BepInEx_Disabled_Backup\` so the game runs 100% pure vanilla without losing your configs or other plugins.
 * **`[2] Restore Modded Game`**: Moves everything back from `_BepInEx_Disabled_Backup\` in one click.
 * **`[3] Uninstall Completely`**: Permanently deletes `BepInEx`, `dotnet`, `winhttp.dll`, `doorstop_config.ini`, `.doorstop_version`, and `changelog.txt`.
@@ -73,6 +73,12 @@ Alongside shared tactical realism goals (some inspired by [`Easy-Red-2-Realism-O
   * **Realistic Airplane Canopy vs. Armored Floor & Fuselage Spall**: Direct canopy/window hits (`BodyPart` / `ItemHelmet`) from level/above (dogfighting fighters, open cockpits) and `.50 cal+` (`>= 12.5mm`) rounds remain lethal, while `< 12.5mm` rifle-caliber ground fire coming up from steep below is stopped by the aircraft's armored floor pan/seat/engine—and vanilla's oversized `1.2m × 2.0m × 1.2m` (`10–150` RNG) fuselage spall box is eliminated for rifle rounds and tightened to a `0.42m` cockpit radius for `.50 cal` HMGs (`18mm+` cannons, HE, and Flak keep full `1.0x` lethality).
   * **Enclosed Tank Crew Explosion & Kinetic AP Spall Realism**: Buttoned-up crew inside intact enclosed armor (`!seat.showUnitSet`) no longer magically die through `50mm+` of steel from non-penetrating external frag grenades, mortar splash, or light HE (`BodyPart.TryDamageWithExplosion`), receiving concussive suppression instead—while AT grenades (`30mm+`), satchel charges, HEAT warheads, AT mines, heavy artillery, aerial bombs, and open-topped seats (`seat.showUnitSet`) remain fully lethal. Solid kinetic AP spall inside armored vehicles is also scaled by caliber (`< 25mm` wounds rather than instant-wiping crews; `58mm+` and HE/APHE remain `1.0x`).
   * **Multiplayer Client Vehicle Roadkill Fix + Seat Priority + 2-Seat Emplacements**: Fixes a vanilla multiplayer bug where **no remote client could ever run over enemy bots** (`VehicleWithWheels.FixedUpdate` zeroes `this.speed = 0` on the Host whenever `!OwnDriverOrVehicle()`, causing `OnTriggerEnter` to abort 100% of client roadkills—and also fixes reverse-gear roadkills!). Human players (Host or Client) can always switch into a gunner/driver seat occupied by an AI bot (`PlayerController.SwitchSeat` + `AIVehicle.SwitchSeatAi`), and bots staff **both seats** on 2-seat static emplacements.
+* **Lifelike Corner-Pieing, Trench Approach Scanning, Tank Hull Cover, Role-Smart Weapon Upgrades & Native Kill Callouts (`v0.6.5`)**:
+  * **90° Idle Gaze Fix (`Soldier.AngleToDirection`) & `320m` Audible Battle Orientation**: Fixes a vanilla `GameAssembly.dll` bug where `Soldier.AngleToDirection` (`0x18073D4E0`) cast `Vector3` to `Vector2(x, y)`—dropping the North/South (`Z`) axis and causing stationary bots to stop turning dead perpendicular (90°) to East/West battles! Idle soldiers now orient accurately toward audible battles (`<= 320m`) or their active contested objective.
+  * **Blind-Corner Pieing (`MoveFPSOptimized`) & Stance-Accurate Trench Scanning**: Moving bots approaching blind doorways, building corners, or trench bends (`>= 28°` occluded turn within `4.6m`) switch from vanilla's feet-locked `Move` to tactical `MoveFPS`, smoothly slicing the corner with their weapon/gaze *before* crossing the threshold. Crouched trench/parapet soldiers (`0.80m` eye height) scan along open trench corridors and periodically check secondary trench bends instead of staring into dirt walls.
+  * **Tank Hull Cover & Walking-Pace Armored Escort**: Infantry use nearby idle or wrecked tanks/armored hulls as physical leeward cover (`CoverManager.vehicleCovers`), and riflemen advancing alongside a slow friendly tank (`0.45–5.2 m/s`) bound in its sheltered rear-quarter wake clear of the tracks.
+  * **GOAP De-Confliction, Pilot/Tanker Retreat Survival & Role-Smart Weapon Upgrades**: Protects active GOAP flankers, scavengers, and tank-cover seekers from vanilla's `2.0s` `CalculateMoveOrderDestination` (`IsInsideMoveOrderArea`) reset; preserves `MissionTaskRetreat` so bailed-out pilots and tankers prioritize retreating to friendly lines (only merging into squads if cut off); and enables **Pistol-Only Primary Re-Arming**, **Fallen Squad MG Inheritance** (when a squad loses its MG gunner), and **Opportunistic Role Upgrades** (Assaulters ditching bolt-actions for SMGs/semi-autos, Marksmen picking up scoped rifles, Gunners recovering LMGs).
+  * **Unified Spectator-Safe Tactical & Kill Callouts (`VoiceClip.enemyDown` — *"I got him!"*)**: AI bots now use every nation's recorded `VoiceClip.enemyDown` lines (~`25%` roll on confirmed kills, matching the player's own `DamageFeedback` rate)—using camera-relative `Creature.IsLodded2()` locally so **Free/Spectator Camera (`F`)** hears battles anywhere on the map while Co-op `SyncSay` RPCs only fire when a remote client is within `75m`.
 
 > *(Want the deep-dive engineering breakdown of what vanilla's `GameAssembly.dll` did under the hood and why each change was made? Read **[`docs/design-and-justifications.md`](docs/design-and-justifications.md)**!)*
 

@@ -606,8 +606,10 @@ namespace EasyRed2HumanAI
                 Vector3 __2,
                 int __3,
                 Soldier __4,
-                ref Creature __result)
+                ref Creature __result,
+                out Soldier __state)
             {
+                __state = null;
                 try
                 {
                     if (!VisionConfig.EnableMod.Value || __0 == null)
@@ -695,6 +697,21 @@ namespace EasyRed2HumanAI
                         }
                     }
 
+                    // Track pre-hit alive enemy victim for AI Bot Kill Callouts (VoiceClip.enemyDown — "I got him!")
+                    if (isDirectBodyOrHelmetHit &&
+                        VisionConfig.EnableTacticalVoiceCallouts.Value &&
+                        victim != null &&
+                        victim.Pointer != IntPtr.Zero &&
+                        victim.IsAlive &&
+                        __4 != null &&
+                        __4.Pointer != IntPtr.Zero &&
+                        AiCore.IsLocallyOwnedBot(__4) &&
+                        !string.IsNullOrEmpty(victim.faction) &&
+                        !ResourcesManager.IsSameFaction(__4.faction, victim.faction))
+                    {
+                        __state = victim;
+                    }
+
                     if (!VisionConfig.EnableDeathScreenAttribution.Value || victim == null || !IsPlayerCharacter(victim))
                         return true;
 
@@ -762,6 +779,32 @@ namespace EasyRed2HumanAI
                 catch { }
 
                 return true;
+            }
+
+            public static void Postfix(Soldier __4, Soldier __state)
+            {
+                if (__state == null)
+                    return;
+
+                try
+                {
+                    // Confirmed lethal hit by an AI bot: match vanilla DamageFeedback.OnSoldierHit (~25% roll)
+                    // routed through unified Spectator-safe TrySayTacticalVoice + Co-op SyncSay!
+                    if (!__state.IsAlive &&
+                        __4 != null &&
+                        __4.IsAlive &&
+                        !__4.isBleeding &&
+                        __4.GetSuppressionValue() < 55)
+                    {
+                        int chance = __4.IsMarksman() ? 35 : 25;
+                        if (UnityEngine.Random.Range(0, 100) < chance)
+                        {
+                            BotKillCalloutsCount++;
+                            TrySayTacticalVoice(__4, __4.joinedSquad, VoiceManager.VoiceClip.enemyDown, 0.25f);
+                        }
+                    }
+                }
+                catch { }
             }
         }
 

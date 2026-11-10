@@ -11,7 +11,7 @@ namespace EasyRed2HumanAI
     {
         public const string PluginGuid = "com.antigravity.easyred2.humanai";
         public const string PluginName = "Easy Red 2 - Battle Hardened";
-        public const string PluginVersion = "0.6.4";
+        public const string PluginVersion = "0.6.5";
 
         internal static Plugin Instance;
         internal static new ManualLogSource Log;
@@ -40,6 +40,8 @@ namespace EasyRed2HumanAI
 
             // Bundle 1: Vision, Camo, Threat Sectors & Adaptive AI Brain Tick Scheduler
             SafePatch(typeof(AiCore.Creature_ProcessSequentialUpdates_Patch));
+            SafePatch(typeof(AiCore.Soldier_AngleToDirection_Patch));
+            SafePatch(typeof(AiCore.Soldier_SignedAngleToDirection_Patch));
             SafePatch(typeof(VisionPatches.Soldier_StartFire_Patch));
             SafePatch(typeof(VisionPatches.Soldier_CamoDistanceAwareEnemies_Patch));
             SafePatch(typeof(VisionPatches.Creature_CanSee_Patch));
@@ -54,6 +56,7 @@ namespace EasyRed2HumanAI
             SafePatch(typeof(VeteranAndTacticsPatches.SoldierAI_OnSuppressed_Patch));
             SafePatch(typeof(VeteranAndTacticsPatches.SoldierAI_UpdateMoveDirection_Patch));
             SafePatch(typeof(VeteranAndTacticsPatches.SoldierAI_GetSpacingFromSquad_Patch));
+            SafePatch(typeof(VeteranAndTacticsPatches.SoldierAI_CalculateMoveOrderDestination_Patch));
             SafePatch(typeof(VeteranAndTacticsPatches.SoldierAI_RotateAndFireToward_Patch));
             SafePatch(typeof(VeteranAndTacticsPatches.SoldierAI_MovementRoutine_Patch));
             SafePatch(typeof(VeteranAndTacticsPatches.SquadSoldierLabel_RefreshVisual_Patch));

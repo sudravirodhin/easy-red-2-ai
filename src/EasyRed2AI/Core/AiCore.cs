@@ -26,6 +26,8 @@ namespace EasyRed2HumanAI
         private static readonly Dictionary<long, bool> _bridgeCellCache = new Dictionary<long, bool>(512);
         private static readonly Dictionary<string, float> _debugLogCooldowns = new Dictionary<string, float>(32);
         private static readonly Dictionary<int, (bool HasMod, float ExpireTime)> _playerModdedCache = new Dictionary<int, (bool HasMod, float ExpireTime)>(16);
+        private static readonly List<Vector3> _cachedRemotePlayerPositions = new List<Vector3>(12);
+        private static float _nextRemotePlayerPosScanTime;
 
         public static int TotalPingGovernorSkippedCycles;
 
@@ -449,6 +451,123 @@ namespace EasyRed2HumanAI
                     lookRot.leftRight = prevLeftRight;
                     lookRot.upDown = prevUpDown;
                 }
+            }
+        }
+
+        /// <summary>
+        /// Computes true horizontal (XZ-plane) unsigned angle in degrees between <paramref name="soldier"/>'s
+        /// forward vector and <paramref name="direction"/>. Replaces vanilla <c>Soldier.AngleToDirection</c>
+        /// (<c>0x18073D4E0</c>), which accidentally casts <see cref="Vector3"/> to <see cref="Vector2"/>
+        /// and drops the North/South (<c>Z</c>) component completely!
+        /// </summary>
+        public static float HorizontalAngleToDirection(Soldier soldier, Vector3 direction)
+        {
+            if (soldier == null || soldier.Pointer == IntPtr.Zero || soldier.transform == null)
+                return 180f;
+
+            Vector3 fwd = soldier.transform.forward;
+            float fx = fwd.x, fz = fwd.z;
+            float dx = direction.x, dz = direction.z;
+            float lenSq = (fx * fx + fz * fz) * (dx * dx + dz * dz);
+            if (lenSq < 1e-8f)
+                return 0f;
+
+            float cos = Mathf.Clamp((fx * dx + fz * dz) / Mathf.Sqrt(lenSq), -1f, 1f);
+            return Mathf.Acos(cos) * Mathf.Rad2Deg;
+        }
+
+        public static float HorizontalSignedAngleToDirection(Soldier soldier, Vector3 direction)
+        {
+            if (soldier == null || soldier.Pointer == IntPtr.Zero || soldier.transform == null)
+                return 0f;
+
+            Vector3 fwd = soldier.transform.forward;
+            float fx = fwd.x, fz = fwd.z;
+            float dx = direction.x, dz = direction.z;
+            float lenSq = (fx * fx + fz * fz) * (dx * dx + dz * dz);
+            if (lenSq < 1e-8f)
+                return 0f;
+
+            float cos = Mathf.Clamp((fx * dx + fz * dz) / Mathf.Sqrt(lenSq), -1f, 1f);
+            float angle = Mathf.Acos(cos) * Mathf.Rad2Deg;
+            // Match vanilla SignedAngleToDirection's intended 2D (x, z) cross sign: fx*dz - dx*fz
+            return (fx * dz - dx * fz) < 0f ? -angle : angle;
+        }
+
+        /// <summary>
+        /// Returns true if any remote multiplayer human client's controlled soldier is within
+        /// <paramref name="maxRadius"/> of <paramref name="worldPos"/> (cached 2 Hz scan, O(1) per call).
+        /// Used so <c>Soldier.SyncSay</c> Photon RPCs are only sent when a remote player can actually hear the bot.
+        /// </summary>
+        public static bool IsNearAnyRemotePlayer(Vector3 worldPos, float maxRadius)
+        {
+            if (!IsMultiplayerWithRemotePlayers())
+                return false;
+
+            float now = Time.unscaledTime;
+            if (now >= _nextRemotePlayerPosScanTime)
+            {
+                _nextRemotePlayerPosScanTime = now + 0.50f;
+                _cachedRemotePlayerPositions.Clear();
+                try
+                {
+                    var list = Creature.allCreatures;
+                    if (list != null)
+                    {
+                        int count = list.Count;
+                        for (int i = 0; i < count; i++)
+                        {
+                            Creature c = list[i];
+                            if (c == null || !c.IsAlive)
+                                continue;
+
+                            Soldier s = c.TryCast<Soldier>();
+                            if (s == null || s.transform == null)
+                                continue;
+
+                            SyncSoldier syncher = s.soldierSyncher;
+                            if (syncher != null && !syncher.OwnSyncher && (syncher.controlled_by_player || s.IsPlayer()))
+                            {
+                                _cachedRemotePlayerPositions.Add(s.transform.position);
+                            }
+                        }
+                    }
+                }
+                catch { }
+            }
+
+            float maxSq = maxRadius * maxRadius;
+            for (int i = 0; i < _cachedRemotePlayerPositions.Count; i++)
+            {
+                if ((_cachedRemotePlayerPositions[i] - worldPos).sqrMagnitude <= maxSq)
+                    return true;
+            }
+            return false;
+        }
+
+        [HarmonyPatch(typeof(Soldier), nameof(Soldier.AngleToDirection))]
+        public static class Soldier_AngleToDirection_Patch
+        {
+            public static bool Prefix(Soldier __instance, Vector3 __0, ref float __result)
+            {
+                if (!VisionConfig.EnableMod.Value || __instance == null)
+                    return true;
+
+                __result = HorizontalAngleToDirection(__instance, __0);
+                return false;
+            }
+        }
+
+        [HarmonyPatch(typeof(Soldier), nameof(Soldier.SignedAngleToDirection))]
+        public static class Soldier_SignedAngleToDirection_Patch
+        {
+            public static bool Prefix(Soldier __instance, Vector3 __0, ref float __result)
+            {
+                if (!VisionConfig.EnableMod.Value || __instance == null)
+                    return true;
+
+                __result = HorizontalSignedAngleToDirection(__instance, __0);
+                return false;
             }
         }
 

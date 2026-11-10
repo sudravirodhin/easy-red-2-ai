@@ -82,9 +82,9 @@ namespace EasyRed2HumanAI
                         AiCore.LogDebug(
                             "Heartbeat",
                             $"FPS:{fps:F0} ({dtMs:F1}ms) | Vets:{VeteranAndTacticsPatches.ActiveVeteransCount} (Prom:{VeteranAndTacticsPatches.FieldPromotionsCount}) | " +
-                            $"GOAP:{VeteranAndTacticsPatches.GoapPlansExecutedCount} (Anvil:{VeteranAndTacticsPatches.TeamNetAnvilHammerCount} PinFlank:{VeteranAndTacticsPatches.GoapPinAndFlankCount} Smoke:{VeteranAndTacticsPatches.GoapSmokeScreensCount} RadioCut:{VeteranAndTacticsPatches.RadioNetCutoffsCount}) | " +
-                            $"Drops:{VeteranAndTacticsPatches.SelfPreservationDrops} | IndoorCrouch:{VeteranAndTacticsPatches.IndoorPronePreventedCount} | " +
-                            $"Callouts:{VeteranAndTacticsPatches.LocalCalloutsSharedCount} | Supp:{VeteranAndTacticsPatches.SuppressiveEventsCount} | " +
+                            $"GOAP:{VeteranAndTacticsPatches.GoapPlansExecutedCount} (Anvil:{VeteranAndTacticsPatches.TeamNetAnvilHammerCount} PinFlank:{VeteranAndTacticsPatches.GoapPinAndFlankCount} Smoke:{VeteranAndTacticsPatches.GoapSmokeScreensCount} WepUp:{VeteranAndTacticsPatches.RoleWeaponUpgradesCount} RadioCut:{VeteranAndTacticsPatches.RadioNetCutoffsCount}) | " +
+                            $"Drops:{VeteranAndTacticsPatches.SelfPreservationDrops} | IndoorCrouch:{VeteranAndTacticsPatches.IndoorPronePreventedCount} | Pies:{VeteranAndTacticsPatches.CornerPiesExecutedCount} | TankCov:{VeteranAndTacticsPatches.TankHullCoverUsesCount} | " +
+                            $"Callouts:{VeteranAndTacticsPatches.LocalCalloutsSharedCount} (KillVoice:{VeteranAndTacticsPatches.BotKillCalloutsCount}) | Supp:{VeteranAndTacticsPatches.SuppressiveEventsCount} | " +
                             $"Bounds:{VeteranAndTacticsPatches.BoundingOverwatchHoldsCount} | Garrisons:{VeteranAndTacticsPatches.MacroGarrisonsAssignedCount} | " +
                             $"Emplace:{VeteranAndTacticsPatches.StaticGunsStaffedCount} | APC:{VeteranAndTacticsPatches.SmartApcDismountsCount} | " +
                             $"TankHold:{VeteranAndTacticsPatches.TankStandoffHoldsCount} | RoadkillSaved:{VeteranAndTacticsPatches.FriendlyRoadkillsPreventedCount} (ClientRK:{VeteranAndTacticsPatches.RemoteClientRoadkillsAssistedCount}) | CombArms:{VeteranAndTacticsPatches.CombinedArmsPriorityAssistsCount} (Kamikaze:{VeteranAndTacticsPatches.KamikazeDivesTriggeredCount}) | " +
@@ -705,6 +705,10 @@ namespace EasyRed2HumanAI
             AiCore.PruneDict(_assignedEmplacementUntil, _reusableAlivePtrs);
             AiCore.PruneDict(_nextFriendlyStepAsideTime, _reusableAlivePtrs);
             AiCore.PruneDict(_botGoapPlans, _reusableAlivePtrs);
+            AiCore.PruneDict(_botScavengeCaches, _reusableAlivePtrs);
+            AiCore.PruneDict(_nextWeaponUpgradeAllowedTime, _reusableAlivePtrs);
+            AiCore.PruneDict(_cornerPieCache, _reusableAlivePtrs);
+            AiCore.PruneDict(_nextCornerPieCountTime, _reusableAlivePtrs);
             AiCore.PruneDict(_lastDamageByVictim, _reusableAlivePtrs);
 
             AiCore.PruneSet(_bayonetCheckedSoldiers, _reusableAlivePtrs);

@@ -599,44 +599,48 @@ namespace EasyRed2HumanAI
             }
         }
 
+        internal static float GetEffectiveVehicleExplosionArmor(Vehicle veh)
+        {
+            if (veh == null || veh.Pointer == IntPtr.Zero)
+                return 0f;
+
+            IntPtr ptr = veh.Pointer;
+            if (_vehicleExplosionArmorCache.TryGetValue(ptr, out float cachedArmor))
+                return cachedArmor;
+
+            float maxHullArmor = 0f;
+            var parts = veh.damageableParts;
+            if (parts != null)
+            {
+                int count = parts.Count;
+                for (int i = 0; i < count; i++)
+                {
+                    VehicleDamagablePart p = parts[i];
+                    if (p == null || p.Pointer == IntPtr.Zero)
+                        continue;
+
+                    if (p.TryCast<VehicleDamageableWheelPart>() != null ||
+                        p.TryCast<VehicleDamageableTrackPart>() != null)
+                    {
+                        continue;
+                    }
+
+                    if (p.armorThickness > maxHullArmor)
+                        maxHullArmor = p.armorThickness;
+                }
+            }
+
+            float effArmor = maxHullArmor < 6.0f
+                ? 0.0f
+                : Mathf.Clamp(maxHullArmor * 0.35f, 8.0f, 28.0f);
+
+            _vehicleExplosionArmorCache[ptr] = effArmor;
+            return effArmor;
+        }
+
         [HarmonyPatch(typeof(BodyPart), nameof(BodyPart.TryDamageWithExplosion))]
         public static class BodyPart_TryDamageWithExplosion_Patch
         {
-            private static float GetEffectiveVehicleExplosionArmor(Vehicle veh)
-            {
-                IntPtr ptr = veh.Pointer;
-                if (_vehicleExplosionArmorCache.TryGetValue(ptr, out float cachedArmor))
-                    return cachedArmor;
-
-                float maxHullArmor = 0f;
-                var parts = veh.damageableParts;
-                if (parts != null)
-                {
-                    int count = parts.Count;
-                    for (int i = 0; i < count; i++)
-                    {
-                        VehicleDamagablePart p = parts[i];
-                        if (p == null || p.Pointer == IntPtr.Zero)
-                            continue;
-
-                        if (p.TryCast<VehicleDamageableWheelPart>() != null ||
-                            p.TryCast<VehicleDamageableTrackPart>() != null)
-                        {
-                            continue;
-                        }
-
-                        if (p.armorThickness > maxHullArmor)
-                            maxHullArmor = p.armorThickness;
-                    }
-                }
-
-                float effArmor = maxHullArmor < 6.0f
-                    ? 0.0f
-                    : Mathf.Clamp(maxHullArmor * 0.35f, 8.0f, 28.0f);
-
-                _vehicleExplosionArmorCache[ptr] = effArmor;
-                return effArmor;
-            }
 
             private static bool IsSoldierInEnclosedVehicleSeat(Vehicle veh, Soldier victim)
             {

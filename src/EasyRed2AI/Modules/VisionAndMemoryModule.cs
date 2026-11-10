@@ -550,6 +550,18 @@ namespace EasyRed2HumanAI
         internal static readonly Dictionary<IntPtr, float> _nextSuppressiveGrenadeTime = new Dictionary<IntPtr, float>(256);
         internal static readonly Dictionary<IntPtr, float> _nextSuppressiveBurstCountTime = new Dictionary<IntPtr, float>(256);
 
+        internal struct CornerPieState
+        {
+            public float NextRefreshTime;
+            public bool IsPieing;
+            public bool RaiseRifle;
+            public Vector3 PieLookDir;
+        }
+
+        internal static readonly Dictionary<IntPtr, CornerPieState> _cornerPieCache = new Dictionary<IntPtr, CornerPieState>(256);
+        internal static readonly Dictionary<IntPtr, float> _nextCornerPieCountTime = new Dictionary<IntPtr, float>(256);
+        public static int CornerPiesExecutedCount;
+
         // =====================================================================
         // Helper: Local Contact Callouts (15m) & Last-Known Target Memory
         // =====================================================================
@@ -952,7 +964,7 @@ namespace EasyRed2HumanAI
                 ai.distFromTarget = dist;
                 ai.targetInWeaponRange = true;
                 ai.allowFireAtEnemy = true;
-                ai.aimingEnemy = soldier.AngleToDirection(aimPos - soldier.transform.position) < 25f;
+                ai.aimingEnemy = AiCore.HorizontalAngleToDirection(soldier, aimPos - soldier.transform.position) < 25f;
                 ai.RotateAndFireToward(aimPos, deltaTime);
             }
             finally
@@ -1056,18 +1068,23 @@ namespace EasyRed2HumanAI
             Vector3 fannedDir = Quaternion.Euler(0f, fanAngle, 0f) * baseDir;
 
             Transform root = soldier.transform.root;
-            Vector3 upperOrigin = myPos + Vector3.up * 1.28f;
+            // Probe at the soldier's ACTUAL stance eye height so crouched trench/parapet defenders (0.80m)
+            // don't falsely treat a 1.15m dirt trench wall as "open" at 1.28m and stare straight into dirt!
+            float eyeH = soldier.m_pose == SoldierPose.Prone ? 0.34f : (soldier.m_pose == SoldierPose.Crouch ? 0.80f : 1.28f);
+            Vector3 upperOrigin = myPos + Vector3.up * eyeH;
+            Vector3 standOrigin = myPos + Vector3.up * 1.28f;
             Vector3 sillOrigin = myPos + Vector3.up * 0.52f;
 
             bool fannedBlocked = AiCore.RaycastEnvironment(upperOrigin, fannedDir, 4.5f, root, out _);
             bool fannedHasWindowSill = !fannedBlocked &&
-                                       !AiCore.RaycastEnvironment(upperOrigin, fannedDir, 7.5f, root, out _) &&
+                                       soldier.m_pose != SoldierPose.Prone &&
+                                       !AiCore.RaycastEnvironment(standOrigin, fannedDir, 7.5f, root, out _) &&
                                        AiCore.RaycastEnvironment(sillOrigin, fannedDir, 2.35f, root, out _);
 
             Vector3 finalDir;
             if (fannedHasWindowSill)
             {
-                finalDir = CenterGazeInWindowAperture(upperOrigin, fannedDir, root, t, maxFanDeg);
+                finalDir = CenterGazeInWindowAperture(standOrigin, fannedDir, root, t, maxFanDeg);
                 _watchWindowCache[ptr] = new WatchWindowCache
                 {
                     Pos = myPos,
@@ -1079,18 +1096,26 @@ namespace EasyRed2HumanAI
             }
 
             bool nearbyWindowDetected = false;
+            bool inNarrowTrenchOrHall = false;
             if (!fannedBlocked)
             {
                 Vector3 left90 = new Vector3(-fannedDir.z, 0f, fannedDir.x);
                 Vector3 right90 = new Vector3(fannedDir.z, 0f, -fannedDir.x);
-                if ((AiCore.RaycastEnvironment(sillOrigin, left90, 2.35f, root, out _) && !AiCore.RaycastEnvironment(upperOrigin, left90, 7.5f, root, out _)) ||
-                    (AiCore.RaycastEnvironment(sillOrigin, right90, 2.35f, root, out _) && !AiCore.RaycastEnvironment(upperOrigin, right90, 7.5f, root, out _)))
+                bool leftCloseWall = AiCore.RaycastEnvironment(upperOrigin, left90, 2.35f, root, out _);
+                bool rightCloseWall = AiCore.RaycastEnvironment(upperOrigin, right90, 2.35f, root, out _);
+                if (leftCloseWall && rightCloseWall)
+                {
+                    inNarrowTrenchOrHall = true;
+                }
+                else if (soldier.m_pose != SoldierPose.Prone &&
+                         ((AiCore.RaycastEnvironment(sillOrigin, left90, 2.35f, root, out _) && !AiCore.RaycastEnvironment(standOrigin, left90, 7.5f, root, out _)) ||
+                          (AiCore.RaycastEnvironment(sillOrigin, right90, 2.35f, root, out _) && !AiCore.RaycastEnvironment(standOrigin, right90, 7.5f, root, out _))))
                 {
                     nearbyWindowDetected = true;
                 }
             }
 
-            if (!fannedBlocked && !nearbyWindowDetected)
+            if (!fannedBlocked && !nearbyWindowDetected && !inNarrowTrenchOrHall)
             {
                 _watchWindowCache[ptr] = new WatchWindowCache
                 {
@@ -1105,6 +1130,8 @@ namespace EasyRed2HumanAI
             Vector3 bestDir = fannedDir;
             float bestScore = -999f;
             bool bestIsWindow = false;
+            Vector3 secondApproachDir = Vector3.zero;
+            float secondApproachScore = -999f;
 
             for (int i = 0; i < _watchSweepOffsets.Length; i++)
             {
@@ -1117,15 +1144,16 @@ namespace EasyRed2HumanAI
                     clearDist = upperHit.distance;
                 }
 
-                if (clearDist < 2.0f)
+                if (clearDist < 2.1f)
                     continue;
 
-                bool isWindowAperture = clearDist >= 7.0f &&
+                bool isWindowAperture = soldier.m_pose != SoldierPose.Prone &&
+                                        clearDist >= 7.0f &&
                                         AiCore.RaycastEnvironment(sillOrigin, cand, 2.35f, root, out RaycastHit sillHit) &&
                                         sillHit.distance < clearDist - 3.0f;
 
                 float alignDot = Vector3.Dot(cand, baseDir);
-                float score = clearDist + (alignDot * 5.5f);
+                float score = clearDist + (alignDot * 6.5f);
                 if (isWindowAperture)
                 {
                     score += 18.0f;
@@ -1133,22 +1161,42 @@ namespace EasyRed2HumanAI
 
                 if (score > bestScore)
                 {
+                    if (bestScore > -900f && Vector3.Dot(cand, bestDir) < -0.25f)
+                    {
+                        secondApproachDir = bestDir;
+                        secondApproachScore = bestScore;
+                    }
                     bestScore = score;
                     bestDir = cand;
                     bestIsWindow = isWindowAperture;
                 }
+                else if (clearDist >= 5.5f && Vector3.Dot(cand, bestDir) < -0.25f && score > secondApproachScore)
+                {
+                    secondApproachScore = score;
+                    secondApproachDir = cand;
+                }
             }
 
-            finalDir = (bestIsWindow || fannedBlocked)
-                ? CenterGazeInWindowAperture(upperOrigin, bestDir, root, t, maxFanDeg)
-                : bestDir;
+            // Trench & Corridor Vigilance: when walled in on both sides (trench/hallway) with two open approaches,
+            // briefly check the secondary trench bend/rear approach ~20% of the time so flankers can't walk up unopposed!
+            bool checkSecondaryTrenchApproach =
+                (fannedBlocked || inNarrowTrenchOrHall) &&
+                !bestIsWindow &&
+                secondApproachDir.sqrMagnitude > 0.01f &&
+                (((int)(Time.time * 0.24f) + (h & 7)) % 5 == 0);
 
+            Vector3 chosenWatch = checkSecondaryTrenchApproach ? secondApproachDir : bestDir;
+            finalDir = (!checkSecondaryTrenchApproach && (bestIsWindow || fannedBlocked))
+                ? CenterGazeInWindowAperture(upperOrigin, chosenWatch, root, t, maxFanDeg)
+                : chosenWatch;
+
+            float cacheDur = (fannedBlocked || inNarrowTrenchOrHall) ? 3.8f : 8.0f;
             _watchWindowCache[ptr] = new WatchWindowCache
             {
                 Pos = myPos,
                 BaseAngleDeg = baseAngleDeg,
                 ResultDir = finalDir,
-                ExpireTime = Time.time + 8.0f
+                ExpireTime = Time.time + cacheDur
             };
             return finalDir;
         }
@@ -1312,18 +1360,20 @@ namespace EasyRed2HumanAI
                     Vector3 toSquad = enemyRef.transform.position - myPos;
                     toSquad.y = 0f;
                     float dSq = toSquad.sqrMagnitude;
-                    if (dSq > 175f * 175f || dSq < 0.25f)
+                    // Allow stationary defenders to hear distant gunfire/battles up to 320m away so idle troops face the audible battle!
+                    if (dSq > 320f * 320f || dSq < 0.25f)
                         continue;
 
-                    bool isKnownContact = sq.IsEnemyAwareOfThisSquad ||
-                                          sq.isMarked ||
-                                          sq.isHalfMarked ||
-                                          sq.isMarkedPinPoint ||
-                                          enemyRef.IsSpotted;
+                    bool isKnownContact = dSq <= 195f * 195f &&
+                                          (sq.IsEnemyAwareOfThisSquad ||
+                                           sq.isMarked ||
+                                           sq.isHalfMarked ||
+                                           sq.isMarkedPinPoint ||
+                                           enemyRef.IsSpotted);
 
                     Vector3 contactVector = toSquad;
 
-                    if (!isKnownContact && dSq <= 150f * 150f)
+                    if (!isKnownContact)
                     {
                         var units = sq.units;
                         int uCount = units.Count;
@@ -1331,12 +1381,14 @@ namespace EasyRed2HumanAI
                         {
                             Soldier u = units[i];
                             if (u == null || !u.IsAlive) continue;
-                            if (u.IsSpotted || VisionPatches.HasFiredRecently(u, 4.5f))
+                            if ((dSq <= 180f * 180f && u.IsSpotted) || VisionPatches.HasFiredRecently(u, 6.0f))
                             {
                                 isKnownContact = true;
                                 contactVector = u.transform.position - myPos;
                                 contactVector.y = 0f;
                                 dSq = contactVector.sqrMagnitude;
+                                if (dSq > 165f * 165f)
+                                    dSq *= 1.35f; // Prioritize local (< 165m) contacts over distant audible gunfire
                                 break;
                             }
                         }
@@ -1396,15 +1448,33 @@ namespace EasyRed2HumanAI
             {
                 hasActiveContact = false;
                 Vector3 fallbackBase = soldier.transform.forward;
-                BattleManager bm = BattleManager.instance;
-                BattlePhase phase = bm != null ? bm.currentPhase : null;
-                if (phase != null && !string.IsNullOrEmpty(myFaction) && phase.EnemyFactionHasSpawn(myFaction))
+                bool foundObjectiveDir = false;
+
+                // Prefer facing the squad's assigned objective when outside its perimeter so idle troops
+                // look toward the contested battle area rather than an off-axis rear map edge!
+                if (myTask != null && myTask.Pointer != IntPtr.Zero && !myTask.IsInsideTaskArea(myPos, 0.90f))
                 {
-                    Vector3 toEnemySpawn = phase.GetOppositeFactionTerritoryPosition(myFaction) - myPos;
-                    toEnemySpawn.y = 0f;
-                    if (toEnemySpawn.sqrMagnitude > 1.0f)
+                    Vector3 toTask = myTask.GetTaskDestination() - myPos;
+                    toTask.y = 0f;
+                    if (toTask.sqrMagnitude > 16.0f * 16.0f)
                     {
-                        fallbackBase = toEnemySpawn;
+                        fallbackBase = toTask;
+                        foundObjectiveDir = true;
+                    }
+                }
+
+                if (!foundObjectiveDir)
+                {
+                    BattleManager bm = BattleManager.instance;
+                    BattlePhase phase = bm != null ? bm.currentPhase : null;
+                    if (phase != null && !string.IsNullOrEmpty(myFaction) && phase.EnemyFactionHasSpawn(myFaction))
+                    {
+                        Vector3 toEnemySpawn = phase.GetOppositeFactionTerritoryPosition(myFaction) - myPos;
+                        toEnemySpawn.y = 0f;
+                        if (toEnemySpawn.sqrMagnitude > 1.0f)
+                        {
+                            fallbackBase = toEnemySpawn;
+                        }
                     }
                 }
                 watchDir = PickClearWatchDirection(soldier, myPos, fallbackBase, 24f);
@@ -1432,12 +1502,156 @@ namespace EasyRed2HumanAI
             return watchDir.sqrMagnitude > 0.01f;
         }
 
+        private static bool TryGetActiveCornerPieDirection(
+            SoldierAI ai,
+            Soldier soldier,
+            out Vector3 pieLookDir,
+            out bool raiseRifle)
+        {
+            pieLookDir = Vector3.zero;
+            raiseRifle = false;
+
+            IntPtr ptr = soldier.Pointer;
+            float now = Time.time;
+
+            if (_cornerPieCache.TryGetValue(ptr, out CornerPieState cached) && now < cached.NextRefreshTime)
+            {
+                if (!cached.IsPieing)
+                    return false;
+
+                pieLookDir = cached.PieLookDir;
+                raiseRifle = cached.RaiseRifle;
+                return pieLookDir.sqrMagnitude > 0.01f;
+            }
+
+            var path = ai.path;
+            if (path == null || path.NodesCount < 2 || soldier.transform == null)
+            {
+                _cornerPieCache[ptr] = new CornerPieState { NextRefreshTime = now + 0.30f, IsPieing = false };
+                return false;
+            }
+
+            Vector3 myPos = soldier.transform.position;
+            Vector3 node0 = path.CurrentNode.point;
+            Vector3 toCorner = node0 - myPos;
+            toCorner.y = 0f;
+            float distToCornerSq = toCorner.sqrMagnitude;
+            if (distToCornerSq < 0.35f * 0.35f || distToCornerSq > 4.6f * 4.6f)
+            {
+                _cornerPieCache[ptr] = new CornerPieState { NextRefreshTime = now + 0.26f, IsPieing = false };
+                return false;
+            }
+
+            bool alerted = now < soldier.alertEndTime || soldier.GetSuppressionValue() > 0;
+            bool indoor = AiCore.HasLowCeilingOverhead(myPos, 4.2f);
+            bool hasThreatContact = HasActiveThreatSectorContact(soldier);
+            if (!alerted && !indoor && !hasThreatContact)
+            {
+                _cornerPieCache[ptr] = new CornerPieState { NextRefreshTime = now + 0.32f, IsPieing = false };
+                return false;
+            }
+
+            Vector3 node1 = path.A(1);
+            Vector3 seg1 = node1 - node0;
+            seg1.y = 0f;
+            if (seg1.sqrMagnitude < 0.64f)
+            {
+                _cornerPieCache[ptr] = new CornerPieState { NextRefreshTime = now + 0.28f, IsPieing = false };
+                return false;
+            }
+
+            float distToCorner = Mathf.Sqrt(distToCornerSq);
+            Vector3 seg0 = toCorner / distToCorner;
+            seg1.Normalize();
+
+            float bendAngle = Vector3.Angle(seg0, seg1);
+            if (bendAngle < 28f || bendAngle > 158f)
+            {
+                _cornerPieCache[ptr] = new CornerPieState { NextRefreshTime = now + 0.28f, IsPieing = false };
+                return false;
+            }
+
+            // Confirm an actual solid wall/doorframe/trench corner blocks direct sight to node1 ("blind corner")!
+            Vector3 eyePos = myPos + Vector3.up * 0.95f;
+            Vector3 toBeyond = (node1 + Vector3.up * 0.95f) - eyePos;
+            float beyondDist = toBeyond.magnitude;
+            if (beyondDist < 1.2f ||
+                !AiCore.IsDirectionBlockedByEnvironment(eyePos, toBeyond / beyondDist, Mathf.Min(beyondDist - 0.3f, 6.2f), soldier.transform.root))
+            {
+                _cornerPieCache[ptr] = new CornerPieState { NextRefreshTime = now + 0.28f, IsPieing = false };
+                return false;
+            }
+
+            // Smoothly "slice the pie" from approach vector seg0 into around-the-corner vector seg1 as distance closes!
+            float pieT = Mathf.Clamp01(1.0f - (distToCorner - 0.55f) / 4.05f);
+            pieLookDir = Vector3.Slerp(seg0, seg1, 0.36f + 0.58f * pieT).normalized;
+            raiseRifle = indoor || (alerted && hasThreatContact);
+
+            _cornerPieCache[ptr] = new CornerPieState
+            {
+                NextRefreshTime = now + 0.16f,
+                IsPieing = true,
+                RaiseRifle = raiseRifle,
+                PieLookDir = pieLookDir
+            };
+
+            if (!_nextCornerPieCountTime.TryGetValue(ptr, out float nextCount) || now >= nextCount)
+            {
+                _nextCornerPieCountTime[ptr] = now + 4.5f;
+                CornerPiesExecutedCount++;
+            }
+            return true;
+        }
+
         // =====================================================================
-        // Stationary Threat-Sector Gaze Rotation (SoldierAI.MovementRoutine)
+        // Corner-Pieing & Stationary Threat-Sector Gaze (SoldierAI.MovementRoutine)
         // =====================================================================
         [HarmonyPatch(typeof(SoldierAI), nameof(SoldierAI.MovementRoutine))]
         public static class SoldierAI_MovementRoutine_Patch
         {
+            public static bool Prefix(SoldierAI __instance, float __0)
+            {
+                try
+                {
+                    if (!VisionConfig.EnableMod.Value ||
+                        !VisionConfig.EnableThreatSectorConcentration.Value ||
+                        __instance == null ||
+                        !__instance.IsMoving() ||
+                        __instance.HasEnemyAndCanFireAtHim ||
+                        __instance.HeldMortar != null)
+                    {
+                        return true;
+                    }
+
+                    Soldier soldier = __instance.character;
+                    if (!AiCore.IsLocallyOwnedBot(soldier) ||
+                        soldier.IsOnVehicle() ||
+                        soldier.IsCharging() ||
+                        soldier.UsingBipod() ||
+                        soldier.isInBodyAnimation ||
+                        soldier.HasSurrended() ||
+                        soldier.IsCarried() ||
+                        soldier.IsCarryingBody() ||
+                        soldier.m_pose == SoldierPose.Prone)
+                    {
+                        return true;
+                    }
+
+                    if (TryGetActiveCornerPieDirection(__instance, soldier, out Vector3 pieDir, out bool raiseRifle))
+                    {
+                        soldier.SetGunTriggerPressed(false);
+                        __instance.MoveFPSOptimized(0.84f, __0);
+                        if (raiseRifle && !soldier.isTowardWallTps)
+                            soldier.RotateToward(pieDir, __0);
+                        else
+                            AiCore.RotateBodyWithoutRaisingGun(soldier, pieDir, __0);
+                        return false;
+                    }
+                }
+                catch { }
+                return true;
+            }
+
             public static void Postfix(SoldierAI __instance, float __0)
             {
                 try
@@ -1486,7 +1700,9 @@ namespace EasyRed2HumanAI
                         watchDir.sqrMagnitude > 0.01f)
                     {
                         // If stationed on a directional CombatCover (e.g. window or bunker aperture), keep gaze within
-                        // the cover's look cone so the soldier never turns sideways to stare at an interior room wall.
+                        // the cover's look cone—UNLESS the cover's forward direction is blocked right in front of the
+                        // soldier's current stance eye height (e.g., crouching deep inside a trench below the parapet),
+                        // in which case let them turn freely along the open trench approach!
                         if (soldier.IsOnCover() && soldier.targetDestination != null)
                         {
                             CombatCover activeCover = soldier.targetDestination.TryCast<CombatCover>();
@@ -1497,16 +1713,26 @@ namespace EasyRed2HumanAI
                                 if (coverFwd.sqrMagnitude > 0.01f)
                                 {
                                     coverFwd.Normalize();
-                                    float maxHalfArc = Mathf.Clamp(activeCover.localLookAngleWideness * 0.5f, 22f, 52f);
-                                    if (Vector3.Angle(coverFwd, watchDir) > maxHalfArc)
+                                    float eyeH = soldier.m_pose == SoldierPose.Prone ? 0.34f : (soldier.m_pose == SoldierPose.Crouch ? 0.80f : 1.28f);
+                                    bool coverFwdBlockedAtEye = AiCore.IsDirectionBlockedByEnvironment(
+                                        soldier.transform.position + Vector3.up * eyeH,
+                                        coverFwd,
+                                        1.85f,
+                                        soldier.transform.root);
+
+                                    if (!coverFwdBlockedAtEye)
                                     {
-                                        watchDir = Vector3.RotateTowards(coverFwd, watchDir, maxHalfArc * Mathf.Deg2Rad, 0f).normalized;
+                                        float maxHalfArc = Mathf.Clamp(activeCover.localLookAngleWideness * 0.5f, 22f, 52f);
+                                        if (Vector3.Angle(coverFwd, watchDir) > maxHalfArc)
+                                        {
+                                            watchDir = Vector3.RotateTowards(coverFwd, watchDir, maxHalfArc * Mathf.Deg2Rad, 0f).normalized;
+                                        }
                                     }
                                 }
                             }
                         }
 
-                        float angle = soldier.AngleToDirection(watchDir);
+                        float angle = AiCore.HorizontalAngleToDirection(soldier, watchDir);
                         if (_isTurningToWatchSector.Contains(ptr))
                         {
                             if (angle <= 4.0f)

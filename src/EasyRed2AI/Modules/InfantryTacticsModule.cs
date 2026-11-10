@@ -53,6 +53,7 @@ namespace EasyRed2HumanAI
         private static readonly Dictionary<IntPtr, float> _nextDoorToggleTime = new Dictionary<IntPtr, float>(128);
         private static readonly Dictionary<IntPtr, float> _nextBotDoorCheckTime = new Dictionary<IntPtr, float>(256);
         public static int DoorsStrategicallyClosedCount { get; private set; }
+        public static int TankHullCoverUsesCount { get; private set; }
 
         public static void ClearDoorCaches()
         {
@@ -74,7 +75,7 @@ namespace EasyRed2HumanAI
             if (shooter == null || distToTarget <= 1.2f)
                 return false;
 
-            if (shooter.AngleToDirection(targetPos - shooter.transform.position) > 35f)
+            if (AiCore.HorizontalAngleToDirection(shooter, targetPos - shooter.transform.position) > 35f)
                 return false;
 
             if (shooter.IsTowardWall())
@@ -479,6 +480,116 @@ namespace EasyRed2HumanAI
             return bipod != null || soldier.hasMg || soldier.IsGunner();
         }
 
+        internal static bool TryFindTankHullCoverOrEscortSpot(
+            Soldier soldier,
+            Vector3 myPos,
+            Vector3 threatDir,
+            bool allowMovingEscort,
+            out Vector3 hullSpotPos,
+            out bool isMovingEscort)
+        {
+            hullSpotPos = Vector3.zero;
+            isMovingEscort = false;
+
+            var vehOctree = CoverManager.vehicleCovers;
+            if (vehOctree == null || soldier == null)
+                return false;
+
+            var nearbyVehs = vehOctree.GetNearby(myPos, 17.5f);
+            if (nearbyVehs == null || nearbyVehs.Length == 0)
+                return false;
+
+            threatDir.y = 0f;
+            threatDir = threatDir.sqrMagnitude > 0.001f ? threatDir.normalized : soldier.transform.forward;
+
+            int h = AiCore.GetDeterministicHash(soldier.Pointer, 73);
+            float spread = ((h % 5) - 2) * 0.65f; // -1.3m .. +1.3m lateral fan behind hull
+            float sideSign = (h & 1) == 0 ? 1.0f : -1.0f;
+
+            float bestScore = float.MaxValue;
+            bool found = false;
+
+            int count = nearbyVehs.Length;
+            for (int i = 0; i < count; i++)
+            {
+                AiDestination dest = nearbyVehs[i];
+                if (dest == null || dest.Pointer == IntPtr.Zero)
+                    continue;
+
+                Vehicle v = dest.TryCast<Vehicle>();
+                if (v == null || v.Pointer == IntPtr.Zero || v.transform == null || v.IsAirVehicle())
+                    continue;
+
+                bool isTank = v.TryCast<VehicleTank>() != null;
+                if (!isTank && GetEffectiveVehicleExplosionArmor(v) < 8.0f)
+                    continue;
+
+                bool destroyed = v.IsCoverDestroyed();
+                if (!destroyed)
+                {
+                    string vf = GetVehicleCrewFaction(v);
+                    if (!string.IsNullOrEmpty(vf) && !ResourcesManager.IsSameFaction(vf, soldier.faction))
+                        continue; // Never try to crouch right behind a live enemy tank!
+                }
+
+                Vector3 vPos = v.transform.position;
+                if (Mathf.Abs(vPos.y - myPos.y) > 2.6f)
+                    continue;
+
+                Vector3 vFwd = v.transform.forward;
+                vFwd.y = 0f;
+                vFwd = vFwd.sqrMagnitude > 0.001f ? vFwd.normalized : Vector3.forward;
+
+                float speed = destroyed ? 0f : Mathf.Abs(v.GetCurrentSpeed());
+                Vector3 relVel = destroyed ? Vector3.zero : v.GetCurrentRelativeSpeed();
+                if (relVel.z < -0.25f)
+                    continue; // Never step behind a reversing tank/vehicle!
+
+                Vector3 candPos;
+                bool candMoving = false;
+
+                if (speed < 0.45f)
+                {
+                    // Stationary / Idle / Wrecked Tank: crouch on the sheltered leeward side opposite enemy fire
+                    Vector3 shelterDir = -threatDir;
+                    Vector3 latPerp = new Vector3(shelterDir.z, 0f, -shelterDir.x);
+                    float hullOffset = Mathf.Lerp(2.9f, 4.2f, Mathf.Abs(Vector3.Dot(shelterDir, vFwd)));
+                    candPos = vPos + shelterDir * hullOffset + latPerp * spread;
+                }
+                else if (allowMovingEscort && !destroyed && speed <= 5.2f && relVel.z > 0.35f && Vector3.Dot(vFwd, threatDir) > 0.35f)
+                {
+                    // Walking-Pace Friendly Tank Escort: advance in the sheltered rear-quarter wake behind the hull, clear of tracks!
+                    Vector3 vRight = new Vector3(vFwd.z, 0f, -vFwd.x);
+                    candPos = vPos - vFwd * 4.35f + vRight * (sideSign * 1.15f);
+                    candMoving = true;
+                }
+                else
+                {
+                    continue;
+                }
+
+                Vector3 fromVeh = candPos - vPos;
+                fromVeh.y = 0f;
+                float fromVehDist = fromVeh.magnitude;
+                if (fromVehDist > 0.5f &&
+                    AiCore.IsDirectionBlockedByEnvironment(vPos + Vector3.up * 1.0f, fromVeh / fromVehDist, fromVehDist + 0.35f, v.transform.root))
+                {
+                    continue;
+                }
+
+                float dSq = (candPos - myPos).sqrMagnitude;
+                if (dSq < bestScore)
+                {
+                    bestScore = dSq;
+                    hullSpotPos = candPos;
+                    isMovingEscort = candMoving;
+                    found = true;
+                }
+            }
+
+            return found;
+        }
+
         private static bool TrySeekNearbyCover(SoldierAI ai, Soldier soldier)
         {
             if (ai == null || soldier == null || soldier.IsOnVehicle() || soldier.transform == null)
@@ -501,17 +612,18 @@ namespace EasyRed2HumanAI
             {
                 _nextLocalCoverSeekTime[ptr] = now + 1.5f;
 
+                Vector3 myPos = soldier.transform.position;
+                Vector3 threatDir = GetEffectiveThreatDirection(soldier, soldier.joinedSquad, myPos, soldier.transform.forward);
+                CombatCover bestCover = null;
+                float bestDistSq = float.MaxValue;
+
                 var octree = CoverManager.staticCovers;
                 if (octree != null)
                 {
-                    Vector3 myPos = soldier.transform.position;
-                    Vector3 threatDir = GetEffectiveThreatDirection(soldier, soldier.joinedSquad, myPos, soldier.transform.forward);
                     var nearby = octree.GetNearby(myPos, 13.5f);
                     if (nearby != null && nearby.Length > 0)
                     {
                         var unreachable = soldier.nonReachableCovers;
-                        CombatCover bestCover = null;
-                        float bestDistSq = float.MaxValue;
                         int count = nearby.Length;
                         for (int i = 0; i < count; i++)
                         {
@@ -539,14 +651,29 @@ namespace EasyRed2HumanAI
                             bestDistSq = dSq;
                             bestCover = cc;
                         }
-
-                        if (bestCover != null)
-                        {
-                            _localCoverProtectedUntil[ptr] = now + 7.5f;
-                            soldier.CoverPosition(bestCover.Cast<AiDestination>());
-                            return true;
-                        }
                     }
+                }
+
+                // Consider nearby idle/wrecked tank or armored vehicle hulls as physical cover if closer than static cover!
+                if (bestDistSq > 7.0f * 7.0f &&
+                    TryFindTankHullCoverOrEscortSpot(soldier, myPos, threatDir, false, out Vector3 tankCoverPos, out _))
+                {
+                    float tankDistSq = (tankCoverPos - myPos).sqrMagnitude;
+                    if (tankDistSq < bestDistSq)
+                    {
+                        DestinationWithoutCover tankDest = new DestinationWithoutCover(tankCoverPos, SoldierPose.Crouch);
+                        _localCoverProtectedUntil[ptr] = now + 6.5f;
+                        soldier.CoverPosition(tankDest.Cast<AiDestination>());
+                        TankHullCoverUsesCount++;
+                        return true;
+                    }
+                }
+
+                if (bestCover != null)
+                {
+                    _localCoverProtectedUntil[ptr] = now + 7.5f;
+                    soldier.CoverPosition(bestCover.Cast<AiDestination>());
+                    return true;
                 }
             }
 
@@ -863,7 +990,7 @@ namespace EasyRed2HumanAI
                 if (ai.HasEnemyAndCanFireAtHim && dist > 2f)
                 {
                     Vector3 toTarget = targetPos - soldier.transform.position;
-                    if (soldier.AngleToDirection(toTarget) > 60f)
+                    if (AiCore.HorizontalAngleToDirection(soldier, toTarget) > 60f)
                     {
                         soldier.PutAwayBipod(0.35f, false, false, false);
                     }
@@ -885,7 +1012,7 @@ namespace EasyRed2HumanAI
 
             _nextBipodDeployCheckTime[ptr] = Time.time + 1.25f;
 
-            if (soldier.isInBodyAnimation || soldier.AngleToDirection(targetPos - soldier.transform.position) > 28f)
+            if (soldier.isInBodyAnimation || AiCore.HorizontalAngleToDirection(soldier, targetPos - soldier.transform.position) > 28f)
                 return;
 
             if (!soldier.CanStartBipodDeploy())
@@ -1090,7 +1217,7 @@ namespace EasyRed2HumanAI
 
             Vector3 toEnemy = enemy.transform.position - soldier.transform.position;
             toEnemy.y = 0f;
-            if (toEnemy.sqrMagnitude > 0.01f && soldier.AngleToDirection(toEnemy) > 42f)
+            if (toEnemy.sqrMagnitude > 0.01f && AiCore.HorizontalAngleToDirection(soldier, toEnemy) > 42f)
                 return;
 
             ai.MeleeBlockWindow();
@@ -2710,7 +2837,7 @@ namespace EasyRed2HumanAI
 
                     if (VisionConfig.EnableWallShootingPrevention.Value && !soldier.IsOnVehicle())
                     {
-                        float angleToTarget = soldier.AngleToDirection(__0 - soldier.transform.position);
+                        float angleToTarget = AiCore.HorizontalAngleToDirection(soldier, __0 - soldier.transform.position);
                         if (angleToTarget <= 35f &&
                             (!_nextWallCheckTime.TryGetValue(ptr, out float nextWall) || Time.time >= nextWall))
                         {
@@ -2870,7 +2997,7 @@ namespace EasyRed2HumanAI
                         if (!inPointBlankMelee && !isMoving)
                         {
                             Vector3 toTarget = __0 - soldier.transform.position;
-                            if (soldier.AngleToDirection(toTarget) > 8.0f)
+                            if (AiCore.HorizontalAngleToDirection(soldier, toTarget) > 8.0f)
                             {
                                 AiCore.RotateBodyWithoutRaisingGun(soldier, toTarget, __1);
                             }
@@ -2881,6 +3008,50 @@ namespace EasyRed2HumanAI
                     if (soldier.isTowardWallTps && !soldier.IsTowardWall())
                     {
                         soldier.isTowardWallTps = false;
+                    }
+                }
+                catch { }
+                return true;
+            }
+        }
+
+        // =====================================================================
+        // GOAP Cover Lock De-Confliction (SoldierAI.CalculateMoveOrderDestination)
+        // Vanilla SquadOrdersRoutine (0x180560895 -> 0x180559CC8) bypasses UnitCanChangeCover
+        // every 2.0s and overwrites soldier.CoverPosition(...) whenever a GOAP Flanker,
+        // Scavenger, Wall-Side Repositioner, or Tank-Cover seeker steps outside the 15m
+        // moveOrderRadius! Preserve their assigned GOAP destination while locked.
+        // =====================================================================
+        [HarmonyPatch(typeof(SoldierAI), nameof(SoldierAI.CalculateMoveOrderDestination))]
+        public static class SoldierAI_CalculateMoveOrderDestination_Patch
+        {
+            public static bool Prefix(SoldierAI __instance, ref Vector3 __result)
+            {
+                try
+                {
+                    if (!VisionConfig.EnableMod.Value || __instance == null)
+                        return true;
+
+                    Soldier soldier = __instance.character;
+                    if (!AiCore.IsLocallyOwnedBot(soldier) ||
+                        soldier.IsOnVehicle() ||
+                        soldier.IsCharging() ||
+                        !soldier.HasDestinationAssigned ||
+                        soldier.targetDestination == null)
+                    {
+                        return true;
+                    }
+
+                    IntPtr ptr = soldier.Pointer;
+                    float now = Time.time;
+                    bool protectedCover =
+                        (VisionConfig.EnableTacticalGoapPlanner.Value && HasActiveGoapCoverLock(ptr, now)) ||
+                        (_localCoverProtectedUntil.TryGetValue(ptr, out float protUntil) && now < protUntil);
+
+                    if (protectedCover)
+                    {
+                        __result = soldier.targetDestination.GetCoverPosition();
+                        return false;
                     }
                 }
                 catch { }
