@@ -33,6 +33,16 @@ namespace EasyRed2HumanAI
         private static readonly Dictionary<IntPtr, float> _nextBayonetCheckTime = new Dictionary<IntPtr, float>(256);
         private static readonly Dictionary<IntPtr, float> _nextMeleeAttemptTime = new Dictionary<IntPtr, float>(256);
         private static readonly Dictionary<IntPtr, float> _nextMeleeStepTime = new Dictionary<IntPtr, float>(256);
+
+        private struct MeleeTargetSlotState
+        {
+            public IntPtr Attacker0;
+            public float Expire0;
+            public IntPtr Attacker1;
+            public float Expire1;
+        }
+
+        private static readonly Dictionary<IntPtr, MeleeTargetSlotState> _meleeTargetSlots = new Dictionary<IntPtr, MeleeTargetSlotState>(64);
         private static readonly Dictionary<IntPtr, float> _nextIndoorCeilingCountTime = new Dictionary<IntPtr, float>(256);
         private static readonly Dictionary<IntPtr, float> _nextBoundingHoldCountTime = new Dictionary<IntPtr, float>(256);
         private static readonly Dictionary<IntPtr, float> _nextBridgeAssistCountTime = new Dictionary<IntPtr, float>(256);
@@ -65,6 +75,8 @@ namespace EasyRed2HumanAI
                 _liberateMoveStartTime.Clear();
             if (_liberateMoveCooldownUntil.Count > 256)
                 _liberateMoveCooldownUntil.Clear();
+            if (_meleeTargetSlots.Count > 128)
+                _meleeTargetSlots.Clear();
         }
 
         // =====================================================================
@@ -1213,6 +1225,80 @@ namespace EasyRed2HumanAI
             }
         }
 
+        private static bool TryClaimMeleeTargetSlot(Soldier attacker, Soldier target, float now, out int slotIndex)
+        {
+            slotIndex = 0;
+            if (attacker == null || target == null || attacker.Pointer == IntPtr.Zero || target.Pointer == IntPtr.Zero)
+                return false;
+
+            IntPtr atkPtr = attacker.Pointer;
+            IntPtr tgtPtr = target.Pointer;
+            const float slotHoldSeconds = 0.90f;
+
+            _meleeTargetSlots.TryGetValue(tgtPtr, out MeleeTargetSlotState state);
+
+            if (state.Attacker0 == atkPtr)
+            {
+                state.Expire0 = now + slotHoldSeconds;
+                _meleeTargetSlots[tgtPtr] = state;
+                slotIndex = 0;
+                return true;
+            }
+
+            if (state.Attacker1 == atkPtr)
+            {
+                state.Expire1 = now + slotHoldSeconds;
+                _meleeTargetSlots[tgtPtr] = state;
+                slotIndex = 1;
+                return true;
+            }
+
+            if (state.Attacker0 == IntPtr.Zero || now >= state.Expire0)
+            {
+                state.Attacker0 = atkPtr;
+                state.Expire0 = now + slotHoldSeconds;
+                _meleeTargetSlots[tgtPtr] = state;
+                slotIndex = 0;
+                return true;
+            }
+
+            if (state.Attacker1 == IntPtr.Zero || now >= state.Expire1)
+            {
+                state.Attacker1 = atkPtr;
+                state.Expire1 = now + slotHoldSeconds;
+                _meleeTargetSlots[tgtPtr] = state;
+                slotIndex = 1;
+                return true;
+            }
+
+            return false;
+        }
+
+        private static Vector3 GetMeleeApproachPosition(Soldier attacker, Soldier enemy, int slotIndex, float dist, float strikeRange)
+        {
+            Vector3 enemyPos = enemy.transform.position;
+            if (dist <= Mathf.Max(1.30f, strikeRange * 0.88f))
+                return enemyPos;
+
+            Vector3 fromEnemy = attacker.transform.position - enemyPos;
+            fromEnemy.y = 0f;
+            if (fromEnemy.sqrMagnitude < 0.04f)
+                fromEnemy = -attacker.transform.forward;
+            else
+                fromEnemy.Normalize();
+
+            // Spread the 2 allowed melee attackers onto +-52 degree flanking pincers so they never stack on one point
+            float sign = slotIndex == 0 ? 1.0f : -1.0f;
+            const float cos52 = 0.61566f;
+            const float sin52 = 0.78801f;
+            Vector3 rotated = new Vector3(
+                fromEnemy.x * cos52 - fromEnemy.z * (sin52 * sign),
+                0f,
+                fromEnemy.x * (sin52 * sign) + fromEnemy.z * cos52);
+
+            return enemyPos + rotated * 0.82f;
+        }
+
         private static bool IsEngagedInPointBlankMelee(
             SoldierAI ai,
             Soldier soldier,
@@ -1220,12 +1306,14 @@ namespace EasyRed2HumanAI
             out Soldier enemySoldier,
             out float lungeRange,
             out float ceaseFireRange,
-            out float strikeRange)
+            out float strikeRange,
+            out int meleeSlotIndex)
         {
             enemySoldier = null;
             lungeRange = 0f;
             ceaseFireRange = 0f;
             strikeRange = 0f;
+            meleeSlotIndex = 0;
 
             if (!VisionConfig.EnablePointBlankMelee.Value ||
                 ai == null ||
@@ -1286,6 +1374,11 @@ namespace EasyRed2HumanAI
             }
 
             if (dist > lungeRange)
+                return false;
+
+            // Anti-stacking cap: allow at most 2 friendly bots to actively melee the same target;
+            // additional bots keep squad spacing and cover with firearms instead of dogpiling.
+            if (!TryClaimMeleeTargetSlot(soldier, enemySoldier, Time.time, out meleeSlotIndex))
                 return false;
 
             Vector3 toEnemy = (enemyPos + Vector3.up * 1.05f) - (myPos + Vector3.up * 1.05f);
@@ -1721,7 +1814,8 @@ namespace EasyRed2HumanAI
                         out Soldier meleeEnemy,
                         out _,
                         out _,
-                        out float seqStrikeRange);
+                        out float seqStrikeRange,
+                        out int seqMeleeSlot);
 
                     if (inPointBlankMelee && meleeEnemy != null)
                     {
@@ -1746,7 +1840,8 @@ namespace EasyRed2HumanAI
 
                         if (dist > 1.15f && !soldier.isInBodyAnimation)
                         {
-                            __instance.MoveDirectlyToward(meleeEnemy.transform.position, 1.15f);
+                            Vector3 approachPos = GetMeleeApproachPosition(soldier, meleeEnemy, seqMeleeSlot, dist, seqStrikeRange);
+                            __instance.MoveDirectlyToward(approachPos, 1.15f);
                         }
 
                         if (dist <= seqStrikeRange)
@@ -2911,7 +3006,8 @@ namespace EasyRed2HumanAI
                             out Soldier meleeEnemy,
                             out _,
                             out float ceaseFireRange,
-                            out float strikeRange) &&
+                            out float strikeRange,
+                            out int rotMeleeSlot) &&
                         meleeEnemy != null)
                     {
                         inPointBlankMelee = true;
@@ -2926,7 +3022,8 @@ namespace EasyRed2HumanAI
                             if (!_nextMeleeStepTime.TryGetValue(ptr, out float nextStep) || Time.time >= nextStep)
                             {
                                 _nextMeleeStepTime[ptr] = Time.time + 0.20f;
-                                __instance.MoveDirectlyToward(enemyPos, 0.65f);
+                                Vector3 approachPos = GetMeleeApproachPosition(soldier, meleeEnemy, rotMeleeSlot, dist, strikeRange);
+                                __instance.MoveDirectlyToward(approachPos, 0.65f);
                                 __instance.moveLookingTarget = true;
                             }
                         }
@@ -3641,7 +3738,7 @@ namespace EasyRed2HumanAI
                             VehiclePlane vp = veh.TryCast<VehiclePlane>();
                             if (vp != null)
                             {
-                                TryHotStartAirborneLocalPlayerPlane(vp);
+                                TryHotStartAirbornePlane(vp, false);
                             }
                         }
                     }
@@ -3893,6 +3990,135 @@ namespace EasyRed2HumanAI
                     }
 
                     return false;
+                }
+                catch { }
+                return true;
+            }
+        }
+
+        // =====================================================================
+        // Vanilla AI Fix: Handheld Knee-Mortar Danger-Close Friendly-Fire Guard
+        // In vanilla SoldierAI.MortarTarget (0x18055CA60), mortar bots pick the single closest
+        // spotted enemy (or keep shelling Squad.mortarOrderPos) with ZERO friendly-troop blast check.
+        // Redirect danger-close mortar aims to a spotted enemy cluster clear of friendlies, or hold fire!
+        // =====================================================================
+        [HarmonyPatch(typeof(SoldierAI), nameof(SoldierAI.MortarTarget))]
+        public static class SoldierAI_MortarTarget_Patch
+        {
+            public static void Postfix(SoldierAI __instance, ref float __0, ref Spottable __result)
+            {
+                try
+                {
+                    if (!VisionConfig.EnableMod.Value ||
+                        VisionConfig.FriendlyFireConeDegrees.Value <= 0.1f ||
+                        __instance == null ||
+                        __result == null ||
+                        __result.Pointer == IntPtr.Zero)
+                    {
+                        return;
+                    }
+
+                    Soldier soldier = __instance.character;
+                    if (!AiCore.IsLocallyOwnedBot(soldier) || soldier.transform == null || string.IsNullOrEmpty(soldier.faction))
+                        return;
+
+                    Vector3 targetPos = __result.GetCenterOfUnit();
+                    if (!AiCore.IsIndirectFireImpactDangerClose(soldier.faction, targetPos, soldier.Pointer, 29.0f, 35.0f))
+                        return;
+
+                    FriendlyFirePrevented++;
+
+                    KneeMortar mortar = __instance.HeldMortar;
+                    Spottable bestSafeTarget = null;
+                    float bestSafeDist = 0f;
+                    float bestScore = -9999f;
+
+                    if (mortar != null && mortar.Pointer != IntPtr.Zero)
+                    {
+                        RefreshCombinedArmsIntelIfNeeded();
+                        Vector3 myPos = soldier.transform.position;
+                        int clusterCount = _knownEnemyClusters.Count;
+
+                        for (int i = 0; i < clusterCount; i++)
+                        {
+                            KnownEnemyCluster cluster = _knownEnemyClusters[i];
+                            if (cluster.Faction == soldier.faction || ResourcesManager.IsSameFaction(soldier.faction, cluster.Faction))
+                                continue;
+
+                            for (int pass = 0; pass < 2; pass++)
+                            {
+                                Spottable cand = pass == 0 ? cluster.PrimarySoldier : cluster.SecondarySoldier;
+                                if (!AiCore.IsValidAliveSpottable(cand))
+                                    continue;
+
+                                Vector3 candPos = cand.GetCenterOfUnit();
+                                float d = Vector3.Distance(myPos, candPos);
+                                if (!mortar.InRange(soldier, d))
+                                    continue;
+
+                                if (AiCore.IsIndirectFireImpactDangerClose(soldier.faction, candPos, soldier.Pointer, 29.0f, 35.0f))
+                                    continue;
+
+                                float score = cluster.BasePriority - d * 0.15f;
+                                if (score > bestScore)
+                                {
+                                    bestScore = score;
+                                    bestSafeTarget = cand;
+                                    bestSafeDist = d;
+                                }
+                                break;
+                            }
+                        }
+                    }
+
+                    if (bestSafeTarget != null)
+                    {
+                        __result = bestSafeTarget;
+                        __0 = bestSafeDist;
+                        AiCore.LogDebug("MortarFFSaved", $"{soldier.faction} mortarman shifted target away from danger-close friendlies ({bestSafeDist:F0}m).", 5.0f);
+                    }
+                    else
+                    {
+                        __result = null;
+                        __0 = 0f;
+                        AiCore.LogDebug("MortarFFSaved", $"{soldier.faction} mortarman held fire (all targets danger-close to friendlies).", 5.0f);
+                    }
+                }
+                catch { }
+            }
+        }
+
+        [HarmonyPatch(typeof(KneeMortar), nameof(KneeMortar.Use))]
+        public static class KneeMortar_Use_Patch
+        {
+            public static bool Prefix(KneeMortar __instance, Creature __0, ref bool __result)
+            {
+                try
+                {
+                    if (!VisionConfig.EnableMod.Value ||
+                        VisionConfig.FriendlyFireConeDegrees.Value <= 0.1f ||
+                        __instance == null ||
+                        __0 == null)
+                    {
+                        return true;
+                    }
+
+                    Soldier soldier = __0.TryCast<Soldier>();
+                    if (!AiCore.IsLocallyOwnedBot(soldier) || soldier.transform == null || string.IsNullOrEmpty(soldier.faction))
+                        return true;
+
+                    float range = Mathf.Max(20.0f, __instance.CurrentRange);
+                    Vector3 flatFwd = soldier.transform.forward;
+                    flatFwd.y = 0f;
+                    flatFwd = flatFwd.sqrMagnitude > 0.001f ? flatFwd.normalized : Vector3.forward;
+
+                    Vector3 predictedImpact = soldier.transform.position + flatFwd * range;
+                    if (AiCore.IsIndirectFireImpactDangerClose(soldier.faction, predictedImpact, soldier.Pointer, 27.0f, 34.0f))
+                    {
+                        FriendlyFirePrevented++;
+                        __result = false;
+                        return false;
+                    }
                 }
                 catch { }
                 return true;

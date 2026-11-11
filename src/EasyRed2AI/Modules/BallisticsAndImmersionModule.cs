@@ -39,6 +39,7 @@ namespace EasyRed2HumanAI
         private static readonly Dictionary<IntPtr, int> _colliderImpactCache = new Dictionary<IntPtr, int>(512);
         private static readonly Dictionary<IntPtr, ParachuteDriftState> _parachuteDriftStates = new Dictionary<IntPtr, ParachuteDriftState>(32);
         private static readonly Dictionary<IntPtr, float> _vehicleExplosionArmorCache = new Dictionary<IntPtr, float>(64);
+        private static readonly Dictionary<IntPtr, TrailRenderer[]> _cachedTracerTrails = new Dictionary<IntPtr, TrailRenderer[]>(64);
 
         public static int PlaneAudioLoopsDesyncedCount { get; private set; }
         public static int ThinCoverPenetrationsCount { get; private set; }
@@ -62,6 +63,8 @@ namespace EasyRed2HumanAI
                 _parachuteDriftStates.Clear();
             if (_vehicleExplosionArmorCache.Count > 128)
                 _vehicleExplosionArmorCache.Clear();
+            if (_cachedTracerTrails.Count > 128)
+                _cachedTracerTrails.Clear();
         }
 
         // ============================================================================
@@ -111,13 +114,22 @@ namespace EasyRed2HumanAI
                         if (clip.Pointer != state.LastClipPtr)
                         {
                             state.LastClipPtr = clip.Pointer;
-                            float len = clip.length;
-                            if (len > 0.45f && src.time < 0.08f)
+                            AudioClip startClip = __instance.engine_start;
+                            bool isStartupClip = __instance.engineStarting ||
+                                                 (startClip != null && startClip.Pointer == clip.Pointer);
+
+                            // Never seek compressed FMOD startup streams or the local player's own cockpit audio
+                            // (prevents synchronous decode hitches on plane entry and preserves startup sound).
+                            if (!isStartupClip && !__instance.PlayerIsInside())
                             {
-                                float targetTime = ((state.PhaseOffset + Time.unscaledTime * 0.29f) % 0.82f + 0.08f) * len;
-                                src.time = Mathf.Clamp(targetTime, 0.05f, len - 0.05f);
-                                PlaneAudioLoopsDesyncedCount++;
-                                AiCore.LogDebug("PlaneAudio", $"Desynchronized plane motor loop '{clip.name}' to {src.time:F2}s/{len:F2}s (detune={state.PitchDetune:+0.000;-0.000}).", 8.0f);
+                                float len = clip.length;
+                                if (len > 0.45f && src.time < 0.08f)
+                                {
+                                    float targetTime = ((state.PhaseOffset + Time.unscaledTime * 0.29f) % 0.82f + 0.08f) * len;
+                                    src.time = Mathf.Clamp(targetTime, 0.05f, len - 0.05f);
+                                    PlaneAudioLoopsDesyncedCount++;
+                                    AiCore.LogDebug("PlaneAudio", $"Desynchronized plane motor loop '{clip.name}' to {src.time:F2}s/{len:F2}s (detune={state.PitchDetune:+0.000;-0.000}).", 8.0f);
+                                }
                             }
                         }
                     }
@@ -179,6 +191,18 @@ namespace EasyRed2HumanAI
 
                 try
                 {
+                    if (__instance != null)
+                    {
+                        // Guard against vanilla BulletInstance.OnHit -> Soldier.SyncSay -> Creature.GetSyncher NRE
+                        // when a long-flight artillery/mortar shooter died & despawned while the shell was in mid-air.
+                        Soldier rawShooter = __instance.shooter;
+                        if (!ReferenceEquals(rawShooter, null) &&
+                            (rawShooter == null || rawShooter.Pointer == IntPtr.Zero || rawShooter.gameObject == null))
+                        {
+                            __instance.shooter = null;
+                        }
+                    }
+
                     if (!VisionConfig.EnableMod.Value || __instance == null || bulletData == null)
                         return;
 
@@ -224,7 +248,7 @@ namespace EasyRed2HumanAI
                                     if (rootVeh != null &&
                                         rootVeh.Pointer != IntPtr.Zero &&
                                         !rootVeh.IsAirVehicle() &&
-                                        AiCore.IsLocallyOwnedVehicle(rootVeh) &&
+                                        AiCore.IsLocallyOwnedVehicleSyncher(rootVeh) &&
                                         shooter != null &&
                                         shooter.Pointer != IntPtr.Zero &&
                                         shooter.IsPlayer() &&
@@ -409,6 +433,125 @@ namespace EasyRed2HumanAI
                 catch { }
 
                 return ImpactUnknownOrBlocked;
+            }
+        }
+
+        // ============================================================================
+        // 2A-2. POOLED TRACER MID-AIR DOGLEG FIX & INDIRECT-FIRE RICOCHET GUARD
+        // - In vanilla BulletInstance.AlignBulletEffect (0x1809DCE10), off-screen artillery/mortar
+        //   shells only pop their pooled TracerBehaviour on the mid-air frame they enter camera view,
+        //   but spawn it at `this.startPosition` (hundreds of meters away) without calling TrailRenderer.Clear(),
+        //   drawing a ~90-degree horizontal-to-vertical dogleg across the sky on the next frame!
+        // - Also prevents plunging indirect-fire artillery/mortar rounds from deflecting sideways off foliage/roofs.
+        // ============================================================================
+        private static void ClearTracerTrailsCached(GameObject tracerGo)
+        {
+            if (tracerGo == null || tracerGo.Pointer == IntPtr.Zero)
+                return;
+
+            IntPtr goPtr = tracerGo.Pointer;
+            if (!_cachedTracerTrails.TryGetValue(goPtr, out TrailRenderer[] trails))
+            {
+                var il2cppTrails = tracerGo.GetComponentsInChildren<TrailRenderer>(true);
+                if (il2cppTrails != null && il2cppTrails.Count > 0)
+                {
+                    trails = new TrailRenderer[il2cppTrails.Count];
+                    for (int i = 0; i < il2cppTrails.Count; i++)
+                        trails[i] = il2cppTrails[i];
+                }
+                else
+                {
+                    trails = Array.Empty<TrailRenderer>();
+                }
+                if (_cachedTracerTrails.Count > 128)
+                    _cachedTracerTrails.Clear();
+                _cachedTracerTrails[goPtr] = trails;
+            }
+
+            for (int i = 0; i < trails.Length; i++)
+            {
+                TrailRenderer tr = trails[i];
+                if (tr != null && tr.Pointer != IntPtr.Zero)
+                {
+                    tr.Clear();
+                }
+            }
+        }
+
+        [HarmonyPatch(typeof(BulletInstance), nameof(BulletInstance._AlignBulletEffect_b__40_0))]
+        public static class BulletInstance_OnTracerPopped_Patch
+        {
+            public static void Postfix(BulletInstance __instance, GameObject __0)
+            {
+                try
+                {
+                    if (!VisionConfig.EnableMod.Value || __instance == null || __0 == null || __0.Pointer == IntPtr.Zero)
+                        return;
+
+                    Vector3 cur = __instance.curPos;
+                    if (cur.sqrMagnitude > 0.01f && (cur - __instance.startPosition).sqrMagnitude > 0.25f && __0.transform != null)
+                    {
+                        __0.transform.position = cur;
+                        Vector3 vel = __instance.curVelocity;
+                        if (vel.sqrMagnitude > 0.01f)
+                        {
+                            __0.transform.rotation = Quaternion.LookRotation(vel.normalized);
+                        }
+                    }
+
+                    ClearTracerTrailsCached(__0);
+                }
+                catch { }
+            }
+        }
+
+        [HarmonyPatch(typeof(BulletInstance), nameof(BulletInstance.DestroyFX))]
+        public static class BulletInstance_DestroyFX_Patch
+        {
+            public static void Prefix(BulletInstance __instance)
+            {
+                try
+                {
+                    if (!VisionConfig.EnableMod.Value || __instance == null)
+                        return;
+
+                    TracerBehaviour tracer = __instance.tracerInstance;
+                    if (tracer != null && tracer.Pointer != IntPtr.Zero && tracer.gameObject != null)
+                    {
+                        ClearTracerTrailsCached(tracer.gameObject);
+                    }
+                }
+                catch { }
+            }
+        }
+
+        [HarmonyPatch(typeof(BulletInstance), nameof(BulletInstance.TryRichochet))]
+        public static class BulletInstance_TryRichochet_Patch
+        {
+            public static bool Prefix(
+                BulletInstance __instance,
+                Vector3 __1,
+                BulletData __3,
+                RaycastHit __4,
+                ref bool __result)
+            {
+                try
+                {
+                    if (!VisionConfig.EnableMod.Value || __instance == null)
+                        return true;
+
+                    // Plunging mortar and heavy indirect-fire artillery shells should detonate/impact cleanly
+                    // rather than bouncing at bizarre 90-degree angles off tree canopies or roof edges.
+                    if (__instance.isMortar ||
+                        (__3 != null && __3.caliber >= 50.0f &&
+                         (__1.y <= -0.32f || (__instance.startPosition.y - __4.point.y) >= 18.0f)))
+                    {
+                        __result = false;
+                        return false;
+                    }
+                }
+                catch { }
+                return true;
             }
         }
 

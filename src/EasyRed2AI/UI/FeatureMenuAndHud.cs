@@ -1357,6 +1357,7 @@ namespace EasyRed2HumanAI
                 AiCore.PruneDict(_nextBayonetCheckTime, _reusableAlivePtrs);
                 AiCore.PruneDict(_nextMeleeAttemptTime, _reusableAlivePtrs);
                 AiCore.PruneDict(_nextMeleeStepTime, _reusableAlivePtrs);
+                AiCore.PruneDict(_meleeTargetSlots, _reusableAlivePtrs);
             }
 
             if (forceFull || slice == 2)
@@ -1424,6 +1425,17 @@ namespace EasyRed2HumanAI
 
                 if (_coverExposureCache.Count > 4096)
                     _coverExposureCache.Clear();
+                if (_turretAiByTurretPtr.Count > 256)
+                    _turretAiByTurretPtr.Clear();
+                if (_planeDogfightBreakOff.Count > 128)
+                {
+                    _planeDogfightBreakOff.Clear();
+                    _remotePlaneSpawnSeenTime.Clear();
+                    _nextRemotePlaneGroundCheckTime.Clear();
+                    _planeHotStartWindowUntil.Clear();
+                }
+                if (_nextLocalDriverRoadkillScanTime.Count > 128)
+                    _nextLocalDriverRoadkillScanTime.Clear();
                 AiCore.PruneSpatialCachesIfOversized();
 
                 if (_repairTaskStartTime.Count > 0)

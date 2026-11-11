@@ -545,7 +545,7 @@ namespace EasyRed2HumanAI
         [HarmonyPatch(typeof(TurretAI), nameof(TurretAI.RefreshTargets))]
         public static class TurretAI_RefreshTargets_Patch
         {
-            public static void Postfix(TurretAI __instance, bool __result)
+            public static void Postfix(TurretAI __instance, Soldier __0, bool __result)
             {
                 try
                 {
@@ -557,10 +557,15 @@ namespace EasyRed2HumanAI
                         return;
                     }
 
-                    Vehicle veh = AiCore.GetCachedTurretVehicle(__instance.turret);
-                    if (!AiCore.IsLocallyOwnedVehicle(veh)) return;
+                    _turretAiByTurretPtr[__instance.turret.Pointer] = __instance;
 
-                    if (VisionConfig.EnableCombinedArmsPrioritySupport.Value)
+                    Vehicle veh = AiCore.GetCachedTurretVehicle(__instance.turret);
+                    bool ownedByGunner = __0 != null && AiCore.IsLocallyOwnedBot(__0);
+                    if (!ownedByGunner && !AiCore.IsLocallyOwnedVehicle(veh))
+                        return;
+
+                    // Always run danger-close indirect-fire target sanitization & combined-arms priority
+                    if (VisionConfig.EnableCombinedArmsPrioritySupport.Value || VisionConfig.FriendlyFireConeDegrees.Value > 0.1f)
                     {
                         TryPrioritizeKnownTargetForTurret(__instance, veh);
                     }
@@ -596,17 +601,31 @@ namespace EasyRed2HumanAI
         [HarmonyPatch(typeof(TurretAI), nameof(TurretAI.AutoPilot))]
         public static class TurretAI_AutoPilot_Patch
         {
-            public static void Prefix(TurretAI __instance)
+            public static void Prefix(TurretAI __instance, Soldier __0)
             {
                 try
                 {
                     if (!VisionConfig.EnableMod.Value ||
-                        !VisionConfig.EnableSmartVehicleAmmoSelection.Value ||
                         __instance == null ||
                         __instance.turret == null)
                     {
                         return;
                     }
+
+                    Turret turret = __instance.turret;
+                    _turretAiByTurretPtr[turret.Pointer] = __instance;
+
+                    // Pre-empt friendly-fire BEFORE AutoPilot calls SetGunTriggerPressed(true) (which otherwise queues
+                    // TurretGun.FireOnReloadDone even if Postfix sets triggerPressed = false!).
+                    if (VisionConfig.FriendlyFireConeDegrees.Value > 0.1f &&
+                        ShouldBlockTurretFriendlyFire(__instance, turret, __0))
+                    {
+                        turret.SetGunTriggerPressed(false, __0);
+                        __instance.nextFireCheckTime = Time.time + 0.30f;
+                    }
+
+                    if (!VisionConfig.EnableSmartVehicleAmmoSelection.Value)
+                        return;
 
                     Spottable curTarget = __instance.CurrentVisibleTarget;
                     if (curTarget != null && curTarget.Pointer != IntPtr.Zero)
@@ -716,6 +735,9 @@ namespace EasyRed2HumanAI
                     if (IsJapaneseKamikazeActive(__instance))
                         return;
 
+                    // Prevent head-on mid-air dogfight collisions (vanilla holds nose-on down to 70m)
+                    TryExecuteDogfightAntiChickenBreakOff(__instance, false);
+
                     if (VisionConfig.EnableCombinedArmsPrioritySupport.Value)
                     {
                         TrySteerAircraftOrbitTowardKnownThreat(__instance);
@@ -755,6 +777,10 @@ namespace EasyRed2HumanAI
                     if (IsJapaneseKamikazeActive(__instance))
                     {
                         TryExecuteJapaneseKamikazeDive(__instance, true);
+                    }
+                    else
+                    {
+                        TryExecuteDogfightAntiChickenBreakOff(__instance, true);
                     }
                 }
                 catch { }

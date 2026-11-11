@@ -507,7 +507,7 @@ namespace EasyRed2HumanAI
 
             int fCount = floorItems.Count;
             if (fCount >= 64)
-                AiCore.NotifyHeavyWorkThisFrame();
+                AiCore.NotifyDirectorWorkThisFrame();
             for (int i = 0; i < fCount; i++)
             {
                 ItemObject item = floorItems[i];

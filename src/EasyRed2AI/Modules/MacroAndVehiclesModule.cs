@@ -692,10 +692,25 @@ namespace EasyRed2HumanAI
             public bool HasSample;
         }
 
+        private struct DogfightBreakOffState
+        {
+            public Vector3 EscapeTargetPos;
+            public float ExpireTime;
+            public float CooldownUntil;
+        }
+
         private static readonly Dictionary<IntPtr, RemoteVehicleMotionState> _remoteVehicleMotion = new Dictionary<IntPtr, RemoteVehicleMotionState>(32);
         private static readonly Dictionary<IntPtr, float> _tankHighCenteredDuration = new Dictionary<IntPtr, float>(32);
         private static readonly Dictionary<IntPtr, float> _nextTankUnstickCountTime = new Dictionary<IntPtr, float>(32);
         private static readonly HashSet<IntPtr> _hotStartedPlayerPlanes = new HashSet<IntPtr>();
+        private static readonly Dictionary<IntPtr, float> _planeHotStartWindowUntil = new Dictionary<IntPtr, float>(16);
+        private static readonly Dictionary<IntPtr, float> _remotePlaneSpawnSeenTime = new Dictionary<IntPtr, float>(16);
+        private static readonly Dictionary<IntPtr, float> _nextRemotePlaneGroundCheckTime = new Dictionary<IntPtr, float>(16);
+        private static readonly Dictionary<IntPtr, DogfightBreakOffState> _planeDogfightBreakOff = new Dictionary<IntPtr, DogfightBreakOffState>(16);
+        private static readonly Dictionary<IntPtr, float> _nextLocalDriverRoadkillScanTime = new Dictionary<IntPtr, float>(16);
+        internal static readonly Dictionary<IntPtr, TurretAI> _turretAiByTurretPtr = new Dictionary<IntPtr, TurretAI>(64);
+        internal static readonly Dictionary<IntPtr, string> _lastKnownVehicleFaction = new Dictionary<IntPtr, string>(64);
+        internal static readonly HashSet<IntPtr> _creditedDestroyedVehicles = new HashSet<IntPtr>();
         private static readonly Dictionary<IntPtr, bool> _lastTurretTargetWasVehicle = new Dictionary<IntPtr, bool>(64);
 
         private struct ActiveRadioSupportInfo
@@ -775,9 +790,18 @@ namespace EasyRed2HumanAI
             _tankHighCenteredDuration.Clear();
             _nextTankUnstickCountTime.Clear();
             _hotStartedPlayerPlanes.Clear();
+            _planeHotStartWindowUntil.Clear();
+            _remotePlaneSpawnSeenTime.Clear();
+            _nextRemotePlaneGroundCheckTime.Clear();
+            _planeDogfightBreakOff.Clear();
+            _nextLocalDriverRoadkillScanTime.Clear();
+            _turretAiByTurretPtr.Clear();
+            _lastKnownVehicleFaction.Clear();
+            _creditedDestroyedVehicles.Clear();
             _lastTurretTargetWasVehicle.Clear();
             _nextCombinedArmsIntelRefreshTime = 0f;
             _nextMacroDirectorTime = 0f;
+            _macroDirectorStarvedSince = 0f;
             _garrisonAssignedObjectiveBySquad.Clear();
             _assignedEmplacementUntil.Clear();
             _nextApcCheckTime.Clear();
@@ -816,31 +840,47 @@ namespace EasyRed2HumanAI
             if (veh == null)
                 return null;
 
+            string resolved = null;
+
             if (turret != null)
             {
                 Soldier gunner = turret.GetSittedUnit(veh);
                 if (gunner != null && !string.IsNullOrEmpty(gunner.faction) && gunner.faction != "Civilian")
-                    return gunner.faction;
+                    resolved = gunner.faction;
             }
 
             // Check seated crew members before falling back to veh.GetVehicleFaction(), because runway-spawned
             // planes and newly boarded vehicles can temporarily report "Civilian" in GetVehicleFaction()!
-            var seats = veh.seats;
-            if (seats != null)
+            if (resolved == null)
             {
-                for (int i = 0; i < seats.Length; i++)
+                var seats = veh.seats;
+                if (seats != null)
                 {
-                    Seats s = seats[i];
-                    if (s != null && s.unitSet != null && !string.IsNullOrEmpty(s.unitSet.faction) && s.unitSet.faction != "Civilian")
-                        return s.unitSet.faction;
+                    for (int i = 0; i < seats.Length; i++)
+                    {
+                        Seats s = seats[i];
+                        if (s != null && s.unitSet != null && !string.IsNullOrEmpty(s.unitSet.faction) && s.unitSet.faction != "Civilian")
+                        {
+                            resolved = s.unitSet.faction;
+                            break;
+                        }
+                    }
                 }
             }
 
-            string vf = veh.GetVehicleFaction();
-            if (!string.IsNullOrEmpty(vf) && vf != "Civilian")
-                return vf;
+            if (resolved == null)
+            {
+                string vf = veh.GetVehicleFaction();
+                if (!string.IsNullOrEmpty(vf) && vf != "Civilian")
+                    resolved = vf;
+            }
 
-            return null;
+            if (resolved != null && veh.Pointer != IntPtr.Zero)
+            {
+                _lastKnownVehicleFaction[veh.Pointer] = resolved;
+            }
+
+            return resolved;
         }
 
         private static void TryRegisterAirborneAircraft(VehiclePlane vp, string pilotFaction)
@@ -889,7 +929,7 @@ namespace EasyRed2HumanAI
             if (AiCore.IsHeavyWorkFrame() && _nextCombinedArmsIntelRefreshTime > 0f && now < _nextCombinedArmsIntelRefreshTime + 0.35f)
                 return;
 
-            AiCore.NotifyHeavyWorkThisFrame();
+            AiCore.NotifyDirectorWorkThisFrame();
             _nextCombinedArmsIntelRefreshTime = now + 1.0f;
             _activeRadioRequests.Clear();
             _knownEnemyClusters.Clear();
@@ -1266,8 +1306,36 @@ namespace EasyRed2HumanAI
             if (string.IsNullOrEmpty(myFaction))
                 return;
 
+            bool checkFF = VisionConfig.FriendlyFireConeDegrees.Value > 0.1f;
+            bool isIndirectOrArty = turret.IsUpIndirectFire() || turret.IsArtillery();
+            IntPtr gunnerPtr = gunner != null ? gunner.Pointer : IntPtr.Zero;
+
             Vector3 firePos = turret.GetFirePos();
             Spottable curTarget = turretAi.CurrentVisibleTarget;
+
+            // 1. Sanitize danger-close indirect/artillery targets & radio support requests before vanilla fires into friendlies!
+            if (checkFF && isIndirectOrArty)
+            {
+                if (curTarget != null && AiCore.IsValidAliveSpottable(curTarget) && !curTarget.IsAirVehicle())
+                {
+                    if (AiCore.IsIndirectFireImpactDangerClose(myFaction, curTarget.GetCenterOfUnit(), gunnerPtr, 30.0f, 36.0f))
+                    {
+                        turretAi.CurrentVisibleTarget = null;
+                        curTarget = null;
+                        FriendlyFirePrevented++;
+                    }
+                }
+
+                if (turretAi.HasRadioSupportRequest &&
+                    AiCore.IsIndirectFireImpactDangerClose(myFaction, turretAi.RadioRequestTargetPosition, gunnerPtr, 30.0f, 36.0f))
+                {
+                    turretAi.supportedSquad = null;
+                    FriendlyFirePrevented++;
+                }
+            }
+
+            if (!VisionConfig.EnableCombinedArmsPrioritySupport.Value)
+                return;
 
             if (curTarget != null)
             {
@@ -1282,8 +1350,8 @@ namespace EasyRed2HumanAI
                         return;
 
                     float curDist = Vector3.Distance(firePos, curTarget.GetCenterOfUnit());
-                    // Never override point-blank self-defense
-                    if (curDist < 32.0f)
+                    // Never override point-blank direct-fire self-defense
+                    if (!isIndirectOrArty && curDist < 32.0f)
                         return;
 
                     // Never distract from an active close/mid-range duel against an armed enemy vehicle
@@ -1347,13 +1415,21 @@ namespace EasyRed2HumanAI
                     Vector3 candPos = cand.GetCenterOfUnit();
                     Vector3 toCand = candPos - firePos;
                     float dist = toCand.magnitude;
-                    float maxDist = isVehCand ? 550.0f : 320.0f;
-                    if (dist < 8.0f || dist > maxDist)
+                    float maxDist = isVehCand ? 550.0f : (isIndirectOrArty ? 650.0f : 320.0f);
+                    if (dist < (isIndirectOrArty ? 34.0f : 8.0f) || dist > maxDist)
                         continue;
 
                     float candScore = cluster.BasePriority + (isVehCand && hasHeavyGun ? 35.0f : 0f) - (dist * 0.12f);
                     if (candScore <= bestScore)
                         continue;
+
+                    if (checkFF && (isIndirectOrArty || (hasHe && caliber >= 50.0f)))
+                    {
+                        float safeR = isIndirectOrArty ? 30.0f : 20.0f;
+                        float playerSafeR = isIndirectOrArty ? 36.0f : 26.0f;
+                        if (AiCore.IsIndirectFireImpactDangerClose(myFaction, candPos, gunnerPtr, safeR, playerSafeR))
+                            continue;
+                    }
 
                     if (!turret.CanShootInDirection(toCand / dist, 1.0f))
                         continue;
@@ -1365,12 +1441,19 @@ namespace EasyRed2HumanAI
                     bool canDirectlySee = turretAi.CanSee(cand);
                     if (!canDirectlySee)
                     {
+                        // Static mortars / indirect artillery can engage spotted/marked team-net targets over hills/roofs
+                        // without direct optical LOS as long as CalculateTrajectory & friendly-fire blast safety succeeded!
+                        bool canShellIndirectly =
+                            isIndirectOrArty &&
+                            (cluster.IsMarkedOrPinPoint || cluster.IsHalfMarked || cluster.NearRadioRequest || cluster.IsEngagingFriendlies);
+
                         // Building Demolition / Strongpoint Shelling:
                         // If a tank or field gun has High-Explosive shells (hasHe && caliber >= 37mm) and a known/spotted
                         // enemy soldier is hiding inside a building (behind a closed shutter or interior wall),
                         // allow the tank to shell the building's exterior facade if the line of fire from the barrel
                         // up to the building's outer wall (dist - 5.5m) is unobstructed!
                         bool canShellBuildingFacade =
+                            !canShellIndirectly &&
                             !isVehCand &&
                             hasHe &&
                             caliber >= 37.0f &&
@@ -1379,10 +1462,10 @@ namespace EasyRed2HumanAI
                             AiCore.HasLowCeilingOverhead(candPos, 3.8f) &&
                             !AiCore.RaycastEnvironment(firePos, toCand / dist, dist - 5.5f, veh.transform.root, out _);
 
-                        if (!canShellBuildingFacade)
+                        if (!canShellIndirectly && !canShellBuildingFacade)
                             continue;
 
-                        if (VisionConfig.DebugLogging.Value)
+                        if (canShellBuildingFacade && VisionConfig.DebugLogging.Value)
                         {
                             AiCore.LogDebug(
                                 "BuildingHE",
@@ -1425,6 +1508,19 @@ namespace EasyRed2HumanAI
                 if (turretAi.HasRadioSupportRequest)
                 {
                     Vector3 radioPos = turretAi.RadioRequestTargetPosition;
+                    bool dangerClose = checkFF && AiCore.IsIndirectFireImpactDangerClose(
+                        myFaction,
+                        radioPos,
+                        gunnerPtr,
+                        isIndirectOrArty ? 30.0f : 22.0f,
+                        isIndirectOrArty ? 36.0f : 28.0f);
+                    if (dangerClose)
+                    {
+                        turretAi.supportedSquad = null;
+                        FriendlyFirePrevented++;
+                        return;
+                    }
+
                     float rDist = Vector3.Distance(turret.transform.position, radioPos);
                     float rAngle = Corvostudio.Weapons.BulletInstance.CalculateTrajectory(rDist, bulletSpeed, bulletGrav, out bool rCanReach);
                     if (rCanReach)
@@ -1451,24 +1547,43 @@ namespace EasyRed2HumanAI
         }
 
         // =====================================================================
-        // Emplacement & Vehicle Turret Friendly Fire Prevention (TurretAI.AutoPilot)
+        // Emplacement & Vehicle Turret Friendly Fire Prevention (TurretAI.AutoPilot / TurretGun)
         // =====================================================================
-        internal static bool ShouldBlockTurretFriendlyFire(TurretAI turretAi, Turret turret, Soldier gunner)
+        internal static bool ShouldBlockTurretFriendlyFire(TurretAI turretAi, Turret turret, Soldier gunner, bool forceFreshCheck = false)
         {
-            if (turretAi == null || turret == null || turret.Pointer == IntPtr.Zero)
-                return false;
-
-            Vehicle rootVeh = AiCore.GetCachedTurretVehicle(turret);
-            if (rootVeh != null && !AiCore.IsLocallyOwnedVehicle(rootVeh))
+            if (turret == null || turret.Pointer == IntPtr.Zero)
                 return false;
 
             IntPtr turretPtr = turret.Pointer;
+            if (turretAi == null)
+            {
+                if (!_turretAiByTurretPtr.TryGetValue(turretPtr, out turretAi) || turretAi == null)
+                {
+                    turretAi = turret.GetTurretAI();
+                    if (turretAi != null)
+                        _turretAiByTurretPtr[turretPtr] = turretAi;
+                }
+            }
+
+            Vehicle rootVeh = AiCore.GetCachedTurretVehicle(turret);
+            if (gunner == null && rootVeh != null)
+                gunner = turret.GetSittedUnit(rootVeh);
+
+            if (gunner != null && gunner.IsPlayer())
+                return false;
+
+            bool ownedGunnerOrVeh =
+                (gunner != null && AiCore.IsLocallyOwnedBot(gunner)) ||
+                (rootVeh != null && AiCore.IsLocallyOwnedVehicle(rootVeh));
+            if (!ownedGunnerOrVeh)
+                return false;
+
             float now = Time.time;
 
             if (_turretFFBlockedUntil.TryGetValue(turretPtr, out float blockedUntil) && now < blockedUntil)
                 return true;
 
-            if (_nextTurretFFCheckTime.TryGetValue(turretPtr, out float nextCheck) && now < nextCheck)
+            if (!forceFreshCheck && _nextTurretFFCheckTime.TryGetValue(turretPtr, out float nextCheck) && now < nextCheck)
                 return false;
 
             _nextTurretFFCheckTime[turretPtr] = now + 0.10f;
@@ -1485,34 +1600,60 @@ namespace EasyRed2HumanAI
                 return false;
             fireDir.Normalize();
 
+            float caliber = turret.GetCaliber();
+            bool isArtillery = turret.IsArtillery();
+            bool isIndirect = turret.IsUpIndirectFire();
+            bool isExplosive = caliber >= 20.0f || isArtillery || isIndirect;
+
             bool hasTargetPos = false;
             Vector3 targetPos = Vector3.zero;
-            if (AiCore.IsValidAliveSpottable(turretAi.CurrentVisibleTarget))
+            if (turretAi != null)
             {
-                targetPos = turretAi.CurrentVisibleTarget.GetCenterOfUnit();
-                hasTargetPos = true;
+                if (AiCore.IsValidAliveSpottable(turretAi.CurrentVisibleTarget))
+                {
+                    targetPos = turretAi.CurrentVisibleTarget.GetCenterOfUnit();
+                    hasTargetPos = true;
+                }
+                else if (turretAi.HasRadioSupportRequest)
+                {
+                    targetPos = turretAi.RadioRequestTargetPosition;
+                    hasTargetPos = true;
+                }
             }
-            else if (turretAi.HasRadioSupportRequest)
+
+            // Fallback for indirect-fire mortars/howitzers (e.g. delayed FireOnReloadDone or unlinked target):
+            // compute the exact ballistic ground impact point from current tube elevation!
+            if ((isIndirect || isArtillery) && !hasTargetPos)
             {
-                targetPos = turretAi.RadioRequestTargetPosition;
-                hasTargetPos = true;
+                TurretGun tg = turret.TryCast<TurretGun>();
+                if (tg != null)
+                {
+                    float estRange = tg.GetFireRangeAtCurrentRotation();
+                    if (estRange >= 15.0f && estRange <= 2500.0f)
+                    {
+                        Vector3 flatDir = new Vector3(fireDir.x, 0f, fireDir.z);
+                        if (flatDir.sqrMagnitude > 0.001f)
+                        {
+                            targetPos = firePos + flatDir.normalized * estRange;
+                            hasTargetPos = true;
+                        }
+                    }
+                }
             }
 
             float targetDist = hasTargetPos ? Vector3.Distance(firePos, targetPos) : 160.0f;
             float maxCheckDist = Mathf.Clamp(targetDist + 5.0f, 12.0f, 220.0f);
             float baseConeDeg = VisionConfig.FriendlyFireConeDegrees.Value;
-            float caliber = turret.GetCaliber();
-            bool isArtillery = turret.IsArtillery();
-            bool isIndirect = turret.IsUpIndirectFire();
-            bool isExplosive = caliber >= 20.0f || isArtillery;
 
             float dangerCloseBlastRadius = 0f;
-            if (isArtillery || caliber >= 70.0f)
-                dangerCloseBlastRadius = 18.0f;
+            if (isIndirect || isArtillery)
+                dangerCloseBlastRadius = 30.0f;
+            else if (caliber >= 70.0f)
+                dangerCloseBlastRadius = 20.0f;
             else if (caliber >= 37.0f)
-                dangerCloseBlastRadius = 11.0f;
+                dangerCloseBlastRadius = 12.0f;
             else if (caliber >= 20.0f)
-                dangerCloseBlastRadius = 6.0f;
+                dangerCloseBlastRadius = 6.5f;
 
             // 1. Prevent direct-fire cannons/AT guns from detonating HE shells on a low wall or sandbag right in front of the muzzle
             if (isExplosive && !isIndirect && VisionConfig.EnableWallShootingPrevention.Value)
@@ -1531,7 +1672,7 @@ namespace EasyRed2HumanAI
             IntPtr gunnerPtr = gunner != null ? gunner.Pointer : IntPtr.Zero;
             IntPtr rootVehPtr = rootVeh != null ? rootVeh.Pointer : IntPtr.Zero;
 
-            // 2. Always check the Human Player first in O(1) so friendly emplacements/turrets never shoot through the player!
+            // 2. Always check the Human Player first in O(1) so friendly emplacements/turrets never shoot through or mortar the player!
             Soldier player = Soldier.CurrentControlledSoldierOrNull();
             if (player != null &&
                 !string.IsNullOrEmpty(player.faction) &&
@@ -1541,7 +1682,7 @@ namespace EasyRed2HumanAI
                     player, gunnerPtr, rootVehPtr, firePos, fireDir, maxCheckDist,
                     baseConeDeg, isIndirect, isExplosive, hasTargetPos, targetPos, dangerCloseBlastRadius))
                 {
-                    _turretFFBlockedUntil[turretPtr] = now + 0.30f;
+                    _turretFFBlockedUntil[turretPtr] = now + 0.35f;
                     FriendlyFirePrevented++;
                     return true;
                 }
@@ -1553,7 +1694,7 @@ namespace EasyRed2HumanAI
             if (sqCount > 0)
             {
                 float maxLineRangeSq = (maxCheckDist + 45f) * (maxCheckDist + 45f);
-                float maxBlastRangeSq = (dangerCloseBlastRadius + 45f) * (dangerCloseBlastRadius + 45f);
+                float maxBlastRangeSq = (dangerCloseBlastRadius + 48f) * (dangerCloseBlastRadius + 48f);
                 var squads = AiCore.WorldSquads;
                 var soldiers = AiCore.WorldSoldiers;
 
@@ -1566,9 +1707,10 @@ namespace EasyRed2HumanAI
                     if (sqSnap.Faction != myFaction && !ResourcesManager.IsSameFaction(myFaction, sqSnap.Faction))
                         continue;
 
-                    bool nearLine = (sqSnap.RefPos - firePos).sqrMagnitude <= maxLineRangeSq;
-                    bool nearBlast = hasTargetPos && dangerCloseBlastRadius > 0f &&
-                                     (sqSnap.RefPos - targetPos).sqrMagnitude <= maxBlastRangeSq;
+                    bool nearLine = !isIndirect && (sqSnap.RefPos - firePos).sqrMagnitude <= maxLineRangeSq;
+                    Vector3 blastDelta = sqSnap.RefPos - targetPos;
+                    float blastSq2D = blastDelta.x * blastDelta.x + blastDelta.z * blastDelta.z;
+                    bool nearBlast = hasTargetPos && dangerCloseBlastRadius > 0f && blastSq2D <= maxBlastRangeSq;
                     if (!nearLine && !nearBlast)
                         continue;
 
@@ -1583,7 +1725,7 @@ namespace EasyRed2HumanAI
                             solSnap.Ref, gunnerPtr, rootVehPtr, firePos, fireDir, maxCheckDist,
                             baseConeDeg, isIndirect, isExplosive, hasTargetPos, targetPos, dangerCloseBlastRadius))
                         {
-                            _turretFFBlockedUntil[turretPtr] = now + 0.30f;
+                            _turretFFBlockedUntil[turretPtr] = now + 0.35f;
                             FriendlyFirePrevented++;
                             return true;
                         }
@@ -1622,12 +1764,20 @@ namespace EasyRed2HumanAI
             Vector3 chestPos = friend.GetCenterOfUnit();
             Vector3 feetPos = friend.transform.position + Vector3.up * 0.45f;
 
-            // A. Danger-Close Explosive Blast Radius around the target impact point
+            // A. Danger-Close Explosive Blast Radius around the target impact point (3D + sloped-terrain XZ check for indirect mortars)
             if (hasTargetPos && dangerCloseBlastRadius > 0f)
             {
-                float blastR = isPlayer ? (dangerCloseBlastRadius + 3.5f) : dangerCloseBlastRadius;
-                if ((chestPos - targetPos).sqrMagnitude <= blastR * blastR)
+                float blastR = isPlayer ? (dangerCloseBlastRadius + 6.0f) : dangerCloseBlastRadius;
+                float blastRSq = blastR * blastR;
+                Vector3 impDelta = chestPos - targetPos;
+                if (impDelta.sqrMagnitude <= blastRSq)
                     return true;
+
+                if ((isIndirect || isExplosive) && Mathf.Abs(impDelta.y) <= (isIndirect ? 14.0f : 6.0f))
+                {
+                    if ((impDelta.x * impDelta.x + impDelta.z * impDelta.z) <= blastRSq)
+                        return true;
+                }
             }
 
             Vector3 toFriend = chestPos - firePos;
@@ -2233,8 +2383,11 @@ namespace EasyRed2HumanAI
                     continue;
 
                 anyEnemyAirborne = true;
-                // Prioritize enemy fighters over bombers so fighters clear threats before hunting bombers
+                // Prioritize enemy fighters over bombers, and penalize point-blank (< 240m) targets when picking a fresh
+                // dogfight target so fighters set up proper lead turns instead of initiating instant head-on merges.
                 float score = (info.IsBomber ? 100.0f : 350.0f) - (dist * 0.25f);
+                if (dist < 240.0f)
+                    score -= 350.0f;
                 if (score > bestScore)
                 {
                     bestScore = score;
@@ -2782,7 +2935,160 @@ namespace EasyRed2HumanAI
             }
         }
 
+        public static void TryExecuteDogfightAntiChickenBreakOff(AIPlane plane, bool isPostfix)
+        {
+            if (plane == null ||
+                plane.veh == null ||
+                plane.veh.Pointer == IntPtr.Zero ||
+                plane.transform == null ||
+                !AiCore.IsLocallyOwnedVehicle(plane.veh) ||
+                plane.veh.PlayerIsInside() ||
+                !plane.HasAIDriver ||
+                plane.veh.isGrounded ||
+                !plane.veh.CanFight())
+            {
+                return;
+            }
+
+            AIPlane.PlaneAIState aiState = plane.planeState;
+            if (aiState == AIPlane.PlaneAIState.takeOff ||
+                aiState == AIPlane.PlaneAIState.gatheringSpeed ||
+                aiState == AIPlane.PlaneAIState.landing)
+            {
+                return;
+            }
+
+            IntPtr vehPtr = plane.veh.Pointer;
+            float now = Time.time;
+
+            if (_planeDogfightBreakOff.TryGetValue(vehPtr, out DogfightBreakOffState breakState) && now < breakState.ExpireTime)
+            {
+                plane.followTarget = false;
+                if (aiState == AIPlane.PlaneAIState.doingDive || aiState == AIPlane.PlaneAIState.preparingDive)
+                {
+                    plane.ExitDive();
+                }
+                plane.flyTargetPosition = breakState.EscapeTargetPos;
+                if (!isPostfix && plane.nextUpdateCheck < now + 0.30f)
+                {
+                    plane.nextUpdateCheck = now + 0.30f;
+                }
+                return;
+            }
+
+            if (isPostfix || now < breakState.CooldownUntil)
+                return;
+
+            string myFaction = GetVehicleCrewFaction(plane.veh);
+            if (string.IsNullOrEmpty(myFaction))
+                return;
+
+            RefreshCombinedArmsIntelIfNeeded();
+
+            Vector3 myPos = plane.transform.position;
+            Vector3 myFwd = plane.transform.forward;
+            if (myFwd.sqrMagnitude < 0.001f)
+                return;
+            myFwd.Normalize();
+
+            SoldierPersonality pilotPers = GetVehicleCrewPersonality(plane.veh);
+            float headOnBreakDist = 260.0f;
+            if (pilotPers == SoldierPersonality.Pilot_Ace || pilotPers == SoldierPersonality.Pilot_Disciplined)
+                headOnBreakDist = 285.0f;
+            else if (pilotPers == SoldierPersonality.Pilot_Daredevil)
+                headOnBreakDist = 205.0f;
+
+            bool triggerBreak = false;
+
+            // 1. Check current targetToAttack first if it is an airborne aircraft
+            Spottable curAtk = plane.targetToAttack;
+            if (curAtk != null && curAtk.Pointer != IntPtr.Zero && curAtk.IsAirVehicle())
+            {
+                VehiclePlane enemyVp = curAtk.TryCast<VehiclePlane>();
+                if (enemyVp != null && !enemyVp.isGrounded && enemyVp.transform != null)
+                {
+                    Vector3 toEnemy = enemyVp.transform.position - myPos;
+                    float dist = toEnemy.magnitude;
+                    if (dist > 1.0f && dist <= headOnBreakDist)
+                    {
+                        Vector3 toEnemyDir = toEnemy / dist;
+                        Vector3 enemyFwd = enemyVp.transform.forward;
+                        float approachDot = Vector3.Dot(toEnemyDir, myFwd);
+                        float mergeDot = Vector3.Dot(myFwd, enemyFwd);
+                        if ((approachDot > 0.28f && mergeDot < -0.25f) ||
+                            (dist <= 130.0f && approachDot > 0.42f))
+                        {
+                            triggerBreak = true;
+                        }
+                    }
+                }
+            }
+
+            // 2. Also scan _airborneAircraft within 300m so an AI plane breaks off even when a player/fighter merges head-on while it was targeting someone else
+            if (!triggerBreak)
+            {
+                int airCount = _airborneAircraft.Count;
+                for (int i = 0; i < airCount; i++)
+                {
+                    AirborneAircraftInfo info = _airborneAircraft[i];
+                    if (info.Faction == myFaction ||
+                        info.Plane == null ||
+                        info.Plane.Pointer == IntPtr.Zero ||
+                        info.Plane.Pointer == vehPtr ||
+                        info.Plane.isGrounded ||
+                        info.Plane.transform == null)
+                    {
+                        continue;
+                    }
+
+                    Vector3 toEnemy = info.Plane.transform.position - myPos;
+                    float dist = toEnemy.magnitude;
+                    if (dist <= 1.0f || dist > headOnBreakDist)
+                        continue;
+
+                    Vector3 toEnemyDir = toEnemy / dist;
+                    Vector3 enemyFwd = info.Plane.transform.forward;
+                    float approachDot = Vector3.Dot(toEnemyDir, myFwd);
+                    float mergeDot = Vector3.Dot(myFwd, enemyFwd);
+                    if ((approachDot > 0.28f && mergeDot < -0.25f) ||
+                        (dist <= 125.0f && approachDot > 0.45f))
+                    {
+                        triggerBreak = true;
+                        break;
+                    }
+                }
+            }
+
+            if (triggerBreak)
+            {
+                // Standard right-hand climbing break turn: opposing aircraft each break to THEIR right, cleanly separating both flight paths!
+                Vector3 rightVec = plane.transform.right;
+                Vector3 escapePos = myPos + myFwd * 235.0f + rightVec * 215.0f + Vector3.up * 68.0f;
+                if (escapePos.y < myPos.y + 45.0f)
+                    escapePos.y = myPos.y + 45.0f;
+
+                breakState.EscapeTargetPos = escapePos;
+                breakState.ExpireTime = now + 2.75f;
+                breakState.CooldownUntil = now + 4.25f;
+                _planeDogfightBreakOff[vehPtr] = breakState;
+
+                plane.followTarget = false;
+                if (aiState == AIPlane.PlaneAIState.doingDive || aiState == AIPlane.PlaneAIState.preparingDive)
+                {
+                    plane.ExitDive();
+                }
+                plane.flyTargetPosition = escapePos;
+                if (plane.nextUpdateCheck < now + 0.30f)
+                {
+                    plane.nextUpdateCheck = now + 0.30f;
+                }
+
+                AiCore.LogDebug("DogfightBreak", $"{myFaction} fighter executed climbing right-hand break turn to avoid head-on collision.");
+            }
+        }
+
         private static int _macroDirectorSubPhase;
+        private static float _macroDirectorStarvedSince;
 
         public static void UpdateMacroObjectiveAndEmplacementDirector()
         {
@@ -2793,10 +3099,16 @@ namespace EasyRed2HumanAI
             if (now < _nextMacroDirectorTime && _nextMacroDirectorTime - now <= 10.0f)
                 return;
 
-            // Never run global squad/vehicle directors on a slow frame or on the same frame as dictionary pruning
-            if (!AiCore.TryClaimHeavyFrameWorkSlot())
+            if (_macroDirectorStarvedSince <= 0f || now - _macroDirectorStarvedSince > 15.0f)
+                _macroDirectorStarvedSince = now;
+
+            // Never run global squad/vehicle directors on a slow spike frame or on the same frame as dictionary pruning,
+            // but allow moderate 60Hz VSync frames once overdue by >= 0.75s so Macro Director can never be starved!
+            bool forceModerateSlot = (now - _macroDirectorStarvedSince) >= 0.75f;
+            if (!AiCore.TryClaimHeavyFrameWorkSlot(forceModerateSlot))
                 return;
 
+            _macroDirectorStarvedSince = 0f;
             _nextMacroDirectorTime = now + 2.0f;
 
             if (!AiCore.IsMasterClient())
@@ -4347,10 +4659,16 @@ namespace EasyRed2HumanAI
                 catch { }
             }
 
-            public static void Postfix(Vehicle __instance, int __0, SeatSwapState __state)
+            public static void Postfix(Vehicle __instance, int __0, Soldier __1, SeatSwapState __state)
             {
                 try
                 {
+                    if (__instance != null && __instance.Pointer != IntPtr.Zero &&
+                        __1 != null && !string.IsNullOrEmpty(__1.faction) && __1.faction != "Civilian")
+                    {
+                        _lastKnownVehicleFaction[__instance.Pointer] = __1.faction;
+                    }
+
                     if (__state.DisplacedBot == null || !__state.DisplacedBot.IsAlive || __instance == null)
                         return;
 
@@ -4358,6 +4676,115 @@ namespace EasyRed2HumanAI
                         __instance.seats != null && __state.OldSeatIdx < __instance.seats.Length)
                     {
                         __instance.GetOnVehicle(__state.OldSeatIdx, __state.DisplacedBot);
+                    }
+                }
+                catch { }
+            }
+        }
+
+        /// <summary>
+        /// Vanilla LostVehicles Casualty Attribution Fix:
+        /// In vanilla OnDisableVehicle, BattleManager.OnTankKilled(GetVehicleFaction()) fails whenever the blast/hit
+        /// kills the last seated crewman first or the crew bailed out seconds before cook-off (GetVehicleFaction() returns null/"").
+        /// Cache the last non-civilian crew faction per vehicle and credit BattleManager.OnTankKilled once on MasterClient!
+        /// </summary>
+        private static void TryCreditDestroyedVehicleCasualty(Vehicle veh, bool hadNoLiveCrewFaction)
+        {
+            if (!VisionConfig.EnableMod.Value ||
+                !AiCore.IsMasterClient() ||
+                veh == null ||
+                veh.Pointer == IntPtr.Zero ||
+                veh.TryCast<MovableVehicle>() == null)
+            {
+                return;
+            }
+
+            // Always mark destroyed movable vehicles as seen so subsequent hits on a burning wreck never double-count
+            if (!_creditedDestroyedVehicles.Add(veh.Pointer))
+                return;
+
+            if (!hadNoLiveCrewFaction)
+                return;
+
+            if (_lastKnownVehicleFaction.TryGetValue(veh.Pointer, out string lastFaction) &&
+                !string.IsNullOrEmpty(lastFaction) &&
+                lastFaction != "Civilian")
+            {
+                BattleManager.OnTankKilled(lastFaction);
+                AiCore.LogDebug("CasualtyFix", $"Credited destroyed {lastFaction} vehicle '{veh.name}' (crew already dead/bailed).");
+            }
+        }
+
+        [HarmonyPatch(typeof(Vehicle), nameof(Vehicle.OnDisableVehicle))]
+        public static class Vehicle_OnDisableVehicle_Patch
+        {
+            public static void Prefix(Vehicle __instance, out bool __state)
+            {
+                __state = false;
+                try
+                {
+                    if (__instance != null && !__instance.IsDisabled())
+                    {
+                        string curFac = __instance.GetVehicleFaction();
+                        __state = string.IsNullOrEmpty(curFac) || curFac == "Civilian";
+                    }
+                }
+                catch { }
+            }
+
+            public static void Postfix(Vehicle __instance, bool __state)
+            {
+                try
+                {
+                    if (__instance != null && __instance.IsDisabled())
+                    {
+                        TryCreditDestroyedVehicleCasualty(__instance, __state);
+                    }
+                }
+                catch { }
+            }
+        }
+
+        [HarmonyPatch(typeof(MovableVehicle), nameof(MovableVehicle.OnDisableVehicle))]
+        public static class MovableVehicle_OnDisableVehicle_Patch
+        {
+            public static void Prefix(MovableVehicle __instance, out bool __state)
+            {
+                __state = false;
+                try
+                {
+                    if (__instance != null && !__instance.IsDisabled())
+                    {
+                        string curFac = __instance.GetVehicleFaction();
+                        __state = string.IsNullOrEmpty(curFac) || curFac == "Civilian";
+                    }
+                }
+                catch { }
+            }
+
+            public static void Postfix(MovableVehicle __instance, bool __state)
+            {
+                try
+                {
+                    if (__instance != null && __instance.IsDisabled())
+                    {
+                        TryCreditDestroyedVehicleCasualty(__instance, __state);
+                    }
+                }
+                catch { }
+            }
+        }
+
+        [HarmonyPatch(typeof(Vehicle), nameof(Vehicle.OnRepaired))]
+        public static class Vehicle_OnRepaired_Patch
+        {
+            public static void Postfix(Vehicle __instance)
+            {
+                try
+                {
+                    if (__instance != null && __instance.Pointer != IntPtr.Zero)
+                    {
+                        _creditedDestroyedVehicles.Remove(__instance.Pointer);
                     }
                 }
                 catch { }
@@ -5075,6 +5502,118 @@ namespace EasyRed2HumanAI
             }
         }
 
+        private static void RunVehicleRoadkillAndRightOfWayObbScan(
+            Vehicle veh,
+            Vector3 curPos,
+            bool hasLeadPos,
+            Vector3 leadPos,
+            Vector3 velFlat,
+            float now,
+            bool isRemoteDriverScan)
+        {
+            float horizSpeed = velFlat.magnitude;
+            if (horizSpeed <= 0.85f || veh == null || veh.transform == null)
+                return;
+
+            Vector3 fwdFlat = veh.transform.forward;
+            fwdFlat.y = 0f;
+            fwdFlat = fwdFlat.sqrMagnitude > 0.001f ? fwdFlat.normalized : Vector3.forward;
+
+            Vector3 rightFlat = veh.transform.right;
+            rightFlat.y = 0f;
+            rightFlat = rightFlat.sqrMagnitude > 0.001f ? rightFlat.normalized : Vector3.right;
+
+            Vector2 extents = GetCachedVehicleHalfExtents(veh);
+            float halfW = extents.x + 0.52f;
+            float halfL = extents.y + 0.62f;
+            float leadDist = hasLeadPos ? Vector3.Distance(curPos, leadPos) : 0f;
+            if (leadDist > 6.5f)
+            {
+                hasLeadPos = false;
+                leadDist = 0f;
+            }
+
+            float broadRadius = halfL + leadDist + 2.75f;
+            float broadRadiusSq = broadRadius * broadRadius;
+            string vehFaction = GetVehicleCrewFaction(veh);
+
+            AiCore.EnsureWorldSnapshot();
+            int solCount = AiCore.WorldSoldierCount;
+            var soldiers = AiCore.WorldSoldiers;
+            Vector3 travelDir = velFlat / horizSpeed;
+
+            for (int i = 0; i < solCount; i++)
+            {
+                ref AiCore.SoldierSnapshot sSnap = ref soldiers[i];
+                if (sSnap.IsOnVehicle || sSnap.Ref == null)
+                    continue;
+
+                Vector3 snapDelta = sSnap.Pos - curPos;
+                if ((snapDelta.x * snapDelta.x + snapDelta.z * snapDelta.z) > broadRadiusSq)
+                    continue;
+
+                Soldier s = sSnap.Ref;
+                if (s == null || !s.IsAlive || s.IsOnVehicle() || s.transform == null)
+                    continue;
+
+                // Use live transform position once inside the broadphase circle so fast-moving soldiers/tanks never miss due to snapshot age
+                Vector3 livePos = s.transform.position;
+                Vector3 delta = livePos - curPos;
+                bool insideCur = Mathf.Abs(delta.y) <= 2.85f &&
+                                 Mathf.Abs(delta.x * fwdFlat.x + delta.z * fwdFlat.z) <= halfL &&
+                                 Mathf.Abs(delta.x * rightFlat.x + delta.z * rightFlat.z) <= halfW;
+
+                bool insideLead = false;
+                if (!insideCur && hasLeadPos)
+                {
+                    Vector3 deltaLead = livePos - leadPos;
+                    insideLead = Mathf.Abs(deltaLead.y) <= 2.85f &&
+                                 Mathf.Abs(deltaLead.x * fwdFlat.x + deltaLead.z * fwdFlat.z) <= halfL &&
+                                 Mathf.Abs(deltaLead.x * rightFlat.x + deltaLead.z * rightFlat.z) <= halfW;
+                    if (insideLead)
+                        delta = deltaLead;
+                }
+
+                if (!insideCur && !insideLead)
+                    continue;
+
+                bool sameFaction = !string.IsNullOrEmpty(vehFaction) &&
+                                   !string.IsNullOrEmpty(s.faction) &&
+                                   ResourcesManager.IsSameFaction(vehFaction, s.faction);
+
+                if (sameFaction)
+                {
+                    if (VisionConfig.EnableFriendlyVehicleRightOfWay.Value)
+                    {
+                        s.DisableHitByVehicleFor(1.25f);
+                        if (!sSnap.IsPlayer && AiCore.IsLocallyOwnedBot(s))
+                        {
+                            TryNudgeFriendlySoldierAside(s, curPos, travelDir, rightFlat, extents.x, now, true);
+                        }
+                    }
+                }
+                else if (s.AllowHitByVehicle)
+                {
+                    // On remote-driver scan (Host watching client tank), only the soldier's owner applies authoritative damage;
+                    // on local-driver scan (driver's own machine), allow immediate roadkill damage synced via SyncDamageWithOthers.
+                    if (isRemoteDriverScan && !AiCore.IsLocallyOwnedSoldier(s))
+                        continue;
+
+                    Vector3 toSolFlat = new Vector3(delta.x, 0f, delta.z);
+                    if (toSolFlat.sqrMagnitude < 0.36f || Vector3.Dot(travelDir, toSolFlat.normalized) > -0.15f)
+                    {
+                        s.DisableHitByVehicleFor(1.0f);
+                        s.Damage(1000f);
+                        if (isRemoteDriverScan)
+                        {
+                            RemoteClientRoadkillsAssistedCount++;
+                            AiCore.LogDebug("RoadkillAssist", $"Host OBB roadkill applied for remote client driver ({horizSpeed:F1}m/s).");
+                        }
+                    }
+                }
+            }
+        }
+
         [HarmonyPatch(typeof(SyncVehicle), nameof(SyncVehicle.UpdatePosAndRot))]
         public static class SyncVehicle_UpdatePosAndRot_Patch
         {
@@ -5107,8 +5646,6 @@ namespace EasyRed2HumanAI
                         state.HasSample = true;
                     }
 
-                    // 1. Remote Co-op Plane isGrounded Sync (fixes vanilla VehiclePlane.FixedUpdate 0x18085011B
-                    //    skipping ground checks when !ownDriverOrVehicle, which left remote client planes isGrounded=true forever!)
                     if (VisionConfig.EnableCoopAirborneSpawnFix.Value && veh.IsAirVehicle())
                     {
                         if (now >= state.NextGroundCheckTime)
@@ -5124,11 +5661,10 @@ namespace EasyRed2HumanAI
                         return;
                     }
 
-                    // 2. Host-Authoritative Remote Client Roadkill & Friendly Right-of-Way OBB Scan:
-                    //    On the Host, SyncVehicle.UpdatePosAndRot moves remote client vehicles via kinematic Transform.set_position
-                    //    inside Update, which in Unity 2022 PhysX NEVER fires VehicleWithWheels.OnTriggerEnter against Soldier
-                    //    CharacterControllers! Perform a fast 0.06s OBB check against AiCore.WorldSoldiers on the Host.
-                    if (AiCore.IsLocallyOwnedVehicle(veh) && now >= state.NextRoadkillScanTime)
+                    // Host-Authoritative Remote Client Roadkill & Friendly Right-of-Way OBB Scan:
+                    // Do NOT gate on IsLocallyOwnedVehicle(veh) because when a remote client drives a tank,
+                    // veh.OwnDriverOrVehicle() is false on the Host while the Host owns all AI soldiers!
+                    if (now >= state.NextRoadkillScanTime)
                     {
                         state.NextRoadkillScanTime = now + 0.06f;
 
@@ -5147,85 +5683,69 @@ namespace EasyRed2HumanAI
                             if (packetVel.sqrMagnitude > velFlat.sqrMagnitude)
                                 velFlat = packetVel;
                         }
-                        if (velFlat.sqrMagnitude < 0.25f && __instance.syncDestPos.HasValue)
+                        bool hasDestPos = __instance.syncDestPos.HasValue;
+                        Vector3 destPos = hasDestPos ? __instance.syncDestPos.Value : curPos;
+                        if (velFlat.sqrMagnitude < 0.25f && hasDestPos)
                         {
                             Vector3 fallbackVel = fwdFlat * __instance.last_speed_update;
                             if (fallbackVel.sqrMagnitude > velFlat.sqrMagnitude)
                                 velFlat = fallbackVel;
                         }
 
-                        float horizSpeed = velFlat.magnitude;
-                        if (horizSpeed > 0.90f)
+                        if (velFlat.sqrMagnitude > 0.85f * 0.85f)
                         {
-                            Vector3 rightFlat = veh.transform.right;
-                            rightFlat.y = 0f;
-                            rightFlat = rightFlat.sqrMagnitude > 0.001f ? rightFlat.normalized : Vector3.right;
-
-                            Vector2 extents = GetCachedVehicleHalfExtents(veh);
-                            float halfW = extents.x + 0.42f;
-                            float halfL = extents.y + 0.55f;
-                            float maxRadiusSq = (halfL + 1.5f) * (halfL + 1.5f);
-                            string vehFaction = GetVehicleCrewFaction(veh);
-
-                            AiCore.EnsureWorldSnapshot();
-                            int solCount = AiCore.WorldSoldierCount;
-                            var soldiers = AiCore.WorldSoldiers;
-                            Vector3 travelDir = velFlat / horizSpeed;
-
-                            for (int i = 0; i < solCount; i++)
-                            {
-                                ref AiCore.SoldierSnapshot sSnap = ref soldiers[i];
-                                if (sSnap.IsOnVehicle || sSnap.Ref == null)
-                                    continue;
-
-                                Vector3 delta = sSnap.Pos - curPos;
-                                if (Mathf.Abs(delta.y) > 2.35f)
-                                    continue;
-
-                                float dSq = delta.x * delta.x + delta.z * delta.z;
-                                if (dSq > maxRadiusSq)
-                                    continue;
-
-                                float fwdDot = delta.x * fwdFlat.x + delta.z * fwdFlat.z;
-                                float rightDot = delta.x * rightFlat.x + delta.z * rightFlat.z;
-                                if (Mathf.Abs(fwdDot) > halfL || Mathf.Abs(rightDot) > halfW)
-                                    continue;
-
-                                Soldier s = sSnap.Ref;
-                                if (s == null || !s.IsAlive)
-                                    continue;
-
-                                bool sameFaction = !string.IsNullOrEmpty(vehFaction) &&
-                                                   !string.IsNullOrEmpty(sSnap.Faction) &&
-                                                   ResourcesManager.IsSameFaction(vehFaction, sSnap.Faction);
-
-                                if (sameFaction)
-                                {
-                                    if (VisionConfig.EnableFriendlyVehicleRightOfWay.Value)
-                                    {
-                                        s.DisableHitByVehicleFor(1.25f);
-                                        if (!sSnap.IsPlayer)
-                                        {
-                                            TryNudgeFriendlySoldierAside(s, curPos, travelDir, rightFlat, extents.x, now, true);
-                                        }
-                                    }
-                                }
-                                else if (s.AllowHitByVehicle)
-                                {
-                                    Vector3 toSolFlat = new Vector3(delta.x, 0f, delta.z);
-                                    if (toSolFlat.sqrMagnitude < 0.25f || Vector3.Dot(travelDir, toSolFlat.normalized) > -0.10f)
-                                    {
-                                        s.DisableHitByVehicleFor(1.0f);
-                                        s.Damage(1000f);
-                                        RemoteClientRoadkillsAssistedCount++;
-                                        AiCore.LogDebug("RoadkillAssist", $"Host OBB roadkill applied for remote client driver ({horizSpeed:F1}m/s).");
-                                    }
-                                }
-                            }
+                            RunVehicleRoadkillAndRightOfWayObbScan(veh, curPos, hasDestPos, destPos, velFlat, now, true);
                         }
                     }
 
                     _remoteVehicleMotion[ptr] = state;
+                }
+                catch { }
+            }
+        }
+
+        /// <summary>
+        /// Local Player Driver OBB Roadkill Scan (VehicleWithWheels.FixedUpdate):
+        /// In Unity 2022 PhysX, rolling tank WheelColliders/BoxTriggers frequently fail to fire OnTriggerEnter against
+        /// stationary or prone Soldier CharacterControllers, and vanilla's 3D 70-degree center-to-feet angle check rejects
+        /// close-in sprocket hits. Run the same throttled 0.06s OBB scan for local human drivers in forward AND reverse!
+        /// </summary>
+        [HarmonyPatch(typeof(VehicleWithWheels), nameof(VehicleWithWheels.FixedUpdate))]
+        public static class VehicleWithWheels_FixedUpdate_Patch
+        {
+            public static void Postfix(VehicleWithWheels __instance)
+            {
+                try
+                {
+                    if (!VisionConfig.EnableMod.Value ||
+                        __instance == null ||
+                        __instance.Pointer == IntPtr.Zero ||
+                        !__instance.OwnDriverOrVehicle() ||
+                        !__instance.PlayerIsDriving() ||
+                        !__instance.HasDriverAlive ||
+                        __instance.IsDisabled() ||
+                        __instance.transform == null)
+                    {
+                        return;
+                    }
+
+                    float now = Time.time;
+                    IntPtr ptr = __instance.Pointer;
+                    if (_nextLocalDriverRoadkillScanTime.TryGetValue(ptr, out float nextScan) && now < nextScan)
+                        return;
+
+                    _nextLocalDriverRoadkillScanTime[ptr] = now + 0.06f;
+
+                    Rigidbody rb = __instance.rb;
+                    if (rb == null || rb.isKinematic)
+                        return;
+
+                    Vector3 rbVel = rb.velocity;
+                    Vector3 velFlat = new Vector3(rbVel.x, 0f, rbVel.z);
+                    if (velFlat.sqrMagnitude > 1.0f * 1.0f)
+                    {
+                        RunVehicleRoadkillAndRightOfWayObbScan(__instance, __instance.transform.position, false, Vector3.zero, velFlat, now, false);
+                    }
                 }
                 catch { }
             }
@@ -5289,8 +5809,8 @@ namespace EasyRed2HumanAI
                         return false;
                     }
 
-                    // Enemy soldier roadkill authority check (Host owns all SyncVehicle instances via OwnSyncher)
-                    if (!AiCore.IsLocallyOwnedVehicle(__instance) ||
+                    bool canApplyHit = __instance.OwnDriverOrVehicle() || AiCore.IsLocallyOwnedSoldier(soldier);
+                    if (!canApplyHit ||
                         !soldier.AllowHitByVehicle ||
                         soldier.IsOnVehicle() ||
                         __instance.transform == null ||
@@ -5299,10 +5819,7 @@ namespace EasyRed2HumanAI
                         return true;
                     }
 
-                    // Fix 1: Remote multiplayer client driving a vehicle/tank.
-                    // In vanilla, VehicleWithWheels.FixedUpdate (0x180879A14 -> 0x18087AAF9) overwrites `this.speed = 0f`
-                    // on the Host every physics tick whenever `!OwnDriverOrVehicle()`, causing `OnTriggerEnter`'s
-                    // `if (this.speed > 0.5f)` check (0x18087C971) to fail 100% of the time for all client drivers!
+                    // Fix 1: Remote multiplayer client driving a vehicle/tank (evaluated on soldier's owner, e.g. Host).
                     if (!__instance.OwnDriverOrVehicle() && __instance.HasDriverAlive)
                     {
                         float now = Time.time;
@@ -5339,8 +5856,8 @@ namespace EasyRed2HumanAI
                         {
                             Vector3 toSoldierFlat = soldier.transform.position - __instance.transform.position;
                             toSoldierFlat.y = 0f;
-                            if (toSoldierFlat.sqrMagnitude < 0.09f ||
-                                Vector3.Dot(velFlat / horizSpeed, toSoldierFlat.normalized) > 0.15f)
+                            if (toSoldierFlat.sqrMagnitude < 0.25f ||
+                                Vector3.Dot(velFlat / horizSpeed, toSoldierFlat.normalized) > 0.10f)
                             {
                                 soldier.DisableHitByVehicleFor(1.0f);
                                 soldier.Damage(1000f);
@@ -5352,29 +5869,26 @@ namespace EasyRed2HumanAI
                         return true;
                     }
 
-                    // Fix 2: Local/Host driver reversing over an enemy (vanilla checks `this.speed > 0.5f` on signed Z speed).
+                    // Fix 2: Local driver (Client or Host) running over an enemy in forward OR reverse:
+                    // Bypass vanilla's broken 3D 70-degree center-to-feet angle check & forward-only speed check using 2D XZ velocity!
                     if (__instance.OwnDriverOrVehicle() && __instance.HasDriverAlive)
                     {
                         Rigidbody rb = __instance.rb;
                         if (rb != null && !rb.isKinematic)
                         {
                             Vector3 rbVel = rb.velocity;
-                            Vector3 localVel = __instance.transform.InverseTransformDirection(rbVel);
-                            if (localVel.z < -1.15f)
+                            Vector3 rbVelFlat = new Vector3(rbVel.x, 0f, rbVel.z);
+                            float horizSpeed = rbVelFlat.magnitude;
+                            if (horizSpeed > 0.85f)
                             {
-                                Vector3 rbVelFlat = new Vector3(rbVel.x, 0f, rbVel.z);
-                                float revSpeed = rbVelFlat.magnitude;
-                                if (revSpeed > 1.15f)
+                                Vector3 toSoldierFlat = soldier.transform.position - __instance.transform.position;
+                                toSoldierFlat.y = 0f;
+                                if (toSoldierFlat.sqrMagnitude < 0.25f ||
+                                    Vector3.Dot(rbVelFlat / horizSpeed, toSoldierFlat.normalized) > 0.10f)
                                 {
-                                    Vector3 toSoldierFlat = soldier.transform.position - __instance.transform.position;
-                                    toSoldierFlat.y = 0f;
-                                    if (toSoldierFlat.sqrMagnitude < 0.09f ||
-                                        Vector3.Dot(rbVelFlat / revSpeed, toSoldierFlat.normalized) > 0.25f)
-                                    {
-                                        soldier.DisableHitByVehicleFor(1.0f);
-                                        soldier.Damage(1000f);
-                                        return false;
-                                    }
+                                    soldier.DisableHitByVehicleFor(1.0f);
+                                    soldier.Damage(1000f);
+                                    return false;
                                 }
                             }
                         }
@@ -5529,59 +6043,354 @@ namespace EasyRed2HumanAI
         }
 
         // =====================================================================
-        // Vanilla Co-op Fix: Mid-Air Plane Spawn Hot-Start (VehiclePlane)
-        // When an airborne plane spawns at match start, VehiclePlane.OnSquadSpawnInside
-        // (0x180853800) runs ONLY on the Host. When a multiplayer client spawns into the
-        // pilot seat, SyncVehicle does not replicate engineStarted, throttle, or velocity,
-        // causing an instant dead-stick stall and crash on the client!
+        // Vanilla Co-op Fix: Mid-Air Plane Spawn Hot-Start & Remote Flight Sync
+        // 1. VehiclePlane.OnSquadSpawnInside (0x180853800) runs ONLY on the Host and fails over
+        //    terrainless ocean/mesh spawners. On remote clients, SyncVehiclePlane does not replicate
+        //    engineStarted, throttle, thrustForce, _trgtThrust, farFromGround, or rb.velocity, and
+        //    rb.isKinematic can stay true on frame 1—causing dead-stick mid-air spawns!
+        // 2. SyncVehiclePlane overrides UpdatePosAndRot (0x180735930) while VehiclePlane.FixedUpdate
+        //    (0x18085011B) skips lift & thrust on non-owners (!OwnDriverOrVehicle) yet leaves
+        //    rb.useGravity = true! Between network packets, PhysX pulls remote planes down at -9.81 m/s^2
+        //    ("falling in columns") until vertical error exceeds 3x outOfSyncDistance and SyncVehiclePosition
+        //    teleports them back up ("jumping planes")!
         // =====================================================================
-        internal static void TryHotStartAirborneLocalPlayerPlane(VehiclePlane vp)
+        private static float GetPlaneCruiseVelocityMs(VehiclePlane vp)
+        {
+            if (vp == null)
+                return 60.0f;
+
+            return Mathf.Max(55.0f, Mathf.Max(vp.startLiftVelocity * 1.35f, (vp.maxKmhSpeed / 3.6f) * 0.80f));
+        }
+
+        internal static void TryHotStartAirbornePlane(VehiclePlane vp, bool allowAiPilot)
         {
             if (vp == null ||
                 vp.Pointer == IntPtr.Zero ||
                 !VisionConfig.EnableMod.Value ||
                 !VisionConfig.EnableCoopAirborneSpawnFix.Value ||
                 !vp.OwnDriverOrVehicle() ||
-                !vp.PlayerIsInside() ||
+                (!allowAiPilot && !vp.PlayerIsInside()) ||
                 vp.IsDisabled() ||
                 vp.transform == null)
             {
                 return;
             }
 
-            if (vp.engineStarted)
+            IntPtr ptr = vp.Pointer;
+            float now = Time.time;
+            bool inWindow = _planeHotStartWindowUntil.TryGetValue(ptr, out float windowUntil);
+
+            if (_hotStartedPlayerPlanes.Contains(ptr))
             {
-                _hotStartedPlayerPlanes.Add(vp.Pointer);
+                if (!inWindow || now >= windowUntil || vp.isGrounded)
+                    return;
+
+                Rigidbody checkRb = vp.rb;
+                float minMaintainMs = GetPlaneCruiseVelocityMs(vp) * 0.62f;
+                if (vp.engineStarted && (checkRb == null || checkRb.isKinematic || checkRb.velocity.sqrMagnitude >= minMaintainMs * minMaintainMs))
+                    return;
+            }
+
+            if (!inWindow)
+            {
+                vp.RefreshGrounded();
+                bool onGroundOrRunway =
+                    vp.isGrounded ||
+                    (vp.transform.position.y < 45.0f &&
+                     AiCore.RaycastEnvironment(vp.transform.position + Vector3.up * 1.8f, Vector3.down, 11.0f, vp.transform.root, out _));
+
+                if (onGroundOrRunway)
+                {
+                    // Plane is on a runway / carrier deck: mark as seen so manual runway startup works normally
+                    _hotStartedPlayerPlanes.Add(ptr);
+                    return;
+                }
+
+                // Airborne spawn confirmed: hold a 2.5s stabilization window so late kinematic release or RPCs cannot stall it!
+                windowUntil = now + 2.5f;
+                _planeHotStartWindowUntil[ptr] = windowUntil;
+            }
+            else if (now >= windowUntil)
+            {
+                _hotStartedPlayerPlanes.Add(ptr);
                 return;
             }
 
-            if (_hotStartedPlayerPlanes.Contains(vp.Pointer))
-                return;
+            vp.SetPhysicsEnabled(true);
+            if (!vp.engineStarted)
+                vp.StartEngine();
 
-            vp.RefreshGrounded();
-            if (vp.isGrounded ||
-                AiCore.RaycastEnvironment(vp.transform.position + Vector3.up * 1.5f, Vector3.down, 8.5f, vp.transform.root, out _))
-            {
-                // Plane is on the runway/ground: mark as seen so manual runway startup works normally
-                _hotStartedPlayerPlanes.Add(vp.Pointer);
-                return;
-            }
-
-            _hotStartedPlayerPlanes.Add(vp.Pointer);
-            vp.StartEngine();
-            vp.engineStartTime = Time.time - 5.0f;
+            vp.engineStartTime = now - 8.0f;
             vp.throttle = 100.0f;
+            float maxThrust = Mathf.Max(100.0f, vp.thrustForceMultiplier * 100.0f);
+            vp.thrustForce = maxThrust;
+            vp._trgtThrust = maxThrust;
+            vp.groundLeaveTime = 0f;
+            vp.farFromGround = true;
             vp.SetGearClosed();
             vp.isGrounded = false;
 
+            float cruiseMs = GetPlaneCruiseVelocityMs(vp);
             Rigidbody rb = vp.rb;
-            if (rb != null && !rb.isKinematic && rb.velocity.sqrMagnitude < 15.0f * 15.0f)
+            if (rb != null)
             {
-                float cruiseMs = Mathf.Max(52.0f, vp.maxControlSpeed * 0.22f);
-                rb.velocity = vp.transform.forward * cruiseMs;
+                if (!rb.useGravity)
+                    rb.useGravity = true;
+
+                if (!rb.isKinematic)
+                {
+                    if (rb.velocity.sqrMagnitude < (cruiseMs * 0.72f) * (cruiseMs * 0.72f))
+                    {
+                        rb.velocity = vp.transform.forward * cruiseMs;
+                    }
+
+                    if (vp.engineStarted && rb.velocity.sqrMagnitude >= (cruiseMs * 0.70f) * (cruiseMs * 0.70f))
+                    {
+                        if (_hotStartedPlayerPlanes.Add(ptr))
+                        {
+                            AiCore.LogDebug("PlaneSpawnFix", $"Hot-started airborne plane '{vp.name}' ({cruiseMs:F0}m/s).");
+                        }
+                    }
+                }
+            }
+        }
+
+        [HarmonyPatch(typeof(Vehicle), nameof(Vehicle.SetPhysicsEnabled))]
+        public static class Vehicle_SetPhysicsEnabled_Patch
+        {
+            public static void Prefix(Vehicle __instance, ref bool __0)
+            {
+                try
+                {
+                    if (!__0 &&
+                        VisionConfig.EnableMod.Value &&
+                        VisionConfig.EnableCoopAirborneSpawnFix.Value &&
+                        __instance != null &&
+                        __instance.IsAirVehicle() &&
+                        !__instance.IsDisabled())
+                    {
+                        VehiclePlane vp = __instance.TryCast<VehiclePlane>();
+                        if (vp != null && (!vp.isGrounded || vp.HasDriverAlive))
+                        {
+                            __0 = true;
+                        }
+                    }
+                }
+                catch { }
+            }
+        }
+
+        // =====================================================================
+        // Host-Side Vanilla-Client Plane Sync Rate & Zero-Speed Guard
+        // 1. When a plane has a live pilot, SyncVehiclePlane.OnPhotonSerializeView (0x1807350AA)
+        //    returns early and SyncSoldier.OnPhotonSerializeView (0x18073176D) sends the plane's
+        //    pos/rot/speed—throttled to `Time.time + 0.40f` (2.5 Hz walking infantry rate!).
+        //    At 100 m/s, 40m gaps + uncompensated client gravity cause vanilla clients to sag
+        //    and snap-teleport ("jumping planes"); and if Host camera LOD ever zeroed rb.velocity,
+        //    sending speed=0 sets allowedOutOfSyncDist=0 on vanilla clients ("falling in columns")!
+        // 2. When pilotless/shot-down, SyncVehiclePlane.OnPhotonSerializeView (0x1807350E9) throttles
+        //    updates to `Time.time + 1.50f` (once every 1.5s!).
+        // Lowering next_position_sync to ~0.08s-0.10s (~10-12 Hz, matching Photon's native tick)
+        // keeps 100% identical vanilla wire format while smoothing planes even for UNMODDED clients!
+        // =====================================================================
+        [HarmonyPatch(typeof(SyncSoldier), nameof(SyncSoldier.OnPhotonSerializeView))]
+        public static class SyncSoldier_OnPhotonSerializeView_Patch
+        {
+            public static void Prefix(SyncSoldier __instance, Photon.Pun.PhotonStream __0)
+            {
+                try
+                {
+                    if (__0 == null ||
+                        !__0.IsWriting ||
+                        !VisionConfig.EnableMod.Value ||
+                        !VisionConfig.EnableCoopAirborneSpawnFix.Value ||
+                        __instance == null)
+                    {
+                        return;
+                    }
+
+                    Soldier s = __instance.soldier;
+                    if (s == null || s.Pointer == IntPtr.Zero || !s.IsOnVehicle())
+                        return;
+
+                    Vehicle veh = s.GetCurrentVehicle();
+                    if (veh == null || veh.Pointer == IntPtr.Zero || !veh.IsAirVehicle() || veh.IsDisabled())
+                        return;
+
+                    VehiclePlane vp = veh.TryCast<VehiclePlane>();
+                    if (vp == null || vp.isGrounded)
+                        return;
+
+                    if (!vp.IsPhysicsEnabled)
+                        vp.SetPhysicsEnabled(true);
+
+                    if (vp.IsOperative() && vp.GetDriver() == s)
+                    {
+                        Rigidbody rb = vp.rb;
+                        if (rb != null && !rb.isKinematic && rb.velocity.sqrMagnitude < 12.0f * 12.0f)
+                        {
+                            TryHotStartAirbornePlane(vp, true);
+                        }
+                    }
+                }
+                catch { }
             }
 
-            AiCore.LogDebug("PlaneSpawnFix", $"Hot-started airborne client player plane '{vp.name}'.");
+            public static void Postfix(SyncSoldier __instance, Photon.Pun.PhotonStream __0)
+            {
+                try
+                {
+                    if (__0 == null ||
+                        !__0.IsWriting ||
+                        !VisionConfig.EnableMod.Value ||
+                        !VisionConfig.EnableCoopAirborneSpawnFix.Value ||
+                        __instance == null)
+                    {
+                        return;
+                    }
+
+                    Soldier s = __instance.soldier;
+                    if (s == null || s.Pointer == IntPtr.Zero || !s.IsOnVehicle())
+                        return;
+
+                    Vehicle veh = s.GetCurrentVehicle();
+                    if (veh == null || veh.Pointer == IntPtr.Zero || !veh.IsAirVehicle() || veh.IsDisabled())
+                        return;
+
+                    VehiclePlane vp = veh.TryCast<VehiclePlane>();
+                    if (vp == null || vp.isGrounded)
+                        return;
+
+                    float targetNextSync = Time.time + 0.08f;
+                    if (__instance.next_position_sync > targetNextSync)
+                    {
+                        __instance.next_position_sync = targetNextSync;
+                    }
+                }
+                catch { }
+            }
+        }
+
+        [HarmonyPatch(typeof(SyncVehiclePlane), nameof(SyncVehiclePlane.OnPhotonSerializeView))]
+        public static class SyncVehiclePlane_OnPhotonSerializeView_Patch
+        {
+            public static void Prefix(SyncVehiclePlane __instance, Photon.Pun.PhotonStream __0)
+            {
+                try
+                {
+                    if (__0 == null ||
+                        !__0.IsWriting ||
+                        !VisionConfig.EnableMod.Value ||
+                        !VisionConfig.EnableCoopAirborneSpawnFix.Value ||
+                        __instance == null)
+                    {
+                        return;
+                    }
+
+                    Vehicle veh = __instance.vehicle;
+                    if (veh == null || veh.Pointer == IntPtr.Zero || veh.IsDisabled())
+                        return;
+
+                    VehiclePlane vp = veh.TryCast<VehiclePlane>();
+                    if (vp != null && !vp.isGrounded && !vp.IsPhysicsEnabled)
+                    {
+                        vp.SetPhysicsEnabled(true);
+                    }
+                }
+                catch { }
+            }
+
+            public static void Postfix(SyncVehiclePlane __instance, Photon.Pun.PhotonStream __0)
+            {
+                try
+                {
+                    if (__0 == null ||
+                        !__0.IsWriting ||
+                        !VisionConfig.EnableMod.Value ||
+                        !VisionConfig.EnableCoopAirborneSpawnFix.Value ||
+                        __instance == null)
+                    {
+                        return;
+                    }
+
+                    Vehicle veh = __instance.vehicle;
+                    if (veh == null || veh.Pointer == IntPtr.Zero)
+                        return;
+
+                    VehiclePlane vp = veh.TryCast<VehiclePlane>();
+                    if (vp == null || vp.isGrounded)
+                        return;
+
+                    float targetNextSync = Time.time + 0.10f;
+                    if (__instance.next_position_sync > targetNextSync)
+                    {
+                        __instance.next_position_sync = targetNextSync;
+                    }
+                }
+                catch { }
+            }
+        }
+
+        [HarmonyPatch(typeof(SyncVehiclePlane), nameof(SyncVehiclePlane.UpdatePosAndRot))]
+        public static class SyncVehiclePlane_UpdatePosAndRot_Patch
+        {
+            public static bool Prefix(SyncVehiclePlane __instance)
+            {
+                try
+                {
+                    if (!VisionConfig.EnableMod.Value ||
+                        !VisionConfig.EnableCoopAirborneSpawnFix.Value ||
+                        __instance == null)
+                    {
+                        return true;
+                    }
+
+                    Vehicle veh = __instance.vehicle;
+                    if (veh == null || veh.Pointer == IntPtr.Zero)
+                        return true;
+
+                    VehiclePlane vp = veh.TryCast<VehiclePlane>();
+                    if (vp == null)
+                        return true;
+
+                    // Prevent stale SyncVehiclePlane interpolation targets from rubber-banding the local pilot's aircraft
+                    if (vp.OwnDriverOrVehicle() && vp.PlayerIsDriving())
+                        return false;
+
+                    if (!vp.OwnDriverOrVehicle())
+                    {
+                        float now = Time.time;
+                        IntPtr ptr = vp.Pointer;
+                        if (!_nextRemotePlaneGroundCheckTime.TryGetValue(ptr, out float nextGrounded) || now >= nextGrounded)
+                        {
+                            _nextRemotePlaneGroundCheckTime[ptr] = now + 0.25f;
+                            vp.RefreshGrounded();
+                        }
+                    }
+                }
+                catch { }
+                return true;
+            }
+        }
+
+        [HarmonyPatch(typeof(VehiclePlane), nameof(VehiclePlane.OnSquadSpawnInside))]
+        public static class VehiclePlane_OnSquadSpawnInside_Patch
+        {
+            public static void Postfix(VehiclePlane __instance)
+            {
+                try
+                {
+                    if (__instance == null || !VisionConfig.EnableMod.Value)
+                        return;
+
+                    GetVehicleCrewFaction(__instance);
+                    if (VisionConfig.EnableCoopAirborneSpawnFix.Value)
+                    {
+                        TryHotStartAirbornePlane(__instance, true);
+                    }
+                }
+                catch { }
+            }
         }
 
         [HarmonyPatch(typeof(VehiclePlane), nameof(VehiclePlane.FixedUpdate))]
@@ -5591,9 +6400,122 @@ namespace EasyRed2HumanAI
             {
                 try
                 {
-                    if (__instance != null && !__instance.engineStarted && __instance.PlayerIsInside())
+                    if (__instance == null ||
+                        __instance.Pointer == IntPtr.Zero ||
+                        !VisionConfig.EnableMod.Value ||
+                        !VisionConfig.EnableCoopAirborneSpawnFix.Value)
                     {
-                        TryHotStartAirborneLocalPlayerPlane(__instance);
+                        return;
+                    }
+
+                    IntPtr ptr = __instance.Pointer;
+                    float now = Time.time;
+
+                    if (!__instance.OwnDriverOrVehicle())
+                    {
+                        if (!_nextRemotePlaneGroundCheckTime.TryGetValue(ptr, out float nextGrounded) || now >= nextGrounded)
+                        {
+                            _nextRemotePlaneGroundCheckTime[ptr] = now + 0.25f;
+                            __instance.RefreshGrounded();
+                        }
+
+                        if (!_remotePlaneSpawnSeenTime.TryGetValue(ptr, out float firstSeen))
+                        {
+                            firstSeen = now;
+                            _remotePlaneSpawnSeenTime[ptr] = firstSeen;
+                        }
+
+                        Rigidbody rb = __instance.rb;
+                        if (rb != null)
+                        {
+                            bool activeAirborneRemote = !__instance.IsDisabled() && !__instance.isGrounded && __instance.HasDriverAlive;
+                            if (activeAirborneRemote)
+                            {
+                                // Disable local PhysX gravity on non-owned airborne planes so they don't plummet between
+                                // network packets ("falling in columns") while SyncVehiclePlane.UpdatePosAndRot drives rb.velocity!
+                                if (rb.useGravity)
+                                    rb.useGravity = false;
+
+                                SyncVehicle syncher = __instance.vehicleSyncher;
+                                bool hasSyncTarget = syncher != null && syncher.syncDestPos.HasValue;
+                                if (!rb.isKinematic)
+                                {
+                                    if (hasSyncTarget)
+                                    {
+                                        // NOTE: Do NOT zero rb.velocity here—SyncVehiclePlane.UpdatePosAndRot (0x180735930)
+                                        // moves airborne remote planes exclusively via VehiclePlane.SetSpeed (rb.velocity)!
+                                        if (rb.angularVelocity.sqrMagnitude > 0.001f)
+                                            rb.angularVelocity = Vector3.zero;
+                                    }
+                                    else if (now - firstSeen <= 4.5f && __instance.transform != null)
+                                    {
+                                        float cruiseMs = GetPlaneCruiseVelocityMs(__instance);
+                                        if (rb.velocity.sqrMagnitude < 14.0f * 14.0f)
+                                            rb.velocity = __instance.transform.forward * cruiseMs;
+                                    }
+                                }
+                            }
+                            else if (!rb.useGravity)
+                            {
+                                rb.useGravity = true;
+                            }
+                        }
+                        return;
+                    }
+
+                    if (__instance.rb != null && !__instance.rb.useGravity)
+                    {
+                        __instance.rb.useGravity = true;
+                    }
+
+                    if (__instance.PlayerIsInside() || !_hotStartedPlayerPlanes.Contains(ptr))
+                    {
+                        TryHotStartAirbornePlane(__instance, false);
+                    }
+                }
+                catch { }
+            }
+
+            public static void Postfix(VehiclePlane __instance)
+            {
+                try
+                {
+                    if (__instance == null ||
+                        __instance.Pointer == IntPtr.Zero ||
+                        !VisionConfig.EnableMod.Value ||
+                        !VisionConfig.EnableCoopAirborneSpawnFix.Value)
+                    {
+                        return;
+                    }
+
+                    // Fix vanilla terrainless-ocean bug in VehiclePlane.FixedUpdate (0x180851228):
+                    // GetDistanceFromTerrain returns 0 beyond Terrain bounds over ocean, clearing farFromGround
+                    // once per second (nextSlowCheck) and popping landing gear open in mid-air!
+                    if (!__instance.farFromGround &&
+                        !__instance.isGrounded &&
+                        !__instance.IsDisabled() &&
+                        __instance.HasDriverAlive &&
+                        __instance.rb != null &&
+                        __instance.rb.velocity.sqrMagnitude > 22.0f * 22.0f &&
+                        __instance.transform != null &&
+                        !AiCore.RaycastEnvironment(__instance.transform.position + Vector3.up * 1.8f, Vector3.down, 18.0f, __instance.transform.root, out _))
+                    {
+                        __instance.farFromGround = true;
+                        if (__instance.gear_opened)
+                            __instance.SetGearClosed();
+                    }
+
+                    if (!__instance.OwnDriverOrVehicle())
+                        return;
+
+                    if (__instance.rb != null && !__instance.rb.useGravity)
+                    {
+                        __instance.rb.useGravity = true;
+                    }
+
+                    if (__instance.PlayerIsInside() || _planeHotStartWindowUntil.ContainsKey(__instance.Pointer))
+                    {
+                        TryHotStartAirbornePlane(__instance, true);
                     }
                 }
                 catch { }
@@ -5790,6 +6712,70 @@ namespace EasyRed2HumanAI
                     }
                 }
                 catch { }
+            }
+        }
+
+        [HarmonyPatch(typeof(TurretGun), nameof(TurretGun.SetGunTriggerPressed))]
+        public static class TurretGun_SetGunTriggerPressed_Patch
+        {
+            public static void Prefix(TurretGun __instance, ref bool __0, Soldier __1)
+            {
+                try
+                {
+                    if (!__0 ||
+                        !VisionConfig.EnableMod.Value ||
+                        VisionConfig.FriendlyFireConeDegrees.Value <= 0.1f ||
+                        __instance == null ||
+                        __instance.Pointer == IntPtr.Zero)
+                    {
+                        return;
+                    }
+
+                    if (__1 != null && __1.IsPlayer())
+                        return;
+
+                    if (ShouldBlockTurretFriendlyFire(null, __instance, __1, true))
+                    {
+                        __0 = false;
+                        __instance.triggerPressed = false;
+                    }
+                }
+                catch { }
+            }
+        }
+
+        [HarmonyPatch(typeof(TurretGun), nameof(TurretGun.StartFire))]
+        public static class TurretGun_StartFire_Patch
+        {
+            public static bool Prefix(TurretGun __instance)
+            {
+                try
+                {
+                    if (!VisionConfig.EnableMod.Value ||
+                        VisionConfig.FriendlyFireConeDegrees.Value <= 0.1f ||
+                        __instance == null ||
+                        __instance.Pointer == IntPtr.Zero)
+                    {
+                        return true;
+                    }
+
+                    Vehicle rootVeh = AiCore.GetCachedTurretVehicle(__instance);
+                    if (rootVeh != null && rootVeh.IsAirVehicle())
+                        return true;
+
+                    Soldier gunner = rootVeh != null ? __instance.GetSittedUnit(rootVeh) : null;
+                    if (gunner != null && gunner.IsPlayer())
+                        return true;
+
+                    // Final safety gate right before a shell/mortar leaves the barrel (catches delayed FireOnReloadDone coroutines!)
+                    if (ShouldBlockTurretFriendlyFire(null, __instance, gunner, true))
+                    {
+                        __instance.triggerPressed = false;
+                        return false;
+                    }
+                }
+                catch { }
+                return true;
             }
         }
     }

@@ -11,7 +11,7 @@ namespace EasyRed2HumanAI
     {
         public const string PluginGuid = "com.antigravity.easyred2.humanai";
         public const string PluginName = "Easy Red 2 - Battle Hardened";
-        public const string PluginVersion = "0.7.2";
+        public const string PluginVersion = "0.7.3";
 
         internal static Plugin Instance;
         internal static new ManualLogSource Log;
@@ -71,11 +71,15 @@ namespace EasyRed2HumanAI
             SafePatch(typeof(VeteranAndTacticsPatches.AmmoRefillCrate_Start_Patch));
             SafePatch(typeof(VeteranAndTacticsPatches.Soldier_OnSetPlayer_Patch));
             SafePatch(typeof(VeteranAndTacticsPatches.Soldier_Throw_Patch));
+            SafePatch(typeof(VeteranAndTacticsPatches.SoldierAI_MortarTarget_Patch));
+            SafePatch(typeof(VeteranAndTacticsPatches.KneeMortar_Use_Patch));
             SafePatch(typeof(VeteranAndTacticsPatches.Explosion_CreateExplosion_Patch));
             SafePatch(typeof(VeteranAndTacticsPatches.Bullet_BulletDamage_Patch));
             SafePatch(typeof(VeteranAndTacticsPatches.DeathPanel_ShowDeath_Patch));
             SafePatch(typeof(VeteranAndTacticsPatches.TurretAI_RefreshTargets_Patch));
             SafePatch(typeof(VeteranAndTacticsPatches.TurretAI_AutoPilot_Patch));
+            SafePatch(typeof(VeteranAndTacticsPatches.TurretGun_SetGunTriggerPressed_Patch));
+            SafePatch(typeof(VeteranAndTacticsPatches.TurretGun_StartFire_Patch));
             SafePatch(typeof(VeteranAndTacticsPatches.AIPlane_Update_Patch));
             SafePatch(typeof(VeteranAndTacticsPatches.AIPlane_ExitDive_Patch));
             SafePatch(typeof(VeteranAndTacticsPatches.AIPlane_NeedRefill_Patch));
@@ -92,12 +96,21 @@ namespace EasyRed2HumanAI
             SafePatch(typeof(VeteranAndTacticsPatches.AIVehicle_SwitchSeatAi_Patch));
             SafePatch(typeof(VeteranAndTacticsPatches.PlayerController_SwitchSeat_Patch));
             SafePatch(typeof(VeteranAndTacticsPatches.Vehicle_GetOnVehicle_Patch));
+            SafePatch(typeof(VeteranAndTacticsPatches.Vehicle_OnDisableVehicle_Patch));
+            SafePatch(typeof(VeteranAndTacticsPatches.MovableVehicle_OnDisableVehicle_Patch));
+            SafePatch(typeof(VeteranAndTacticsPatches.Vehicle_OnRepaired_Patch));
+            SafePatch(typeof(VeteranAndTacticsPatches.Vehicle_SetPhysicsEnabled_Patch));
             SafePatch(typeof(VeteranAndTacticsPatches.AIVehicle_MovableVehicleRoutine_Patch));
             SafePatch(typeof(VeteranAndTacticsPatches.Vehicle_OnVehicleSuppressed_Patch));
+            SafePatch(typeof(VeteranAndTacticsPatches.SyncSoldier_OnPhotonSerializeView_Patch));
             SafePatch(typeof(VeteranAndTacticsPatches.SyncVehicle_SyncVehiclePosition_Patch));
             SafePatch(typeof(VeteranAndTacticsPatches.SyncVehicle_UpdatePosAndRot_Patch));
+            SafePatch(typeof(VeteranAndTacticsPatches.SyncVehiclePlane_OnPhotonSerializeView_Patch));
+            SafePatch(typeof(VeteranAndTacticsPatches.SyncVehiclePlane_UpdatePosAndRot_Patch));
+            SafePatch(typeof(VeteranAndTacticsPatches.VehicleWithWheels_FixedUpdate_Patch));
             SafePatch(typeof(VeteranAndTacticsPatches.VehicleWithWheels_OnTriggerEnter_Patch));
             SafePatch(typeof(VeteranAndTacticsPatches.AIVehicle_MoveTowardCurrentNodeTank_Patch));
+            SafePatch(typeof(VeteranAndTacticsPatches.VehiclePlane_OnSquadSpawnInside_Patch));
             SafePatch(typeof(VeteranAndTacticsPatches.VehiclePlane_FixedUpdate_Patch));
             SafePatch(typeof(VeteranAndTacticsPatches.VehicleTank_FixedUpdate_Patch));
             SafePatch(typeof(VeteranAndTacticsPatches.TurretGun_SelectBestAmmo_Patch));
@@ -112,6 +125,9 @@ namespace EasyRed2HumanAI
             // Bundle 6: Ballistics, Plane Audio De-Throbber, First-Person Shadow Fix & Battlefield Immersion
             SafePatch(typeof(VeteranAndTacticsPatches.VehiclePlane_UpdateMotorSound_Patch));
             SafePatch(typeof(VeteranAndTacticsPatches.BulletInstance_OnHit_Patch));
+            SafePatch(typeof(VeteranAndTacticsPatches.BulletInstance_OnTracerPopped_Patch));
+            SafePatch(typeof(VeteranAndTacticsPatches.BulletInstance_DestroyFX_Patch));
+            SafePatch(typeof(VeteranAndTacticsPatches.BulletInstance_TryRichochet_Patch));
             SafePatch(typeof(VeteranAndTacticsPatches.VehicleDamagablePart_TryPenetrateArmor_Patch));
             SafePatch(typeof(VeteranAndTacticsPatches.Soldier_Damage_Patch));
             SafePatch(typeof(VeteranAndTacticsPatches.BodyPart_TryDamageWithExplosion_Patch));

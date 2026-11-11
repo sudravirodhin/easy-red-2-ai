@@ -23,6 +23,7 @@ namespace EasyRed2HumanAI
         private static int _cachedRoomPlayerCount = 1;
         private static IntPtr _lastPublishedRoomPtr;
         private static int _lastHeavyWorkFrame = -1;
+        private static int _lastDirectorWorkFrame = -1;
         private static int _lastDebugLogWriteFrame = -1;
         [ThreadStatic]
         private static StringBuilder _sharedLogBuilder;
@@ -207,7 +208,9 @@ namespace EasyRed2HumanAI
         {
             float dt = Time.unscaledDeltaTime;
             int players = GetConnectedPlayerCount();
-            float threshold = players >= 6 ? 0.0168f : (players > 1 ? 0.0178f : 0.0250f);
+            // Keep thresholds safely above normal 60Hz VSync jitter (16.67ms-17.4ms) so locked 60 FPS lobbies
+            // never false-trigger PingSkip or starve global squad/macro directors.
+            float threshold = players >= 6 ? 0.0208f : (players > 1 ? 0.0222f : 0.0265f);
             if (dt > threshold)
             {
                 TotalPingGovernorSkippedCycles++;
@@ -219,11 +222,18 @@ namespace EasyRed2HumanAI
         /// <summary>
         /// Marks the current frame as having executed heavy spatial/octree/snapshot work
         /// (e.g., vanilla <c>Squad.SquadLeaderRoutine</c> or a full world snapshot rebuild)
-        /// so global directors and secondary sweeps automatically shift to subsequent frames.
+        /// so secondary octree sweeps shift to subsequent frames.
         /// </summary>
         public static void NotifyHeavyWorkThisFrame()
         {
             _lastHeavyWorkFrame = Time.frameCount;
+        }
+
+        public static void NotifyDirectorWorkThisFrame()
+        {
+            int frame = Time.frameCount;
+            _lastHeavyWorkFrame = frame;
+            _lastDirectorWorkFrame = frame;
         }
 
         public static bool IsHeavyWorkFrame()
@@ -232,18 +242,20 @@ namespace EasyRed2HumanAI
         }
 
         /// <summary>
-        /// Ensures at most ONE global director pass (Macro Director, TeamNet GOAP Coordinator,
-        /// or Dictionary Pruning) executes on any single frame, and never on a slow frame.
+        /// Ensures at most ONE global mod director pass (Macro Director, TeamNet GOAP Coordinator,
+        /// Snapshot Rebuild, or Dictionary Pruning) executes on any single frame, without allowing
+        /// frequent vanilla <c>Squad.SquadLeaderRoutine</c> coroutines (80+/s across 20 squads) to starve directors.
         /// </summary>
-        public static bool TryClaimHeavyFrameWorkSlot()
+        public static bool TryClaimHeavyFrameWorkSlot(bool allowOnModerateFrame = false)
         {
-            if (ShouldSkipBotCycleForNetworkPing())
+            if (!allowOnModerateFrame && ShouldSkipBotCycleForNetworkPing())
                 return false;
 
             int frame = Time.frameCount;
-            if (_lastHeavyWorkFrame == frame)
+            if (_lastDirectorWorkFrame == frame)
                 return false;
 
+            _lastDirectorWorkFrame = frame;
             _lastHeavyWorkFrame = frame;
             return true;
         }
@@ -533,10 +545,31 @@ namespace EasyRed2HumanAI
             return true;
         }
 
+        public static bool IsLocallyOwnedSoldier(Soldier s)
+        {
+            if (s == null || s.Pointer == IntPtr.Zero || !s.IsAlive)
+                return false;
+
+            SyncSoldier syncher = s.soldierSyncher;
+            return syncher == null || syncher.OwnSyncher;
+        }
+
+        public static bool IsLocallyOwnedVehicleSyncher(Vehicle v)
+        {
+            if (v == null || v.Pointer == IntPtr.Zero)
+                return false;
+
+            SyncVehicle syncher = v.vehicleSyncher;
+            return syncher == null || syncher.OwnSyncher;
+        }
+
         public static bool IsLocallyOwnedVehicle(Vehicle v)
         {
             if (v == null || v.Pointer == IntPtr.Zero)
                 return false;
+
+            if (v.HasDriverAlive)
+                return v.OwnDriverOrVehicle();
 
             SyncVehicle syncher = v.vehicleSyncher;
             return syncher == null || syncher.OwnSyncher;
@@ -1088,6 +1121,80 @@ namespace EasyRed2HumanAI
             return false;
         }
 
+        /// <summary>
+        /// Zero-allocation danger-close blast + dispersion safety check for handheld knee mortars and static/on-map
+        /// indirect-fire artillery/mortars. Checks the local player, remote human players, and all friendly squads.
+        /// </summary>
+        public static bool IsIndirectFireImpactDangerClose(
+            string myFaction,
+            Vector3 impactPos,
+            IntPtr shooterPtr = default,
+            float friendlySafeRadius = 29.0f,
+            float playerSafeRadius = 35.0f)
+        {
+            if (string.IsNullOrEmpty(myFaction))
+                return false;
+
+            float playerSafeSq = playerSafeRadius * playerSafeRadius;
+            float friendlySafeSq = friendlySafeRadius * friendlySafeRadius;
+
+            Soldier localPlayer = Soldier.CurrentControlledSoldierOrNull();
+            if (localPlayer != null &&
+                localPlayer.IsAlive &&
+                localPlayer.Pointer != shooterPtr &&
+                localPlayer.transform != null &&
+                !string.IsNullOrEmpty(localPlayer.faction) &&
+                (localPlayer.faction == myFaction || ResourcesManager.IsSameFaction(myFaction, localPlayer.faction)))
+            {
+                Vehicle pVeh = localPlayer.IsOnVehicle() ? localPlayer.GetCurrentVehicle() : null;
+                if (pVeh == null || !pVeh.IsAirVehicle())
+                {
+                    Vector3 dP = localPlayer.transform.position - impactPos;
+                    if (dP.x * dP.x + dP.z * dP.z <= playerSafeSq && Mathf.Abs(dP.y) <= 22.0f)
+                        return true;
+                }
+            }
+
+            EnsureWorldSnapshot();
+            int sqCount = WorldSquadCount;
+            if (sqCount <= 0)
+                return false;
+
+            float maxSquadCheckRadius = Mathf.Max(friendlySafeRadius, playerSafeRadius) + 48.0f;
+            float maxSquadCheckSq = maxSquadCheckRadius * maxSquadCheckRadius;
+            var squads = WorldSquads;
+            var soldiers = WorldSoldiers;
+
+            for (int s = 0; s < sqCount; s++)
+            {
+                ref SquadSnapshot sqSnap = ref squads[s];
+                if (sqSnap.UnitCount == 0 || sqSnap.RefOnPlane || string.IsNullOrEmpty(sqSnap.Faction))
+                    continue;
+
+                if (sqSnap.Faction != myFaction && !ResourcesManager.IsSameFaction(myFaction, sqSnap.Faction))
+                    continue;
+
+                Vector3 sqDelta = sqSnap.RefPos - impactPos;
+                if (sqDelta.x * sqDelta.x + sqDelta.z * sqDelta.z > maxSquadCheckSq)
+                    continue;
+
+                int end = sqSnap.UnitStartIndex + sqSnap.UnitCount;
+                for (int i = sqSnap.UnitStartIndex; i < end; i++)
+                {
+                    ref SoldierSnapshot solSnap = ref soldiers[i];
+                    if (solSnap.Ptr == shooterPtr || solSnap.Ref == null)
+                        continue;
+
+                    Vector3 d = solSnap.Pos - impactPos;
+                    float rSq = solSnap.IsPlayer ? playerSafeSq : friendlySafeSq;
+                    if (d.x * d.x + d.z * d.z <= rSq && Mathf.Abs(d.y) <= 22.0f)
+                        return true;
+                }
+            }
+
+            return false;
+        }
+
         [HarmonyPatch(typeof(Soldier), nameof(Soldier.AngleToDirection))]
         public static class Soldier_AngleToDirection_Patch
         {
@@ -1246,7 +1353,7 @@ namespace EasyRed2HumanAI
                     return;
             }
 
-            NotifyHeavyWorkThisFrame();
+            NotifyDirectorWorkThisFrame();
             _lastWorldSnapshotTime = now;
             int prevSqCount = WorldSquadCount;
             int prevSolCount = WorldSoldierCount;

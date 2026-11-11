@@ -1,4 +1,4 @@
-# Easy Red 2: Battle Hardened (`v0.7.2`)
+# Easy Red 2: Battle Hardened (`v0.7.3`)
 *3-Tier Tactical GOAP, Squad Blackboard, Radioman Intel Net, Veterancy, Personalities & Combined-Arms Overhaul*
 
 > [!IMPORTANT]
@@ -19,7 +19,7 @@ A comprehensive **BepInEx 6 (IL2CPP)** AI, combined-arms, and fairness overhaul 
 | **Target Branch** | Steam `public` (Default Branch) |
 | **Confirmed Game Version** | **Easy Red 2 — Game Build `921`** (Steam Build ID `26375879`, Unity `2022.3.62f3` IL2CPP x64) |
 | **Mod Loader** | **[BepInEx 6 Bleeding Edge (`BepInEx-Unity.IL2CPP-win-x64`, build `#791`+)](https://builds.bepinex.dev/projects/bepinex_be)** |
-| **Last Confirmed Test Date** | **November 10, 2026** (`2026-11-10`) |
+| **Last Confirmed Test Date** | **November 11, 2026** (`2026-11-11`) |
 
 ---
 
@@ -27,23 +27,23 @@ A comprehensive **BepInEx 6 (IL2CPP)** AI, combined-arms, and fairness overhaul 
 
 Download your preferred package from the **[Releases](https://github.com/sudravirodhin/easy-red-2-ai/releases)** page:
 
-### Option A: With BepInEx Included (`EasyRed2HumanAI-v0.7.2-with-BepInEx.zip`) — *Recommended for Fresh Installs*
+### Option A: With BepInEx Included (`EasyRed2HumanAI-v0.7.3-with-BepInEx.zip`) — *Recommended for Fresh Installs*
 Includes **[BepInEx 6.0.0-be.791 (Unity.IL2CPP-win-x64)](https://builds.bepinex.dev/projects/bepinex_be)**, the `.NET 6` runtime, Unity `2022.3.62` base libraries, pre-generated IL2CPP `interop` assemblies for Easy Red 2 Build `921`, and `EasyRed2HumanAI.dll` (with no other third-party mods).
 1. Open your **Easy Red 2** installation folder (e.g. `Steam\steamapps\common\Easy Red 2`, where `Easy Red 2.exe` is located).
-2. Extract all contents of `EasyRed2HumanAI-v0.7.2-with-BepInEx.zip` directly into the `Easy Red 2` folder.
+2. Extract all contents of `EasyRed2HumanAI-v0.7.3-with-BepInEx.zip` directly into the `Easy Red 2` folder.
 3. Launch the game!
 
-### Option B: Without BepInEx / Plugin Only (`EasyRed2HumanAI-v0.7.2-Plugin-Only.zip` or `EasyRed2HumanAI.dll`)
+### Option B: Without BepInEx / Plugin Only (`EasyRed2HumanAI-v0.7.3-Plugin-Only.zip` or `EasyRed2HumanAI.dll`)
 For users who already have **[BepInEx 6 Bleeding Edge (`BepInEx-Unity.IL2CPP-win-x64`)](https://builds.bepinex.dev/projects/bepinex_be)** installed:
-1. Download `EasyRed2HumanAI-v0.7.2-Plugin-Only.zip` (or `EasyRed2HumanAI.dll` directly).
+1. Download `EasyRed2HumanAI-v0.7.3-Plugin-Only.zip` (or `EasyRed2HumanAI.dll` directly).
 2. Place `EasyRed2HumanAI.dll` into:
    ```text
    Easy Red 2\BepInEx\plugins\EasyRed2HumanAI.dll
    ```
-   *(Using **[Quartermaster - ER2 Mod Manager](https://www.nexusmods.com/easyred2/mods/107)**? Import `EasyRed2HumanAI-v0.7.2-Plugin-Only.zip` directly in Quartermaster's Mods tab—do not import `with-BepInEx.zip`.)*
+   *(Using **[Quartermaster - ER2 Mod Manager](https://www.nexusmods.com/easyred2/mods/107)**? Import `EasyRed2HumanAI-v0.7.3-Plugin-Only.zip` directly in Quartermaster's Mods tab—do not import `with-BepInEx.zip`.)*
 
 ### Switching to Vanilla or Uninstalling (`Uninstall-BepInEx-Mod.bat`)
-Included in `EasyRed2HumanAI-v0.7.2-with-BepInEx.zip` (and in the root of this repository) is **[`Uninstall-BepInEx-Mod.bat`](Uninstall-BepInEx-Mod.bat)**. Double-click it inside your `Easy Red 2` folder when the game is closed to:
+Included in `EasyRed2HumanAI-v0.7.3-with-BepInEx.zip` (and in the root of this repository) is **[`Uninstall-BepInEx-Mod.bat`](Uninstall-BepInEx-Mod.bat)**. Double-click it inside your `Easy Red 2` folder when the game is closed to:
 * **`[1] Play Vanilla Temporarily`**: Moves `BepInEx`, `dotnet`, and `winhttp.dll` into `_BepInEx_Disabled_Backup\` so the game runs 100% pure vanilla without losing your configs or other plugins.
 * **`[2] Restore Modded Game`**: Moves everything back from `_BepInEx_Disabled_Backup\` in one click.
 * **`[3] Uninstall Completely`**: Permanently deletes `BepInEx`, `dotnet`, `winhttp.dll`, `doorstop_config.ini`, `.doorstop_version`, and `changelog.txt`.
@@ -98,6 +98,10 @@ Alongside shared tactical realism goals (some inspired by [`Easy-Red-2-Realism-O
 * **All-Map / All-Mode Dynamic Operations Support & Zero-Hitch Frame Pacing (`v0.7.2`)**:
   * **Universal Objective & Economy Support Across All 216 Vanilla Missions + Custom/Workshop Modes**: Full audit of all 216 `ME_*` maps and 178 Lua scripts (`gamemode_conquest.lua`, `gamemode_defend.lua`, `phase_0..5.lua`, `briefing.lua`, `SDKFZ.lua`, `runaway.lua`) adds universal objective classification (`AiCore.ClassifyMissionObjectiveForFaction`) for **Dynamic Conquest** (proper held-flag garrisons, `ConquestEconomy.GetBudget` ticket awareness, and drain-based contest urgency instead of false `0.99` back-cap alarms), **Wave Defense** (counter-attacking lost flags while guarding defended points), **Lua Retreat Finales (`#retreat`)**, and **Custom `AiParams` Scripted Soldiers** (`!canMove`, `!changePoseAutomatically`, `forcedPose`, `!findCoverWhenSuppressed`, `!canDoMedic`, `!canUseRadio`). Also fixes a vanilla `Squad.TaskCanStillAttract` bug where squads stayed stuck on deactivated Lua objectives (`canAttractAllies == false && canAttractAxis == false`), caps `RepairStation` tank detours to `240m–360m`, and adds `[Local]` / `[Workshop]` campaigns to `F5`.
   * **Zero-Alloc Debug Logger & Global Heavy-Work Frame Staggering (`MaxFrame` / `Hitches` Telemetry)**: Eliminates per-frame `Heartbeat` string concatenation and `StringBuilder` allocations when `DebugLogging` is enabled (`[InterpolatedStringHandlerArgument]` + `[ThreadStatic] StringBuilder` + max 1 console write per frame), hooks vanilla `Squad.SquadLeaderRoutine` (`NotifyHeavyWorkThisFrame`) so octree cover searches, `EnsureWorldSnapshot` rebuilds, `FindSquadFlankCovers` (max 1 per frame), and floor-item scans never stack on the same frame, and adds rolling `MaxFrame` (`ms`) and `Hitches` (`>28ms`) counters to `F10` and `[Diag:Heartbeat]`.
+* **Multiplayer Aircraft Physics Sync, Dogfight Break-Off, Mortar Blast Safety, Artillery Trails & Dual-Sided Roadkills (`v0.7.3`)**:
+  * **Smooth Multiplayer Plane Sync (Even for Unmodded Vanilla Clients!), 2.5s Airborne Hot-Start & Zero Entry Hitch**: Fixes all three vanilla aircraft sync bugs—on the **Host**, prevents camera-LOD (`Vehicle.SetPhysicsEnabled`) from zeroing `rb.velocity` (which sent `speed = 0` packets that forced `allowedOutOfSyncDist = 0` snap-teleporting + vertical gravity-fall columns on clients!) and raises airborne plane `PhotonStream` sync frequency from vanilla's infantry-walk `0.40s` (`2.5 Hz` in `SyncSoldier`) / `1.50s` (`SyncVehiclePlane`) up to `~10–12 Hz` (`0.08s–0.10s`) with 100% vanilla wire compatibility so **even unmodded vanilla clients get dramatically smoother planes**; on **modded clients**, also disables non-owned `rb.useGravity` (`VehiclePlane.FixedUpdate`) and guards `farFromGround` over terrainless ocean; replaces one-shot mid-air hot-start with a `2.5s` stabilization window; and skips FMOD audio-sample seeking on plane entry (`VehiclePlane.UpdateMotorSound`).
+  * **Dogfight Anti-Chicken Break-Off (`AIPlane.Update`)**: AI fighters no longer hold nose-on down to `70m` during head-on merges, executing a `2.75s` right-hand climbing break turn at `205m–285m` so opposing aircraft peel off cleanly instead of colliding.
+  * **Indirect Mortar/Howitzer Danger-Close Safety, Anti-Stack Melee Pincers, Artillery 90° Trail Fix, `LostVehicles` Attribution & Dual-Sided Tank Roadkills**: Protects friendlies (`27m–30m`, `+6m` for players) across handheld knee mortars, static mortar pits, and artillery (`SoldierAI.MortarTarget`, `KneeMortar.Use`, `TurretAI`, `TurretGun.StartFire` catching delayed `FireOnReloadDone` coroutines); caps simultaneous melee attackers to `2` per target on `±52°` pincer angles; clears pooled `TracerBehaviour` `TrailRenderer` streaks and blocks 90° foliage/roof ricochets on indirect shells; credits `BattleManager.OnTankKilled` when vehicle crews die or bail out prior to cook-off; fixes both Host-interpolated (`curPos` + `syncDestPos`) and local-driver (`FixedUpdate`) tank roadkills in forward/reverse; and tunes the 60Hz VSync ping governor so the Macro Director is never starved in 6+ player lobbies.
 
 > *(Want the deep-dive engineering breakdown of what vanilla's `GameAssembly.dll` did under the hood and why each change was made? Read **[`docs/design-and-justifications.md`](docs/design-and-justifications.md)**!)*
 
