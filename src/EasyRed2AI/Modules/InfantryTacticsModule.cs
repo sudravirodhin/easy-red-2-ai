@@ -297,7 +297,7 @@ namespace EasyRed2HumanAI
                 SetBotPose(friendAi, friend, SoldierPose.Crouch);
             }
 
-            if (friendAi == null || friend.IsOnCover())
+            if (friendAi == null || friend.IsOnCover() || !AiCore.CanBotMoveAutonomously(friend))
                 return;
 
             Vector3 fireDir = targetPos - gunPos;
@@ -392,7 +392,7 @@ namespace EasyRed2HumanAI
             if (ai == null || soldier == null)
                 return;
 
-            if (soldier.UsingBipod() || soldier.IsBipodTransitioning())
+            if (soldier.UsingBipod() || soldier.IsBipodTransitioning() || (!forceImmediate && !AiCore.CanBotChangePoseAutonomously(soldier)))
             {
                 ai.actualPose = soldier.m_pose;
                 return;
@@ -613,6 +613,9 @@ namespace EasyRed2HumanAI
             if (ai == null || soldier == null || soldier.IsOnVehicle() || soldier.transform == null)
                 return false;
 
+            if (soldier.Params != null && (!soldier.Params.canMove || !soldier.Params.findCoverWhenSuppressed))
+                return false;
+
             if (!soldier.isBleeding &&
                 soldier.targetDestination != null &&
                 (soldier.targetDestination.TryCast<MedicHealingDestination>() != null ||
@@ -755,6 +758,48 @@ namespace EasyRed2HumanAI
             return true;
         }
 
+        private static float GetJitteredPeekDuration(IntPtr ptr, float baseDuration)
+        {
+            float jitter = ((AiCore.GetDeterministicHash(ptr, 193) & 31) - 15) * 0.03f; // -0.45s .. +0.48s
+            return Mathf.Max(2.6f, baseDuration + jitter);
+        }
+
+        private static bool HasClearLineOfFireAndSightFromPosition(
+            Vector3 basePos,
+            Transform ignoreRoot,
+            Vector3 targetPos,
+            float dist,
+            float lowerBarrelHeight,
+            float upperBarrelHeight,
+            float maxRayDist,
+            float eyeHeight,
+            float maxEyeLintelDist)
+        {
+            if (!HasClearLineOfFireFromPosition(basePos, ignoreRoot, targetPos, dist, lowerBarrelHeight, upperBarrelHeight, maxRayDist))
+                return false;
+
+            if (maxEyeLintelDist > 0.25f)
+            {
+                // Verify local aperture/lintel clearance from actual eye height (Soldier.FacePosition: ~1.56m standing, ~1.04m crouched)
+                // toward upper-torso SpotPosition so bots never stand up into blind pillbox headers or low attic/cottage window lintels.
+                Vector3 eyeOrigin = basePos + Vector3.up * eyeHeight;
+                Vector3 toSpot = (targetPos + Vector3.up * 0.25f) - eyeOrigin;
+                float lenEye = toSpot.magnitude;
+                if (lenEye > 1.0f)
+                {
+                    Vector3 dirEye = toSpot / lenEye;
+                    float checkEyeDist = Mathf.Min(lenEye - 0.50f, maxEyeLintelDist);
+                    if (checkEyeDist > 0.30f &&
+                        AiCore.RaycastEnvironment(eyeOrigin - dirEye * 0.08f, dirEye, checkEyeDist + 0.08f, ignoreRoot, out _))
+                    {
+                        return false;
+                    }
+                }
+            }
+
+            return true;
+        }
+
         private static bool HasClearLineOfFireFromProne(Soldier soldier, Vector3 targetPos, float dist)
         {
             return HasClearLineOfFireAtHeight(soldier, targetPos, dist, 0.22f, 0.32f, 15.0f);
@@ -762,12 +807,36 @@ namespace EasyRed2HumanAI
 
         private static bool HasClearLineOfFireFromCrouch(Soldier soldier, Vector3 targetPos, float dist)
         {
-            return HasClearLineOfFireAtHeight(soldier, targetPos, dist, 0.64f, 0.78f, 18.0f);
+            if (soldier == null || dist <= 1.5f)
+                return false;
+
+            return HasClearLineOfFireAndSightFromPosition(
+                soldier.transform.position,
+                soldier.transform.root,
+                targetPos,
+                dist,
+                0.64f,
+                0.78f,
+                18.0f,
+                1.04f,
+                2.8f);
         }
 
         private static bool HasClearLineOfFireFromStanding(Soldier soldier, Vector3 targetPos, float dist)
         {
-            return HasClearLineOfFireAtHeight(soldier, targetPos, dist, 1.18f, 1.32f, 18.0f);
+            if (soldier == null || dist <= 1.5f)
+                return false;
+
+            return HasClearLineOfFireAndSightFromPosition(
+                soldier.transform.position,
+                soldier.transform.root,
+                targetPos,
+                dist,
+                1.22f,
+                1.36f,
+                18.0f,
+                1.56f,
+                3.5f);
         }
 
         private static bool TrySidestepWallObstruction(SoldierAI ai, Soldier soldier, Vector3 targetPos, float dist)
@@ -779,7 +848,7 @@ namespace EasyRed2HumanAI
             if (_nextWallSidestepTime.TryGetValue(ptr, out float nextSide) && Time.time < nextSide)
                 return false;
 
-            _nextWallSidestepTime[ptr] = Time.time + 3.5f;
+            _nextWallSidestepTime[ptr] = Time.time + 3.2f;
 
             Vector3 curPos = soldier.transform.position;
             Vector3 toTargetXZ = targetPos - curPos;
@@ -793,9 +862,9 @@ namespace EasyRed2HumanAI
             bool preferRight = (AiCore.GetDeterministicHash(ptr, 61) & 1) == 0;
 
             int envMask = AiCore.GetSolidEnvironmentMask();
-            for (int dIdx = 0; dIdx < 2; dIdx++)
+            for (int dIdx = 0; dIdx < 3; dIdx++)
             {
-                float stepDist = dIdx == 0 ? 1.25f : 1.80f;
+                float stepDist = dIdx == 0 ? 0.90f : (dIdx == 1 ? 1.35f : 1.85f);
                 for (int side = 0; side < 2; side++)
                 {
                     Vector3 sideDir = ((side == 0) == preferRight) ? right : -right;
@@ -814,14 +883,23 @@ namespace EasyRed2HumanAI
                     if (Mathf.Abs(stepPos.y - curPos.y) > 1.20f)
                         continue;
 
-                    if (HasClearLineOfFireFromPosition(stepPos, myRoot, targetPos, dist, 1.18f, 1.32f, 18.0f) ||
-                        HasClearLineOfFireFromPosition(stepPos, myRoot, targetPos, dist, 0.64f, 0.78f, 18.0f))
+                    bool crouchStepClear = HasClearLineOfFireAndSightFromPosition(stepPos, myRoot, targetPos, dist, 0.64f, 0.78f, 18.0f, 1.04f, 2.8f);
+                    bool standStepClear = !crouchStepClear &&
+                                          HasClearLineOfFireAndSightFromPosition(stepPos, myRoot, targetPos, dist, 1.22f, 1.36f, 18.0f, 1.56f, 3.5f);
+                    if (crouchStepClear || standStepClear)
                     {
-                        if ((ai.MoveDestination - curPos).sqrMagnitude <= 2.5f * 2.5f)
+                        _localCoverProtectedUntil[ptr] = Time.time + 6.5f;
+                        if (soldier.IsOnCover() || soldier.HasDestinationAssigned)
+                        {
+                            SoldierPose stepPose = crouchStepClear ? SoldierPose.Crouch : SoldierPose.Idle;
+                            DestinationWithoutCover sideDest = new DestinationWithoutCover(stepPos, stepPose);
+                            soldier.CoverPosition(sideDest.Cast<AiDestination>());
+                        }
+                        if ((ai.MoveDestination - curPos).sqrMagnitude <= 3.0f * 3.0f)
                         {
                             ai.MoveDestination = stepPos;
                         }
-                        ai.MoveDirectlyToward(stepPos, 0.45f);
+                        AiCore.MoveBotTowardPosition(ai, soldier, stepPos, 0.05f, 2.2f);
                         _nextWallSidestepTime[ptr] = Time.time + 4.5f;
                         AntiStackNudges++;
                         return true;
@@ -837,9 +915,10 @@ namespace EasyRed2HumanAI
         // =====================================================================
         private static Vector3 GetEffectiveThreatDirection(Soldier soldier, Squad squad, Vector3 referencePos, Vector3 fallbackDir)
         {
-            if (soldier != null && soldier.aiController != null && soldier.aiController.visibleTarget != null)
+            if (soldier != null && soldier.aiController != null &&
+                AiCore.TryGetSpottableCenter(soldier.aiController.visibleTarget, out Vector3 ownTargetPos))
             {
-                Vector3 toTarget = soldier.aiController.visibleTarget.GetCenterOfUnit() - referencePos;
+                Vector3 toTarget = ownTargetPos - referencePos;
                 toTarget.y = 0f;
                 if (toTarget.sqrMagnitude > 0.25f)
                     return toTarget.normalized;
@@ -856,10 +935,8 @@ namespace EasyRed2HumanAI
                 {
                     Soldier mate = units[i];
                     if (mate == null || !mate.IsAlive || mate.aiController == null) continue;
-                    Spottable mateTarget = mate.aiController.visibleTarget;
-                    if (mateTarget == null) continue;
+                    if (!AiCore.TryGetSpottableCenter(mate.aiController.visibleTarget, out Vector3 enemyPos)) continue;
 
-                    Vector3 enemyPos = mateTarget.GetCenterOfUnit();
                     Vector3 toEnemy = enemyPos - referencePos;
                     toEnemy.y = 0f;
                     float dSq = toEnemy.sqrMagnitude;
@@ -884,15 +961,9 @@ namespace EasyRed2HumanAI
             }
 
             string faction = soldier != null ? soldier.faction : (squad != null && squad.Leader != null ? squad.Leader.faction : null);
-            BattleManager bm = BattleManager.instance;
-            BattlePhase phase = bm != null ? bm.currentPhase : null;
-            if (phase != null && !string.IsNullOrEmpty(faction) && phase.EnemyFactionHasSpawn(faction))
+            if (AiCore.TryGetEnemySpawnDirection(faction, referencePos, out Vector3 enemySpawnDir))
             {
-                Vector3 enemyTerritory = phase.GetOppositeFactionTerritoryPosition(faction);
-                Vector3 toTerritory = enemyTerritory - referencePos;
-                toTerritory.y = 0f;
-                if (toTerritory.sqrMagnitude > 1.0f)
-                    return toTerritory.normalized;
+                return enemySpawnDir;
             }
 
             fallbackDir.y = 0f;
@@ -1480,33 +1551,42 @@ namespace EasyRed2HumanAI
                     bool isPeeking = false;
                     if (_peekRestoreTime.TryGetValue(ptr, out float restoreAt))
                     {
+                        float curSuppNow = soldier.GetSuppressionValue();
                         bool urgentDuck = soldier.IsReloading ||
-                                          soldier.GetSuppressionValue() > duckBackSupp ||
+                                          soldier.MustReload() ||
+                                          curSuppNow > duckBackSupp ||
                                           !__instance.HasEnemyAndCanFireAtHim;
 
                         bool timerExpiredAndCanCrouch = false;
                         if (!urgentDuck && Time.time > restoreAt)
                         {
-                            Vector3 peekTargetPos = __instance.visibleTarget != null
-                                ? __instance.visibleTarget.GetCenterOfUnit()
+                            Vector3 peekTargetPos = AiCore.TryGetSpottableCenter(__instance.visibleTarget, out Vector3 validPeekPos)
+                                ? validPeekPos
                                 : (soldier.transform.position + soldier.transform.forward * Mathf.Max(__instance.distFromTarget, 15f));
-                            if (HasClearLineOfFireFromCrouch(soldier, peekTargetPos, __instance.distFromTarget))
+                            bool crouchClearNow = HasClearLineOfFireFromCrouch(soldier, peekTargetPos, __instance.distFromTarget);
+                            bool calmIndoorWindow = !crouchClearNow &&
+                                                    curSuppNow < 12f &&
+                                                    AiCore.HasLowCeilingOverhead(soldier.transform.position, 4.2f);
+                            if (calmIndoorWindow)
                             {
-                                timerExpiredAndCanCrouch = true;
+                                _peekRestoreTime[ptr] = Time.time + 2.8f;
                             }
                             else
                             {
-                                _peekRestoreTime[ptr] = Time.time + 2.5f;
+                                // True Pop-Up / Burst / Duck Rhythm: after firing a burst over an outdoor low wall or trench parapet
+                                // (or when taking return fire >= 12 at an indoor window), duck back into Crouch for peekCooldown!
+                                timerExpiredAndCanCrouch = true;
                             }
                         }
 
                         if (urgentDuck || timerExpiredAndCanCrouch)
                         {
                             _peekRestoreTime.Remove(ptr);
-                            _nextPeekAllowedTime[ptr] = Time.time + peekCooldown;
+                            float cdJitter = (AiCore.GetDeterministicHash(ptr, 211) & 15) * 0.05f;
+                            _nextPeekAllowedTime[ptr] = Time.time + peekCooldown + cdJitter;
                             if (!__instance.IsMoving() && soldier.m_pose == SoldierPose.Idle)
                             {
-                                SetBotPose(__instance, soldier, SoldierPose.Crouch);
+                                SetBotPose(__instance, soldier, SoldierPose.Crouch, true);
                                 _combatStanceHoldUntil[ptr] = Time.time + 5.0f;
                                 _combatCrouchLockUntil[ptr] = Time.time + 3.5f;
                             }
@@ -1533,7 +1613,7 @@ namespace EasyRed2HumanAI
                         else if ((personality == SoldierPersonality.Assaulter_Breacher ||
                                   personality == SoldierPersonality.Rifleman_Grenadier ||
                                   personality == SoldierPersonality.AT_Demolitionist) &&
-                                 __instance.visibleTarget != null &&
+                                 AiCore.TryGetSpottableCenter(__instance.visibleTarget, out Vector3 grenTargetPos) &&
                                  !__instance.visibleTarget.IsWheeledVehicleOrTank() &&
                                  __instance.distFromTarget >= 9.0f &&
                                  __instance.distFromTarget <= 34.0f &&
@@ -1546,7 +1626,7 @@ namespace EasyRed2HumanAI
                             if (fragItem != null &&
                                 __instance.distFromTarget <= soldier.GetGrenadeThrowRange(fragItem) &&
                                 UnityEngine.Random.Range(0, 100) > 60 &&
-                                IsSafeToThrowGrenadeAt(soldier, __instance.visibleTarget.GetCenterOfUnit(), __instance.distFromTarget, 9.0f) &&
+                                IsSafeToThrowGrenadeAt(soldier, grenTargetPos, __instance.distFromTarget, 9.0f) &&
                                 AiCore.TryConsumeBotRpcBudget(0.45f))
                             {
                                 soldier.Throw(fragItem, __instance.visibleTarget);
@@ -1666,7 +1746,7 @@ namespace EasyRed2HumanAI
 
                         if (dist > 1.15f && !soldier.isInBodyAnimation)
                         {
-                            __instance.MoveDirectlyToward(meleeEnemy.transform.position, 0.35f);
+                            __instance.MoveDirectlyToward(meleeEnemy.transform.position, 1.15f);
                         }
 
                         if (dist <= seqStrikeRange)
@@ -1883,11 +1963,10 @@ namespace EasyRed2HumanAI
                                 dist >= 18f &&
                                 dist <= 145f &&
                                 suppression < 42f &&
-                                __instance.visibleTarget != null)
+                                AiCore.TryGetSpottableCenter(__instance.visibleTarget, out Vector3 owCheckPos))
                             {
-                                Vector3 owTargetPos = __instance.visibleTarget.GetCenterOfUnit();
-                                if (HasClearLineOfFireFromCrouch(soldier, owTargetPos, dist) ||
-                                    HasClearLineOfFireFromStanding(soldier, owTargetPos, dist))
+                                if (HasClearLineOfFireFromCrouch(soldier, owCheckPos, dist) ||
+                                    HasClearLineOfFireFromStanding(soldier, owCheckPos, dist))
                                 {
                                     holdOverwatchFireNow = true;
                                 }
@@ -1898,10 +1977,9 @@ namespace EasyRed2HumanAI
                         {
                             SetBotPose(__instance, soldier, SoldierPose.Idle, true);
                         }
-                        else if (holdOverwatchFireNow)
+                        else if (holdOverwatchFireNow && AiCore.TryGetSpottableCenter(__instance.visibleTarget, out Vector3 owTargetPos))
                         {
                             __instance.moveCharacter = false;
-                            Vector3 owTargetPos = __instance.visibleTarget.GetCenterOfUnit();
                             bool crouchClear = HasClearLineOfFireFromCrouch(soldier, owTargetPos, dist);
                             SetBotPose(__instance, soldier, crouchClear ? SoldierPose.Crouch : SoldierPose.Idle, true);
                             if (!_nextBoundingHoldCountTime.TryGetValue(ptr, out float nextBoundCount) || Time.time >= nextBoundCount)
@@ -1923,8 +2001,8 @@ namespace EasyRed2HumanAI
                                  dist > 4.5f &&
                                  (__instance.moveLookingTarget || dist <= 22f || suppression >= 26f))
                         {
-                            Vector3 targetPos = __instance.visibleTarget != null
-                                ? __instance.visibleTarget.GetCenterOfUnit()
+                            Vector3 targetPos = AiCore.TryGetSpottableCenter(__instance.visibleTarget, out Vector3 validMoveTargetPos)
+                                ? validMoveTargetPos
                                 : (soldier.transform.position + soldier.transform.forward * Mathf.Max(dist, 15f));
 
                             bool crouchClear = HasClearLineOfFireFromCrouch(soldier, targetPos, dist);
@@ -1986,16 +2064,19 @@ namespace EasyRed2HumanAI
                         {
                             if (VisionConfig.NeverShootStandingInOpen.Value && dist > 4.5f)
                             {
-                                Vector3 targetPos = __instance.visibleTarget != null
-                                    ? __instance.visibleTarget.GetCenterOfUnit()
+                                Vector3 targetPos = AiCore.TryGetSpottableCenter(__instance.visibleTarget, out Vector3 validStandTargetPos)
+                                    ? validStandTargetPos
                                     : (soldier.transform.position + soldier.transform.forward * Mathf.Max(dist, 15f));
 
                                 bool crouchClear = HasClearLineOfFireFromCrouch(soldier, targetPos, dist);
                                 bool standClear = !crouchClear && HasClearLineOfFireFromStanding(soldier, targetPos, dist);
-                                bool mustStandToClearWall = !crouchClear &&
+                                bool canPeekNow = !_nextPeekAllowedTime.TryGetValue(ptr, out float nextPeekAllowed) || Time.time >= nextPeekAllowed;
+                                bool mustStandToClearWall = canPeekNow &&
+                                                            !crouchClear &&
                                                             standClear &&
                                                             suppression < maxPeekSupp &&
-                                                            !soldier.IsReloading;
+                                                            !soldier.IsReloading &&
+                                                            !soldier.MustReload();
 
                                 if (mustStandToClearWall)
                                 {
@@ -2003,10 +2084,11 @@ namespace EasyRed2HumanAI
                                     {
                                         SetBotPose(__instance, soldier, SoldierPose.Idle);
                                         _noProneUntil[ptr] = Time.time + 10.0f;
-                                        _peekRestoreTime[ptr] = Time.time + 4.5f;
+                                        _peekRestoreTime[ptr] = Time.time + GetJitteredPeekDuration(ptr, 4.0f);
+                                        AutoPeeksTriggered++;
                                     }
                                 }
-                                else if (!crouchClear && soldier.m_pose == SoldierPose.Idle && suppression < 32f)
+                                else if (canPeekNow && !crouchClear && soldier.m_pose == SoldierPose.Idle && suppression < 32f && !soldier.IsReloading)
                                 {
                                     __instance.actualPose = SoldierPose.Idle;
                                 }
@@ -2067,20 +2149,62 @@ namespace EasyRed2HumanAI
                             bool hasMortar = __instance.HeldMortar != null;
 
                             bool holdDefensiveCrouch = onActualCombatCover || inObjectiveZone || isShelteredByWall || isSquadAlerted;
-                            Vector3 lookFwd = soldier.transform.forward;
-                            lookFwd.y = 0f;
-                            lookFwd = lookFwd.sqrMagnitude > 0.001f ? lookFwd.normalized : threatDir;
-                            bool windowSillRequiresStanding =
-                                (onActualCombatCover && activeCover != null && activeCover.GetCoverPose() == SoldierPose.Idle) ||
-                                (AiCore.RaycastEnvironment(myPos + Vector3.up * 0.78f, lookFwd, 2.2f, myRoot, out _) &&
-                                 !AiCore.RaycastEnvironment(myPos + Vector3.up * 1.28f, lookFwd, 6.0f, myRoot, out _));
+                            bool canAttemptStand = !soldier.IsReloading &&
+                                                   !soldier.MustReload() &&
+                                                   !soldier.isBleeding &&
+                                                   !stealthCrouch &&
+                                                   !hasMortar &&
+                                                   suppression < duckBackSupp;
+                            bool shouldStandAtCoverOrTrench = false;
+                            if ((holdDefensiveCrouch || inCombatHold) && canAttemptStand)
+                            {
+                                bool isIndoor = AiCore.HasLowCeilingOverhead(myPos, 4.2f);
+                                bool inOutdoorTrenchWindow = false;
+                                if (!isIndoor)
+                                {
+                                    float cycleLen = (isSquadAlerted || inCombatHold) ? 7.2f : 8.6f;
+                                    float phaseOffset = (AiCore.GetDeterministicHash(ptr, 197) & 127) * (cycleLen / 128f);
+                                    bool canPeekTrenchNow = !_nextPeekAllowedTime.TryGetValue(ptr, out float nextTrenchP) || Time.time >= nextTrenchP;
+                                    inOutdoorTrenchWindow = canPeekTrenchNow &&
+                                                            suppression < duckBackSupp * 0.85f &&
+                                                            ((Time.time + phaseOffset) % cycleLen) < 3.4f;
+                                }
 
-                            bool canStandAtWindow = windowSillRequiresStanding &&
-                                                    suppression < duckBackSupp &&
-                                                    !soldier.IsReloading &&
-                                                    !soldier.isBleeding;
+                                if (isIndoor || inOutdoorTrenchWindow)
+                                {
+                                    Vector3 lookFwd = soldier.transform.forward;
+                                    lookFwd.y = 0f;
+                                    lookFwd = lookFwd.sqrMagnitude > 0.001f ? lookFwd.normalized : threatDir;
 
-                            if (canStandAtWindow && !stealthCrouch && !hasMortar)
+                                    bool lowCoverBlocked = AiCore.RaycastEnvironment(myPos + Vector3.up * 0.76f, lookFwd, 2.2f, myRoot, out _);
+                                    bool lintelClear = !AiCore.RaycastEnvironment(myPos + Vector3.up * 1.56f, lookFwd, 2.6f, myRoot, out _);
+                                    bool standLipClear = lowCoverBlocked &&
+                                                         lintelClear &&
+                                                         !AiCore.RaycastEnvironment(myPos + Vector3.up * 1.36f, lookFwd, 5.5f, myRoot, out _);
+                                    bool coverSuggestsStand = onActualCombatCover &&
+                                                              activeCover != null &&
+                                                              activeCover.GetCoverPose() == SoldierPose.Idle &&
+                                                              lintelClear;
+
+                                    if (isIndoor)
+                                    {
+                                        // Indoor Window (lintel > 1.56m): stand to watch out window when unsuppressed;
+                                        // pillboxes and low cottage/attic slits (lintel <= 1.56m) fail lintelClear and stay crouched!
+                                        shouldStandAtCoverOrTrench = standLipClear || coverSuggestsStand;
+                                    }
+                                    else
+                                    {
+                                        // Outdoor Waist-High Wall (~0.75m-1.00m): if crouched eye height (~1.04m) ALREADY clears the rim,
+                                        // stay crouched behind the sandbags/wall while scanning and only pop up when firing!
+                                        // Outdoor Trench / Chest-High Parapet (~1.05m-1.40m): staggered sentry peek cycle (2-3 squadmates at a time).
+                                        bool crouchEyeBlocked = lowCoverBlocked &&
+                                                                AiCore.RaycastEnvironment(myPos + Vector3.up * 1.04f, lookFwd, 2.3f, myRoot, out _);
+                                        shouldStandAtCoverOrTrench = (crouchEyeBlocked && standLipClear) || coverSuggestsStand;
+                                    }
+                                }
+                            }
+
+                            if (shouldStandAtCoverOrTrench)
                             {
                                 SetBotPose(__instance, soldier, SoldierPose.Idle);
                             }
@@ -2108,8 +2232,8 @@ namespace EasyRed2HumanAI
 
                     if (isGunner && !__instance.IsMoving())
                     {
-                        Vector3 targetPos = __instance.visibleTarget != null
-                            ? __instance.visibleTarget.GetCenterOfUnit()
+                        Vector3 targetPos = AiCore.TryGetSpottableCenter(__instance.visibleTarget, out Vector3 validGunnerPos)
+                            ? validGunnerPos
                             : (soldier.transform.position + soldier.transform.forward * 25f);
                         HandleGunnerBipodAndWallMounting(__instance, soldier, bipod, targetPos, dist);
                     }
@@ -2196,6 +2320,8 @@ namespace EasyRed2HumanAI
                     if (bestDistSq <= 3.8f * 3.8f)
                     {
                         _liberateMoveStartTime.Remove(rescuerPtr);
+                        if (ai != null && ai.moveDirectlyToward_end > Time.time)
+                            ai.moveDirectlyToward_end = 0f;
                         if (AiCore.TryConsumeBotRpcBudget(0.45f))
                         {
                             string sqId = rescuer.joinedSquad != null ? rescuer.joinedSquad.InstanceID.ToString() : "";
@@ -2226,7 +2352,7 @@ namespace EasyRed2HumanAI
                             return;
                         }
 
-                        ai.MoveDirectlyToward(bestSurrendered.transform.position, 1.35f);
+                        AiCore.MoveBotTowardPosition(ai, rescuer, bestSurrendered.transform.position, 2.0f, 2.8f);
                     }
                 }
                 else
@@ -2800,7 +2926,7 @@ namespace EasyRed2HumanAI
                             if (!_nextMeleeStepTime.TryGetValue(ptr, out float nextStep) || Time.time >= nextStep)
                             {
                                 _nextMeleeStepTime[ptr] = Time.time + 0.20f;
-                                __instance.MoveDirectlyToward(enemyPos, 0.30f);
+                                __instance.MoveDirectlyToward(enemyPos, 0.65f);
                                 __instance.moveLookingTarget = true;
                             }
                         }
@@ -2898,7 +3024,10 @@ namespace EasyRed2HumanAI
                                 {
                                     bool crouchClear = HasClearLineOfFireFromCrouch(soldier, __0, dist);
                                     bool standClear = !crouchClear && HasClearLineOfFireFromStanding(soldier, __0, dist);
-                                    bool canSidestep = !soldier.IsCharging() && !isOnBridge && !soldier.IsOnCover();
+                                    bool isStaffingStaticGun = _assignedEmplacementUntil.TryGetValue(ptr, out float empUntilT) && Time.time < empUntilT;
+                                    // Allow short lateral jamb/embrasure sidestep even when snapped to cover once both crouch & standing shots are blocked!
+                                    bool canSidestep = !soldier.IsCharging() && !isOnBridge && !isStaffingStaticGun;
+                                    float peekDur = GetJitteredPeekDuration(ptr, 4.1f);
 
                                     if (soldier.m_pose == SoldierPose.Prone &&
                                         !HasClearLineOfFireFromProne(soldier, __0, dist))
@@ -2917,8 +3046,8 @@ namespace EasyRed2HumanAI
                                             SetBotPose(__instance, soldier, SoldierPose.Idle, true);
                                             _noProneUntil[ptr] = Time.time + 10.0f;
                                             _combatStanceHoldUntil[ptr] = Time.time + 6.0f;
-                                            _peekRestoreTime[ptr] = Time.time + 4.5f;
-                                            _nextStanceDropAllowed[ptr] = Time.time + 4.5f;
+                                            _peekRestoreTime[ptr] = Time.time + peekDur;
+                                            _nextStanceDropAllowed[ptr] = Time.time + peekDur;
                                             if (isGunner && bipod != null)
                                             {
                                                 _bipodStandUntil[ptr] = Time.time + 4.5f;
@@ -2938,8 +3067,8 @@ namespace EasyRed2HumanAI
                                             SetBotPose(__instance, soldier, SoldierPose.Idle, true);
                                             _noProneUntil[ptr] = Time.time + 10.0f;
                                             _combatStanceHoldUntil[ptr] = Time.time + 6.0f;
-                                            _peekRestoreTime[ptr] = Time.time + 4.5f;
-                                            _nextStanceDropAllowed[ptr] = Time.time + 4.5f;
+                                            _peekRestoreTime[ptr] = Time.time + peekDur;
+                                            _nextStanceDropAllowed[ptr] = Time.time + peekDur;
                                             if (isGunner && bipod != null)
                                             {
                                                 _bipodStandUntil[ptr] = Time.time + 4.5f;
@@ -3007,7 +3136,7 @@ namespace EasyRed2HumanAI
                                 Vector3 curPos = soldier.transform.position;
                                 if (!AiCore.IsDirectionBlockedByEnvironment(curPos + Vector3.up * 0.75f, pushDir, 1.50f, soldier.transform.root))
                                 {
-                                    __instance.MoveDirectlyToward(curPos + pushDir * 1.40f, 0.45f);
+                                    __instance.MoveDirectlyToward(curPos + pushDir * 1.40f, 0.80f);
                                     _nextAntiStackTime[ptr] = Time.time + 6.0f;
                                     AntiStackNudges++;
                                 }
@@ -3314,9 +3443,9 @@ namespace EasyRed2HumanAI
                     }
 
                     float curSupp = __instance.GetSuppressionValue();
-                    bool isDoorVulnerable = curSupp >= 32f ||
-                                            __instance.IsReloading ||
-                                            __instance.isBleeding;
+                    // Never slam open doors shut just because a soldier is reloading; only close exposed doorways
+                    // under heavy suppression (>= 58) or while bleeding out so indoor defenders keep their firing lane!
+                    bool isDoorVulnerable = curSupp >= 58f || __instance.isBleeding;
                     // Never close window shutters just because a soldier is reloading or lightly suppressed;
                     // only close shutters under severe suppression (>= 78) or while bleeding out.
                     bool isShutterVulnerable = curSupp >= 78f || __instance.isBleeding;
@@ -3403,7 +3532,15 @@ namespace EasyRed2HumanAI
                             {
                                 bool walkingThrough = isMoving && Vector3.Dot(moveDir, toDoorDir) > 0.20f;
                                 bool facingClose = distSq <= 1.96f && Vector3.Dot(botFwd, toDoorDir) > 0.35f;
-                                if (walkingThrough || facingClose)
+                                bool clearingFiringLane = !isMoving &&
+                                                          !onCooldown &&
+                                                          !isDoorVulnerable &&
+                                                          distSq <= 6.25f &&
+                                                          threatDir.sqrMagnitude > 0.01f &&
+                                                          Vector3.Dot(toDoorDir, threatDir) > 0.45f &&
+                                                          Vector3.Dot(botFwd, toDoorDir) > 0.35f &&
+                                                          AiCore.TryConsumeBotRpcBudget(0.25f);
+                                if (walkingThrough || facingClose || clearingFiringLane)
                                 {
                                     door.SetDoor(true);
                                     _nextDoorToggleTime[doorPtr] = now + 3.5f;
@@ -3635,6 +3772,7 @@ namespace EasyRed2HumanAI
                     if (!character.IsAlive ||
                         character.IsInjured ||
                         !character.hasSyringe ||
+                        (character.Params != null && (!character.Params.canDoMedic || !character.Params.canMove)) ||
                         character.IsCharging() ||
                         character.isInBodyAnimation ||
                         character.HasSurrended() ||

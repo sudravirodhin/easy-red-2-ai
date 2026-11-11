@@ -31,10 +31,15 @@ namespace EasyRed2HumanAI
 
         private static readonly List<PickerCampaignEntry> _mapPickerCampaigns = new List<PickerCampaignEntry>(24);
         private static bool _mapPickerInitialized;
+        private static int _lastCustomCampaignCount = -1;
         private static int _selectedCampaignIdx;
         private static int _selectedBattleIdx;
         private static int _campaignPage;
         private static int _battlePage;
+        private static int _mpSwitchStage;
+        private static float _mpSwitchStageDeadline;
+        private static string _mpSwitchDisplayName;
+        private static bool _mpSwitchRetriedConnect;
 
         public static void ShowToast(string msg, float duration = 4.0f)
         {
@@ -53,6 +58,8 @@ namespace EasyRed2HumanAI
             {
                 try
                 {
+                    AiCore.RecordFrameTiming();
+                    UpdatePendingMpMapSwitch();
                     CleanupExpiredFiringRecords();
                     VeteranAndTacticsPatches.RenderVeteran3DMarkersAndCleanup();
                     VeteranAndTacticsPatches.UpdateMacroObjectiveAndEmplacementDirector();
@@ -101,28 +108,30 @@ namespace EasyRed2HumanAI
                         {
                             VeteranAndTacticsPatches.CleanupDictionaries();
                             ShowToast(
-                                $"[Battle Hardened v{Plugin.PluginVersion} Telemetry] Vets:{VeteranAndTacticsPatches.ActiveVeteransCount} (Prom:{VeteranAndTacticsPatches.FieldPromotionsCount}) | ExtraTicks:{AiCore.TotalAdaptiveAiExtraTicks} (PingSkip:{AiCore.TotalPingGovernorSkippedCycles}) | FFSaved:{VeteranAndTacticsPatches.FriendlyFirePrevented} | MedRedirect:{VeteranAndTacticsPatches.MedicTriageRedirectsCount}\n" +
+                                $"[Battle Hardened v{Plugin.PluginVersion} Telemetry] MaxFrame:{AiCore.RollingMaxFrameMs:F1}ms (Hitches:{AiCore.TotalHitchesOver28ms}) | Vets:{VeteranAndTacticsPatches.ActiveVeteransCount} (Prom:{VeteranAndTacticsPatches.FieldPromotionsCount}) | ExtraTicks:{AiCore.TotalAdaptiveAiExtraTicks} (PingSkip:{AiCore.TotalPingGovernorSkippedCycles}) | FFSaved:{VeteranAndTacticsPatches.FriendlyFirePrevented} | MedRedirect:{VeteranAndTacticsPatches.MedicTriageRedirectsCount}\n" +
                                 $"GOAP:{VeteranAndTacticsPatches.GoapPlansExecutedCount} (Anvil:{VeteranAndTacticsPatches.TeamNetAnvilHammerCount} Flank:{VeteranAndTacticsPatches.GoapPinAndFlankCount} Smoke:{VeteranAndTacticsPatches.GoapSmokeScreensCount} RadioCut:{VeteranAndTacticsPatches.RadioNetCutoffsCount}) | WepUp:{VeteranAndTacticsPatches.RoleWeaponUpgradesCount} | BuddyResup:{VeteranAndTacticsPatches.BuddyResuppliesCount} | RadioLoot:{VeteranAndTacticsPatches.FieldRadiosInheritedCount} | Helmets:{VeteranAndTacticsPatches.HelmetsRecoveredCount} | Dragged:{VeteranAndTacticsPatches.CasualtiesDraggedCount}\n" +
-                                $"Drops:{VeteranAndTacticsPatches.SelfPreservationDrops} | IndoorCrouch:{VeteranAndTacticsPatches.IndoorPronePreventedCount} | Pies:{VeteranAndTacticsPatches.CornerPiesExecutedCount} | TankCov:{VeteranAndTacticsPatches.TankHullCoverUsesCount} | Bounds:{VeteranAndTacticsPatches.BoundingOverwatchHoldsCount} | Doors:{VeteranAndTacticsPatches.DoorsStrategicallyClosedCount} | Bipods:{VeteranAndTacticsPatches.BipodsDeployed} | WallBlk:{VeteranAndTacticsPatches.WallsBlocked} | Melee:{VeteranAndTacticsPatches.MeleeAttacksTriggered} | Surr:{VeteranAndTacticsPatches.ShellShockSurrendersCount}/Lib:{VeteranAndTacticsPatches.ComradesLiberated}\n" +
-                                $"Garrisons:{VeteranAndTacticsPatches.MacroGarrisonsAssignedCount} | Emplace:{VeteranAndTacticsPatches.StaticGunsStaffedCount} | APC:{VeteranAndTacticsPatches.SmartApcDismountsCount} | TankHold:{VeteranAndTacticsPatches.TankStandoffHoldsCount} | SmartAmmo:{VeteranAndTacticsPatches.SmartAmmoSwitchesCount} | Unsticks:{VeteranAndTacticsPatches.TankRockUnsticksCount} | Repairs:{VeteranAndTacticsPatches.ShelteredRepairsCount} | RoadkillSaved:{VeteranAndTacticsPatches.FriendlyRoadkillsPreventedCount} (ClientRK:{VeteranAndTacticsPatches.RemoteClientRoadkillsAssistedCount})\n" +
+                                $"Drops:{VeteranAndTacticsPatches.SelfPreservationDrops} | Peeks:{VeteranAndTacticsPatches.AutoPeeksTriggered} | IndoorCrouch:{VeteranAndTacticsPatches.IndoorPronePreventedCount} | Pies:{VeteranAndTacticsPatches.CornerPiesExecutedCount} | TankCov:{VeteranAndTacticsPatches.TankHullCoverUsesCount} | Bounds:{VeteranAndTacticsPatches.BoundingOverwatchHoldsCount} | Doors:{VeteranAndTacticsPatches.DoorsStrategicallyClosedCount} | Bipods:{VeteranAndTacticsPatches.BipodsDeployed} | WallBlk:{VeteranAndTacticsPatches.WallsBlocked} | Melee:{VeteranAndTacticsPatches.MeleeAttacksTriggered} | Surr:{VeteranAndTacticsPatches.ShellShockSurrendersCount}/Lib:{VeteranAndTacticsPatches.ComradesLiberated}\n" +
+                                $"Garrisons:{VeteranAndTacticsPatches.MacroGarrisonsAssignedCount} | Emplace:{VeteranAndTacticsPatches.StaticGunsStaffedCount} | APC:{VeteranAndTacticsPatches.SmartApcDismountsCount} | TankHold:{VeteranAndTacticsPatches.TankStandoffHoldsCount} | TankSpread:{VeteranAndTacticsPatches.ArmoredDispersionAdjustmentsCount} | SmartAmmo:{VeteranAndTacticsPatches.SmartAmmoSwitchesCount} | Unsticks:{VeteranAndTacticsPatches.TankRockUnsticksCount} | Repairs:{VeteranAndTacticsPatches.ShelteredRepairsCount} | RoadkillSaved:{VeteranAndTacticsPatches.FriendlyRoadkillsPreventedCount} (ClientRK:{VeteranAndTacticsPatches.RemoteClientRoadkillsAssistedCount})\n" +
                                 $"CombArms:{VeteranAndTacticsPatches.CombinedArmsPriorityAssistsCount} (Kamikaze:{VeteranAndTacticsPatches.KamikazeDivesTriggeredCount}) | Callouts:{VeteranAndTacticsPatches.LocalCalloutsSharedCount} | Supp:{VeteranAndTacticsPatches.SuppressiveEventsCount} | WoodPen:{VeteranAndTacticsPatches.ThinCoverPenetrationsCount} | TopAP:{VeteranAndTacticsPatches.AircraftTopAttackPenetrationsAssistedCount} (HostAssist:{VeteranAndTacticsPatches.HostVanillaClientApAssistsCount}) | CrewBlastBlk:{VeteranAndTacticsPatches.EnclosedCrewExplosionHitsBlockedCount} | AirMgBlk:{VeteranAndTacticsPatches.AirplanePilotMgHitsBlockedCount} | Chutes:{VeteranAndTacticsPatches.ParachutesDriftedCount}",
                                 9.5f);
                         }
                     }
 
-                    if (VisionConfig.DebugLogging.Value)
+                    // CRITICAL: Check CanEmitDebugLog("Heartbeat", 15.0f) BEFORE building the multi-line string so zero
+                    // string concatenations or int.ToString() allocations occur on the 99.9% of frames while on cooldown!
+                    if (AiCore.CanEmitDebugLog("Heartbeat", 15.0f))
                     {
                         float dtMs = Mathf.Max(Time.unscaledDeltaTime, 0.0001f) * 1000f;
                         float fps = 1000f / dtMs;
                         AiCore.LogDebug(
                             "Heartbeat",
-                            $"FPS:{fps:F0} ({dtMs:F1}ms) | Vets:{VeteranAndTacticsPatches.ActiveVeteransCount} (Prom:{VeteranAndTacticsPatches.FieldPromotionsCount}) | " +
+                            $"FPS:{fps:F0} ({dtMs:F1}ms, Max15s:{AiCore.RollingMaxFrameMs:F1}ms, Hitches:{AiCore.TotalHitchesOver28ms}) | Vets:{VeteranAndTacticsPatches.ActiveVeteransCount} (Prom:{VeteranAndTacticsPatches.FieldPromotionsCount}) | " +
                             $"GOAP:{VeteranAndTacticsPatches.GoapPlansExecutedCount} (Anvil:{VeteranAndTacticsPatches.TeamNetAnvilHammerCount} PinFlank:{VeteranAndTacticsPatches.GoapPinAndFlankCount} Smoke:{VeteranAndTacticsPatches.GoapSmokeScreensCount} WepUp:{VeteranAndTacticsPatches.RoleWeaponUpgradesCount} BuddyResup:{VeteranAndTacticsPatches.BuddyResuppliesCount} RadioLoot:{VeteranAndTacticsPatches.FieldRadiosInheritedCount} Helmets:{VeteranAndTacticsPatches.HelmetsRecoveredCount} Dragged:{VeteranAndTacticsPatches.CasualtiesDraggedCount} RadioCut:{VeteranAndTacticsPatches.RadioNetCutoffsCount}) | " +
-                            $"Drops:{VeteranAndTacticsPatches.SelfPreservationDrops} | IndoorCrouch:{VeteranAndTacticsPatches.IndoorPronePreventedCount} | Pies:{VeteranAndTacticsPatches.CornerPiesExecutedCount} | TankCov:{VeteranAndTacticsPatches.TankHullCoverUsesCount} | " +
+                            $"Drops:{VeteranAndTacticsPatches.SelfPreservationDrops} | Peeks:{VeteranAndTacticsPatches.AutoPeeksTriggered} | IndoorCrouch:{VeteranAndTacticsPatches.IndoorPronePreventedCount} | Pies:{VeteranAndTacticsPatches.CornerPiesExecutedCount} | TankCov:{VeteranAndTacticsPatches.TankHullCoverUsesCount} | " +
                             $"Callouts:{VeteranAndTacticsPatches.LocalCalloutsSharedCount} (KillVoice:{VeteranAndTacticsPatches.BotKillCalloutsCount}) | Supp:{VeteranAndTacticsPatches.SuppressiveEventsCount} | " +
                             $"Bounds:{VeteranAndTacticsPatches.BoundingOverwatchHoldsCount} | Garrisons:{VeteranAndTacticsPatches.MacroGarrisonsAssignedCount} | " +
                             $"Emplace:{VeteranAndTacticsPatches.StaticGunsStaffedCount} | APC:{VeteranAndTacticsPatches.SmartApcDismountsCount} | " +
-                            $"TankHold:{VeteranAndTacticsPatches.TankStandoffHoldsCount} | SmartAmmo:{VeteranAndTacticsPatches.SmartAmmoSwitchesCount} | Unsticks:{VeteranAndTacticsPatches.TankRockUnsticksCount} | MedRedirect:{VeteranAndTacticsPatches.MedicTriageRedirectsCount} | RoadkillSaved:{VeteranAndTacticsPatches.FriendlyRoadkillsPreventedCount} (ClientRK:{VeteranAndTacticsPatches.RemoteClientRoadkillsAssistedCount}) | CombArms:{VeteranAndTacticsPatches.CombinedArmsPriorityAssistsCount} (Kamikaze:{VeteranAndTacticsPatches.KamikazeDivesTriggeredCount}) | " +
+                            $"TankHold:{VeteranAndTacticsPatches.TankStandoffHoldsCount} | TankSpread:{VeteranAndTacticsPatches.ArmoredDispersionAdjustmentsCount} | SmartAmmo:{VeteranAndTacticsPatches.SmartAmmoSwitchesCount} | Unsticks:{VeteranAndTacticsPatches.TankRockUnsticksCount} | MedRedirect:{VeteranAndTacticsPatches.MedicTriageRedirectsCount} | RoadkillSaved:{VeteranAndTacticsPatches.FriendlyRoadkillsPreventedCount} (ClientRK:{VeteranAndTacticsPatches.RemoteClientRoadkillsAssistedCount}) | CombArms:{VeteranAndTacticsPatches.CombinedArmsPriorityAssistsCount} (Kamikaze:{VeteranAndTacticsPatches.KamikazeDivesTriggeredCount}) | " +
                             $"Bridges:{VeteranAndTacticsPatches.BridgeCrossingsAssistedCount} | Surr:{VeteranAndTacticsPatches.ShellShockSurrendersCount} (Lib:{VeteranAndTacticsPatches.ComradesLiberated}) | " +
                             $"WoodPen:{VeteranAndTacticsPatches.ThinCoverPenetrationsCount} | TopAP:{VeteranAndTacticsPatches.AircraftTopAttackPenetrationsAssistedCount} (HostAssist:{VeteranAndTacticsPatches.HostVanillaClientApAssistsCount}) | CrewBlastBlk:{VeteranAndTacticsPatches.EnclosedCrewExplosionHitsBlockedCount} | AirMgBlk:{VeteranAndTacticsPatches.AirplanePilotMgHitsBlockedCount} | PlaneAudio:{VeteranAndTacticsPatches.PlaneAudioLoopsDesyncedCount} | Chutes:{VeteranAndTacticsPatches.ParachutesDriftedCount} | " +
                             $"Doors:{VeteranAndTacticsPatches.DoorsStrategicallyClosedCount} | Bipods:{VeteranAndTacticsPatches.BipodsDeployed} | WallBlk:{VeteranAndTacticsPatches.WallsBlocked} | " +
@@ -131,7 +140,106 @@ namespace EasyRed2HumanAI
                             15.0f);
                     }
                 }
+                catch (Exception ex)
+                {
+                    AiCore.LogDebug("UpdateErr", ex.Message, 10.0f);
+                }
+            }
+        }
+
+        // Vanilla BattleLoader.ConnectToNextMatch (0x180A6E2CD) accidentally sets `this.waitBeforeJoining = (float)this.waitTime`
+        // (reading the int retry counter `this.waitTime` = 0 instead of the `float waitTime` RPC parameter), causing Clients
+        // to race into JoinRoom before the Host has finished leaving the old room and creating the new room.
+        [HarmonyPatch(typeof(BattleLoader), nameof(BattleLoader.ConnectToNextMatch))]
+        public static class BattleLoader_ConnectToNextMatch_Patch
+        {
+            public static void Postfix(BattleLoader __instance, float __1)
+            {
+                try
+                {
+                    if (__instance != null && __1 > __instance.waitBeforeJoining)
+                    {
+                        __instance.waitBeforeJoining = __1;
+                    }
+                }
                 catch { }
+            }
+        }
+
+        private static void BeginHostLeaveRoomForMapSwitch(BattleLoader bl)
+        {
+            if (bl == null)
+                bl = BattleLoader.instance;
+
+            // Unregister the dying scene's BattleLoader from Photon callbacks (OnDisable -> RemoveCallbackTarget)
+            // so BattleLoader.OnConnectedToMaster does not fire ConnectUsingSettings() / ConnectToNextMatchCR on the Host.
+            if (bl != null)
+                bl.enabled = false;
+
+            MatchData.actorType = MatchData.RoomActorType.master;
+            Photon.Pun.PhotonNetwork.LeaveRoom();
+            Photon.Pun.PhotonNetwork.SendAllOutgoingCommands();
+            _mpSwitchStage = 2;
+            _mpSwitchRetriedConnect = false;
+            _mpSwitchStageDeadline = Time.unscaledTime + 3.5f;
+        }
+
+        private static void UpdatePendingMpMapSwitch()
+        {
+            if (_mpSwitchStage == 0)
+                return;
+
+            MatchData md = MatchData.data;
+            if (md == null)
+            {
+                _mpSwitchStage = 0;
+                return;
+            }
+
+            float now = Time.unscaledTime;
+            if (_mpSwitchStage == 1)
+            {
+                Photon.Pun.PhotonNetwork.SendAllOutgoingCommands();
+                bool allClientsLeft = !Photon.Pun.PhotonNetwork.InRoom ||
+                                      Photon.Pun.PhotonNetwork.CurrentRoom == null ||
+                                      Photon.Pun.PhotonNetwork.CurrentRoom.PlayerCount <= 1;
+                if (allClientsLeft || now >= _mpSwitchStageDeadline)
+                {
+                    if (Photon.Pun.PhotonNetwork.InRoom)
+                    {
+                        BeginHostLeaveRoomForMapSwitch(BattleLoader.instance);
+                    }
+                    else
+                    {
+                        _mpSwitchStage = 2;
+                        _mpSwitchRetriedConnect = false;
+                        _mpSwitchStageDeadline = now + 3.5f;
+                    }
+                }
+                return;
+            }
+
+            if (_mpSwitchStage == 2)
+            {
+                var netState = Photon.Pun.PhotonNetwork.NetworkClientState;
+                if (!_mpSwitchRetriedConnect &&
+                    netState == Photon.Realtime.ClientState.Disconnected &&
+                    now < _mpSwitchStageDeadline)
+                {
+                    _mpSwitchRetriedConnect = true;
+                    Photon.Pun.PhotonNetwork.ConnectUsingSettings();
+                    return;
+                }
+
+                bool readyOnMaster = !Photon.Pun.PhotonNetwork.InRoom &&
+                                     netState == Photon.Realtime.ClientState.ConnectedToMasterServer;
+                if (readyOnMaster || now >= _mpSwitchStageDeadline)
+                {
+                    _mpSwitchStage = 0;
+                    MatchData.actorType = MatchData.RoomActorType.master;
+                    BattleManager.SetPlayerFaction("");
+                    md.StartBattleLoading();
+                }
             }
         }
 
@@ -512,11 +620,59 @@ namespace EasyRed2HumanAI
                 GUI.color = Color.white;
             }
 
-            internal static void EnsureMapPickerCatalog()
+            private static void AppendCampaignTreeEntry(CampaignTreeData camp, string prefix, int fallbackIdx)
             {
-                if (_mapPickerInitialized && _mapPickerCampaigns.Count > 0)
+                if (camp == null || camp.battles == null || camp.battles.Count == 0)
                     return;
 
+                string campName = camp.GetName();
+                if (string.IsNullOrEmpty(campName))
+                    campName = camp.campaing_id ?? $"Campaign #{fallbackIdx + 1}";
+                if (!string.IsNullOrEmpty(prefix))
+                    campName = $"{prefix} {campName}";
+
+                List<PickerBattleEntry> bList = new List<PickerBattleEntry>(camp.battles.Count);
+                for (int j = 0; j < camp.battles.Count; j++)
+                {
+                    ICampaignTreeBattleData bRef = camp.battles[j];
+                    if (bRef == null)
+                        continue;
+
+                    string uid = bRef.GetUniqueId() ?? $"Mission_{j + 1}";
+                    bList.Add(new PickerBattleEntry
+                    {
+                        DisplayName = null, // Lazily resolved per visible page to avoid upfront XML disk I/O & Missing translation spam
+                        UniqueId = uid,
+                        BattleRef = bRef
+                    });
+                }
+
+                if (bList.Count > 0)
+                {
+                    _mapPickerCampaigns.Add(new PickerCampaignEntry
+                    {
+                        CampaignName = campName,
+                        Battles = bList
+                    });
+                }
+            }
+
+            internal static void EnsureMapPickerCatalog()
+            {
+                int curCustomCount = 0;
+                try
+                {
+                    var loc = CustomCampaignsList.local_campaign_data;
+                    var ws = CustomCampaignsList.workshop_campaign_data;
+                    if (loc != null) curCustomCount += loc.Count;
+                    if (ws != null) curCustomCount += ws.Count;
+                }
+                catch { }
+
+                if (_mapPickerInitialized && _mapPickerCampaigns.Count > 0 && curCustomCount == _lastCustomCampaignCount)
+                    return;
+
+                _lastCustomCampaignCount = curCustomCount;
                 _mapPickerCampaigns.Clear();
                 try
                 {
@@ -525,44 +681,25 @@ namespace EasyRed2HumanAI
                     {
                         for (int i = 0; i < rawCampaigns.Length; i++)
                         {
-                            CampaignTreeData camp = rawCampaigns[i];
-                            if (camp == null || camp.battles == null || camp.battles.Count == 0)
-                                continue;
+                            AppendCampaignTreeEntry(rawCampaigns[i], null, i);
+                        }
+                    }
 
-                            string campName = camp.GetName();
-                            if (string.IsNullOrEmpty(campName))
-                                campName = camp.campaing_id ?? $"Campaign #{i + 1}";
+                    var localCampaigns = CustomCampaignsList.local_campaign_data;
+                    if (localCampaigns != null)
+                    {
+                        for (int i = 0; i < localCampaigns.Count; i++)
+                        {
+                            AppendCampaignTreeEntry(localCampaigns[i], "[Local]", i);
+                        }
+                    }
 
-                            List<PickerBattleEntry> bList = new List<PickerBattleEntry>(camp.battles.Count);
-                            for (int j = 0; j < camp.battles.Count; j++)
-                            {
-                                ICampaignTreeBattleData bRef = camp.battles[j];
-                                if (bRef == null)
-                                    continue;
-
-                                string uid = bRef.GetUniqueId() ?? $"Mission_{j + 1}";
-                                string bName = Language.GetBattleName(uid);
-                                if (string.IsNullOrEmpty(bName))
-                                    bName = Language.GetText(uid);
-                                if (string.IsNullOrEmpty(bName))
-                                    bName = uid;
-
-                                bList.Add(new PickerBattleEntry
-                                {
-                                    DisplayName = bName,
-                                    UniqueId = uid,
-                                    BattleRef = bRef
-                                });
-                            }
-
-                            if (bList.Count > 0)
-                            {
-                                _mapPickerCampaigns.Add(new PickerCampaignEntry
-                                {
-                                    CampaignName = campName,
-                                    Battles = bList
-                                });
-                            }
+                    var workshopCampaigns = CustomCampaignsList.workshop_campaign_data;
+                    if (workshopCampaigns != null)
+                    {
+                        for (int i = 0; i < workshopCampaigns.Count; i++)
+                        {
+                            AppendCampaignTreeEntry(workshopCampaigns[i], "[Workshop]", i);
                         }
                     }
                 }
@@ -571,6 +708,47 @@ namespace EasyRed2HumanAI
                 _mapPickerInitialized = true;
                 _selectedCampaignIdx = Mathf.Clamp(_selectedCampaignIdx, 0, Mathf.Max(0, _mapPickerCampaigns.Count - 1));
                 _selectedBattleIdx = 0;
+            }
+
+            private static PickerBattleEntry GetResolvedBattleEntry(List<PickerBattleEntry> list, int index)
+            {
+                PickerBattleEntry entry = list[index];
+                if (!string.IsNullOrEmpty(entry.DisplayName))
+                    return entry;
+
+                string bName = null;
+                string uid = entry.UniqueId ?? $"Mission_{index + 1}";
+                try
+                {
+                    string contentPath = entry.BattleRef != null ? entry.BattleRef.GetContentPath() : null;
+                    if (!string.IsNullOrEmpty(contentPath))
+                    {
+                        // Streaming / Mission Editor V2 (sp_ME_...) battles store localized names in <contentPath>/localization.xml
+                        bName = Language.GetText("battle_name", contentPath, "localization.xml");
+                    }
+                    else if (!uid.StartsWith("sp_ME_", StringComparison.OrdinalIgnoreCase))
+                    {
+                        var dict = Language.languages;
+                        if (dict != null)
+                        {
+                            if (dict.ContainsKey(uid))
+                                bName = dict[uid];
+                        }
+                        else
+                        {
+                            // Populate Language.languages once if not yet parsed
+                            bName = Language.GetBattleName(uid);
+                        }
+                    }
+                }
+                catch { }
+
+                if (string.IsNullOrEmpty(bName))
+                    bName = uid;
+
+                entry.DisplayName = bName;
+                list[index] = entry;
+                return entry;
             }
 
             private static void DrawMapPickerWindow()
@@ -684,7 +862,7 @@ namespace EasyRed2HumanAI
                             : new Color(0.82f, 0.86f, 0.92f, 0.92f);
 
                         string prefix = selected ? "[SELECTED] " : $"#{j + 1}. ";
-                        PickerBattleEntry bEntry = curBattles[j];
+                        PickerBattleEntry bEntry = GetResolvedBattleEntry(curBattles, j);
                         if (GUI.Button(new Rect(colBatX, yB, colBatW, rowH - 2f), $"{prefix}{bEntry.DisplayName}"))
                         {
                             _selectedBattleIdx = j;
@@ -700,7 +878,7 @@ namespace EasyRed2HumanAI
                 bool hasChosen = false;
                 if (curBattles != null && _selectedBattleIdx >= 0 && _selectedBattleIdx < curBattles.Count)
                 {
-                    chosenBattle = curBattles[_selectedBattleIdx];
+                    chosenBattle = GetResolvedBattleEntry(curBattles, _selectedBattleIdx);
                     hasChosen = chosenBattle.BattleRef != null;
                     string campTitle = _mapPickerCampaigns[_selectedCampaignIdx].CampaignName;
                     int playlistCount = MatchData.data != null && MatchData.data.battles != null ? MatchData.data.battles.Count : 0;
@@ -744,6 +922,12 @@ namespace EasyRed2HumanAI
 
                 try
                 {
+                    if (switchNow && _mpSwitchStage != 0)
+                    {
+                        ShowToast($"[Battle Hardened] Already switching Multiplayer Room to '{_mpSwitchDisplayName}'...");
+                        return;
+                    }
+
                     MatchData md = MatchData.data;
                     if (md == null)
                     {
@@ -790,24 +974,50 @@ namespace EasyRed2HumanAI
                     _showConfigMenu = false;
                     md.currentBattleId = insertIdx;
                     md.loadedBattle = null;
+                    BattleManager.SetPlayerFaction("");
 
                     if (Photon.Pun.PhotonNetwork.InRoom)
                     {
-                        md.UpdateNetworkMatchInfo();
                         BattleLoader bl = BattleLoader.instance;
-                        if (bl != null && bl.photonView != null)
+                        if (bl != null)
+                        {
+                            try { bl.StopVoting(); } catch { }
+                        }
+
+                        bool hasRemoteClients = Photon.Pun.PhotonNetwork.CurrentRoom != null &&
+                                                Photon.Pun.PhotonNetwork.CurrentRoom.PlayerCount > 1;
+                        if (bl != null && bl.photonView != null && hasRemoteClients)
                         {
                             var rawBytes = ResourcesManager.SerializeToByteArray(md.Cast<Il2CppSystem.Object>());
                             var waitArr = new Il2CppInterop.Runtime.InteropTypes.Arrays.Il2CppStructArray<float>(1);
-                            waitArr[0] = 1.5f;
+                            waitArr[0] = 3.0f;
                             var rpcArgs = new Il2CppInterop.Runtime.InteropTypes.Arrays.Il2CppReferenceArray<Il2CppSystem.Object>(2);
                             rpcArgs[0] = rawBytes.Cast<Il2CppSystem.Object>();
                             rpcArgs[1] = waitArr.Cast<Il2CppSystem.Array>().GetValue(0);
                             bl.photonView.RPC("ConnectToNextMatch", Photon.Pun.RpcTarget.Others, rpcArgs);
-                            bl.LoadNextMpMatch();
-                            ShowToast($"[Battle Hardened] Switching Multiplayer Room to '{displayName}'...");
-                            return;
+                            Photon.Pun.PhotonNetwork.SendAllOutgoingCommands();
                         }
+
+                        // Replicate vanilla EndBattleGUI.VictoryAnimation (0x180499286):
+                        // NEVER call bl.LoadNextMpMatch() on the Host (which sets MatchData.actorType = client!).
+                        // SetMultiplayerRoomSettings() keeps actorType = master (so TryConnect() calls CreateRoom instead of JoinRoom)
+                        // and refreshes RoomOptions custom properties for the new battle.
+                        md.SetMultiplayerRoomSettings();
+                        MatchData.actorType = MatchData.RoomActorType.master;
+                        _mpSwitchDisplayName = displayName;
+
+                        if (hasRemoteClients)
+                        {
+                            _mpSwitchStage = 1;
+                            _mpSwitchStageDeadline = Time.unscaledTime + 1.0f;
+                        }
+                        else
+                        {
+                            BeginHostLeaveRoomForMapSwitch(bl);
+                        }
+
+                        ShowToast($"[Battle Hardened] Switching Multiplayer Room to '{displayName}'...");
+                        return;
                     }
 
                     md.StartBattleLoading();
@@ -815,6 +1025,7 @@ namespace EasyRed2HumanAI
                 }
                 catch (Exception ex)
                 {
+                    _mpSwitchStage = 0;
                     ShowToast($"[Battle Hardened] Map Picker error: {ex.Message}");
                 }
             }
@@ -1177,6 +1388,8 @@ namespace EasyRed2HumanAI
                 AiCore.PruneDict(_nextWeaponUpgradeAllowedTime, _reusableAlivePtrs);
                 AiCore.PruneDict(_nextBuddyBandageRefillTime, _reusableAlivePtrs);
                 AiCore.PruneDict(_nextBuddyAmmoResupplyTime, _reusableAlivePtrs);
+                AiCore.PruneDict(_nextBotBoxOrCrateResupplyTime, _reusableAlivePtrs);
+                AiCore.PruneDict(_nextSmokeGrenadeTime, _reusableAlivePtrs);
                 AiCore.PruneDict(_nextSoldierVoiceTime, _reusableAlivePtrs);
                 AiCore.PruneDict(_nextFlankCoverAssignTime, _reusableAlivePtrs);
                 AiCore.PruneDict(_medicHealStartTime, _reusableAlivePtrs);

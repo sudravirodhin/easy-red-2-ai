@@ -11,7 +11,7 @@ namespace EasyRed2HumanAI
     {
         public const string PluginGuid = "com.antigravity.easyred2.humanai";
         public const string PluginName = "Easy Red 2 - Battle Hardened";
-        public const string PluginVersion = "0.6.8";
+        public const string PluginVersion = "0.7.2";
 
         internal static Plugin Instance;
         internal static new ManualLogSource Log;
@@ -49,6 +49,7 @@ namespace EasyRed2HumanAI
             SafePatch(typeof(VisionPatches.AIPlane_GetBestAircraftVisibleEnemy_Patch));
             SafePatch(typeof(VisionPatches.BattleManager_Update_Patch));
             SafePatch(typeof(VisionPatches.BattleManager_OnGUI_Patch));
+            SafePatch(typeof(VisionPatches.BattleLoader_ConnectToNextMatch_Patch));
 
             // Bundle 2-5: Infantry Combat, Cover, Macro & Vehicles, Veterancy & Personalities, UI & QoL
             SafePatch(typeof(VeteranAndTacticsPatches.SoldierAI_SequentialUpdate_Patch));
@@ -67,6 +68,7 @@ namespace EasyRed2HumanAI
             SafePatch(typeof(VeteranAndTacticsPatches.Squad_SendUnitsToCovers_Patch));
             SafePatch(typeof(VeteranAndTacticsPatches.Squad_GetCoveredPositionInArea_Patch));
             SafePatch(typeof(VeteranAndTacticsPatches.Soldier_CheckAndOpenDoor_Patch));
+            SafePatch(typeof(VeteranAndTacticsPatches.AmmoRefillCrate_Start_Patch));
             SafePatch(typeof(VeteranAndTacticsPatches.Soldier_OnSetPlayer_Patch));
             SafePatch(typeof(VeteranAndTacticsPatches.Soldier_Throw_Patch));
             SafePatch(typeof(VeteranAndTacticsPatches.Explosion_CreateExplosion_Patch));
@@ -78,6 +80,7 @@ namespace EasyRed2HumanAI
             SafePatch(typeof(VeteranAndTacticsPatches.AIPlane_ExitDive_Patch));
             SafePatch(typeof(VeteranAndTacticsPatches.AIPlane_NeedRefill_Patch));
             SafePatch(typeof(VeteranAndTacticsPatches.AIPlane_RetreatCrew_Patch));
+            SafePatch(typeof(VeteranAndTacticsPatches.Squad_SquadLeaderRoutine_Patch));
             SafePatch(typeof(VeteranAndTacticsPatches.Squad_TaskCanStillAttract_Patch));
             SafePatch(typeof(VeteranAndTacticsPatches.Squad_UnitCanChangeCover_Patch));
             SafePatch(typeof(VeteranAndTacticsPatches.Squad_SendUnitsToVehicle_Patch));

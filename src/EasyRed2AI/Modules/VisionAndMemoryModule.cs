@@ -98,6 +98,9 @@ namespace EasyRed2HumanAI
             if (Time.time <= _nextCleanupTime && _nextCleanupTime - Time.time <= 30f)
                 return;
 
+            if (AiCore.IsHeavyWorkFrame() && Time.time < _nextCleanupTime + 1.0f)
+                return;
+
             _nextCleanupTime = Time.time + 15f;
             float cutoff = Time.time - Mathf.Max(10f, VisionConfig.FiringRevealDuration.Value);
             _reusableExpiredFirePtrs.Clear();
@@ -113,7 +116,10 @@ namespace EasyRed2HumanAI
 
             if (VisionConfig.DebugLogging.Value && TotalSightChecks > 0)
             {
-                Plugin.Log.LogInfo($"[Stats] SightChecks={TotalSightChecks}, BlockedFOV={BlockedByFOV}, BlockedRange={BlockedByRange}, ScopeBoosts={BoostedByScope}, BlockedPlane={BlockedPlaneSpot}");
+                AiCore.LogDebug(
+                    "SightStats",
+                    $"SightChecks={TotalSightChecks}, BlockedFOV={BlockedByFOV}, BlockedRange={BlockedByRange}, ScopeBoosts={BoostedByScope}, BlockedPlane={BlockedPlaneSpot}",
+                    15.0f);
             }
         }
 
@@ -1325,9 +1331,9 @@ namespace EasyRed2HumanAI
                     Soldier mate = units[i];
                     if (mate == null || !mate.IsAlive || mate.aiController == null) continue;
                     Spottable mateTarget = mate.aiController.visibleTarget;
-                    if (mateTarget == null || mateTarget.IsAirVehicle()) continue;
+                    if (!AiCore.TryGetSpottableCenter(mateTarget, out Vector3 mateEnemyPos) || mateTarget.IsAirVehicle()) continue;
 
-                    Vector3 toEnemy = mateTarget.GetCenterOfUnit() - myPos;
+                    Vector3 toEnemy = mateEnemyPos - myPos;
                     toEnemy.y = 0f;
                     float dSq = toEnemy.sqrMagnitude;
                     if (dSq > 0.25f)
@@ -1450,19 +1456,9 @@ namespace EasyRed2HumanAI
                     }
                 }
 
-                if (!foundObjectiveDir)
+                if (!foundObjectiveDir && AiCore.TryGetEnemySpawnDirection(myFaction, myPos, out Vector3 enemySpawnDir))
                 {
-                    BattleManager bm = BattleManager.instance;
-                    BattlePhase phase = bm != null ? bm.currentPhase : null;
-                    if (phase != null && !string.IsNullOrEmpty(myFaction) && phase.EnemyFactionHasSpawn(myFaction))
-                    {
-                        Vector3 toEnemySpawn = phase.GetOppositeFactionTerritoryPosition(myFaction) - myPos;
-                        toEnemySpawn.y = 0f;
-                        if (toEnemySpawn.sqrMagnitude > 1.0f)
-                        {
-                            fallbackBase = toEnemySpawn;
-                        }
-                    }
+                    fallbackBase = enemySpawnDir;
                 }
                 watchDir = PickClearWatchDirection(soldier, myPos, fallbackBase, 24f);
             }
@@ -1504,7 +1500,7 @@ namespace EasyRed2HumanAI
             bool hadCache = _cornerPieCache.TryGetValue(ptr, out CornerPieState cached);
             if (hadCache && now < cached.NextRefreshTime)
             {
-                if (!cached.IsPieing)
+                if (!cached.IsPieing || !cached.RaiseRifle || soldier.isTowardWallTps)
                     return false;
 
                 pieLookDir = cached.PieLookDir;
@@ -1513,7 +1509,7 @@ namespace EasyRed2HumanAI
             }
 
             var path = ai.path;
-            if (path == null || path.NodesCount < 2 || soldier.transform == null)
+            if (path == null || path.NodesCount < 2 || soldier.transform == null || soldier.isTowardWallTps)
             {
                 _cornerPieCache[ptr] = new CornerPieState { NextRefreshTime = now + 0.32f, IsPieing = false };
                 return false;
@@ -1524,17 +1520,20 @@ namespace EasyRed2HumanAI
             Vector3 toCorner = node0 - myPos;
             toCorner.y = 0f;
             float distToCornerSq = toCorner.sqrMagnitude;
-            if (distToCornerSq < 0.35f * 0.35f || distToCornerSq > 4.2f * 4.2f)
+            if (distToCornerSq < 0.45f * 0.45f || distToCornerSq > 2.55f * 2.55f)
             {
-                _cornerPieCache[ptr] = new CornerPieState { NextRefreshTime = now + 0.28f, IsPieing = false };
+                _cornerPieCache[ptr] = new CornerPieState { NextRefreshTime = now + 0.26f, IsPieing = false };
                 return false;
             }
 
             bool alerted = now < soldier.alertEndTime || soldier.GetSuppressionValue() > 0;
             bool indoor = AiCore.HasLowCeilingOverhead(myPos, 4.2f);
             bool hasThreatContact = HasActiveThreatSectorContact(soldier);
-            if (!alerted && !indoor && !hasThreatContact)
+            raiseRifle = indoor || (alerted && hasThreatContact);
+            if (!raiseRifle)
             {
+                // Never override MovementRoutine with angled MoveFPSOptimized when the rifle is lowered;
+                // Easy Red 2's un-aimed TPS walk tree has no lateral strafe blend and causes sideways foot-sliding.
                 _cornerPieCache[ptr] = new CornerPieState { NextRefreshTime = now + 0.34f, IsPieing = false };
                 return false;
             }
@@ -1591,16 +1590,17 @@ namespace EasyRed2HumanAI
                 return false;
             seg1.Normalize();
 
-            // Smoothly "slice the pie" from approach vector seg0 into around-the-corner vector seg1 as distance closes!
-            float pieT = Mathf.Clamp01(1.0f - (distToCorner - 0.55f) / 3.65f);
-            pieLookDir = Vector3.Slerp(seg0, seg1, 0.36f + 0.58f * pieT).normalized;
-            raiseRifle = indoor || (alerted && hasThreatContact);
+            // Smoothly "slice the pie" within <= 38 deg of travel vector seg0 so the aimed 4-way diagonal
+            // walk/jog blend tree stays crisp with zero sideways foot-skating!
+            float pieT = Mathf.Clamp01(1.0f - (distToCorner - 0.45f) / 2.10f);
+            Vector3 desiredPie = Vector3.Slerp(seg0, seg1, 0.28f + 0.44f * pieT).normalized;
+            pieLookDir = Vector3.RotateTowards(seg0, desiredPie, 38f * Mathf.Deg2Rad, 0f).normalized;
 
             _cornerPieCache[ptr] = new CornerPieState
             {
-                NextRefreshTime = now + 0.16f,
+                NextRefreshTime = now + 0.14f,
                 IsPieing = true,
-                RaiseRifle = raiseRifle,
+                RaiseRifle = true,
                 HasVerifiedCorner = true,
                 PieLookDir = pieLookDir,
                 CachedNode0 = node0,
@@ -1661,19 +1661,17 @@ namespace EasyRed2HumanAI
                         soldier.HasSurrended() ||
                         soldier.IsCarried() ||
                         soldier.IsCarryingBody() ||
+                        soldier.isTowardWallTps ||
                         soldier.m_pose == SoldierPose.Prone)
                     {
                         return true;
                     }
 
-                    if (TryGetActiveCornerPieDirection(__instance, soldier, out Vector3 pieDir, out bool raiseRifle))
+                    if (TryGetActiveCornerPieDirection(__instance, soldier, out Vector3 pieDir, out bool raiseRifle) && raiseRifle)
                     {
                         soldier.SetGunTriggerPressed(false);
-                        __instance.MoveFPSOptimized(0.84f, __0);
-                        if (raiseRifle && !soldier.isTowardWallTps)
-                            soldier.RotateToward(pieDir, __0);
-                        else
-                            AiCore.RotateBodyWithoutRaisingGun(soldier, pieDir, __0);
+                        __instance.MoveFPSOptimized(0.88f, __0);
+                        soldier.RotateToward(pieDir, __0);
                         return false;
                     }
                 }

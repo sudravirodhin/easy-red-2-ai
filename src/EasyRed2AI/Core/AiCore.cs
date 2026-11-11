@@ -23,6 +23,9 @@ namespace EasyRed2HumanAI
         private static int _cachedRoomPlayerCount = 1;
         private static IntPtr _lastPublishedRoomPtr;
         private static int _lastHeavyWorkFrame = -1;
+        private static int _lastDebugLogWriteFrame = -1;
+        [ThreadStatic]
+        private static StringBuilder _sharedLogBuilder;
         private static readonly List<IntPtr> _sharedPruneBuffer = new List<IntPtr>(256);
         private static readonly Dictionary<IntPtr, Vehicle> _turretVehicleCache = new Dictionary<IntPtr, Vehicle>(64);
         private static readonly Dictionary<long, bool> _ceilingCache = new Dictionary<long, bool>(512);
@@ -32,22 +35,83 @@ namespace EasyRed2HumanAI
         private static readonly List<Vector3> _cachedRemotePlayerPositions = new List<Vector3>(12);
         private static float _nextRemotePlayerPosScanTime;
 
+        // Rolling 15s Frame-Time & Hitch Telemetry
+        private static float _currentWindowMaxFrameMs;
+        private static float _previousWindowMaxFrameMs;
+        private static float _nextFrameWindowRolloverTime;
+        public static float RollingMaxFrameMs => Mathf.Max(_currentWindowMaxFrameMs, _previousWindowMaxFrameMs);
+        public static int TotalHitchesOver28ms;
+
         public static int TotalPingGovernorSkippedCycles;
+
+        public static void RecordFrameTiming()
+        {
+            float now = Time.unscaledTime;
+            if (now >= _nextFrameWindowRolloverTime)
+            {
+                _previousWindowMaxFrameMs = _currentWindowMaxFrameMs;
+                _currentWindowMaxFrameMs = 0f;
+                _nextFrameWindowRolloverTime = now + 15.0f;
+            }
+
+            // Ignore scene load / alt-tab / pause frames so telemetry reflects true gameplay frame pacing
+            if (Time.timeSinceLevelLoad < 3.0f || Time.timeScale <= 0.01f)
+                return;
+
+            float dt = Time.unscaledDeltaTime;
+            if (dt <= 0f || dt > 0.50f)
+                return;
+
+            float dtMs = dt * 1000.0f;
+            if (dtMs > _currentWindowMaxFrameMs)
+                _currentWindowMaxFrameMs = dtMs;
+            if (dtMs > 28.0f)
+                TotalHitchesOver28ms++;
+        }
+
+        public static bool CanEmitDebugLog(string category, float minInterval = 4.0f)
+        {
+            if (!VisionConfig.DebugLogging.Value || Plugin.Log == null)
+                return false;
+
+            if (_lastDebugLogWriteFrame == Time.frameCount && category != "Heartbeat")
+                return false;
+
+            float now = Time.unscaledTime;
+            if (_debugLogCooldowns.TryGetValue(category, out float nextAllowed) && now < nextAllowed)
+                return false;
+
+            return true;
+        }
 
         [InterpolatedStringHandler]
         public ref struct DebugLogInterpolatedStringHandler
         {
             private StringBuilder _builder;
 
-            public DebugLogInterpolatedStringHandler(int literalLength, int formattedCount, out bool shouldAppend)
+            public DebugLogInterpolatedStringHandler(
+                int literalLength,
+                int formattedCount,
+                string category,
+                out bool shouldAppend)
             {
-                if (!VisionConfig.DebugLogging.Value || Plugin.Log == null)
+                if (!CanEmitDebugLog(category))
                 {
                     _builder = null;
                     shouldAppend = false;
                     return;
                 }
-                _builder = new StringBuilder(literalLength + formattedCount * 12);
+                StringBuilder sb = _sharedLogBuilder;
+                if (sb == null)
+                {
+                    sb = new StringBuilder(Math.Max(256, literalLength + formattedCount * 12));
+                    _sharedLogBuilder = sb;
+                }
+                else
+                {
+                    sb.Clear();
+                }
+                _builder = sb;
                 shouldAppend = true;
             }
 
@@ -63,32 +127,30 @@ namespace EasyRed2HumanAI
                     _builder.Append(value);
             }
 
+            internal bool IsActive => _builder != null;
             internal string GetFormattedText() => _builder != null ? _builder.ToString() : string.Empty;
         }
 
-        public static void LogDebug(string category, DebugLogInterpolatedStringHandler message, float minInterval = 4.0f)
+        public static void LogDebug(
+            string category,
+            [InterpolatedStringHandlerArgument("category")] DebugLogInterpolatedStringHandler message,
+            float minInterval = 4.0f)
         {
-            if (!VisionConfig.DebugLogging.Value || Plugin.Log == null)
+            if (!message.IsActive || !CanEmitDebugLog(category, minInterval))
                 return;
 
-            float now = Time.unscaledTime;
-            if (_debugLogCooldowns.TryGetValue(category, out float nextAllowed) && now < nextAllowed)
-                return;
-
-            _debugLogCooldowns[category] = now + minInterval;
+            _debugLogCooldowns[category] = Time.unscaledTime + minInterval;
+            _lastDebugLogWriteFrame = Time.frameCount;
             Plugin.Log.LogInfo($"[Diag:{category}] {message.GetFormattedText()}");
         }
 
         public static void LogDebug(string category, string message, float minInterval = 4.0f)
         {
-            if (!VisionConfig.DebugLogging.Value || Plugin.Log == null)
+            if (!CanEmitDebugLog(category, minInterval))
                 return;
 
-            float now = Time.unscaledTime;
-            if (_debugLogCooldowns.TryGetValue(category, out float nextAllowed) && now < nextAllowed)
-                return;
-
-            _debugLogCooldowns[category] = now + minInterval;
+            _debugLogCooldowns[category] = Time.unscaledTime + minInterval;
+            _lastDebugLogWriteFrame = Time.frameCount;
             Plugin.Log.LogInfo($"[Diag:{category}] {message}");
         }
 
@@ -155,6 +217,21 @@ namespace EasyRed2HumanAI
         }
 
         /// <summary>
+        /// Marks the current frame as having executed heavy spatial/octree/snapshot work
+        /// (e.g., vanilla <c>Squad.SquadLeaderRoutine</c> or a full world snapshot rebuild)
+        /// so global directors and secondary sweeps automatically shift to subsequent frames.
+        /// </summary>
+        public static void NotifyHeavyWorkThisFrame()
+        {
+            _lastHeavyWorkFrame = Time.frameCount;
+        }
+
+        public static bool IsHeavyWorkFrame()
+        {
+            return _lastHeavyWorkFrame == Time.frameCount;
+        }
+
+        /// <summary>
         /// Ensures at most ONE global director pass (Macro Director, TeamNet GOAP Coordinator,
         /// or Dictionary Pruning) executes on any single frame, and never on a slow frame.
         /// </summary>
@@ -169,6 +246,219 @@ namespace EasyRed2HumanAI
 
             _lastHeavyWorkFrame = frame;
             return true;
+        }
+
+        public static bool CanBotMoveAutonomously(Soldier s)
+        {
+            if (s == null || s.Pointer == IntPtr.Zero)
+                return false;
+
+            AiParams p = s.Params;
+            return p == null || p.canMove;
+        }
+
+        public static bool CanBotChangePoseAutonomously(Soldier s)
+        {
+            if (s == null || s.Pointer == IntPtr.Zero)
+                return false;
+
+            AiParams p = s.Params;
+            return p == null || (p.changePoseAutomatically && !p.forcedPose.HasValue);
+        }
+
+        /// <summary>
+        /// Universal game-mode objective classifier supporting Classic Invasion (<c>MissionTaskConquerArea</c>,
+        /// <c>MissionTaskDestroyVehicles</c>, <c>MissionTaskClearArea</c>), <c>MissionTaskRetreat</c>,
+        /// <c>MissionTaskPushFrontline</c>, Dynamic Conquest (<c>gamemode_conquest.lua</c>), Wave Defense
+        /// (<c>gamemode_defend.lua</c>), Retreat Finales (<c>phase_4.lua</c>), and Multi-Phase Lua Operations.
+        /// </summary>
+        public static bool ClassifyMissionObjectiveForFaction(
+            MissionObjective obj,
+            string faction,
+            BattleData bd,
+            out bool isHeldByFaction,
+            out bool canAttractFaction,
+            out float contestOrProgress01)
+        {
+            isHeldByFaction = false;
+            canAttractFaction = false;
+            contestOrProgress01 = 0f;
+
+            if (obj == null || obj.Pointer == IntPtr.Zero || string.IsNullOrEmpty(faction))
+                return false;
+
+            MissionTask task = obj.missionTask;
+            if (task == null || task.Pointer == IntPtr.Zero || !task.IsTaskEnabled())
+                return false;
+
+            MissionObjectiveScripted sObj = obj.TryCast<MissionObjectiveScripted>();
+            if (sObj != null)
+            {
+                if (!sObj.IsSettedUp() || sObj.IsSecured())
+                    return false;
+
+                // Dormant / staged / completed Lua objectives set both attractors false; ignore completely
+                if (!sObj.canAttractAllies && !sObj.canAttractAxis)
+                    return false;
+
+                bool isInvader = bd != null && bd.IsInvaderFaction(faction);
+                bool canAttract = sObj.CanAttractFaction(faction);
+                MissionTaskScripted mTask = task.TryCast<MissionTaskScripted>();
+                float rawPct = Mathf.Clamp01(task.GetTaskCompletationPercentage());
+
+                // MissionTaskScripted stores icon/icon_defenders as (luaIcon + 1): 1 = Attack (#attack/#chase), 2 = Defend (#defend/#retreat)
+                byte effIcon = mTask != null
+                    ? ((!isInvader && mTask.icon_defenders > 0) ? mTask.icon_defenders : mTask.icon)
+                    : (byte)0;
+
+                // Retreat Finales (SHARED/phase_4.lua): Defenders get icon_defenders = 2 with "#retreat" text and canAttract = true.
+                // Treat as an active evacuation rally objective (not a rear garrison) so all Defender squads withdraw into the zone!
+                if (!isInvader && canAttract && mTask != null && mTask.customTextDefenders == "#retreat")
+                {
+                    canAttractFaction = true;
+                    return true;
+                }
+
+                string sSec = sObj.securedFaction;
+                bool ownedByFaction = (effIcon == 2) ||
+                                      (!canAttract && !string.IsNullOrEmpty(sSec) && string.Equals(sSec, faction, StringComparison.OrdinalIgnoreCase));
+
+                if (ownedByFaction)
+                {
+                    isHeldByFaction = true;
+                    canAttractFaction = canAttract;
+                    // Conquest & Invader-captured Wave Defense flags set canAttract = false for the owner and rest at 0.99f when uncontested,
+                    // draining toward 0.0f when enemies capture! Defender-held Wave Defense / Lua Phase flags keep canAttract = true and rest at 0.0f.
+                    if (!canAttract)
+                        contestOrProgress01 = (rawPct > 0.01f && rawPct < 0.95f) ? Mathf.Clamp01(1.0f - rawPct) : 0f;
+                    else
+                        contestOrProgress01 = rawPct > 0.05f ? rawPct : 0f;
+                    return true;
+                }
+
+                if (canAttract)
+                {
+                    canAttractFaction = true;
+                    // On enemy-owned Conquest flags, rawPct starts at 0.99f under enemy ownership before neutralizing through 0.0f;
+                    // only report positive friendly capture momentum once neutralized or under friendly securedFaction!
+                    if (!string.IsNullOrEmpty(sSec) && !string.Equals(sSec, faction, StringComparison.OrdinalIgnoreCase))
+                        contestOrProgress01 = rawPct < 0.65f ? (1.0f - rawPct) * 0.45f : 0f;
+                    else if (mTask != null && mTask.icon == 2 && !isInvader && rawPct >= 0.95f)
+                        contestOrProgress01 = 0f; // Lost Wave Defense flag resting at 0.99f before counter-capture begins
+                    else
+                        contestOrProgress01 = rawPct;
+                    return true;
+                }
+
+                return false;
+            }
+
+            float capPct = Mathf.Clamp01(task.GetTaskCompletationPercentage());
+            if (task.TryCast<MissionTaskPushFrontline>() != null)
+            {
+                string secFaction = obj.GetSecuredFaction();
+                if (!string.IsNullOrEmpty(secFaction) && secFaction == faction)
+                {
+                    isHeldByFaction = true;
+                    contestOrProgress01 = capPct > 0.05f ? capPct : 0f;
+                    return true;
+                }
+                if (obj.CanAttractFaction(faction))
+                {
+                    canAttractFaction = true;
+                    contestOrProgress01 = capPct;
+                    return true;
+                }
+                return false;
+            }
+
+            if (obj.IsSecured())
+                return false;
+
+            if (task.TryCast<MissionTaskRetreat>() != null)
+            {
+                if (obj.CanAttractFaction(faction))
+                {
+                    canAttractFaction = true;
+                    return true;
+                }
+                return false;
+            }
+
+            string invFaction = obj.GetSecuredFaction();
+            if (!string.IsNullOrEmpty(invFaction) && invFaction != faction)
+            {
+                isHeldByFaction = true;
+                canAttractFaction = obj.CanAttractFaction(faction);
+                contestOrProgress01 = capPct > 0.05f ? capPct : 0f;
+                return true;
+            }
+
+            if (obj.CanAttractFaction(faction))
+            {
+                canAttractFaction = true;
+                contestOrProgress01 = capPct;
+                return true;
+            }
+
+            return false;
+        }
+
+        /// <summary>
+        /// Evaluates a squad's active <see cref="SquadTask"/> across all vanilla and scripted/dynamic game modes
+        /// so GOAP never misinterprets resting <c>0.99f</c> Conquest/WaveDefense bars as enemy back-caps.
+        /// </summary>
+        public static void EvaluateSquadTaskForFaction(
+            SquadTask curTask,
+            string faction,
+            BattleData bd,
+            bool isGarrisonAssigned,
+            out bool isDefending,
+            out float progressOrContest01)
+        {
+            isDefending = isGarrisonAssigned;
+            progressOrContest01 = 0f;
+            if (curTask == null || curTask.Pointer == IntPtr.Zero || string.IsNullOrEmpty(faction))
+                return;
+
+            var scriptedList = MissionObjectiveScripted.scriptedMissionObjectives;
+            if (scriptedList != null)
+            {
+                IntPtr taskPtr = curTask.Pointer;
+                int sCount = scriptedList.Count;
+                for (int i = 0; i < sCount; i++)
+                {
+                    MissionObjectiveScripted sObj = scriptedList[i];
+                    if (sObj != null && sObj.missionTask != null && sObj.missionTask.Pointer == taskPtr)
+                    {
+                        if (ClassifyMissionObjectiveForFaction(sObj, faction, bd, out bool held, out _, out float prog))
+                        {
+                            isDefending = isGarrisonAssigned || held;
+                            progressOrContest01 = prog;
+                        }
+                        return;
+                    }
+                }
+            }
+
+            float rawPct = Mathf.Clamp01(curTask.GetTaskCompletationPercentage());
+            if (curTask.TryCast<MissionTaskPushFrontline>() != null)
+            {
+                isDefending = isGarrisonAssigned;
+                progressOrContest01 = rawPct;
+                return;
+            }
+
+            if (curTask.TryCast<MissionTaskRetreat>() != null)
+            {
+                isDefending = false;
+                progressOrContest01 = 1.0f;
+                return;
+            }
+
+            bool isInvader = bd != null && bd.IsInvaderFaction(faction);
+            isDefending = isGarrisonAssigned || !isInvader;
+            progressOrContest01 = rawPct;
         }
 
         /// <summary>
@@ -195,6 +485,26 @@ namespace EasyRed2HumanAI
             }
             catch
             {
+                return false;
+            }
+        }
+
+        public static bool TryGetSpottableCenter(Spottable s, out Vector3 center)
+        {
+            if (!IsValidAliveSpottable(s))
+            {
+                center = Vector3.zero;
+                return false;
+            }
+
+            try
+            {
+                center = s.GetCenterOfUnit();
+                return true;
+            }
+            catch
+            {
+                center = Vector3.zero;
                 return false;
             }
         }
@@ -230,6 +540,140 @@ namespace EasyRed2HumanAI
 
             SyncVehicle syncher = v.vehicleSyncher;
             return syncher == null || syncher.OwnSyncher;
+        }
+
+        /// <summary>
+        /// Safely returns the active <see cref="BattlePhase"/> without throwing when
+        /// <c>BattleManager.phases</c> is null/empty (e.g., <c>sp_ME_...</c> Mission Editor V2 / reworked streaming battles).
+        /// </summary>
+        public static BattlePhase TryGetCurrentBattlePhase(BattleManager bm)
+        {
+            if (bm == null || bm.Pointer == IntPtr.Zero)
+                return null;
+
+            var phases = bm.phases;
+            if (phases == null)
+                return null;
+
+            int idx = bm.currentPhaseNum;
+            if ((uint)idx >= (uint)phases.Length)
+                return null;
+
+            return phases[idx];
+        }
+
+        /// <summary>
+        /// Resolves the horizontal direction toward enemy spawn territory on both classic <see cref="BattlePhase"/>
+        /// maps and <c>sp_ME_...</c> Mission Editor V2 streaming maps (falling back to <c>SpawnManager.activeSpawns</c>).
+        /// </summary>
+        public static bool TryGetEnemySpawnDirection(string myFaction, Vector3 fromPos, out Vector3 dir)
+        {
+            dir = Vector3.zero;
+            if (string.IsNullOrEmpty(myFaction))
+                return false;
+
+            try
+            {
+                BattlePhase phase = TryGetCurrentBattlePhase(BattleManager.instance);
+                if (phase != null && phase.EnemyFactionHasSpawn(myFaction))
+                {
+                    Vector3 toEnemy = phase.GetOppositeFactionTerritoryPosition(myFaction) - fromPos;
+                    toEnemy.y = 0f;
+                    if (toEnemy.sqrMagnitude > 1.0f)
+                    {
+                        dir = toEnemy.normalized;
+                        return true;
+                    }
+                }
+
+                var spawns = SpawnManager.activeSpawns;
+                if (spawns != null && spawns.Count > 0)
+                {
+                    Vector3 sum = Vector3.zero;
+                    int count = 0;
+                    for (int i = 0; i < spawns.Count; i++)
+                    {
+                        SpawnManager sp = spawns[i];
+                        if (sp == null || sp.Pointer == IntPtr.Zero || sp.gameObject == null || !sp.gameObject.activeInHierarchy)
+                            continue;
+
+                        string spFact = sp.GetFaction();
+                        if (string.IsNullOrEmpty(spFact) || spFact == myFaction || spFact == "Civilian")
+                            continue;
+
+                        sum += sp.GetSpawnPosition();
+                        count++;
+                    }
+
+                    if (count > 0)
+                    {
+                        Vector3 toEnemy = (sum / count) - fromPos;
+                        toEnemy.y = 0f;
+                        if (toEnemy.sqrMagnitude > 1.0f)
+                        {
+                            dir = toEnemy.normalized;
+                            return true;
+                        }
+                    }
+                }
+            }
+            catch { }
+
+            return false;
+        }
+
+        /// <summary>
+        /// Resolves the nearest friendly spawn position on both classic <see cref="BattlePhase"/> maps
+        /// and <c>sp_ME_...</c> Mission Editor V2 streaming maps (via <c>SpawnManager.activeSpawns</c>).
+        /// </summary>
+        public static bool TryGetNearestFriendlySpawnPosition(string myFaction, Vector3 fromPos, out Vector3 spawnPos)
+        {
+            spawnPos = Vector3.zero;
+            if (string.IsNullOrEmpty(myFaction))
+                return false;
+
+            try
+            {
+                BattlePhase phase = TryGetCurrentBattlePhase(BattleManager.instance);
+                if (phase != null)
+                {
+                    SpawnManager nearest = phase.GetNearestSpawn(myFaction, fromPos);
+                    if (nearest != null && nearest.Pointer != IntPtr.Zero)
+                    {
+                        spawnPos = nearest.GetSpawnPosition();
+                        return true;
+                    }
+                }
+
+                var spawns = SpawnManager.activeSpawns;
+                if (spawns != null && spawns.Count > 0)
+                {
+                    float bestSq = float.MaxValue;
+                    bool found = false;
+                    for (int i = 0; i < spawns.Count; i++)
+                    {
+                        SpawnManager sp = spawns[i];
+                        if (sp == null || sp.Pointer == IntPtr.Zero || sp.gameObject == null || !sp.gameObject.activeInHierarchy)
+                            continue;
+
+                        if (sp.GetFaction() != myFaction)
+                            continue;
+
+                        Vector3 cand = sp.GetSpawnPosition();
+                        float dSq = (cand - fromPos).sqrMagnitude;
+                        if (dSq < bestSq)
+                        {
+                            bestSq = dSq;
+                            spawnPos = cand;
+                            found = true;
+                        }
+                    }
+                    return found;
+                }
+            }
+            catch { }
+
+            return false;
         }
 
         /// <summary>
@@ -503,6 +947,57 @@ namespace EasyRed2HumanAI
         }
 
         /// <summary>
+        /// Moves an AI bot smoothly toward <paramref name="targetPos"/> while stopping at
+        /// <paramref name="standoffDist"/> meters so bots never body-hug squadmates/corpses.
+        /// Uses multi-node <c>CPathFinding</c> (<see cref="SoldierAI.MoveDestination"/>) for long
+        /// distances (&gt; 16m) or obstructed lines of walk, and uses an overlap-safe duration on
+        /// <see cref="SoldierAI.MoveDirectlyToward"/> for short unobstructed hops so
+        /// <c>moveDirectlyToward_end</c> never expires mid-stride into vanilla's 1-node
+        /// <c>MoveFPSOptimized(0.5f)</c> slow-walk fallback.
+        /// </summary>
+        public static void MoveBotTowardPosition(
+            SoldierAI ai,
+            Soldier soldier,
+            Vector3 targetPos,
+            float standoffDist = 0f,
+            float minDirectDuration = 2.8f)
+        {
+            if (ai == null || soldier == null || soldier.transform == null)
+                return;
+
+            Vector3 myPos = soldier.transform.position;
+            Vector3 flatDelta = targetPos - myPos;
+            flatDelta.y = 0f;
+            float flatDistSq = flatDelta.sqrMagnitude;
+            float stopThreshold = Mathf.Max(0f, standoffDist) + 0.25f;
+            if (flatDistSq <= stopThreshold * stopThreshold)
+                return;
+
+            float flatDist = Mathf.Sqrt(flatDistSq);
+            Vector3 dir = flatDelta / flatDist;
+            Vector3 dest = standoffDist > 0.05f ? (targetPos - dir * standoffDist) : targetPos;
+            dest.y = targetPos.y;
+            float moveDist = Mathf.Max(0.25f, flatDist - standoffDist);
+
+            // Long runs (> 16m) or wall-obstructed paths must use multi-node CPathFinding (NodesCount >= 2)
+            // rather than a 1-node straight-line MoveDirectlyToward segment.
+            if (moveDist > 16.0f ||
+                IsDirectionBlockedByEnvironment(myPos + Vector3.up * 0.85f, dir, Mathf.Min(moveDist, 7.5f), soldier.transform.root))
+            {
+                if (ai.moveDirectlyToward_end > Time.time)
+                    ai.moveDirectlyToward_end = 0f;
+
+                if ((ai.MoveDestination - dest).sqrMagnitude > 0.64f)
+                    ai.MoveDestination = dest;
+
+                return;
+            }
+
+            float duration = Mathf.Clamp(moveDist / 2.6f + 1.45f, minDirectDuration, 5.5f);
+            ai.MoveDirectlyToward(dest, duration);
+        }
+
+        /// <summary>
         /// Computes true horizontal (XZ-plane) unsigned angle in degrees between <paramref name="soldier"/>'s
         /// forward vector and <paramref name="direction"/>. Replaces vanilla <c>Soldier.AngleToDirection</c>
         /// (<c>0x18073D4E0</c>), which accidentally casts <see cref="Vector3"/> to <see cref="Vector2"/>
@@ -739,9 +1234,19 @@ namespace EasyRed2HumanAI
         public static void EnsureWorldSnapshot(float maxAge = 0.35f)
         {
             float now = Time.time;
-            if (now >= _lastWorldSnapshotTime && (now - _lastWorldSnapshotTime) < maxAge)
-                return;
+            if (now >= _lastWorldSnapshotTime)
+            {
+                float age = now - _lastWorldSnapshotTime;
+                if (age < maxAge)
+                    return;
 
+                // If heavy spatial/octree work (e.g. SquadLeaderRoutine) already ran on this frame, reuse the slightly older
+                // snapshot for 1 more frame so the O(N) snapshot rebuild lands on a clean frame!
+                if (IsHeavyWorkFrame() && age < maxAge + 0.30f)
+                    return;
+            }
+
+            NotifyHeavyWorkThisFrame();
             _lastWorldSnapshotTime = now;
             int prevSqCount = WorldSquadCount;
             int prevSolCount = WorldSoldierCount;
@@ -1034,6 +1539,10 @@ namespace EasyRed2HumanAI
             _nextAllowedBotRpcTime = 0f;
             TotalAdaptiveAiExtraTicks = 0;
             TotalPingGovernorSkippedCycles = 0;
+            TotalHitchesOver28ms = 0;
+            _currentWindowMaxFrameMs = 0f;
+            _previousWindowMaxFrameMs = 0f;
+            _nextFrameWindowRolloverTime = 0f;
         }
 
         public static void PruneSpatialCachesIfOversized()
@@ -1068,7 +1577,8 @@ namespace EasyRed2HumanAI
                     return;
 
                 // Prioritize multiplayer ping & frame-time stability: never add extra ticks on busy frames
-                if (ShouldSkipBotCycleForNetworkPing())
+                // or on frames where vanilla SquadLeaderRoutine / world snapshot rebuild already ran!
+                if (IsHeavyWorkFrame() || ShouldSkipBotCycleForNetworkPing())
                     return;
 
                 float dt = Time.unscaledDeltaTime;
