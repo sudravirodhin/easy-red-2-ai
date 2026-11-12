@@ -1402,6 +1402,16 @@ namespace EasyRed2HumanAI
         public static int HelmetsRecoveredCount { get; private set; }
         public static int CasualtiesDraggedCount { get; private set; }
         public static int BotKillCalloutsCount { get; set; }
+        public static int SquadChargesOrderedCount { get; private set; }
+        public static int SquadCovertOrdersCount { get; private set; }
+        public static int SquadFollowOrdersCount { get; private set; }
+
+        internal static readonly HashSet<IntPtr> _aiCovertHoldFireSquads = new HashSet<IntPtr>();
+        internal static readonly Dictionary<IntPtr, float> _aiCovertHoldFireExpireTime = new Dictionary<IntPtr, float>(32);
+        internal static readonly Dictionary<IntPtr, float> _aiFollowColumnUntil = new Dictionary<IntPtr, float>(32);
+        internal static readonly Dictionary<IntPtr, float> _nextAiSquadChargeTime = new Dictionary<IntPtr, float>(64);
+        internal static readonly Dictionary<IntPtr, float> _nextAiCovertOrderTime = new Dictionary<IntPtr, float>(64);
+        internal static readonly Dictionary<IntPtr, float> _nextAiFollowOrderTime = new Dictionary<IntPtr, float>(64);
 
         internal struct CasualtyDragState
         {
@@ -1436,6 +1446,12 @@ namespace EasyRed2HumanAI
             _medicHealStartTime.Clear();
             _medicHealTargetPtr.Clear();
             _pincerOrderedTaskBySquad.Clear();
+            _aiCovertHoldFireSquads.Clear();
+            _aiCovertHoldFireExpireTime.Clear();
+            _aiFollowColumnUntil.Clear();
+            _nextAiSquadChargeTime.Clear();
+            _nextAiCovertOrderTime.Clear();
+            _nextAiFollowOrderTime.Clear();
             _nextGlobalBotWeaponPickupTime = 0f;
         }
 
@@ -1693,6 +1709,30 @@ namespace EasyRed2HumanAI
         /// </summary>
         private static readonly List<Squad> _reusableConnectedInfantrySquads = new List<Squad>(32);
         private static readonly List<Squad> _reusableActiveVehicleAnvils = new List<Squad>(16);
+        private static readonly List<Squad> _reusableAiFootSquads = new List<Squad>(48);
+
+        private static void ReleaseAiSquadExecutionStateIfActive(Squad sq)
+        {
+            if (sq == null || sq.Pointer == IntPtr.Zero)
+                return;
+
+            IntPtr sqPtr = sq.Pointer;
+            _aiFollowColumnUntil.Remove(sqPtr);
+            if (_aiCovertHoldFireSquads.Remove(sqPtr))
+            {
+                _aiCovertHoldFireExpireTime.Remove(sqPtr);
+                if (sq.HoldFire)
+                {
+                    Soldier leader = sq.Leader;
+                    bool canSync = !Photon.Pun.PhotonNetwork.InRoom ||
+                                   (leader != null && (leader.soldierSyncher == null || leader.soldierSyncher.OwnSyncher));
+                    if (canSync)
+                    {
+                        try { sq.SetHoldFireOrder(false, false, false, Photon.Pun.PhotonNetwork.InRoom); } catch { }
+                    }
+                }
+            }
+        }
 
         internal static void RunTeamNetGoapCoordinator(float now)
         {
@@ -1706,8 +1746,10 @@ namespace EasyRed2HumanAI
 
             var connectedInfantrySquads = _reusableConnectedInfantrySquads;
             var activeVehicleAnvils = _reusableActiveVehicleAnvils;
+            var aiFootSquads = _reusableAiFootSquads;
             connectedInfantrySquads.Clear();
             activeVehicleAnvils.Clear();
+            aiFootSquads.Clear();
             bool issuedSquadCoverOrderThisTick = false;
 
             var squads = AiCore.WorldSquads;
@@ -1727,6 +1769,7 @@ namespace EasyRed2HumanAI
                 // allow the Team Net to treat the Player's Squad as an Anvil and send a nearby AI Hammer squad to flank!
                 if (leader.IsPlayer())
                 {
+                    ReleaseAiSquadExecutionStateIfActive(sq);
                     SquadBlackboard playerBoard = GetOrUpdateSquadBlackboard(sq, leader);
                     if (playerBoard.IsConnectedToRadioNet && playerBoard.HasActiveThreat)
                     {
@@ -1741,6 +1784,7 @@ namespace EasyRed2HumanAI
                 // Mounted Ground Combat Vehicles have onboard radios and can act as Heavy Anvils for nearby infantry!
                 if (sqSnap.LeaderOnVehicle)
                 {
+                    ReleaseAiSquadExecutionStateIfActive(sq);
                     if (IsMountedOnGroundVehicle(leader))
                     {
                         SquadBlackboard vehBoard = GetOrUpdateSquadBlackboard(sq, leader);
@@ -1752,6 +1796,7 @@ namespace EasyRed2HumanAI
                     continue;
                 }
 
+                aiFootSquads.Add(sq);
                 SquadBlackboard board = GetOrUpdateSquadBlackboard(sq, leader);
                 if (!board.IsConnectedToRadioNet)
                 {
@@ -1837,200 +1882,531 @@ namespace EasyRed2HumanAI
             }
 
             int infCount = connectedInfantrySquads.Count;
-            if (infCount == 0)
-                return;
-
-            // =================================================================
-            // 1A. Vehicle/Tank Anvil + Infantry Hammer (Combined-Arms Flank)
-            // =================================================================
-            for (int v = 0; v < activeVehicleAnvils.Count; v++)
+            if (infCount > 0)
             {
-                Squad vehSq = activeVehicleAnvils[v];
-                if (!_squadBlackboards.TryGetValue(vehSq.Pointer, out SquadBlackboard vehBoard) || !vehBoard.HasActiveThreat)
-                    continue;
-
-                Soldier vehLeader = vehSq.Leader;
-                if (vehLeader == null || vehLeader.transform == null)
-                    continue;
-
-                Vector3 vehPos = vehLeader.transform.position;
-                Vector3 threatPos = vehBoard.ThreatPosition;
-                Vector3 vehToThreat = threatPos - vehPos;
-                vehToThreat.y = 0f;
-                float vehDist = vehToThreat.magnitude;
-                if (vehDist < 18f || vehDist > 180f)
-                    continue;
-
-                Vector3 axisDir = vehToThreat / vehDist;
-                Vector3 perpRight = new Vector3(axisDir.z, 0f, -axisDir.x);
-                IntPtr vehTaskPtr = vehSq.currentTask != null ? vehSq.currentTask.Pointer : IntPtr.Zero;
-
-                Squad bestHammerSq = FindBestAvailableHammerSquad(connectedInfantrySquads, -1, vehSq.Pointer, vehLeader.faction, vehTaskPtr, threatPos, 115f, now);
-                if (bestHammerSq != null)
+                // =================================================================
+                // 1A. Vehicle/Tank Anvil + Infantry Hammer (Combined-Arms Flank)
+                // =================================================================
+                for (int v = 0; v < activeVehicleAnvils.Count; v++)
                 {
-                    IssueHammerFlankDirective(bestHammerSq, vehPos, threatPos, axisDir, perpRight, now, $"Tank/Vehicle Anvil ('{vehSq.squadName}')");
-                }
-            }
+                    Squad vehSq = activeVehicleAnvils[v];
+                    if (!_squadBlackboards.TryGetValue(vehSq.Pointer, out SquadBlackboard vehBoard) || !vehBoard.HasActiveThreat)
+                        continue;
 
-            // =================================================================
-            // 1B. Infantry Anvil + Infantry Hammer (or Single-Squad Pin & Flank)
-            // =================================================================
-            for (int i = 0; i < infCount; i++)
-            {
-                Squad anvilSq = connectedInfantrySquads[i];
-                if (!_squadBlackboards.TryGetValue(anvilSq.Pointer, out SquadBlackboard anvilBoard))
-                    continue;
+                    Soldier vehLeader = vehSq.Leader;
+                    if (vehLeader == null || vehLeader.transform == null)
+                        continue;
 
-                if (!anvilBoard.HasActiveThreat || now < anvilBoard.NetDirectiveExpireTime)
-                    continue;
+                    Vector3 vehPos = vehLeader.transform.position;
+                    Vector3 threatPos = vehBoard.ThreatPosition;
+                    Vector3 vehToThreat = threatPos - vehPos;
+                    vehToThreat.y = 0f;
+                    float vehDist = vehToThreat.magnitude;
+                    if (vehDist < 18f || vehDist > 180f)
+                        continue;
 
-                Soldier anvilLeader = anvilSq.Leader;
-                if (anvilLeader == null || anvilLeader.transform == null)
-                    continue;
+                    Vector3 axisDir = vehToThreat / vehDist;
+                    Vector3 perpRight = new Vector3(axisDir.z, 0f, -axisDir.x);
+                    IntPtr vehTaskPtr = vehSq.currentTask != null ? vehSq.currentTask.Pointer : IntPtr.Zero;
 
-                Vector3 anvilPos = anvilLeader.transform.position;
-                Vector3 threatPos = anvilBoard.ThreatPosition;
-                Vector3 anvilToThreat = threatPos - anvilPos;
-                anvilToThreat.y = 0f;
-                float anvilDist = anvilToThreat.magnitude;
-                if (anvilDist < 18f || anvilDist > 160f)
-                    continue;
-
-                Vector3 axisDir = anvilToThreat / anvilDist;
-                Vector3 perpRight = new Vector3(axisDir.z, 0f, -axisDir.x);
-                IntPtr anvilTaskPtr = anvilSq.currentTask != null ? anvilSq.currentTask.Pointer : IntPtr.Zero;
-
-                // Find best nearby Radio-Connected friendly squad within 115m on the same objective/sector to act as the HAMMER
-                Squad bestHammerSq = FindBestAvailableHammerSquad(connectedInfantrySquads, i, anvilSq.Pointer, anvilLeader.faction, anvilTaskPtr, threatPos, 115f, now);
-
-                if (bestHammerSq != null)
-                {
-                    // Lock in ANVIL directive on Squad A (Pin & Call Radio Support if Radioman ready)
-                    anvilBoard.NetDirective = SquadNetDirective.Anvil_PinAndCallSupport;
-                    anvilBoard.NetDirectiveExpireTime = now + 24.0f;
-                    anvilBoard.NetDirectiveTargetPos = threatPos;
-                    _squadBlackboards[anvilSq.Pointer] = anvilBoard;
-                    ConsumeInitialHqSpawnBriefingIfNoRadio(anvilSq);
-
-                    TrySayTacticalVoice(anvilLeader, anvilSq, VoiceManager.VoiceClip.coveringFire, 0.1f);
-                    TryTriggerSquadRadioSupport(anvilSq, anvilLeader);
-
-                    // Lock in HAMMER directive on Squad B
-                    IssueHammerFlankDirective(bestHammerSq, anvilPos, threatPos, axisDir, perpRight, now, $"Infantry Anvil ('{anvilSq.squadName}')");
-                }
-                else if (anvilBoard.AliveMemberCount >= 4 &&
-                         anvilBoard.IsThreatBeingPinned(now) &&
-                         (anvilBoard.FlankLeftCover != null || anvilBoard.FlankRightCover != null) &&
-                         anvilLeader.Params != null && anvilLeader.Params.canGiveOrders && anvilLeader.Params.canMove)
-                {
-                    // Single-Squad Self-Pin & Flank: MG gunner has the enemy pinned and lateral cover exists.
-                    // Note: Do NOT call anvilSq.AttackFromSide(..., threatPos, ...) because setting sq.orderPosition to threatPos
-                    // (outside sq.currentTask) causes vanilla Squad.Leader_OrderAttackCurrentTask to immediately overwrite the order 250ms later!
-                    anvilBoard.NetDirective = SquadNetDirective.Hammer_WideFlankEnvelopment;
-                    anvilBoard.NetDirectiveExpireTime = now + 22.0f;
-                    anvilBoard.NetDirectiveTargetPos = threatPos;
-                    _squadBlackboards[anvilSq.Pointer] = anvilBoard;
-                    ConsumeInitialHqSpawnBriefingIfNoRadio(anvilSq);
-
-                    TrySayTacticalVoice(anvilLeader, anvilSq, VoiceManager.VoiceClip.attackThere, 0.2f);
-                    TryTriggerSquadRadioSupport(anvilSq, anvilLeader);
-                    TeamNetAnvilHammerCount++;
-                    GoapPlansExecutedCount++;
-                }
-            }
-
-            // =================================================================
-            // 2. Multi-Squad Objective Pincer (When 2+ Connected Squads Push the Same Objective)
-            // =================================================================
-            _reusablePrimarySquadByTask.Clear();
-            _reusablePincerCountByTask.Clear();
-            var primarySquadByTask = _reusablePrimarySquadByTask;
-            var pincerCountByTask = _reusablePincerCountByTask;
-
-            for (int i = 0; i < infCount; i++)
-            {
-                Squad sq = connectedInfantrySquads[i];
-                if (sq.currentTask == null || sq.currentTask.Pointer == IntPtr.Zero)
-                    continue;
-
-                if (_squadBlackboards.TryGetValue(sq.Pointer, out SquadBlackboard board) &&
-                    (board.HasActiveThreat || now < board.NetDirectiveExpireTime))
-                {
-                    continue;
-                }
-
-                Soldier leader = sq.Leader;
-                if (leader == null || leader.transform == null ||
-                    (leader.Params != null && (!leader.Params.canGiveOrders || !leader.Params.canMove)))
-                {
-                    continue;
-                }
-
-                IntPtr taskPtr = sq.currentTask.Pointer;
-                Vector3 taskPos = sq.currentTask.GetTaskDestination();
-                Vector3 toTask = taskPos - leader.transform.position;
-                toTask.y = 0f;
-                float distToTask = toTask.magnitude;
-                if (distToTask < 55f || distToTask > 175f)
-                    continue;
-
-                if (!primarySquadByTask.ContainsKey(taskPtr))
-                {
-                    primarySquadByTask[taskPtr] = sq;
-                    pincerCountByTask[taskPtr] = 0;
-                    ConsumeInitialHqSpawnBriefingIfNoRadio(sq);
-                    continue;
-                }
-
-                int pincerIndex = pincerCountByTask[taskPtr] + 1;
-                pincerCountByTask[taskPtr] = pincerIndex;
-
-                FactionCommandProfile pincerProfile = GetFactionCommandProfile(leader.faction);
-                Vector3 axisDir = toTask / distToTask;
-                Vector3 perpRight = new Vector3(axisDir.z, 0f, -axisDir.x);
-                float sideSign = (pincerIndex % 2 == 1) ? 1f : -1f;
-                float latBias = pincerProfile.FlankLateralBias;
-                float fwdBias = Mathf.Sqrt(Mathf.Max(0.1f, 1f - latBias * latBias));
-                Vector3 pincerFlankDir = (axisDir * fwdBias - perpRight * (sideSign * latBias)).normalized;
-
-                board.NetDirective = SquadNetDirective.Hammer_WideFlankEnvelopment;
-                board.NetDirectiveExpireTime = now + 28.0f;
-                board.NetDirectiveTargetPos = taskPos;
-                _squadBlackboards[sq.Pointer] = board;
-                ConsumeInitialHqSpawnBriefingIfNoRadio(sq);
-
-                // Only issue the squad-level AttackFromSide waypoint ONCE per objective assignment, AND cap at 1 AttackFromSide
-                // call per TeamNetGOAP tick (gated by TryConsumeBotRpcBudget) so multiple squads never stack CoverManager sweeps
-                // or burst 12-20 reliable PhotonView.RPCs on a single frame!
-                if (!_pincerOrderedTaskBySquad.TryGetValue(sq.Pointer, out IntPtr prevPincerTask) || prevPincerTask != taskPtr)
-                {
-                    if (!issuedSquadCoverOrderThisTick &&
-                        (!Photon.Pun.PhotonNetwork.InRoom || AiCore.TryConsumeBotRpcBudget(0.45f)))
+                    Squad bestHammerSq = FindBestAvailableHammerSquad(connectedInfantrySquads, -1, vehSq.Pointer, vehLeader.faction, vehTaskPtr, threatPos, 115f, now);
+                    if (bestHammerSq != null)
                     {
-                        issuedSquadCoverOrderThisTick = true;
-                        _pincerOrderedTaskBySquad[sq.Pointer] = taskPtr;
-                        try
-                        {
-                            sq.AttackFromSide(pincerFlankDir, taskPos, 22.0f);
-                            if (sq.timed_order_end < now + 28.0f)
-                                sq.timed_order_end = now + 28.0f;
-                        }
-                        catch { }
+                        IssueHammerFlankDirective(bestHammerSq, vehPos, threatPos, axisDir, perpRight, now, $"Tank/Vehicle Anvil ('{vehSq.squadName}')");
+                    }
+                }
 
+                // =================================================================
+                // 1B. Infantry Anvil + Infantry Hammer (or Single-Squad Pin & Flank)
+                // =================================================================
+                for (int i = 0; i < infCount; i++)
+                {
+                    Squad anvilSq = connectedInfantrySquads[i];
+                    if (!_squadBlackboards.TryGetValue(anvilSq.Pointer, out SquadBlackboard anvilBoard))
+                        continue;
+
+                    if (!anvilBoard.HasActiveThreat || now < anvilBoard.NetDirectiveExpireTime)
+                        continue;
+
+                    Soldier anvilLeader = anvilSq.Leader;
+                    if (anvilLeader == null || anvilLeader.transform == null)
+                        continue;
+
+                    Vector3 anvilPos = anvilLeader.transform.position;
+                    Vector3 threatPos = anvilBoard.ThreatPosition;
+                    Vector3 anvilToThreat = threatPos - anvilPos;
+                    anvilToThreat.y = 0f;
+                    float anvilDist = anvilToThreat.magnitude;
+                    if (anvilDist < 18f || anvilDist > 160f)
+                        continue;
+
+                    Vector3 axisDir = anvilToThreat / anvilDist;
+                    Vector3 perpRight = new Vector3(axisDir.z, 0f, -axisDir.x);
+                    IntPtr anvilTaskPtr = anvilSq.currentTask != null ? anvilSq.currentTask.Pointer : IntPtr.Zero;
+
+                    // Find best nearby Radio-Connected friendly squad within 115m on the same objective/sector to act as the HAMMER
+                    Squad bestHammerSq = FindBestAvailableHammerSquad(connectedInfantrySquads, i, anvilSq.Pointer, anvilLeader.faction, anvilTaskPtr, threatPos, 115f, now);
+
+                    if (bestHammerSq != null)
+                    {
+                        // Lock in ANVIL directive on Squad A (Pin & Call Radio Support if Radioman ready)
+                        anvilBoard.NetDirective = SquadNetDirective.Anvil_PinAndCallSupport;
+                        anvilBoard.NetDirectiveExpireTime = now + 24.0f;
+                        anvilBoard.NetDirectiveTargetPos = threatPos;
+                        _squadBlackboards[anvilSq.Pointer] = anvilBoard;
+                        ConsumeInitialHqSpawnBriefingIfNoRadio(anvilSq);
+
+                        TrySayTacticalVoice(anvilLeader, anvilSq, VoiceManager.VoiceClip.coveringFire, 0.1f);
+                        TryTriggerSquadRadioSupport(anvilSq, anvilLeader);
+
+                        // Lock in HAMMER directive on Squad B
+                        IssueHammerFlankDirective(bestHammerSq, anvilPos, threatPos, axisDir, perpRight, now, $"Infantry Anvil ('{anvilSq.squadName}')");
+                    }
+                    else if (anvilBoard.AliveMemberCount >= 4 &&
+                             anvilBoard.IsThreatBeingPinned(now) &&
+                             (anvilBoard.FlankLeftCover != null || anvilBoard.FlankRightCover != null) &&
+                             anvilLeader.Params != null && anvilLeader.Params.canGiveOrders && anvilLeader.Params.canMove)
+                    {
+                        // Single-Squad Self-Pin & Flank: MG gunner has the enemy pinned and lateral cover exists.
+                        // Note: Do NOT call anvilSq.AttackFromSide(..., threatPos, ...) because setting sq.orderPosition to threatPos
+                        // (outside sq.currentTask) causes vanilla Squad.Leader_OrderAttackCurrentTask to immediately overwrite the order 250ms later!
+                        anvilBoard.NetDirective = SquadNetDirective.Hammer_WideFlankEnvelopment;
+                        anvilBoard.NetDirectiveExpireTime = now + 22.0f;
+                        anvilBoard.NetDirectiveTargetPos = threatPos;
+                        _squadBlackboards[anvilSq.Pointer] = anvilBoard;
+                        ConsumeInitialHqSpawnBriefingIfNoRadio(anvilSq);
+
+                        TrySayTacticalVoice(anvilLeader, anvilSq, VoiceManager.VoiceClip.attackThere, 0.2f);
+                        TryTriggerSquadRadioSupport(anvilSq, anvilLeader);
                         TeamNetAnvilHammerCount++;
                         GoapPlansExecutedCount++;
-                        if (VisionConfig.DebugLogging.Value)
+                    }
+                }
+
+                // =================================================================
+                // 2. Multi-Squad Objective Pincer (When 2+ Connected Squads Push the Same Objective)
+                // =================================================================
+                _reusablePrimarySquadByTask.Clear();
+                _reusablePincerCountByTask.Clear();
+                var primarySquadByTask = _reusablePrimarySquadByTask;
+                var pincerCountByTask = _reusablePincerCountByTask;
+
+                for (int i = 0; i < infCount; i++)
+                {
+                    Squad sq = connectedInfantrySquads[i];
+                    if (sq.currentTask == null || sq.currentTask.Pointer == IntPtr.Zero)
+                        continue;
+
+                    if (_squadBlackboards.TryGetValue(sq.Pointer, out SquadBlackboard board) &&
+                        (board.HasActiveThreat || now < board.NetDirectiveExpireTime))
+                    {
+                        continue;
+                    }
+
+                    Soldier leader = sq.Leader;
+                    if (leader == null || leader.transform == null ||
+                        (leader.Params != null && (!leader.Params.canGiveOrders || !leader.Params.canMove)))
+                    {
+                        continue;
+                    }
+
+                    IntPtr taskPtr = sq.currentTask.Pointer;
+                    Vector3 taskPos = sq.currentTask.GetTaskDestination();
+                    Vector3 toTask = taskPos - leader.transform.position;
+                    toTask.y = 0f;
+                    float distToTask = toTask.magnitude;
+                    if (distToTask < 55f || distToTask > 175f)
+                        continue;
+
+                    if (!primarySquadByTask.ContainsKey(taskPtr))
+                    {
+                        primarySquadByTask[taskPtr] = sq;
+                        pincerCountByTask[taskPtr] = 0;
+                        ConsumeInitialHqSpawnBriefingIfNoRadio(sq);
+                        continue;
+                    }
+
+                    int pincerIndex = pincerCountByTask[taskPtr] + 1;
+                    pincerCountByTask[taskPtr] = pincerIndex;
+
+                    FactionCommandProfile pincerProfile = GetFactionCommandProfile(leader.faction);
+                    Vector3 axisDir = toTask / distToTask;
+                    Vector3 perpRight = new Vector3(axisDir.z, 0f, -axisDir.x);
+                    float sideSign = (pincerIndex % 2 == 1) ? 1f : -1f;
+                    float latBias = pincerProfile.FlankLateralBias;
+                    float fwdBias = Mathf.Sqrt(Mathf.Max(0.1f, 1f - latBias * latBias));
+                    Vector3 pincerFlankDir = (axisDir * fwdBias - perpRight * (sideSign * latBias)).normalized;
+
+                    board.NetDirective = SquadNetDirective.Hammer_WideFlankEnvelopment;
+                    board.NetDirectiveExpireTime = now + 28.0f;
+                    board.NetDirectiveTargetPos = taskPos;
+                    _squadBlackboards[sq.Pointer] = board;
+                    ConsumeInitialHqSpawnBriefingIfNoRadio(sq);
+
+                    // Only issue the squad-level AttackFromSide waypoint ONCE per objective assignment, AND cap at 1 AttackFromSide
+                    // call per TeamNetGOAP tick (gated by TryConsumeBotRpcBudget) so multiple squads never stack CoverManager sweeps
+                    // or burst 12-20 reliable PhotonView.RPCs on a single frame!
+                    if (!_pincerOrderedTaskBySquad.TryGetValue(sq.Pointer, out IntPtr prevPincerTask) || prevPincerTask != taskPtr)
+                    {
+                        if (!issuedSquadCoverOrderThisTick &&
+                            (!Photon.Pun.PhotonNetwork.InRoom || AiCore.TryConsumeBotRpcBudget(0.45f)))
                         {
-                            AiCore.LogDebug(
-                                "TeamNetPincer",
-                                $"{leader.faction} squad '{sq.squadName}' executing objective pincer (latBias:{latBias:F2}, dist:{distToTask:F0}m).",
-                                4.0f);
+                            issuedSquadCoverOrderThisTick = true;
+                            _pincerOrderedTaskBySquad[sq.Pointer] = taskPtr;
+                            try
+                            {
+                                sq.AttackFromSide(pincerFlankDir, taskPos, 22.0f);
+                                if (sq.timed_order_end < now + 28.0f)
+                                    sq.timed_order_end = now + 28.0f;
+                            }
+                            catch { }
+
+                            TeamNetAnvilHammerCount++;
+                            GoapPlansExecutedCount++;
+                            if (VisionConfig.DebugLogging.Value)
+                            {
+                                AiCore.LogDebug(
+                                    "TeamNetPincer",
+                                    $"{leader.faction} squad '{sq.squadName}' executing objective pincer (latBias:{latBias:F2}, dist:{distToTask:F0}m).",
+                                    4.0f);
+                            }
                         }
                     }
                 }
+                _reusablePrimarySquadByTask.Clear();
+                _reusablePincerCountByTask.Clear();
             }
-            _reusablePrimarySquadByTask.Clear();
-            _reusablePincerCountByTask.Clear();
+
+            // =================================================================
+            // 3. Tier 2 Squad Leader Execution GOAP (Charge! / Covert Hold-Fire / Follow Column)
+            //    Evaluated for all AI foot Squad Leaders (both Radio-Connected and Disconnected)
+            //    so each Squad Leader translates TeamNet directives & local battlefield state into
+            //    native squad orders based on personality, doctrine, cap urgency, tickets & smoke.
+            // =================================================================
+            int footCount = aiFootSquads.Count;
+            for (int i = 0; i < footCount; i++)
+            {
+                Squad footSq = aiFootSquads[i];
+                if (footSq == null || footSq.Pointer == IntPtr.Zero)
+                    continue;
+
+                Soldier footLeader = footSq.Leader;
+                if (footLeader == null || !footLeader.IsAlive || footLeader.transform == null)
+                    continue;
+
+                if (!_squadBlackboards.TryGetValue(footSq.Pointer, out SquadBlackboard footBoard))
+                    footBoard = GetOrUpdateSquadBlackboard(footSq, footLeader);
+
+                EvaluateSquadLeaderExecutionOrders(footSq, footLeader, ref footBoard, now, ref issuedSquadCoverOrderThisTick);
+            }
+            aiFootSquads.Clear();
+        }
+
+        private static void EvaluateSquadLeaderExecutionOrders(
+            Squad sq,
+            Soldier leader,
+            ref SquadBlackboard board,
+            float now,
+            ref bool issuedSquadCoverOrderThisTick)
+        {
+            IntPtr sqPtr = sq.Pointer;
+            Vector3 leaderPos = leader.transform.position;
+            float leaderSupp = leader.GetSuppressionValue();
+            float distToThreat = board.HasActiveThreat ? Vector3.Distance(leaderPos, board.ThreatPosition) : 9999f;
+            float distToObj = board.HasActiveObjectiveTask ? Vector3.Distance(leaderPos, board.ObjectivePosition) : 9999f;
+            bool syncOnline = Photon.Pun.PhotonNetwork.InRoom;
+
+            // A. Auto-Release AI Covert Hold-Fire immediately when discovered, suppressed, or entering close assault range.
+            //    Strictly scoped to _aiCovertHoldFireSquads so mission-scripted Lua holdFire orders are NEVER touched!
+            if (_aiCovertHoldFireSquads.Contains(sqPtr))
+            {
+                if (!sq.HoldFire)
+                {
+                    _aiCovertHoldFireSquads.Remove(sqPtr);
+                    _aiCovertHoldFireExpireTime.Remove(sqPtr);
+                }
+                else
+                {
+                    bool expired = !_aiCovertHoldFireExpireTime.TryGetValue(sqPtr, out float expT) || now >= expT;
+                    bool compromised = sq.IsEnemyAwareOfThisSquad ||
+                                       leaderSupp >= 8.0f ||
+                                       leader.isBleeding ||
+                                       distToThreat <= 36.0f ||
+                                       distToObj <= 36.0f ||
+                                       sq.InChargeTime() ||
+                                       (board.IsDefendingObjective && board.ObjectiveCaptureProgress >= 0.35f);
+
+                    if ((expired || compromised) && (!syncOnline || AiCore.TryConsumeBotRpcBudget(0.20f)))
+                    {
+                        _aiCovertHoldFireSquads.Remove(sqPtr);
+                        _aiCovertHoldFireExpireTime.Remove(sqPtr);
+                        try
+                        {
+                            sq.SetHoldFireOrder(false, false, compromised && !expired, syncOnline);
+                        }
+                        catch { }
+                    }
+                }
+            }
+
+            // B. Auto-Release AI Follow Column March as soon as the squad nears the frontline (<=78m) or takes contact
+            //    so vanilla SquadLeaderRoutine deploys the squad into tactical cover immediately.
+            if (_aiFollowColumnUntil.TryGetValue(sqPtr, out float followUntil))
+            {
+                if (sq.order != Order.follow)
+                {
+                    _aiFollowColumnUntil.Remove(sqPtr);
+                }
+                else if (now >= followUntil ||
+                         board.HasActiveThreat ||
+                         sq.IsEnemyAwareOfThisSquad ||
+                         leaderSupp >= 4.0f ||
+                         leader.isBleeding ||
+                         distToObj <= 78.0f)
+                {
+                    _aiFollowColumnUntil.Remove(sqPtr);
+                    if (sq.timed_order_end > now)
+                        sq.timed_order_end = 0f;
+                }
+            }
+
+            // C. Evaluate New Tier 2 Squad Leader Execution Order (Baseline 1.00f = Standard Cover-to-Cover Assault)
+            if (issuedSquadCoverOrderThisTick)
+                return;
+
+            if (leader.Params != null && (!leader.Params.canGiveOrders || !leader.Params.canMove))
+                return;
+
+            if (leader.HasSurrended() || leader.IsInjured || IsSquadOnRetreatTask(sq) || _squadOrderedToVehicle.ContainsKey(sqPtr))
+                return;
+
+            FactionCommandProfile profile = GetFactionCommandProfile(leader.faction);
+            SoldierPersonality leaderPers = GetPersonality(leader);
+
+            float bestCost = 0.98f;
+            int bestAction = 0; // 1 = Charge, 2 = Covert HoldFire, 3 = Follow Column
+            Vector3 chargeTarget = Vector3.zero;
+
+            // 1. Evaluate Charge! (sq.Charge) — Desperate Cap Saves, Final Cap Push, Low-Ticket Push, Smoke/Shock Assaults
+            if (!sq.InChargeTime() &&
+                board.AliveMemberCount >= 3 &&
+                (!_nextAiSquadChargeTime.TryGetValue(sqPtr, out float nextChargeT) || now >= nextChargeT) &&
+                !AiCore.IsOnBridgeOrNarrowCrossing(leaderPos))
+            {
+                bool hasChargeTarget = false;
+                if (board.HasActiveObjectiveTask && distToObj >= 14.0f && distToObj <= 52.0f)
+                {
+                    chargeTarget = board.ObjectivePosition;
+                    hasChargeTarget = !board.ThreatIsArmor || distToObj <= 36.0f;
+                }
+                else if (board.HasActiveThreat && !board.ThreatIsArmor && distToThreat >= 14.0f && distToThreat <= 42.0f)
+                {
+                    chargeTarget = board.ThreatPosition;
+                    hasChargeTarget = true;
+                }
+
+                if (hasChargeTarget)
+                {
+                    float chargeCost = 1.65f * profile.BayonetBreachCostMult;
+                    if (leaderPers == SoldierPersonality.Leader_Spearhead)
+                        chargeCost *= 0.74f;
+                    else if (leaderPers == SoldierPersonality.Leader_Tactician)
+                        chargeCost *= 0.95f;
+                    else if (leaderPers == SoldierPersonality.Leader_OldGuard)
+                        chargeCost *= 1.32f;
+
+                    bool isDesperateCap = false;
+                    if (board.HasActiveObjectiveTask &&
+                        board.IsDefendingObjective &&
+                        board.ObjectiveCaptureProgress >= 0.45f &&
+                        distToObj <= 52.0f)
+                    {
+                        isDesperateCap = true;
+                        float urg01 = Mathf.InverseLerp(0.45f, 0.90f, board.ObjectiveCaptureProgress);
+                        chargeCost *= Mathf.Lerp(0.72f, 0.40f, urg01);
+                    }
+                    else if (board.HasActiveObjectiveTask &&
+                             !board.IsDefendingObjective &&
+                             board.ObjectiveCaptureProgress >= 0.55f &&
+                             distToObj <= 48.0f)
+                    {
+                        chargeCost *= 0.68f;
+                    }
+
+                    if (board.IsInvaderFaction &&
+                        board.TicketRatio01 <= 0.24f &&
+                        board.HasActiveObjectiveTask &&
+                        !board.IsDefendingObjective &&
+                        distToObj <= 50.0f)
+                    {
+                        isDesperateCap = true;
+                        chargeCost *= 0.64f;
+                    }
+
+                    bool hasSmokeCover = (now < board.SmokeActiveUntil &&
+                                          (board.LastSmokeTargetPos - chargeTarget).sqrMagnitude <= 28.0f * 28.0f) ||
+                                         Physics.Linecast(
+                                             leaderPos + Vector3.up * 1.2f,
+                                             chargeTarget + Vector3.up * 1.2f,
+                                             AiCore.GetSmokeOcclusionMask());
+                    if (hasSmokeCover)
+                        chargeCost *= 0.68f;
+
+                    if (board.HasActiveThreat && board.IsThreatBeingPinned(now))
+                        chargeCost *= 0.80f;
+
+                    if (board.NetDirective == SquadNetDirective.Hammer_WideFlankEnvelopment &&
+                        Vector3.Distance(leaderPos, chargeTarget) <= 34.0f)
+                    {
+                        chargeCost *= 0.84f;
+                    }
+
+                    if (!isDesperateCap && leaderSupp >= 55.0f && profile.BayonetBreachCostMult > 0.68f)
+                        chargeCost *= 1.45f;
+
+                    if (chargeCost < bestCost)
+                    {
+                        bestCost = chargeCost;
+                        bestAction = 1;
+                    }
+                }
+            }
+
+            // 2. Evaluate Covert Hold-Fire (sq.SetHoldFireOrder) — Stealth Hammer Envelopments, Tactician Infiltration, Ambush Doctrines
+            if (!sq.HoldFire &&
+                !sq.InChargeTime() &&
+                !sq.IsEnemyAwareOfThisSquad &&
+                leaderSupp < 5.0f &&
+                !leader.isBleeding &&
+                board.AliveMemberCount >= 3 &&
+                distToThreat > 42.0f &&
+                distToObj > 40.0f &&
+                (distToThreat <= 135.0f || distToObj <= 135.0f) &&
+                (!_nextAiCovertOrderTime.TryGetValue(sqPtr, out float nextCovT) || now >= nextCovT))
+            {
+                bool wantStealthFlank = board.NetDirective == SquadNetDirective.Hammer_WideFlankEnvelopment;
+                bool wantTacticianInfil = leaderPers == SoldierPersonality.Leader_Tactician;
+                bool wantDoctrineAmbush = profile.PreferAmbushWhenAlone && (!board.IsConnectedToRadioNet || board.IsDefendingObjective);
+
+                if (wantStealthFlank || wantTacticianInfil || wantDoctrineAmbush)
+                {
+                    float covertCost = 1.26f * profile.FlankMoveCostMult;
+                    if (wantStealthFlank)
+                        covertCost *= 0.72f;
+                    if (wantTacticianInfil)
+                        covertCost *= 0.76f;
+                    if (wantDoctrineAmbush)
+                        covertCost *= 0.80f;
+                    if (leaderPers == SoldierPersonality.Leader_Spearhead)
+                        covertCost *= 1.20f;
+                    if (board.IsDefendingObjective && board.ObjectiveCaptureProgress >= 0.25f)
+                        covertCost *= 2.50f;
+
+                    if (covertCost < bestCost)
+                    {
+                        bestCost = covertCost;
+                        bestAction = 2;
+                    }
+                }
+            }
+
+            // 3. Evaluate Follow Column (sq.FollowLeader) — Fast Unengaged Rear-Echelon Approach (>105m Out of Contact)
+            if (sq.order == Order.defend &&
+                !sq.InChargeTime() &&
+                !board.HasActiveThreat &&
+                !sq.IsEnemyAwareOfThisSquad &&
+                !board.IsDefendingObjective &&
+                !_garrisonAssignedObjectiveBySquad.ContainsKey(sqPtr) &&
+                distToObj >= 105.0f &&
+                distToObj < 9000.0f &&
+                leaderSupp < 2.0f &&
+                (!_nextAiFollowOrderTime.TryGetValue(sqPtr, out float nextFolT) || now >= nextFolT))
+            {
+                const float followCost = 0.86f;
+                if (followCost < bestCost)
+                {
+                    bestCost = followCost;
+                    bestAction = 3;
+                }
+            }
+
+            if (bestAction == 1)
+            {
+                if (!syncOnline || AiCore.TryConsumeBotRpcBudget(0.45f))
+                {
+                    if (_aiCovertHoldFireSquads.Remove(sqPtr))
+                    {
+                        _aiCovertHoldFireExpireTime.Remove(sqPtr);
+                        try { sq.SetHoldFireOrder(false, false, false, syncOnline); } catch { }
+                    }
+                    _aiFollowColumnUntil.Remove(sqPtr);
+
+                    try
+                    {
+                        sq.Charge(chargeTarget, 15.0f);
+                        if (sq.timed_order_end < now + 14.0f)
+                            sq.timed_order_end = now + 14.0f;
+                    }
+                    catch { }
+
+                    _nextAiSquadChargeTime[sqPtr] = now + 42.0f;
+                    issuedSquadCoverOrderThisTick = true;
+                    SquadChargesOrderedCount++;
+                    GoapPlansExecutedCount++;
+
+                    if (VisionConfig.DebugLogging.Value)
+                    {
+                        AiCore.LogDebug(
+                            "SquadCharge",
+                            $"{leader.faction} {leaderPers} ordered Charge! on '{sq.squadName}' (cost:{bestCost:F2}, capProg:{board.ObjectiveCaptureProgress:F2}, dist:{Vector3.Distance(leaderPos, chargeTarget):F0}m).",
+                            3.0f);
+                    }
+                }
+            }
+            else if (bestAction == 2)
+            {
+                if (!syncOnline || AiCore.TryConsumeBotRpcBudget(0.40f))
+                {
+                    try
+                    {
+                        sq.SetHoldFireOrder(true, false, true, syncOnline);
+                        _aiCovertHoldFireSquads.Add(sqPtr);
+                        _aiCovertHoldFireExpireTime[sqPtr] = now + 20.0f;
+                    }
+                    catch { }
+
+                    _nextAiCovertOrderTime[sqPtr] = now + 38.0f;
+                    issuedSquadCoverOrderThisTick = true;
+                    SquadCovertOrdersCount++;
+                    GoapPlansExecutedCount++;
+
+                    if (VisionConfig.DebugLogging.Value)
+                    {
+                        AiCore.LogDebug(
+                            "SquadCovert",
+                            $"{leader.faction} {leaderPers} ordered Covert Hold-Fire on '{sq.squadName}' (cost:{bestCost:F2}, directive:{board.NetDirective}).",
+                            3.0f);
+                    }
+                }
+            }
+            else if (bestAction == 3)
+            {
+                if (!syncOnline || AiCore.TryConsumeBotRpcBudget(0.40f))
+                {
+                    try
+                    {
+                        sq.FollowLeader(false);
+                        sq.timed_order_end = now + 12.0f;
+                        _aiFollowColumnUntil[sqPtr] = now + 12.0f;
+                    }
+                    catch { }
+
+                    _nextAiFollowOrderTime[sqPtr] = now + 32.0f;
+                    issuedSquadCoverOrderThisTick = true;
+                    SquadFollowOrdersCount++;
+                    GoapPlansExecutedCount++;
+                }
+            }
         }
 
         private static Squad FindBestAvailableHammerSquad(

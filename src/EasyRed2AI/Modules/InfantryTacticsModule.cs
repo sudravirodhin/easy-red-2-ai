@@ -165,7 +165,11 @@ namespace EasyRed2HumanAI
             IntPtr myPtr = shooter.Pointer;
 
             Soldier player = Soldier.CurrentControlledSoldierOrNull();
-            if (player != null && player.IsAlive && player.Pointer != myPtr && player.faction == myFaction)
+            if (player != null &&
+                player.IsAlive &&
+                player.Pointer != myPtr &&
+                !string.IsNullOrEmpty(player.faction) &&
+                (player.faction == myFaction || ResourcesManager.IsSameFaction(myFaction, player.faction)))
             {
                 if (CheckSingleFriendlyInCone(gunPos, fireDir, maxCheckDist, allowedConeDeg, corridorWidth, shooter, player, out sidestepDir))
                 {
@@ -191,46 +195,42 @@ namespace EasyRed2HumanAI
                 }
             }
 
+            // Scan flat WorldSoldiers directly so detached vehicle crewmen, remote Co-op human players,
+            // and allied sub-factions are all protected with pure C# L1-cache spatial culling.
             AiCore.EnsureWorldSnapshot();
-            int sqCount = AiCore.WorldSquadCount;
-            if (sqCount > 0)
+            int solCount = AiCore.WorldSoldierCount;
+            if (solCount > 0)
             {
                 IntPtr mySqPtr = mySquad != null ? mySquad.Pointer : IntPtr.Zero;
-                float maxDistWithMarginSq = (maxCheckDist + 2.2f) * (maxCheckDist + 2.2f);
-                var squads = AiCore.WorldSquads;
+                IntPtr playerPtr = player != null ? player.Pointer : IntPtr.Zero;
+                float maxDistWithMarginSq = (maxCheckDist + 3.0f) * (maxCheckDist + 3.0f);
                 var soldiers = AiCore.WorldSoldiers;
 
-                for (int s = 0; s < sqCount; s++)
+                for (int i = 0; i < solCount; i++)
                 {
-                    ref AiCore.SquadSnapshot sqSnap = ref squads[s];
-                    if (sqSnap.Ptr == mySqPtr || sqSnap.UnitCount == 0 || sqSnap.Faction != myFaction)
+                    ref AiCore.SoldierSnapshot solSnap = ref soldiers[i];
+                    if (solSnap.Ptr == myPtr || solSnap.Ptr == playerPtr || (mySqPtr != IntPtr.Zero && solSnap.SquadPtr == mySqPtr))
                         continue;
 
-                    if ((sqSnap.RefPos - gunPos).sqrMagnitude > 75f * 75f)
+                    // Pure C# L1-cache spatial cull BEFORE any string/IL2CPP boundary crossing
+                    Vector3 approxDelta = (solSnap.Pos + new Vector3(0f, 0.9f, 0f)) - gunPos;
+                    float approxSq = approxDelta.sqrMagnitude;
+                    if (approxSq > maxDistWithMarginSq || Vector3.Dot(approxDelta, fireDir) <= -0.5f)
                         continue;
 
-                    int end = sqSnap.UnitStartIndex + sqSnap.UnitCount;
-                    for (int i = sqSnap.UnitStartIndex; i < end; i++)
+                    if (string.IsNullOrEmpty(solSnap.Faction))
+                        continue;
+                    if (solSnap.Faction != myFaction && !ResourcesManager.IsSameFaction(myFaction, solSnap.Faction))
+                        continue;
+
+                    Soldier f = solSnap.Ref;
+                    if (f == null || !f.IsAlive)
+                        continue;
+
+                    if (CheckSingleFriendlyInCone(gunPos, fireDir, maxCheckDist, allowedConeDeg, corridorWidth, shooter, f, out sidestepDir))
                     {
-                        ref AiCore.SoldierSnapshot solSnap = ref soldiers[i];
-                        if (solSnap.Ptr == myPtr)
-                            continue;
-
-                        // Pure C# L1-cache cull before crossing the IL2CPP boundary for GetCenterOfUnit()
-                        Vector3 approxDelta = (solSnap.Pos + new Vector3(0f, 0.9f, 0f)) - gunPos;
-                        float approxSq = approxDelta.sqrMagnitude;
-                        if (approxSq > maxDistWithMarginSq || Vector3.Dot(approxDelta, fireDir) <= -0.5f)
-                            continue;
-
-                        Soldier f = solSnap.Ref;
-                        if (f == null || !f.IsAlive)
-                            continue;
-
-                        if (CheckSingleFriendlyInCone(gunPos, fireDir, maxCheckDist, allowedConeDeg, corridorWidth, shooter, f, out sidestepDir))
-                        {
-                            blockingFriend = f;
-                            return true;
-                        }
+                        blockingFriend = f;
+                        return true;
                     }
                 }
             }
@@ -262,7 +262,25 @@ namespace EasyRed2HumanAI
             float angle = Vector3.Angle(toFriend, fireDir);
             float lateralDist = Vector3.Cross(fireDir, toFriend).magnitude;
 
-            if (angle <= allowedConeDeg || (forwardDist <= 8.0f && lateralDist <= corridorWidth))
+            float effCorridor = corridorWidth;
+            float corridorRange = 8.0f;
+            if (friend.IsOnVehicle())
+            {
+                Vehicle fv = friend.GetCurrentVehicle();
+                if (fv != null && fv.Pointer != IntPtr.Zero && !fv.IsAirVehicle())
+                {
+                    IntPtr shooterVehPtr = (shooter.IsOnVehicle() && shooter.GetCurrentVehicle() != null)
+                        ? shooter.GetCurrentVehicle().Pointer
+                        : IntPtr.Zero;
+                    if (shooterVehPtr != fv.Pointer)
+                    {
+                        effCorridor = Mathf.Max(corridorWidth, 1.65f);
+                        corridorRange = 14.0f;
+                    }
+                }
+            }
+
+            if (angle <= allowedConeDeg || (forwardDist <= corridorRange && lateralDist <= effCorridor))
             {
                 Vector3 right = shooter.transform.right;
                 float side = Vector3.Dot(toFriend, right);

@@ -14,12 +14,18 @@ namespace EasyRed2HumanAI
         private static float _toastExpireTime;
         private static bool _showConfigMenu;
         private static bool _showMapPicker;
+        private static bool _revealMapPickerSpoilers;
         private static int _activeConfigTab;
 
         private struct PickerBattleEntry
         {
             public string DisplayName;
             public string UniqueId;
+            public string SaveDataId;
+            public string PreviousSaveDataId;
+            public bool IsVanilla;
+            public bool InitialIsUnlocked;
+            public bool MetadataResolved;
             public ICampaignTreeBattleData BattleRef;
         }
 
@@ -64,6 +70,8 @@ namespace EasyRed2HumanAI
                     VeteranAndTacticsPatches.RenderVeteran3DMarkersAndCleanup();
                     VeteranAndTacticsPatches.UpdateMacroObjectiveAndEmplacementDirector();
                     VeteranAndTacticsPatches.UpdateQuickTapSpot(_showConfigMenu || _showMapPicker);
+                    if (_showMapPicker)
+                        BattleManager_OnGUI_Patch.StepResolveSelectedCampaignBattles();
 
                     var input = UnityInput.Current;
                     if (input != null)
@@ -109,10 +117,10 @@ namespace EasyRed2HumanAI
                             VeteranAndTacticsPatches.CleanupDictionaries();
                             ShowToast(
                                 $"[Battle Hardened v{Plugin.PluginVersion} Telemetry] MaxFrame:{AiCore.RollingMaxFrameMs:F1}ms (Hitches:{AiCore.TotalHitchesOver28ms}) | Vets:{VeteranAndTacticsPatches.ActiveVeteransCount} (Prom:{VeteranAndTacticsPatches.FieldPromotionsCount}) | ExtraTicks:{AiCore.TotalAdaptiveAiExtraTicks} (PingSkip:{AiCore.TotalPingGovernorSkippedCycles}) | FFSaved:{VeteranAndTacticsPatches.FriendlyFirePrevented} | MedRedirect:{VeteranAndTacticsPatches.MedicTriageRedirectsCount}\n" +
-                                $"GOAP:{VeteranAndTacticsPatches.GoapPlansExecutedCount} (Anvil:{VeteranAndTacticsPatches.TeamNetAnvilHammerCount} Flank:{VeteranAndTacticsPatches.GoapPinAndFlankCount} Smoke:{VeteranAndTacticsPatches.GoapSmokeScreensCount} RadioCut:{VeteranAndTacticsPatches.RadioNetCutoffsCount}) | WepUp:{VeteranAndTacticsPatches.RoleWeaponUpgradesCount} | BuddyResup:{VeteranAndTacticsPatches.BuddyResuppliesCount} | RadioLoot:{VeteranAndTacticsPatches.FieldRadiosInheritedCount} | Helmets:{VeteranAndTacticsPatches.HelmetsRecoveredCount} | Dragged:{VeteranAndTacticsPatches.CasualtiesDraggedCount}\n" +
+                                $"GOAP:{VeteranAndTacticsPatches.GoapPlansExecutedCount} (Anvil:{VeteranAndTacticsPatches.TeamNetAnvilHammerCount} Flank:{VeteranAndTacticsPatches.GoapPinAndFlankCount} Charge:{VeteranAndTacticsPatches.SquadChargesOrderedCount} Covert:{VeteranAndTacticsPatches.SquadCovertOrdersCount} Follow:{VeteranAndTacticsPatches.SquadFollowOrdersCount} Smoke:{VeteranAndTacticsPatches.GoapSmokeScreensCount} RadioCut:{VeteranAndTacticsPatches.RadioNetCutoffsCount}) | WepUp:{VeteranAndTacticsPatches.RoleWeaponUpgradesCount} | BuddyResup:{VeteranAndTacticsPatches.BuddyResuppliesCount} | RadioLoot:{VeteranAndTacticsPatches.FieldRadiosInheritedCount} | Helmets:{VeteranAndTacticsPatches.HelmetsRecoveredCount} | Dragged:{VeteranAndTacticsPatches.CasualtiesDraggedCount}\n" +
                                 $"Drops:{VeteranAndTacticsPatches.SelfPreservationDrops} | Peeks:{VeteranAndTacticsPatches.AutoPeeksTriggered} | IndoorCrouch:{VeteranAndTacticsPatches.IndoorPronePreventedCount} | Pies:{VeteranAndTacticsPatches.CornerPiesExecutedCount} | TankCov:{VeteranAndTacticsPatches.TankHullCoverUsesCount} | Bounds:{VeteranAndTacticsPatches.BoundingOverwatchHoldsCount} | Doors:{VeteranAndTacticsPatches.DoorsStrategicallyClosedCount} | Bipods:{VeteranAndTacticsPatches.BipodsDeployed} | WallBlk:{VeteranAndTacticsPatches.WallsBlocked} | Melee:{VeteranAndTacticsPatches.MeleeAttacksTriggered} | Surr:{VeteranAndTacticsPatches.ShellShockSurrendersCount}/Lib:{VeteranAndTacticsPatches.ComradesLiberated}\n" +
                                 $"Garrisons:{VeteranAndTacticsPatches.MacroGarrisonsAssignedCount} | Emplace:{VeteranAndTacticsPatches.StaticGunsStaffedCount} | APC:{VeteranAndTacticsPatches.SmartApcDismountsCount} | TankHold:{VeteranAndTacticsPatches.TankStandoffHoldsCount} | TankSpread:{VeteranAndTacticsPatches.ArmoredDispersionAdjustmentsCount} | SmartAmmo:{VeteranAndTacticsPatches.SmartAmmoSwitchesCount} | Unsticks:{VeteranAndTacticsPatches.TankRockUnsticksCount} | Repairs:{VeteranAndTacticsPatches.ShelteredRepairsCount} | RoadkillSaved:{VeteranAndTacticsPatches.FriendlyRoadkillsPreventedCount} (ClientRK:{VeteranAndTacticsPatches.RemoteClientRoadkillsAssistedCount})\n" +
-                                $"CombArms:{VeteranAndTacticsPatches.CombinedArmsPriorityAssistsCount} (Kamikaze:{VeteranAndTacticsPatches.KamikazeDivesTriggeredCount}) | Callouts:{VeteranAndTacticsPatches.LocalCalloutsSharedCount} | Supp:{VeteranAndTacticsPatches.SuppressiveEventsCount} | WoodPen:{VeteranAndTacticsPatches.ThinCoverPenetrationsCount} | TopAP:{VeteranAndTacticsPatches.AircraftTopAttackPenetrationsAssistedCount} (HostAssist:{VeteranAndTacticsPatches.HostVanillaClientApAssistsCount}) | CrewBlastBlk:{VeteranAndTacticsPatches.EnclosedCrewExplosionHitsBlockedCount} | AirMgBlk:{VeteranAndTacticsPatches.AirplanePilotMgHitsBlockedCount} | Chutes:{VeteranAndTacticsPatches.ParachutesDriftedCount} | BloodOcc:{VeteranAndTacticsPatches.BloodSmokeWaterOccludedCount}",
+                                $"CombArms:{VeteranAndTacticsPatches.CombinedArmsPriorityAssistsCount} (Kamikaze:{VeteranAndTacticsPatches.KamikazeDivesTriggeredCount}) | Callouts:{VeteranAndTacticsPatches.LocalCalloutsSharedCount} | Supp:{VeteranAndTacticsPatches.SuppressiveEventsCount} | WoodPen:{VeteranAndTacticsPatches.ThinCoverPenetrationsCount} | TopAP:{VeteranAndTacticsPatches.AircraftTopAttackPenetrationsAssistedCount} (HostAssist:{VeteranAndTacticsPatches.HostVanillaClientApAssistsCount}) | CrewBlastBlk:{VeteranAndTacticsPatches.EnclosedCrewExplosionHitsBlockedCount} | CrewClipBlk:{VeteranAndTacticsPatches.EnclosedCrewBulletClipsBlockedCount} | AirMgBlk:{VeteranAndTacticsPatches.AirplanePilotMgHitsBlockedCount} | Chutes:{VeteranAndTacticsPatches.ParachutesDriftedCount} | BloodOcc:{VeteranAndTacticsPatches.BloodSmokeWaterOccludedCount}",
                                 9.5f);
                         }
                     }
@@ -126,14 +134,14 @@ namespace EasyRed2HumanAI
                         AiCore.LogDebug(
                             "Heartbeat",
                             $"FPS:{fps:F0} ({dtMs:F1}ms, Max15s:{AiCore.RollingMaxFrameMs:F1}ms, Hitches:{AiCore.TotalHitchesOver28ms}) | Vets:{VeteranAndTacticsPatches.ActiveVeteransCount} (Prom:{VeteranAndTacticsPatches.FieldPromotionsCount}) | " +
-                            $"GOAP:{VeteranAndTacticsPatches.GoapPlansExecutedCount} (Anvil:{VeteranAndTacticsPatches.TeamNetAnvilHammerCount} PinFlank:{VeteranAndTacticsPatches.GoapPinAndFlankCount} Smoke:{VeteranAndTacticsPatches.GoapSmokeScreensCount} WepUp:{VeteranAndTacticsPatches.RoleWeaponUpgradesCount} BuddyResup:{VeteranAndTacticsPatches.BuddyResuppliesCount} RadioLoot:{VeteranAndTacticsPatches.FieldRadiosInheritedCount} Helmets:{VeteranAndTacticsPatches.HelmetsRecoveredCount} Dragged:{VeteranAndTacticsPatches.CasualtiesDraggedCount} RadioCut:{VeteranAndTacticsPatches.RadioNetCutoffsCount}) | " +
+                            $"GOAP:{VeteranAndTacticsPatches.GoapPlansExecutedCount} (Anvil:{VeteranAndTacticsPatches.TeamNetAnvilHammerCount} PinFlank:{VeteranAndTacticsPatches.GoapPinAndFlankCount} Charge:{VeteranAndTacticsPatches.SquadChargesOrderedCount} Covert:{VeteranAndTacticsPatches.SquadCovertOrdersCount} Follow:{VeteranAndTacticsPatches.SquadFollowOrdersCount} Smoke:{VeteranAndTacticsPatches.GoapSmokeScreensCount} WepUp:{VeteranAndTacticsPatches.RoleWeaponUpgradesCount} BuddyResup:{VeteranAndTacticsPatches.BuddyResuppliesCount} RadioLoot:{VeteranAndTacticsPatches.FieldRadiosInheritedCount} Helmets:{VeteranAndTacticsPatches.HelmetsRecoveredCount} Dragged:{VeteranAndTacticsPatches.CasualtiesDraggedCount} RadioCut:{VeteranAndTacticsPatches.RadioNetCutoffsCount}) | " +
                             $"Drops:{VeteranAndTacticsPatches.SelfPreservationDrops} | Peeks:{VeteranAndTacticsPatches.AutoPeeksTriggered} | IndoorCrouch:{VeteranAndTacticsPatches.IndoorPronePreventedCount} | Pies:{VeteranAndTacticsPatches.CornerPiesExecutedCount} | TankCov:{VeteranAndTacticsPatches.TankHullCoverUsesCount} | " +
                             $"Callouts:{VeteranAndTacticsPatches.LocalCalloutsSharedCount} (KillVoice:{VeteranAndTacticsPatches.BotKillCalloutsCount}) | Supp:{VeteranAndTacticsPatches.SuppressiveEventsCount} | " +
                             $"Bounds:{VeteranAndTacticsPatches.BoundingOverwatchHoldsCount} | Garrisons:{VeteranAndTacticsPatches.MacroGarrisonsAssignedCount} | " +
                             $"Emplace:{VeteranAndTacticsPatches.StaticGunsStaffedCount} | APC:{VeteranAndTacticsPatches.SmartApcDismountsCount} | " +
                             $"TankHold:{VeteranAndTacticsPatches.TankStandoffHoldsCount} | TankSpread:{VeteranAndTacticsPatches.ArmoredDispersionAdjustmentsCount} | SmartAmmo:{VeteranAndTacticsPatches.SmartAmmoSwitchesCount} | Unsticks:{VeteranAndTacticsPatches.TankRockUnsticksCount} | MedRedirect:{VeteranAndTacticsPatches.MedicTriageRedirectsCount} | RoadkillSaved:{VeteranAndTacticsPatches.FriendlyRoadkillsPreventedCount} (ClientRK:{VeteranAndTacticsPatches.RemoteClientRoadkillsAssistedCount}) | CombArms:{VeteranAndTacticsPatches.CombinedArmsPriorityAssistsCount} (Kamikaze:{VeteranAndTacticsPatches.KamikazeDivesTriggeredCount}) | " +
                             $"Bridges:{VeteranAndTacticsPatches.BridgeCrossingsAssistedCount} | Surr:{VeteranAndTacticsPatches.ShellShockSurrendersCount} (Lib:{VeteranAndTacticsPatches.ComradesLiberated}) | " +
-                            $"WoodPen:{VeteranAndTacticsPatches.ThinCoverPenetrationsCount} | TopAP:{VeteranAndTacticsPatches.AircraftTopAttackPenetrationsAssistedCount} (HostAssist:{VeteranAndTacticsPatches.HostVanillaClientApAssistsCount}) | CrewBlastBlk:{VeteranAndTacticsPatches.EnclosedCrewExplosionHitsBlockedCount} | AirMgBlk:{VeteranAndTacticsPatches.AirplanePilotMgHitsBlockedCount} | PlaneAudio:{VeteranAndTacticsPatches.PlaneAudioLoopsDesyncedCount} | Chutes:{VeteranAndTacticsPatches.ParachutesDriftedCount} | BloodOcc:{VeteranAndTacticsPatches.BloodSmokeWaterOccludedCount} | " +
+                            $"WoodPen:{VeteranAndTacticsPatches.ThinCoverPenetrationsCount} | TopAP:{VeteranAndTacticsPatches.AircraftTopAttackPenetrationsAssistedCount} (HostAssist:{VeteranAndTacticsPatches.HostVanillaClientApAssistsCount}) | CrewBlastBlk:{VeteranAndTacticsPatches.EnclosedCrewExplosionHitsBlockedCount} | CrewClipBlk:{VeteranAndTacticsPatches.EnclosedCrewBulletClipsBlockedCount} | AirMgBlk:{VeteranAndTacticsPatches.AirplanePilotMgHitsBlockedCount} | PlaneAudio:{VeteranAndTacticsPatches.PlaneAudioLoopsDesyncedCount} | Chutes:{VeteranAndTacticsPatches.ParachutesDriftedCount} | BloodOcc:{VeteranAndTacticsPatches.BloodSmokeWaterOccludedCount} | " +
                             $"Doors:{VeteranAndTacticsPatches.DoorsStrategicallyClosedCount} | Bipods:{VeteranAndTacticsPatches.BipodsDeployed} | WallBlk:{VeteranAndTacticsPatches.WallsBlocked} | " +
                             $"Melee:{VeteranAndTacticsPatches.MeleeAttacksTriggered} | TankBlk:{VeteranAndTacticsPatches.UselessTankFirePrevented} (Crew:{VeteranAndTacticsPatches.ExposedCrewTargeted}) | " +
                             $"Ticks:{AiCore.TotalAdaptiveAiExtraTicks} (PingSkip:{AiCore.TotalPingGovernorSkippedCycles}) | FFSaved:{VeteranAndTacticsPatches.FriendlyFirePrevented} | Repairs:{VeteranAndTacticsPatches.ShelteredRepairsCount}",
@@ -633,6 +641,7 @@ namespace EasyRed2HumanAI
                 if (!string.IsNullOrEmpty(prefix))
                     campName = $"{prefix} {campName}";
 
+                bool isVanillaCamp = string.IsNullOrEmpty(prefix);
                 List<PickerBattleEntry> bList = new List<PickerBattleEntry>(camp.battles.Count);
                 for (int j = 0; j < camp.battles.Count; j++)
                 {
@@ -641,10 +650,16 @@ namespace EasyRed2HumanAI
                         continue;
 
                     string uid = bRef.GetUniqueId() ?? $"Mission_{j + 1}";
+                    bool knownSaveId = !isVanillaCamp || !uid.StartsWith("sp_ME_", StringComparison.OrdinalIgnoreCase);
                     bList.Add(new PickerBattleEntry
                     {
                         DisplayName = null, // Lazily resolved per visible page to avoid upfront XML disk I/O & Missing translation spam
                         UniqueId = uid,
+                        SaveDataId = knownSaveId ? uid : null,
+                        PreviousSaveDataId = null,
+                        IsVanilla = isVanillaCamp,
+                        InitialIsUnlocked = !isVanillaCamp || j == 0,
+                        MetadataResolved = !isVanillaCamp,
                         BattleRef = bRef
                     });
                 }
@@ -661,6 +676,13 @@ namespace EasyRed2HumanAI
 
             internal static void EnsureMapPickerCatalog()
             {
+                try
+                {
+                    if (!SavableData.IsDataLoaded())
+                        SavableData.LoadDataIfNotYet();
+                }
+                catch { }
+
                 int curCustomCount = 0;
                 try
                 {
@@ -753,9 +775,123 @@ namespace EasyRed2HumanAI
                 return entry;
             }
 
+            // Amortizes IBattle / BattleData metadata loading (SaveDataId + PreviousMission_SaveDataId) at strictly <= 1 mission
+            // per frame while F5 is open so sp_ME_ streaming campaigns resolve exact gamedata.er2 unlock status with zero hitches.
+            internal static void StepResolveSelectedCampaignBattles()
+            {
+                if (!_showMapPicker || !_mapPickerInitialized)
+                    return;
+
+                if (_selectedCampaignIdx < 0 || _selectedCampaignIdx >= _mapPickerCampaigns.Count)
+                    return;
+
+                List<PickerBattleEntry> list = _mapPickerCampaigns[_selectedCampaignIdx].Battles;
+                if (list == null || list.Count == 0)
+                    return;
+
+                int count = list.Count;
+                int bStart = Mathf.Clamp(_battlePage * 17, 0, count - 1);
+
+                for (int offset = 0; offset < count; offset++)
+                {
+                    int idx = (bStart + offset) % count;
+                    PickerBattleEntry entry = list[idx];
+                    if (entry.MetadataResolved)
+                        continue;
+
+                    entry = GetResolvedBattleEntry(list, idx);
+                    try
+                    {
+                        if (entry.BattleRef != null)
+                        {
+                            IBattle ib = entry.BattleRef.LoadBattle();
+                            if (ib != null)
+                            {
+                                if (string.IsNullOrEmpty(entry.DisplayName) || entry.DisplayName == entry.UniqueId)
+                                {
+                                    string loadedName = ib.GetBattleName();
+                                    if (!string.IsNullOrEmpty(loadedName))
+                                        entry.DisplayName = loadedName;
+                                }
+
+                                BattleData bd = ib.GetBattleData();
+                                if (bd != null)
+                                {
+                                    entry.IsVanilla = bd.IsVanilla();
+                                    entry.InitialIsUnlocked = bd.IsUnlocked();
+                                    entry.SaveDataId = !string.IsNullOrEmpty(bd.SaveDataId) ? bd.SaveDataId : entry.UniqueId;
+                                    entry.PreviousSaveDataId = bd.PreviousMission_SaveDataId;
+                                }
+                            }
+                        }
+                    }
+                    catch { }
+
+                    if (string.IsNullOrEmpty(entry.SaveDataId))
+                        entry.SaveDataId = entry.UniqueId;
+
+                    entry.MetadataResolved = true;
+                    list[idx] = entry;
+                    return; // Strictly <= 1 LoadBattle() per frame
+                }
+            }
+
+            private static void EvaluateBattleUnlockAndStars(
+                PickerBattleEntry bEntry,
+                int battleIdx,
+                GameProgresses prog,
+                out bool isCompleted,
+                out bool wonBothFactions,
+                out bool isUnlocked)
+            {
+                isCompleted = false;
+                wonBothFactions = false;
+
+                if (prog != null && !string.IsNullOrEmpty(bEntry.SaveDataId))
+                {
+                    try
+                    {
+                        var comp = prog.GetCompletedLevelData(bEntry.SaveDataId);
+                        if (comp != null && comp.IsCompleted())
+                        {
+                            isCompleted = true;
+                            wonBothFactions = comp.WonOnBothFactions;
+                        }
+                    }
+                    catch { }
+                }
+
+                if (!bEntry.IsVanilla)
+                {
+                    isUnlocked = true;
+                }
+                else if (!bEntry.MetadataResolved)
+                {
+                    // Mask unresolved >0 vanilla rows during the <=0.25s amortized scan window so spoiler titles never flash
+                    isUnlocked = (battleIdx == 0) || isCompleted;
+                }
+                else
+                {
+                    bool prevDone = false;
+                    if (!string.IsNullOrEmpty(bEntry.PreviousSaveDataId) && prog != null)
+                    {
+                        try { prevDone = prog.IsLevelCompleted(bEntry.PreviousSaveDataId); } catch { }
+                    }
+
+                    isUnlocked = (battleIdx == 0) ||
+                                 isCompleted ||
+                                 bEntry.InitialIsUnlocked ||
+                                 string.IsNullOrEmpty(bEntry.PreviousSaveDataId) ||
+                                 prevDone;
+                }
+            }
+
             private static void DrawMapPickerWindow()
             {
                 EnsureMapPickerCatalog();
+
+                GameProgresses prog = null;
+                try { prog = SavableData.Progresses; } catch { }
 
                 float panelW = 820f;
                 float panelH = 620f;
@@ -767,8 +903,16 @@ namespace EasyRed2HumanAI
 
                 KeyCode mpKey = VisionConfig.MapPickerHotkey != null ? VisionConfig.MapPickerHotkey.Value : KeyCode.F5;
                 GUI.color = new Color(1.0f, 0.88f, 0.35f, 1.0f);
-                GUI.Label(new Rect(panelX + 20f, panelY + 10f, panelW - 240f, 22f),
-                    $"Easy Red 2: Battle Hardened  |  In-Game Campaign & Mission Picker ({mpKey})");
+                GUI.Label(new Rect(panelX + 20f, panelY + 10f, panelW - 360f, 22f),
+                    $"Easy Red 2: Battle Hardened  |  Campaign & Mission Picker ({mpKey})");
+
+                GUI.color = _revealMapPickerSpoilers
+                    ? new Color(1.0f, 0.86f, 0.36f, 1.0f)
+                    : new Color(0.68f, 0.78f, 0.90f, 0.95f);
+                if (GUI.Button(new Rect(panelX + panelW - 332f, panelY + 8f, 114f, 24f), _revealMapPickerSpoilers ? "Hide ??? [ON]" : "Show ???"))
+                {
+                    _revealMapPickerSpoilers = !_revealMapPickerSpoilers;
+                }
 
                 GUI.color = new Color(0.75f, 0.90f, 1.0f, 1.0f);
                 if (GUI.Button(new Rect(panelX + panelW - 210f, panelY + 8f, 190f, 24f), "Back to Feature Menu (F6)"))
@@ -841,7 +985,7 @@ namespace EasyRed2HumanAI
                 _selectedBattleIdx = Mathf.Clamp(_selectedBattleIdx, 0, Mathf.Max(0, batCount - 1));
 
                 GUI.color = new Color(0.55f, 0.82f, 1.0f, 1.0f);
-                GUI.Label(new Rect(colBatX, listTopY, colBatW - 110f, 20f), $"=== Missions ({batCount}) ===");
+                GUI.Label(new Rect(colBatX, listTopY, colBatW - 110f, 20f), $"=== Missions ({batCount})  [★ Beat | ??? Locked] ===");
                 if (totalBatPages > 1)
                 {
                     GUI.color = new Color(0.85f, 0.90f, 1.0f, 1.0f);
@@ -859,13 +1003,38 @@ namespace EasyRed2HumanAI
                     for (int j = bStart; j < bEnd; j++)
                     {
                         bool selected = j == _selectedBattleIdx;
-                        GUI.color = selected
-                            ? new Color(0.45f, 0.95f, 0.52f, 1.0f)
-                            : new Color(0.82f, 0.86f, 0.92f, 0.92f);
+                        PickerBattleEntry bEntry = GetResolvedBattleEntry(curBattles, j);
+                        EvaluateBattleUnlockAndStars(bEntry, j, prog, out bool isCompleted, out bool wonBoth, out bool isUnlocked);
+
+                        bool maskedAsUnknown = !isUnlocked && !_revealMapPickerSpoilers;
+                        if (selected)
+                        {
+                            GUI.color = maskedAsUnknown
+                                ? new Color(0.78f, 0.72f, 0.52f, 0.96f)
+                                : new Color(0.45f, 0.95f, 0.52f, 1.0f);
+                        }
+                        else if (isCompleted)
+                        {
+                            GUI.color = new Color(0.98f, 0.90f, 0.58f, 0.96f);
+                        }
+                        else if (isUnlocked)
+                        {
+                            GUI.color = new Color(0.86f, 0.92f, 0.98f, 0.96f);
+                        }
+                        else if (_revealMapPickerSpoilers)
+                        {
+                            GUI.color = new Color(0.78f, 0.72f, 0.64f, 0.85f);
+                        }
+                        else
+                        {
+                            GUI.color = new Color(0.55f, 0.59f, 0.65f, 0.78f);
+                        }
 
                         string prefix = selected ? "[SELECTED] " : $"#{j + 1}. ";
-                        PickerBattleEntry bEntry = GetResolvedBattleEntry(curBattles, j);
-                        if (GUI.Button(new Rect(colBatX, yB, colBatW, rowH - 2f), $"{prefix}{bEntry.DisplayName}"))
+                        string badge = isCompleted ? (wonBoth ? "★★ " : "★ ") : (!isUnlocked && _revealMapPickerSpoilers ? "[Locked] " : "");
+                        string labelTitle = maskedAsUnknown ? "??? (Locked)" : $"{badge}{bEntry.DisplayName}";
+
+                        if (GUI.Button(new Rect(colBatX, yB, colBatW, rowH - 2f), $"{prefix}{labelTitle}"))
                         {
                             _selectedBattleIdx = j;
                         }
@@ -876,16 +1045,21 @@ namespace EasyRed2HumanAI
                 // Bottom Selection Summary & Action Buttons
                 float summaryY = panelY + panelH - 72f;
                 string selSummary = "No mission selected.";
+                string chosenVisibleName = null;
                 PickerBattleEntry chosenBattle = default;
                 bool hasChosen = false;
                 if (curBattles != null && _selectedBattleIdx >= 0 && _selectedBattleIdx < curBattles.Count)
                 {
                     chosenBattle = GetResolvedBattleEntry(curBattles, _selectedBattleIdx);
                     hasChosen = chosenBattle.BattleRef != null;
+                    EvaluateBattleUnlockAndStars(chosenBattle, _selectedBattleIdx, prog, out bool selDone, out bool selBoth, out bool selUnlocked);
+                    bool selMasked = !selUnlocked && !_revealMapPickerSpoilers;
+                    string selBadge = selDone ? (selBoth ? "★★ " : "★ ") : "";
+                    chosenVisibleName = selMasked ? "??? (Locked)" : chosenBattle.DisplayName;
                     string campTitle = _mapPickerCampaigns[_selectedCampaignIdx].CampaignName;
                     int playlistCount = MatchData.data != null && MatchData.data.battles != null ? MatchData.data.battles.Count : 0;
                     int curIdx = MatchData.data != null ? MatchData.data.currentBattleId + 1 : 1;
-                    selSummary = $"Selected: [{campTitle}]  {chosenBattle.DisplayName}   |   Active Playlist: Battle {curIdx} of {playlistCount}";
+                    selSummary = $"Selected: [{campTitle}]  {selBadge}{chosenVisibleName}   |   Active Playlist: Battle {curIdx} of {playlistCount}";
                 }
 
                 GUI.color = new Color(0.95f, 0.92f, 0.78f, 1.0f);
@@ -897,7 +1071,7 @@ namespace EasyRed2HumanAI
                     : new Color(0.55f, 0.55f, 0.55f, 0.75f);
                 if (GUI.Button(new Rect(panelX + 20f, bottomY, 260f, 28f), "Switch to Mission Now") && hasChosen && canControlMatch)
                 {
-                    TriggerMapPickerMission(chosenBattle.BattleRef, chosenBattle.DisplayName, switchNow: true);
+                    TriggerMapPickerMission(chosenBattle.BattleRef, chosenVisibleName ?? chosenBattle.DisplayName, switchNow: true);
                 }
 
                 GUI.color = (hasChosen && canControlMatch)
@@ -905,7 +1079,7 @@ namespace EasyRed2HumanAI
                     : new Color(0.55f, 0.55f, 0.55f, 0.75f);
                 if (GUI.Button(new Rect(panelX + 295f, bottomY, 260f, 28f), "Queue as Next Mission") && hasChosen && canControlMatch)
                 {
-                    TriggerMapPickerMission(chosenBattle.BattleRef, chosenBattle.DisplayName, switchNow: false);
+                    TriggerMapPickerMission(chosenBattle.BattleRef, chosenVisibleName ?? chosenBattle.DisplayName, switchNow: false);
                 }
 
                 GUI.color = new Color(1.0f, 0.80f, 0.80f, 1.0f);
@@ -1424,6 +1598,12 @@ namespace EasyRed2HumanAI
                 AiCore.PruneDict(_garrisonAssignedObjectiveBySquad, _reusableAlivePtrs);
                 AiCore.PruneDict(_squadTaskCommittedUntil, _reusableAlivePtrs);
                 AiCore.PruneDict(_squadOrderedToVehicle, _reusableAlivePtrs);
+                AiCore.PruneDict(_aiCovertHoldFireExpireTime, _reusableAlivePtrs);
+                AiCore.PruneDict(_aiFollowColumnUntil, _reusableAlivePtrs);
+                AiCore.PruneDict(_nextAiSquadChargeTime, _reusableAlivePtrs);
+                AiCore.PruneDict(_nextAiCovertOrderTime, _reusableAlivePtrs);
+                AiCore.PruneDict(_nextAiFollowOrderTime, _reusableAlivePtrs);
+                AiCore.PruneSet(_aiCovertHoldFireSquads, _reusableAlivePtrs);
                 AiCore.PruneSet(_initialHqSpawnBriefingConsumed, _reusableAlivePtrs);
 
                 if (_coverExposureCache.Count > 4096)

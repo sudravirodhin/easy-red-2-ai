@@ -1,4 +1,4 @@
-# Easy Red 2: Battle Hardened (`v0.7.5`)
+# Easy Red 2: Battle Hardened (`v0.7.6`)
 *3-Tier Tactical GOAP, Squad Blackboard, Radioman Intel Net, Veterancy, Personalities & Combined-Arms Overhaul*
 
 > [!IMPORTANT]
@@ -18,32 +18,47 @@ A comprehensive **BepInEx 6 (IL2CPP)** AI, combined-arms, and fairness overhaul 
 | :--- | :--- |
 | **Target Branch** | Steam `public` (Default Branch) |
 | **Confirmed Game Version** | **Easy Red 2 — Game Build `921`** (Steam Build ID `26375879`, Unity `2022.3.62f3` IL2CPP x64) |
-| **Mod Loader** | **[BepInEx 6 Bleeding Edge (`BepInEx-Unity.IL2CPP-win-x64`, build `#791`+)](https://builds.bepinex.dev/projects/bepinex_be)** |
-| **Last Confirmed Test Date** | **November 11, 2026** (`2026-11-11`) |
+| **Mod Loader** | **[BepInEx 6 Bleeding Edge (`BepInEx-Unity.IL2CPP-win-x64`, build `#791`+)](https://builds.bepinex.dev/projects/bepinex_be)** *(Windows & Linux/Steam Deck via Proton)* |
+| **Last Confirmed Test Date** | **November 12, 2026** (`2026-11-12`) |
 
 ---
 
-## Installation (Two Release Options)
+## Installation (Two Release Options + Linux / Proton)
 
 Download your preferred package from the **[Releases](https://github.com/sudravirodhin/easy-red-2-ai/releases)** page:
 
-### Option A: With BepInEx Included (`EasyRed2HumanAI-v0.7.5-with-BepInEx.zip`) — *Recommended for Fresh Installs*
+### Option A: With BepInEx Included (`EasyRed2HumanAI-v0.7.6-with-BepInEx.zip`) — *Recommended for Fresh Installs*
 Includes **[BepInEx 6.0.0-be.791 (Unity.IL2CPP-win-x64)](https://builds.bepinex.dev/projects/bepinex_be)**, the `.NET 6` runtime, Unity `2022.3.62` base libraries, pre-generated IL2CPP `interop` assemblies for Easy Red 2 Build `921`, and `EasyRed2HumanAI.dll` (with no other third-party mods).
 1. Open your **Easy Red 2** installation folder (e.g. `Steam\steamapps\common\Easy Red 2`, where `Easy Red 2.exe` is located).
-2. Extract all contents of `EasyRed2HumanAI-v0.7.5-with-BepInEx.zip` directly into the `Easy Red 2` folder.
+2. Extract all contents of `EasyRed2HumanAI-v0.7.6-with-BepInEx.zip` directly into the `Easy Red 2` folder.
 3. Launch the game!
 
-### Option B: Without BepInEx / Plugin Only (`EasyRed2HumanAI-v0.7.5-Plugin-Only.zip` or `EasyRed2HumanAI.dll`)
+### Option B: Without BepInEx / Plugin Only (`EasyRed2HumanAI-v0.7.6-Plugin-Only.zip` or `EasyRed2HumanAI.dll`)
 For users who already have **[BepInEx 6 Bleeding Edge (`BepInEx-Unity.IL2CPP-win-x64`)](https://builds.bepinex.dev/projects/bepinex_be)** installed:
-1. Download `EasyRed2HumanAI-v0.7.5-Plugin-Only.zip` (or `EasyRed2HumanAI.dll` directly).
+1. Download `EasyRed2HumanAI-v0.7.6-Plugin-Only.zip` (or `EasyRed2HumanAI.dll` directly).
 2. Place `EasyRed2HumanAI.dll` into:
    ```text
    Easy Red 2\BepInEx\plugins\EasyRed2HumanAI.dll
    ```
-   *(Using **[Quartermaster - ER2 Mod Manager](https://www.nexusmods.com/easyred2/mods/107)**? Import `EasyRed2HumanAI-v0.7.5-Plugin-Only.zip` directly in Quartermaster's Mods tab—do not import `with-BepInEx.zip`.)*
+   *(Using **[Quartermaster - ER2 Mod Manager](https://www.nexusmods.com/easyred2/mods/107)**? Import `EasyRed2HumanAI-v0.7.6-Plugin-Only.zip` directly in Quartermaster's Mods tab—do not import `with-BepInEx.zip`.)*
+
+### Linux & Steam Deck Setup (via Steam Proton)
+`EasyRed2HumanAI` works out of the box on **Linux Desktop** and **SteamOS / Steam Deck** with 100% Windows Co-op cross-play compatibility by running the Windows IL2CPP build under **Proton**:
+1. **Force Proton in Steam** *(do not use the native Linux runtime, as BepInEx IL2CPP hooks `Easy Red 2.exe` / `GameAssembly.dll`)*:
+   * Right-click **Easy Red 2** in Steam → **Properties** → **Compatibility**.
+   * Check **"Force the use of a specific Steam Play compatibility tool"** and select **Proton Experimental** or **Proton 9.0+**. Let Steam finish downloading the Windows executable (`Easy Red 2.exe`).
+2. **Extract the Mod**:
+   * Right-click **Easy Red 2** → **Manage** → **Browse local files** (`~/.steam/steam/steamapps/common/Easy Red 2/`).
+   * Extract all contents of **`EasyRed2HumanAI-v0.7.6-with-BepInEx.zip`** directly into that folder (so `winhttp.dll`, `doorstop_config.ini`, `dotnet/`, and `BepInEx/` sit next to `Easy Red 2.exe`).
+3. **Add the Wine DLL Override Launch Option** *(Required on Linux/Proton so Wine loads BepInEx's `winhttp.dll` proxy instead of Wine's built-in `winhttp`)*:
+   * In Steam → **Easy Red 2** → **Properties** → **General** → **Launch Options**, paste:
+     ```bash
+     WINEDLLOVERRIDES="winhttp=n,b" %command%
+     ```
+4. Launch the game! Verify `BepInEx/LogOutput.log` shows `Easy Red 2 - Battle Hardened v0.7.6 loaded!`. Both Windows and Linux/Proton players can seamlessly Host or Join each other's Multiplayer Co-op lobbies.
 
 ### Switching to Vanilla or Uninstalling (`Uninstall-BepInEx-Mod.bat`)
-Included in `EasyRed2HumanAI-v0.7.5-with-BepInEx.zip` (and in the root of this repository) is **[`Uninstall-BepInEx-Mod.bat`](Uninstall-BepInEx-Mod.bat)**. Double-click it inside your `Easy Red 2` folder when the game is closed to:
+Included in `EasyRed2HumanAI-v0.7.6-with-BepInEx.zip` (and in the root of this repository) is **[`Uninstall-BepInEx-Mod.bat`](Uninstall-BepInEx-Mod.bat)**. Double-click it inside your `Easy Red 2` folder when the game is closed to:
 * **`[1] Play Vanilla Temporarily`**: Moves `BepInEx`, `dotnet`, and `winhttp.dll` into `_BepInEx_Disabled_Backup\` so the game runs 100% pure vanilla without losing your configs or other plugins.
 * **`[2] Restore Modded Game`**: Moves everything back from `_BepInEx_Disabled_Backup\` in one click.
 * **`[3] Uninstall Completely`**: Permanently deletes `BepInEx`, `dotnet`, `winhttp.dll`, `doorstop_config.ini`, `.doorstop_version`, and `changelog.txt`.
@@ -107,6 +122,11 @@ Alongside shared tactical realism goals (some inspired by [`Easy-Red-2-Realism-O
   * **Emplacement Staffing Lock, Hostile-Occupant, Ammo & `SquadOrdersRoutine` De-Confliction (`RunProactiveEmplacementStaffing`, `SoldierAI.CalculateMoveOrderDestination`)**: Rejects `Vehicle.IsLocked()`, dry turrets (`!TurretGun.HasAmmo()`), and multi-seat guns occupied by hostile factions (`ResourcesManager.IsEnemyFaction`); tethers infantry emplacement searches to their active squad order area; protects active emplacement approaches inside `SoldierAI.CalculateMoveOrderDestination` so vanilla's `2.0s` `SquadOrdersRoutine` never wipes out `targetDestination` mid-approach; and immediately releases `IsActivelyHeadingToEmplacement` with an anti-loop cooldown if boarding is interrupted or unreachable.
 * **Smoke & Water Blood Spray Occlusion Fix (`v0.7.5` — `EnableBloodSmokeWaterOcclusion`)**:
   * **Eliminates Disembodied "Ghost" Blood Sprays Through Smoke & Water (`ResourcesManager.PlayImpactEffect`)**: Fixes three vanilla URP VFX quirks where bright red `"ImpactFX_flesh"` sprays drew in mid-air over opaque smoke clouds or water surfaces: (1) bullets hitting submerged or cross-water `Soldier` `BodyPart` colliders (`FollowingWater.WaterLevel` / Layer 4 `Water`) had `onWater = false` and spawned airborne blood clouds underwater; (2) hits behind or inside tactical smoke volumes (`SmokeGrenade`, `SmokeArtillery`, `visionMask & ~bulletMask`) bypassed smoke occlusion because `PlayImpactEffect` only checked camera frustum (`PointInCameraView`) — now cleanly swapped to vanilla's pooled `"ImpactFX_flesh_noBlood"` so 100% of bullet-flesh impact audio plays with zero ghost blood; and (3) pooled `"ImpactFX_flesh"` `ParticleSystemRenderer`s are normalized once per pooled instance (`sortingOrder <= 0`, `renderQueue <= 3000`, `sortingFudge >= +6.5m`) so colliderless ambient map smoke (e.g. Stalingrad burning rubble/building/vehicle plumes) and water transparencies sort naturally over blood mist.
+* **Campaign Unlock Masking (`???`) in `F5`, Enclosed Tank Crew Small-Arms Protection, Tier 2 Squad Leader Execution GOAP & Vanilla Shrapnel NRE Fix (`v0.7.6`)**:
+  * **Vanilla Campaign-Style Unlock Masking (`???`) & Completion Stars (`★` / `★★`) in `F5` Map Picker**: Completed missions display gold `★` (won on one faction) or `★★` (won as both Invader & Defender), currently unlocked next missions display cleanly, and locked future campaign missions mask spoilers as **`??? (Locked)`** with a one-click **`[Show ???]` / `[Hide ???]`** header button—amortizing `BattleData.SaveDataId` resolution at `<= 1` mission per frame for zero frame-time spikes across `sp_ME_` streaming campaigns.
+  * **Enclosed Tank Crew Small-Arms / Collider-Clip Protection & Ricochet Obituary Fix**: Buttoned-up crewmen (`!seat.showUnitSet`) inside intact armored ground hulls (`effArmor >= 8mm`) can no longer be killed by small-arms bullets (`< 12mm` / non-AP / non-HE) clipping through `BodyPart`/`ItemHelmet` colliders or point-blank muzzles poking inside outer hull colliders; non-penetrating small-arms ricochets and friendly pings on `VehicleDamagablePart` no longer overwrite death attribution (`"Vehicle Hit"`); and `IsFriendlyInLineOfFire` now scans flat `WorldSoldiers` directly (protecting detached crewmen, remote Co-op human players, and allied sub-factions with a wider `1.65m` friendly ground-vehicle corridor).
+  * **Tier 2 Squad Leader Execution GOAP (`Charge!` / `Covert Hold-Fire` / `Follow` Column)**: AI Squad Leaders dynamically evaluate cost-weighted native squad orders (`Squad.Charge`, `Squad.SetHoldFireOrder`, `Squad.FollowLeader`) based on TeamNet directives, Officer personality (`[Spearhead]`, `[Tactician]`, `[Old Guard]`), 20-nation doctrine, desperate cap saves (`>= 45%` enemy capture progress), low invader tickets (`<= 24%`), active smoke screens, and stealth flank approaches—auto-releasing `HoldFire` (scoped strictly to AI-issued covert orders so Lua-scripted `holdFire` is untouched) and `Follow` columns the instant contact is made.
+  * **Vanilla `ResourcesManager.FactionCanDamageFaction` `NullReferenceException` Hitch Fix**: Guards `ResourcesManager.FactionCanDamageFaction(Soldier shooter, string hitfaction)` when unowned map/artillery shrapnel or projectiles from a despawned shooter hit a `VehicleDamagablePart` with `shooter == null` (eliminating a `~176ms` vanilla exception hitch observed in Co-op).
 
 > *(Want the deep-dive engineering breakdown of what vanilla's `GameAssembly.dll` did under the hood and why each change was made? Read **[`docs/design-and-justifications.md`](docs/design-and-justifications.md)**!)*
 

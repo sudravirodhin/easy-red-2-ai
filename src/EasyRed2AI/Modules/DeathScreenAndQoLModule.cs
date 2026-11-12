@@ -646,9 +646,62 @@ namespace EasyRed2HumanAI
                                     curPlayer.GetCurrentVehicle() != null &&
                                     curPlayer.GetCurrentVehicle().Pointer == vPart.rootVeh.Pointer)
                                 {
-                                    victim = curPlayer;
-                                    hitDetail = "Vehicle Hit";
+                                    // Ignore harmless non-penetrating small-arms ricochets and non-explosive friendly hull hits
+                                    // so stray SMG/rifle pings on tank armor never overwrite _lastDamageByVictim with "Vehicle Hit".
+                                    bool fromExp = !string.IsNullOrEmpty(_activeExplosionWeaponName);
+                                    bool sameFactionBullet = !fromExp &&
+                                                             __4 != null &&
+                                                             __4.Pointer != IntPtr.Zero &&
+                                                             !string.IsNullOrEmpty(__4.faction) &&
+                                                             !string.IsNullOrEmpty(curPlayer.faction) &&
+                                                             (__4.faction == curPlayer.faction || ResourcesManager.IsSameFaction(__4.faction, curPlayer.faction));
+                                    bool canThreatenArmor = fromExp ||
+                                                            __1 == null ||
+                                                            __1.IsHe() ||
+                                                            __1.IsFire() ||
+                                                            __1.explosion_penetration > 2.0f ||
+                                                            __1.mmPenetration > vPart.armorThickness;
+                                    if (!sameFactionBullet && canThreatenArmor)
+                                    {
+                                        victim = curPlayer;
+                                        hitDetail = "Vehicle Hit";
+                                    }
                                 }
+                            }
+                        }
+                    }
+
+                    // Enclosed Armored Ground Vehicle Crew Protection:
+                    // Stop small-arms bullets (<12mm / non-AP / non-HE / non-Fire) from killing buttoned-up crewmen
+                    // (!seat.showUnitSet) inside intact armored hulls via BodyPart/Helmet collider clipping or
+                    // point-blank friendly/enemy muzzles poking inside the outer hull collider.
+                    if (VisionConfig.EnableRealisticVehicleArmorAndTopAttack.Value &&
+                        isDirectBodyOrHelmetHit &&
+                        victim != null &&
+                        victim.Pointer != IntPtr.Zero &&
+                        victim.IsOnVehicle() &&
+                        string.IsNullOrEmpty(_activeExplosionWeaponName) &&
+                        !ActiveCrewSpallContext)
+                    {
+                        Vehicle groundVeh = victim.GetCurrentVehicle();
+                        if (groundVeh != null &&
+                            groundVeh.Pointer != IntPtr.Zero &&
+                            !groundVeh.IsAirVehicle() &&
+                            !groundVeh.IsCoverDestroyed())
+                        {
+                            float effArmor = GetEffectiveVehicleExplosionArmor(groundVeh);
+                            if (effArmor >= 8.0f &&
+                                (__1 == null ||
+                                 (!__1.IsHe() &&
+                                  !__1.IsFlak() &&
+                                  !__1.IsFire() &&
+                                  __1.explosion_penetration < 5.0f &&
+                                  __1.mmPenetration < Mathf.Max(12.0f, effArmor))) &&
+                                IsSoldierInEnclosedVehicleSeat(groundVeh, victim))
+                            {
+                                EnclosedCrewBulletClipsBlockedCount++;
+                                __result = null;
+                                return false;
                             }
                         }
                     }
@@ -860,7 +913,11 @@ namespace EasyRed2HumanAI
                     bool hasAttr = _lastDamageByVictim.TryGetValue(__0.Pointer, out DamageAttribution attr);
                     _lastDamageByVictim.Remove(__0.Pointer);
 
-                    if (!hasAttr || Time.time - attr.Timestamp > 120f)
+                    bool staleVehicleHit = hasAttr &&
+                                           string.Equals(attr.HitDetail, "Vehicle Hit", StringComparison.Ordinal) &&
+                                           (Time.time - attr.Timestamp) > 8.0f;
+
+                    if (!hasAttr || Time.time - attr.Timestamp > 120f || staleVehicleHit)
                     {
                         if (yearLabel != null && !string.IsNullOrEmpty(yearLineWithAge))
                             yearLabel.text = $"<size={yearFontSize}>{yearLineWithAge}</size>";

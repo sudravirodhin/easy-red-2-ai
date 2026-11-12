@@ -45,8 +45,9 @@ namespace EasyRed2HumanAI
         public static int ThinCoverPenetrationsCount { get; private set; }
         public static int ParachutesDriftedCount { get; private set; }
         public static int AircraftTopAttackPenetrationsAssistedCount { get; private set; }
-        public static int AirplanePilotMgHitsBlockedCount { get; private set; }
+        public static int AirplanePilotMgHitsBlockedCount { get; internal set; }
         public static int EnclosedCrewExplosionHitsBlockedCount { get; private set; }
+        public static int EnclosedCrewBulletClipsBlockedCount { get; internal set; }
         public static int HostVanillaClientApAssistsCount { get; private set; }
         public static int BloodSmokeWaterOccludedCount { get; private set; }
 
@@ -797,27 +798,45 @@ namespace EasyRed2HumanAI
             return effArmor;
         }
 
+        internal static bool IsSoldierInEnclosedVehicleSeat(Vehicle veh, Soldier victim)
+        {
+            if (veh == null || victim == null)
+                return false;
+
+            var seats = veh.seats;
+            if (seats == null)
+                return false;
+
+            IntPtr victimPtr = victim.Pointer;
+            int count = seats.Length;
+            for (int i = 0; i < count; i++)
+            {
+                Seats seat = seats[i];
+                if (seat != null && seat.unitSet != null && seat.unitSet.Pointer == victimPtr)
+                    return !seat.showUnitSet;
+            }
+            return false;
+        }
+
+        // Prevent vanilla NullReferenceException (and ~175ms exception hitch) in ResourcesManager.FactionCanDamageFaction
+        // when unowned map/artillery shrapnel or projectiles from a despawned shooter hit a VehicleDamagablePart or Soldier.
+        [HarmonyPatch(typeof(ResourcesManager), nameof(ResourcesManager.FactionCanDamageFaction))]
+        public static class ResourcesManager_FactionCanDamageFaction_Patch
+        {
+            public static bool Prefix(Soldier __0, string __1, ref bool __result)
+            {
+                if (__0 == null || __0.Pointer == IntPtr.Zero || string.IsNullOrEmpty(__1))
+                {
+                    __result = true;
+                    return false;
+                }
+                return true;
+            }
+        }
+
         [HarmonyPatch(typeof(BodyPart), nameof(BodyPart.TryDamageWithExplosion))]
         public static class BodyPart_TryDamageWithExplosion_Patch
         {
-
-            private static bool IsSoldierInEnclosedVehicleSeat(Vehicle veh, Soldier victim)
-            {
-                var seats = veh.seats;
-                if (seats == null)
-                    return false;
-
-                IntPtr victimPtr = victim.Pointer;
-                int count = seats.Length;
-                for (int i = 0; i < count; i++)
-                {
-                    Seats seat = seats[i];
-                    if (seat != null && seat.unitSet != null && seat.unitSet.Pointer == victimPtr)
-                        return !seat.showUnitSet;
-                }
-                return false;
-            }
-
             public static bool Prefix(BodyPart __instance, float __0)
             {
                 try
