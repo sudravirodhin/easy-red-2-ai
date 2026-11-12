@@ -366,9 +366,19 @@ namespace EasyRed2HumanAI
             if (dist <= 7.5f || dist > 32f || soldier.isInBodyAnimation || soldier.isInHandsAnimation)
                 return;
 
-            VirtualItem grenadeItem = soldier.inventory.FindItemOfType<VirtualGrenade>();
+            // Prefer dedicated AT / sapper grenades first, then check standard grenades (Molotov / HE / frag)
+            VirtualItem grenadeItem = soldier.inventory.FindItemOfType<VirtualATGrenade>();
+            if (grenadeItem == null)
+                grenadeItem = soldier.inventory.FindItemOfType<VirtualGrenade>();
+
             if (grenadeItem != null)
             {
+                if (VisionConfig.PreventSmallArmsFireAtTanks.Value &&
+                    !CanThrowableDamageOrFlushVehicle(soldier, grenadeItem, targetVeh))
+                {
+                    return;
+                }
+
                 float maxThrowRange = soldier.GetGrenadeThrowRange(grenadeItem);
                 if (dist <= maxThrowRange &&
                     UnityEngine.Random.Range(0, 100) > 65 &&
@@ -3347,12 +3357,6 @@ namespace EasyRed2HumanAI
                 // to garrison held points, prioritizing held objectives that have enemy squads within 150m.
                 if (heldObjectives.Count > 0 && unheldObjectives.Count > 0 && eligibleSquads.Count >= 2)
                 {
-                    float garrisonRatio = GetFactionCommandProfile(faction).GarrisonSquadRatio;
-                    int targetGarrisonCount = Mathf.Clamp(
-                        Mathf.RoundToInt(eligibleSquads.Count * garrisonRatio),
-                        1,
-                        Mathf.Min(heldObjectives.Count, eligibleSquads.Count - 1));
-
                     // Sort held objectives so threatened or actively back-capped objectives get garrisoned first
                     heldObjectives.Sort((a, b) =>
                     {
@@ -3360,6 +3364,20 @@ namespace EasyRed2HumanAI
                         float dB = GetObjectiveThreatPriorityScore(b, faction, allEnemyLeaderPositions);
                         return dA.CompareTo(dB);
                     });
+
+                    int contestedHeldCount = 0;
+                    for (int h = 0; h < heldObjectives.Count; h++)
+                    {
+                        if (GetObjectiveThreatPriorityScore(heldObjectives[h], faction, allEnemyLeaderPositions) <= 135f * 135f)
+                            contestedHeldCount++;
+                    }
+
+                    float garrisonRatio = GetFactionCommandProfile(faction).GarrisonSquadRatio;
+                    int desiredGarrisons = Mathf.Max(Mathf.RoundToInt(eligibleSquads.Count * garrisonRatio), contestedHeldCount);
+                    int targetGarrisonCount = Mathf.Clamp(
+                        desiredGarrisons,
+                        1,
+                        Mathf.Min(heldObjectives.Count, eligibleSquads.Count - 1));
 
                     var assignedGarrisonSquads = _reusableAssignedGarrisonSquads;
                     assignedGarrisonSquads.Clear();
@@ -3436,7 +3454,7 @@ namespace EasyRed2HumanAI
                         bool onActiveUnheld = IsSquadTaskInObjectiveList(sq, unheldObjectives);
                         if (!onActiveUnheld)
                         {
-                            MissionObjective bestUnheld = GetClosestObjectiveToPosition(sq.Leader.transform.position, faction, unheldObjectives);
+                            MissionObjective bestUnheld = PickBestAttackObjectiveForSquad(sq.Leader.transform.position, faction, unheldObjectives, eligibleSquads);
                             if (bestUnheld != null && bestUnheld.missionTask != null)
                             {
                                 AssignAiSquadMacroTask(sq, bestUnheld, now, 45.0f);
@@ -3526,7 +3544,16 @@ namespace EasyRed2HumanAI
 
                         if (!hasDefenderAssigned)
                         {
-                            Squad bestReserve = PickBestReserveDefenderSquad(eligibleSquads, heldObjectives, heldTaskPtr, objPos, now);
+                            bool isUrgentRescue = closestEnemySq <= 85f * 85f;
+                            Squad bestReserve = PickBestReserveDefenderSquad(
+                                eligibleSquads,
+                                heldObjectives,
+                                heldTaskPtr,
+                                objPos,
+                                now,
+                                isUrgentRescue,
+                                faction,
+                                allEnemyLeaderPositions);
                             if (bestReserve != null)
                             {
                                 if (!heldObj.CanAttractFaction(faction))
@@ -3569,11 +3596,18 @@ namespace EasyRed2HumanAI
                                 if (sq.currentTask != null && sq.currentTask.Pointer == quietTaskPtr)
                                 {
                                     quietSquadCount++;
-                                    // Respect objective commitment so we don't ping-pong a squad that was just reassigned
-                                    if (IsSquadCommittedToActiveObjective(sq, heldObjectives, now))
+                                    // Never strip player squads, recently reassigned squads, or squads in active local firefights
+                                    if (sq.IsPlayerInSquad() ||
+                                        (_squadTaskCommittedUntil.TryGetValue(sq.Pointer, out float qCommit) && now < qCommit && primaryThreatSq > 55f * 55f) ||
+                                        (_squadBlackboards.TryGetValue(sq.Pointer, out SquadBlackboard qBoard) && qBoard.HasActiveThreat))
+                                    {
                                         continue;
+                                    }
 
                                     float dSq = (sq.Leader.transform.position - primaryPos).sqrMagnitude;
+                                    if (dSq > 65f * 65f && !IsSquadConnectedToRadioNet(sq))
+                                        continue;
+
                                     if (dSq < closestExcessDistSq)
                                     {
                                         closestExcessDistSq = dSq;
@@ -3619,11 +3653,12 @@ namespace EasyRed2HumanAI
                         _garrisonAssignedObjectiveBySquad.Remove(sq.Pointer);
 
                         // In pure attack (heldObjectives.Count == 0 && unheldObjectives.Count > 0),
-                        // if a squad's previous objective was just captured, assign the closest remaining unheld objective
+                        // if a squad's previous objective was just captured, distribute squads intelligently across
+                        // remaining unheld objectives (prioritizing unstaffed and actively progressing flags)
                         // and update the HUD if the player is a member of this squad!
                         if (unheldObjectives.Count > 0 && !IsSquadTaskInObjectiveList(sq, unheldObjectives))
                         {
-                            MissionObjective nextAttack = GetClosestObjectiveToPosition(sq.Leader.transform.position, faction, unheldObjectives);
+                            MissionObjective nextAttack = PickBestAttackObjectiveForSquad(sq.Leader.transform.position, faction, unheldObjectives, eligibleSquads);
                             if (nextAttack != null && nextAttack.missionTask != null)
                             {
                                 AssignAiSquadMacroTask(sq, nextAttack, now, 45.0f);
@@ -3804,12 +3839,76 @@ namespace EasyRed2HumanAI
             catch { }
         }
 
+        private static MissionObjective PickBestAttackObjectiveForSquad(
+            Vector3 leaderPos,
+            string faction,
+            List<MissionObjective> unheldObjectives,
+            List<Squad> eligibleSquads)
+        {
+            if (unheldObjectives == null || unheldObjectives.Count == 0)
+                return null;
+            if (unheldObjectives.Count == 1)
+                return unheldObjectives[0];
+
+            BattleData bd = _currentDirectorBattleData ?? BattleManager.GetCurrentBattleData();
+            MissionObjective bestObj = null;
+            float bestScore = float.MaxValue;
+
+            for (int i = 0; i < unheldObjectives.Count; i++)
+            {
+                MissionObjective obj = unheldObjectives[i];
+                if (obj == null || obj.missionTask == null)
+                    continue;
+
+                IntPtr taskPtr = obj.missionTask.Pointer;
+                int assignedAttackers = 0;
+                if (eligibleSquads != null)
+                {
+                    for (int s = 0; s < eligibleSquads.Count; s++)
+                    {
+                        Squad other = eligibleSquads[s];
+                        if (other != null && other.currentTask != null && other.currentTask.Pointer == taskPtr)
+                            assignedAttackers++;
+                    }
+                }
+
+                float dist = Vector3.Distance(leaderPos, obj.GetTaskPosition()) + 25.0f;
+                float weight = 1.0f;
+
+                // Ensure every open attack objective gets at least 1 pressuring squad instead of leaving a flank flag empty
+                if (assignedAttackers == 0)
+                    weight *= 0.52f;
+                else if (assignedAttackers >= 3)
+                    weight *= (1.0f + (assignedAttackers - 2) * 0.22f);
+
+                // Reinforce flags where friendly troops are already ticking capture progress so caps finish decisively!
+                if (AiCore.ClassifyMissionObjectiveForFaction(obj, faction, bd, out bool isHeld, out _, out float urgency) &&
+                    !isHeld &&
+                    urgency > 0.05f)
+                {
+                    weight *= Mathf.Lerp(0.92f, 0.62f, urgency);
+                }
+
+                float score = dist * weight;
+                if (score < bestScore)
+                {
+                    bestScore = score;
+                    bestObj = obj;
+                }
+            }
+
+            return bestObj ?? GetClosestObjectiveToPosition(leaderPos, faction, unheldObjectives);
+        }
+
         private static Squad PickBestReserveDefenderSquad(
             List<Squad> eligibleSquads,
             List<MissionObjective> heldObjectives,
             IntPtr targetTaskPtr,
             Vector3 targetPos,
-            float now)
+            float now,
+            bool urgentUndefendedRescue = false,
+            string faction = null,
+            List<KeyValuePair<string, Vector3>> allEnemyLeaderPositions = null)
         {
             Squad bestSquad = null;
             float bestScore = float.MaxValue;
@@ -3820,9 +3919,41 @@ namespace EasyRed2HumanAI
                 if (cand.currentTask != null && cand.currentTask.Pointer == targetTaskPtr)
                     continue;
 
-                // Respect task commitment hysteresis so reserve squads don't get ping-ponged mid-march
-                if (IsSquadCommittedToActiveObjective(cand, heldObjectives, now))
+                if (cand.IsPlayerInSquad())
                     continue;
+
+                if (!urgentUndefendedRescue)
+                {
+                    // Respect task commitment hysteresis so reserve squads don't get ping-ponged mid-march
+                    if (IsSquadCommittedToActiveObjective(cand, heldObjectives, now))
+                        continue;
+                }
+                else
+                {
+                    // Urgent rescue of an UNDEFENDED bleeding/threatened flag: allow unengaged squads sitting on
+                    // a quiet secondary flag to break their initial spawn hold, while keeping squads in active combat
+                    // or defending another threatened flag locked in place!
+                    if (_squadBlackboards.TryGetValue(cand.Pointer, out SquadBlackboard board) && board.HasActiveThreat)
+                        continue;
+
+                    if (cand.currentTask != null && !string.IsNullOrEmpty(faction) && allEnemyLeaderPositions != null)
+                    {
+                        IntPtr curPtr = cand.currentTask.Pointer;
+                        bool curIsAlsoThreatened = false;
+                        for (int h = 0; h < heldObjectives.Count; h++)
+                        {
+                            MissionObjective hObj = heldObjectives[h];
+                            if (hObj != null && hObj.missionTask != null && hObj.missionTask.Pointer == curPtr)
+                            {
+                                if (GetObjectiveThreatPriorityScore(hObj, faction, allEnemyLeaderPositions) <= 165f * 165f)
+                                    curIsAlsoThreatened = true;
+                                break;
+                            }
+                        }
+                        if (curIsAlsoThreatened)
+                            continue;
+                    }
+                }
 
                 int sameTaskCount = 0;
                 if (cand.currentTask != null)
@@ -6933,6 +7064,590 @@ namespace EasyRed2HumanAI
                 }
                 catch { }
                 return true;
+            }
+        }
+
+        // ============================================================================
+        // DYNAMIC OPERATIONS (ConquestEconomy) NET QUARTERMASTER & PLAYER TICKET BUFFER
+        // Fixes vanilla's omission where SpawnManager.CanSpawn(false) and SpawnAISquad
+        // completely bypassed ConquestEconomy, spawning 400-500 ticket tanks/aircraft for
+        // 0 tickets on minute 0 while human players had to pay full ticket prices.
+        // Strategically surges cheap infantry waves when outnumbered, saves surplus tickets
+        // to buy heavy armor/aircraft counters, and reserves a ticket buffer for human players.
+        // ============================================================================
+        private struct ConquestFactionQuartermasterState
+        {
+            public int AliveFootSoldiers;
+            public int ActiveFriendlyTanks;
+            public int ActiveFriendlyPlanes;
+            public int EnemyFootSoldiers;
+            public int EnemyActiveTanks;
+            public int EnemyActivePlanes;
+            public int ReservedPlayerBuffer;
+            public int BestAvailableHeavyCost;
+            public bool HasCheapInfantrySpawner;
+            public bool SurgeCheapInfantry;
+            public bool BankForHeavyCounter;
+            public float BankWindowUntil;
+            public float NextBankAllowedTime;
+        }
+
+        private struct CachedHumanFactionEntry
+        {
+            public string Faction;
+            public float ExpireTime;
+            public bool CurrentlyAlive;
+        }
+
+        private static readonly Dictionary<string, ConquestFactionQuartermasterState> _conquestQuartermasterByFaction =
+            new Dictionary<string, ConquestFactionQuartermasterState>(8, StringComparer.OrdinalIgnoreCase);
+        private static readonly Dictionary<int, CachedHumanFactionEntry> _knownHumanPlayersByKey =
+            new Dictionary<int, CachedHumanFactionEntry>(8);
+        private static readonly List<string> _reusableConquestFactions = new List<string>(8);
+        private static readonly List<int> _reusableExpiredHumanKeys = new List<int>(8);
+        private static float _nextConquestQuartermasterUpdateTime;
+        private static IntPtr _armedConquestSpawnPtr;
+        private static int _armedConquestSpawnFrame = -999;
+
+        public static int ConquestPurchasesCount { get; internal set; }
+
+        public static void ClearConquestQuartermasterState()
+        {
+            _conquestQuartermasterByFaction.Clear();
+            _knownHumanPlayersByKey.Clear();
+            _nextConquestQuartermasterUpdateTime = 0f;
+            _armedConquestSpawnPtr = IntPtr.Zero;
+            _armedConquestSpawnFrame = -999;
+        }
+
+        public static void UpdateConquestQuartermasterIfNeeded()
+        {
+            if (!VisionConfig.EnableMod.Value || !VisionConfig.EnableConquestEconomyQuartermaster.Value)
+                return;
+
+            if (Photon.Pun.PhotonNetwork.InRoom && !Photon.Pun.PhotonNetwork.IsMasterClient)
+                return;
+
+            try
+            {
+                if (!ConquestEconomy.IsActive)
+                {
+                    if (_conquestQuartermasterByFaction.Count > 0)
+                        ClearConquestQuartermasterState();
+                    return;
+                }
+
+                float now = Time.unscaledTime;
+                if (now < _nextConquestQuartermasterUpdateTime)
+                    return;
+
+                _nextConquestQuartermasterUpdateTime = now + 2.5f;
+                RefreshConquestQuartermasterStates(now);
+            }
+            catch { }
+        }
+
+        private static void RefreshConquestQuartermasterStates(float now)
+        {
+            var spawns = SpawnManager.activeSpawns;
+            if (spawns == null || spawns.Count == 0)
+                return;
+
+            // 1. Mark all tracked human players temporarily dead for this snapshot pass, then refresh from live units
+            _reusableExpiredHumanKeys.Clear();
+            foreach (var kv in _knownHumanPlayersByKey)
+            {
+                if (now >= kv.Value.ExpireTime)
+                    _reusableExpiredHumanKeys.Add(kv.Key);
+            }
+            for (int i = 0; i < _reusableExpiredHumanKeys.Count; i++)
+                _knownHumanPlayersByKey.Remove(_reusableExpiredHumanKeys[i]);
+
+            // Record Host/SP player faction even while dead on the respawn screen!
+            try
+            {
+                string hostFaction = BattleManager.PlayerFaction;
+                if (!string.IsNullOrEmpty(hostFaction))
+                {
+                    Soldier localControlled = Soldier.CurrentControlledSoldierOrNull();
+                    bool localAlive = localControlled != null && localControlled.IsAlive;
+                    _knownHumanPlayersByKey[0] = new CachedHumanFactionEntry
+                    {
+                        Faction = hostFaction,
+                        ExpireTime = now + 300f,
+                        CurrentlyAlive = localAlive
+                    };
+                }
+            }
+            catch { }
+
+            // Collect active factions from SpawnManagers
+            _reusableConquestFactions.Clear();
+            int spawnCount = spawns.Count;
+            for (int i = 0; i < spawnCount; i++)
+            {
+                SpawnManager sm = spawns[i];
+                if (sm == null || sm.Pointer == IntPtr.Zero)
+                    continue;
+
+                string f = sm.GetFaction();
+                if (string.IsNullOrEmpty(f))
+                    continue;
+
+                bool exists = false;
+                for (int j = 0; j < _reusableConquestFactions.Count; j++)
+                {
+                    if (string.Equals(_reusableConquestFactions[j], f, StringComparison.OrdinalIgnoreCase))
+                    {
+                        exists = true;
+                        break;
+                    }
+                }
+                if (!exists)
+                    _reusableConquestFactions.Add(f);
+            }
+
+            if (_reusableConquestFactions.Count == 0)
+                return;
+
+            // Reset alive flags on remote player entries before scanning WorldSoldiers
+            if (_knownHumanPlayersByKey.Count > 1)
+            {
+                _reusableExpiredHumanKeys.Clear();
+                foreach (var kv in _knownHumanPlayersByKey)
+                {
+                    if (kv.Key != 0)
+                        _reusableExpiredHumanKeys.Add(kv.Key);
+                }
+                for (int i = 0; i < _reusableExpiredHumanKeys.Count; i++)
+                {
+                    int k = _reusableExpiredHumanKeys[i];
+                    var entry = _knownHumanPlayersByKey[k];
+                    entry.CurrentlyAlive = false;
+                    _knownHumanPlayersByKey[k] = entry;
+                }
+            }
+
+            AiCore.EnsureWorldSnapshot();
+            var squads = AiCore.WorldSquads;
+            var soldiers = AiCore.WorldSoldiers;
+            int sqCount = AiCore.WorldSquadCount;
+
+            // Update remote Co-op human players from WorldSoldiers
+            for (int s = 0; s < sqCount; s++)
+            {
+                ref AiCore.SquadSnapshot sqSnap = ref squads[s];
+                int end = sqSnap.UnitStartIndex + sqSnap.UnitCount;
+                for (int u = sqSnap.UnitStartIndex; u < end; u++)
+                {
+                    ref AiCore.SoldierSnapshot solSnap = ref soldiers[u];
+                    if (!solSnap.IsPlayer || solSnap.Ref == null || string.IsNullOrEmpty(solSnap.Faction))
+                        continue;
+
+                    int ownerKey = 0;
+                    try
+                    {
+                        SyncSoldier syncher = solSnap.Ref.soldierSyncher;
+                        if (syncher != null)
+                        {
+                            Photon.Realtime.Player ctrl = syncher.Controller ?? syncher.Owner;
+                            if (ctrl != null && ctrl.ActorNumber > 0)
+                                ownerKey = ctrl.ActorNumber;
+                        }
+                    }
+                    catch { }
+
+                    if (ownerKey == 0 && solSnap.Ref == Soldier.CurrentControlledSoldierOrNull())
+                        ownerKey = 0;
+                    else if (ownerKey == 0)
+                        ownerKey = solSnap.Ptr.ToInt32();
+
+                    _knownHumanPlayersByKey[ownerKey] = new CachedHumanFactionEntry
+                    {
+                        Faction = solSnap.Faction,
+                        ExpireTime = now + 210f,
+                        CurrentlyAlive = true
+                    };
+                }
+            }
+
+            // Build per-faction force & spawner profile
+            var vehList = Vehicle.allVehicles;
+            int vehCount = vehList != null ? vehList.Count : 0;
+
+            for (int fIdx = 0; fIdx < _reusableConquestFactions.Count; fIdx++)
+            {
+                string faction = _reusableConquestFactions[fIdx];
+                _conquestQuartermasterByFaction.TryGetValue(faction, out ConquestFactionQuartermasterState prev);
+
+                ConquestFactionQuartermasterState st = new ConquestFactionQuartermasterState
+                {
+                    BankWindowUntil = prev.BankWindowUntil,
+                    NextBankAllowedTime = prev.NextBankAllowedTime
+                };
+
+                // Count foot troops
+                for (int s = 0; s < sqCount; s++)
+                {
+                    ref AiCore.SquadSnapshot sqSnap = ref squads[s];
+                    if (sqSnap.UnitCount == 0 || sqSnap.RefOnPlane || string.IsNullOrEmpty(sqSnap.Faction))
+                        continue;
+
+                    bool sameSide = string.Equals(sqSnap.Faction, faction, StringComparison.OrdinalIgnoreCase) ||
+                                    ResourcesManager.IsSameFaction(faction, sqSnap.Faction);
+
+                    int footInSq = 0;
+                    int end = sqSnap.UnitStartIndex + sqSnap.UnitCount;
+                    for (int u = sqSnap.UnitStartIndex; u < end; u++)
+                    {
+                        if (!soldiers[u].IsOnVehicle)
+                            footInSq++;
+                    }
+
+                    if (sameSide)
+                        st.AliveFootSoldiers += footInSq;
+                    else
+                        st.EnemyFootSoldiers += footInSq;
+                }
+
+                // Count active crewed tanks & combat aircraft
+                for (int v = 0; v < vehCount; v++)
+                {
+                    Vehicle veh = vehList[v];
+                    if (veh == null || veh.Pointer == IntPtr.Zero || veh.IsDisabled() || !veh.CanFight())
+                        continue;
+
+                    string vFac = GetActiveVehicleCrewFaction(veh);
+                    if (string.IsNullOrEmpty(vFac))
+                        continue;
+
+                    bool sameSide = string.Equals(vFac, faction, StringComparison.OrdinalIgnoreCase) ||
+                                    ResourcesManager.IsSameFaction(faction, vFac);
+
+                    if (veh.IsAirVehicle())
+                    {
+                        if (sameSide) st.ActiveFriendlyPlanes++;
+                        else st.EnemyActivePlanes++;
+                    }
+                    else if (veh.TryCast<VehicleTank>() != null)
+                    {
+                        if (sameSide) st.ActiveFriendlyTanks++;
+                        else st.EnemyActiveTanks++;
+                    }
+                }
+
+                // Compute Human Player Ticket Buffer (0 on AI-only factions; scaled on human-occupied factions!)
+                int humansOnSide = 0;
+                int aliveHumansOnSide = 0;
+                foreach (var kv in _knownHumanPlayersByKey)
+                {
+                    string hFac = kv.Value.Faction;
+                    if (!string.IsNullOrEmpty(hFac) &&
+                        (string.Equals(hFac, faction, StringComparison.OrdinalIgnoreCase) ||
+                         ResourcesManager.IsSameFaction(faction, hFac)))
+                    {
+                        humansOnSide++;
+                        if (kv.Value.CurrentlyAlive)
+                            aliveHumansOnSide++;
+                    }
+                }
+
+                if (humansOnSide > 0)
+                {
+                    int baseBuf = Mathf.Max(0, VisionConfig.ConquestPlayerTicketBuffer.Value);
+                    int extraPlayersBuf = Mathf.Max(0, humansOnSide - 1) * 75;
+                    int respawnMenuCushion = (aliveHumansOnSide < humansOnSide && baseBuf > 0) ? 60 : 0;
+                    st.ReservedPlayerBuffer = baseBuf + extraPlayersBuf + respawnMenuCushion;
+                }
+                else
+                {
+                    st.ReservedPlayerBuffer = 0;
+                }
+
+                // Inspect available AI spawners for this faction
+                for (int i = 0; i < spawnCount; i++)
+                {
+                    SpawnManager sm = spawns[i];
+                    if (sm == null || sm.Pointer == IntPtr.Zero)
+                        continue;
+
+                    SpawnType sType = sm.spawnType;
+                    if (sType == SpawnType.None || sType == SpawnType.onlyPlayer)
+                        continue;
+
+                    string smFac = sm.GetFaction();
+                    if (string.IsNullOrEmpty(smFac) ||
+                        (!string.Equals(smFac, faction, StringComparison.OrdinalIgnoreCase) &&
+                         !ResourcesManager.IsSameFaction(faction, smFac)))
+                    {
+                        continue;
+                    }
+
+                    int cost = sm.scriptedSpawnCost;
+                    if (cost <= 90)
+                    {
+                        st.HasCheapInfantrySpawner = true;
+                    }
+                    else if (cost >= 220 && cost > st.BestAvailableHeavyCost && IsAnyVehicleSlotReady(sm))
+                    {
+                        st.BestAvailableHeavyCost = cost;
+                    }
+                }
+
+                // Decide Quartermaster strategic posture
+                st.SurgeCheapInfantry = st.AliveFootSoldiers < 18 ||
+                                        (st.AliveFootSoldiers * 1.35f < st.EnemyFootSoldiers && st.AliveFootSoldiers < 32);
+
+                int curBudget = ConquestEconomy.GetBudget(faction);
+                bool wantsHeavyAsset = !st.SurgeCheapInfantry &&
+                                       st.BestAvailableHeavyCost >= 220 &&
+                                       ((st.EnemyActiveTanks > st.ActiveFriendlyTanks && st.ActiveFriendlyTanks == 0) ||
+                                        (st.EnemyActivePlanes > 0 && st.ActiveFriendlyPlanes == 0) ||
+                                        (st.AliveFootSoldiers >= 26 && st.ActiveFriendlyTanks == 0));
+
+                int targetHeavyThreshold = st.ReservedPlayerBuffer + st.BestAvailableHeavyCost;
+                int minSaveStartBudget = st.ReservedPlayerBuffer + Mathf.RoundToInt(st.BestAvailableHeavyCost * 0.45f);
+
+                if (wantsHeavyAsset && curBudget >= minSaveStartBudget && curBudget < targetHeavyThreshold)
+                {
+                    if (st.BankWindowUntil > now)
+                    {
+                        st.BankForHeavyCounter = true;
+                    }
+                    else if (now >= st.NextBankAllowedTime)
+                    {
+                        st.BankWindowUntil = now + 50.0f;
+                        st.NextBankAllowedTime = now + 80.0f;
+                        st.BankForHeavyCounter = true;
+                        if (VisionConfig.DebugLogging.Value)
+                        {
+                            AiCore.LogDebug(
+                                "ConquestQM",
+                                $"{faction} Quartermaster banking tickets ({curBudget}/{targetHeavyThreshold}, buf={st.ReservedPlayerBuffer}) for {st.BestAvailableHeavyCost}-ticket armor/air support.");
+                        }
+                    }
+                }
+                else
+                {
+                    st.BankForHeavyCounter = false;
+                }
+
+                _conquestQuartermasterByFaction[faction] = st;
+            }
+        }
+
+        private static string GetActiveVehicleCrewFaction(Vehicle veh)
+        {
+            var seats = veh.seats;
+            if (seats == null)
+                return null;
+
+            int len = seats.Length;
+            for (int i = 0; i < len; i++)
+            {
+                Seats s = seats[i];
+                if (s != null && s.unitSet != null && s.unitSet.IsAlive && !string.IsNullOrEmpty(s.unitSet.faction))
+                    return s.unitSet.faction;
+            }
+            return null;
+        }
+
+        private static bool IsAnyVehicleSlotReady(SpawnManager sm)
+        {
+            var vehSpawners = sm.spawnOnVehicle;
+            if (vehSpawners == null || vehSpawners.Length == 0)
+                return true;
+
+            for (int i = 0; i < vehSpawners.Length; i++)
+            {
+                VehicleSpawner vs = vehSpawners[i];
+                if (vs != null && vs.IsAvailable())
+                    return true;
+            }
+            return false;
+        }
+
+        private static bool CanAiQuartermasterAuthorizeSpawn(SpawnManager sm, int cost)
+        {
+            if (cost <= 0 || sm == null)
+                return true;
+
+            string faction = sm.GetFaction();
+            if (string.IsNullOrEmpty(faction))
+                return true;
+
+            if (!ConquestEconomy.CanAfford(faction, cost))
+                return false;
+
+            float now = Time.unscaledTime;
+            if (!_conquestQuartermasterByFaction.TryGetValue(faction, out ConquestFactionQuartermasterState st))
+            {
+                RefreshConquestQuartermasterStates(now);
+                if (!_conquestQuartermasterByFaction.TryGetValue(faction, out st))
+                    return true;
+            }
+
+            int budget = ConquestEconomy.GetBudget(faction);
+            int remaining = budget - cost;
+
+            var vehSpawners = sm.spawnOnVehicle;
+            bool isPureFootWave = cost <= 65 && (vehSpawners == null || vehSpawners.Length == 0);
+
+            // 1. Respect Human Player Ticket Buffer (allowing emergency cheap foot waves only if frontline collapsed < 10 infantry)
+            if (isPureFootWave && st.AliveFootSoldiers < 10)
+            {
+                int emergencyMin = Mathf.Min(st.ReservedPlayerBuffer / 2, 35);
+                if (remaining < emergencyMin)
+                    return false;
+            }
+            else if (remaining < st.ReservedPlayerBuffer)
+            {
+                return false;
+            }
+
+            // 2. Surge cheap infantry waves first when foot strength is depleted (unless urgently countering enemy armor or flush with tickets)
+            if (st.SurgeCheapInfantry &&
+                st.HasCheapInfantrySpawner &&
+                cost >= 180 &&
+                st.EnemyActiveTanks <= st.ActiveFriendlyTanks &&
+                remaining < st.ReservedPlayerBuffer + 150)
+            {
+                return false;
+            }
+
+            // 3. When banking toward an available 220-500 ticket tank/aircraft counter, hold mid-tier 75+ ticket purchases temporarily
+            if (st.BankForHeavyCounter &&
+                now < st.BankWindowUntil &&
+                cost >= 75 &&
+                cost < st.BestAvailableHeavyCost - 25)
+            {
+                return false;
+            }
+
+            return true;
+        }
+
+        [HarmonyPatch(typeof(SpawnManager), nameof(SpawnManager.CanSpawn))]
+        public static class SpawnManager_CanSpawn_Patch
+        {
+            public static void Postfix(SpawnManager __instance, bool __0, ref bool __result)
+            {
+                try
+                {
+                    // Only gate AI spawns (!isPlayer) when vanilla CanSpawn returned true and ConquestEconomy is active
+                    if (!__result ||
+                        __0 ||
+                        !VisionConfig.EnableMod.Value ||
+                        !VisionConfig.EnableConquestEconomyQuartermaster.Value ||
+                        __instance == null ||
+                        __instance.Pointer == IntPtr.Zero)
+                    {
+                        return;
+                    }
+
+                    if (Photon.Pun.PhotonNetwork.InRoom && !Photon.Pun.PhotonNetwork.IsMasterClient)
+                        return;
+
+                    if (!ConquestEconomy.IsActive)
+                        return;
+
+                    int cost = __instance.scriptedSpawnCost;
+                    if (cost <= 0)
+                        return;
+
+                    if (!CanAiQuartermasterAuthorizeSpawn(__instance, cost))
+                    {
+                        __result = false;
+                        return;
+                    }
+
+                    _armedConquestSpawnPtr = __instance.Pointer;
+                    _armedConquestSpawnFrame = Time.frameCount;
+                }
+                catch { }
+            }
+        }
+
+        [HarmonyPatch(typeof(SpawnManager._SpawnAISquad_d__45), nameof(SpawnManager._SpawnAISquad_d__45.MoveNext))]
+        public static class SpawnManager_SpawnAISquadMoveNext_Patch
+        {
+            public static void Prefix(SpawnManager._SpawnAISquad_d__45 __instance, out bool __state)
+            {
+                __state = __instance != null &&
+                          __instance.Pointer != IntPtr.Zero &&
+                          __instance.__1__state == 0 &&
+                          __instance.__8__1 == null;
+            }
+
+            public static void Postfix(SpawnManager._SpawnAISquad_d__45 __instance, bool __state)
+            {
+                try
+                {
+                    // Charge ONLY when step 0 of <SpawnAISquad>d__45.MoveNext actually passed CanSpawn(false)
+                    // and instantiated the Squad closure (__8__1 != null)!
+                    if (!__state ||
+                        __instance == null ||
+                        __instance.Pointer == IntPtr.Zero ||
+                        __instance.__8__1 == null ||
+                        __instance.squadIsForPlayer ||
+                        __instance.forceSpawn ||
+                        !VisionConfig.EnableMod.Value ||
+                        !VisionConfig.EnableConquestEconomyQuartermaster.Value)
+                    {
+                        return;
+                    }
+
+                    if (Photon.Pun.PhotonNetwork.InRoom && !Photon.Pun.PhotonNetwork.IsMasterClient)
+                        return;
+
+                    if (!ConquestEconomy.IsActive)
+                        return;
+
+                    SpawnManager sm = __instance.__4__this;
+                    if (sm == null || sm.Pointer == IntPtr.Zero)
+                        return;
+
+                    int cost = sm.scriptedSpawnCost;
+                    if (cost <= 0)
+                        return;
+
+                    string faction = sm.GetFaction();
+                    if (string.IsNullOrEmpty(faction))
+                        return;
+
+                    bool wasArmedByCanSpawn = sm.Pointer == _armedConquestSpawnPtr &&
+                                              _armedConquestSpawnFrame == Time.frameCount;
+                    if (wasArmedByCanSpawn)
+                        _armedConquestSpawnPtr = IntPtr.Zero;
+
+                    // If startPhaseSpawn bypassed CanSpawn(false) via sm.forceFirstSpawn, treat that pre-placed
+                    // opening garrison as free (matching scripted forceSpawn); otherwise charge the Conquest budget!
+                    if (!wasArmedByCanSpawn && __instance.startPhaseSpawn)
+                        return;
+
+                    if (wasArmedByCanSpawn || ConquestEconomy.CanAfford(faction, cost))
+                    {
+                        ConquestEconomy.Charge(faction, cost);
+                        ConquestPurchasesCount++;
+
+                        if (cost >= 220 && _conquestQuartermasterByFaction.TryGetValue(faction, out ConquestFactionQuartermasterState st))
+                        {
+                            st.BankForHeavyCounter = false;
+                            st.BankWindowUntil = 0f;
+                            st.NextBankAllowedTime = Time.unscaledTime + 30.0f;
+                            _conquestQuartermasterByFaction[faction] = st;
+                        }
+
+                        if (VisionConfig.DebugLogging.Value)
+                        {
+                            int rem = ConquestEconomy.GetBudget(faction);
+                            AiCore.LogDebug(
+                                "ConquestQM",
+                                $"{faction} AI Quartermaster purchased '{sm.squad_id}' for {cost} tickets (remaining={rem}).");
+                        }
+                    }
+                }
+                catch { }
             }
         }
     }

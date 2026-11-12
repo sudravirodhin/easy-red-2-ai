@@ -345,7 +345,7 @@ namespace EasyRed2HumanAI
                     // Conquest & Invader-captured Wave Defense flags set canAttract = false for the owner and rest at 0.99f when uncontested,
                     // draining toward 0.0f when enemies capture! Defender-held Wave Defense / Lua Phase flags keep canAttract = true and rest at 0.0f.
                     if (!canAttract)
-                        contestOrProgress01 = (rawPct > 0.01f && rawPct < 0.95f) ? Mathf.Clamp01(1.0f - rawPct) : 0f;
+                        contestOrProgress01 = (rawPct > 0.01f && rawPct < 0.98f) ? Mathf.Clamp01(1.0f - rawPct) : 0f;
                     else
                         contestOrProgress01 = rawPct > 0.05f ? rawPct : 0f;
                     return true;
@@ -987,6 +987,42 @@ namespace EasyRed2HumanAI
                 _bridgeCellCache.Clear();
             _bridgeCellCache[cellKey] = isBridge;
             return isBridge;
+        }
+
+        /// <summary>
+        /// Verifies that a candidate cover/bounding position for a soldier currently on a bridge or narrow crossing
+        /// lands squarely on walkable deck geometry at roughly the same elevation (not off an edge, into water, or inside a pillar).
+        /// </summary>
+        public static bool IsSafeBridgeDeckStep(Vector3 currentFeetPos, Vector3 candidatePos, out Vector3 snappedGroundPos)
+        {
+            snappedGroundPos = candidatePos;
+            int mask = GetSolidEnvironmentMask();
+            Vector3 probeOrigin = new Vector3(candidatePos.x, currentFeetPos.y + 1.35f, candidatePos.z);
+            if (!Physics.Raycast(probeOrigin, Vector3.down, out RaycastHit hit, 2.50f, mask, QueryTriggerInteraction.Ignore))
+                return false;
+
+            if (hit.normal.y < 0.65f || Mathf.Abs(hit.point.y - currentFeetPos.y) > 1.15f)
+                return false;
+
+            if (hit.collider == null || hit.collider.gameObject.layer == 4)
+                return false;
+
+            try
+            {
+                FollowingWater water = FollowingWater.instance;
+                if (water != null && water.Pointer != IntPtr.Zero && water.isActiveAndEnabled &&
+                    hit.point.y <= FollowingWater.WaterLevel + 0.15f)
+                {
+                    return false;
+                }
+            }
+            catch { }
+
+            if (Physics.CheckSphere(hit.point + Vector3.up * 0.65f, 0.26f, mask, QueryTriggerInteraction.Ignore))
+                return false;
+
+            snappedGroundPos = hit.point;
+            return true;
         }
 
         public static float GetBarrelHeightForPose(SoldierPose pose)

@@ -11,7 +11,7 @@ namespace EasyRed2HumanAI
     {
         public const string PluginGuid = "com.antigravity.easyred2.humanai";
         public const string PluginName = "Easy Red 2 - Battle Hardened";
-        public const string PluginVersion = "0.7.6";
+        public const string PluginVersion = "0.7.7";
 
         internal static Plugin Instance;
         internal static new ManualLogSource Log;
@@ -115,6 +115,8 @@ namespace EasyRed2HumanAI
             SafePatch(typeof(VeteranAndTacticsPatches.VehicleTank_FixedUpdate_Patch));
             SafePatch(typeof(VeteranAndTacticsPatches.TurretGun_SelectBestAmmo_Patch));
             SafePatch(typeof(VeteranAndTacticsPatches.Squad_MedicRoutine_Patch));
+            SafePatch(typeof(VeteranAndTacticsPatches.SpawnManager_CanSpawn_Patch));
+            SafePatch(typeof(VeteranAndTacticsPatches.SpawnManager_SpawnAISquadMoveNext_Patch));
 
             // 64-Character Multiplayer Room Name Limit patches
             SafePatch(typeof(VeteranAndTacticsPatches.ServerListMenu_Awake_Patch));

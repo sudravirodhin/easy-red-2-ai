@@ -93,6 +93,9 @@ namespace EasyRed2HumanAI
         public static ConfigEntry<bool> EnableBuddyResupply;
         public static ConfigEntry<bool> EnableEmergentWearableScavenge;
         public static ConfigEntry<bool> EnableBuddyCasualtyDragging;
+        public static ConfigEntry<bool> EnableConquestEconomyQuartermaster;
+        public static ConfigEntry<int> ConquestPlayerTicketBuffer;
+        public static ConfigEntry<bool> EnableTacticalRetreatsAndRegroup;
 
         // 7. Phase 3: Role-Based AI Personalities (3 Archetypes per Infantry & Vehicle Role)
         public static ConfigEntry<bool> EnableRolePersonalities;
@@ -477,7 +480,7 @@ namespace EasyRed2HumanAI
                 "6. Tactical Self-Preservation & Muzzle Discipline",
                 "PreventSmallArmsFireAtTanks",
                 true,
-                "Stop infantry from uselessly firing small arms (rifles, SMGs, MGs, pistols) at armored tanks/vehicles unless their weapon can actually penetrate a vehicle part/wheel/track or they can shoot a visible exposed crew member.");
+                "Stop infantry from uselessly firing small arms (rifles, SMGs, MGs, pistols) or throwing standard fragmentation grenades (< 12mm penetration) at buttoned-up armored tanks/vehicles unless they can actually penetrate a vehicle part/wheel/track or flush out an exposed crew member.");
 
             EnablePointBlankMelee = config.Bind(
                 "6. Tactical Self-Preservation & Muzzle Discipline",
@@ -501,7 +504,7 @@ namespace EasyRed2HumanAI
                 "6. Tactical Self-Preservation & Muzzle Discipline",
                 "EnableBridgeCrossingDiscipline",
                 true,
-                "Bridge & Narrow Crossing Discipline: prevents vanilla's 5m-35m sideways squad-spacing scatter (SoldierAI.GetSpacingFromSquad) from flinging pathfinding waypoints off bridges into rivers/ravines, and prevents bots on bridges from going Prone, stopping mid-span for overwatch, or nudging laterally off bridge edges.");
+                "Bridge Crossing, Parapet Cover & Bipod Propping: prevents vanilla's 5m-35m sideways squad-spacing scatter from flinging waypoints off bridges into rivers/ravines, while letting suppressed bridge troops hug deck-safe parapet walls/pillars, prop gunner bipods on bridge balustrades, and bound safely along the span.");
 
             EnableShellShockSurrender = config.Bind(
                 "6. Tactical Self-Preservation & Muzzle Discipline",
@@ -574,6 +577,26 @@ namespace EasyRed2HumanAI
                 "EnableBuddyCasualtyDragging",
                 true,
                 "Emergent GOAP Buddy Casualty Dragging: nearby riflemen drag/carry (CarryBodySynched) wounded teammates out of open fire into cover or directly to a nearby friendly/player Medic.");
+
+            EnableConquestEconomyQuartermaster = config.Bind(
+                "6. Tactical Self-Preservation & Muzzle Discipline",
+                "EnableConquestEconomyQuartermaster",
+                true,
+                "Dynamic Operations (ConquestEconomy) Net Quartermaster: makes AI teams actually obey Conquest ticket budgets instead of spawning 400-500 ticket vehicles for free, surges cheap infantry waves when outnumbered, saves surplus tickets to unlock and buy heavy armor/aircraft counters, and protects a ticket buffer for human players.");
+
+            ConquestPlayerTicketBuffer = config.Bind(
+                "6. Tactical Self-Preservation & Muzzle Discipline",
+                "ConquestPlayerTicketBuffer",
+                135,
+                new ConfigDescription(
+                    "Minimum ConquestEconomy tickets reserved on human-occupied factions (+75 per extra Co-op player, +60 while a player is on the respawn screen) before AI unlocks or purchases expensive vehicle/aircraft squads. AI-only opposing factions use 0 buffer.",
+                    new AcceptableValueRange<int>(0, 600)));
+
+            EnableTacticalRetreatsAndRegroup = config.Bind(
+                "6. Tactical Self-Preservation & Muzzle Discipline",
+                "EnableTacticalRetreatsAndRegroup",
+                true,
+                "3-Tier Tactical Retreats & Regroup: enables TeamNet sector withdrawals for shattered squads, Squad Leader fighting withdrawals (smoke + 'Retreat!' callout + fallback rally point) when mauled or facing uncounterable close armor, and individual 'Oh Shit' break-contact sprints before surrendering.");
 
             // 7. AI Role Personalities (3 Archetypes per Infantry & Vehicle Role)
             EnableRolePersonalities = config.Bind(

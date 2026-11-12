@@ -638,6 +638,77 @@ namespace EasyRed2HumanAI
             return found;
         }
 
+        private static bool TryFindBridgeParapetOrPillarSpot(
+            Soldier soldier,
+            Vector3 myPos,
+            Vector3 threatDir,
+            out Vector3 bestSpot)
+        {
+            bestSpot = myPos;
+            int envMask = AiCore.GetSolidEnvironmentMask();
+            Vector3 threatFlat = new Vector3(threatDir.x, 0f, threatDir.z);
+            if (threatFlat.sqrMagnitude < 0.001f && soldier.transform != null)
+                threatFlat = new Vector3(soldier.transform.forward.x, 0f, soldier.transform.forward.z);
+            if (threatFlat.sqrMagnitude < 0.001f)
+                threatFlat = Vector3.forward;
+            else
+                threatFlat.Normalize();
+
+            Vector3 sideAxis = new Vector3(-threatFlat.z, 0f, threatFlat.x);
+            float bestScore = -999f;
+            bool found = false;
+
+            for (int dirIdx = 0; dirIdx < 5; dirIdx++)
+            {
+                Vector3 probeDir;
+                switch (dirIdx)
+                {
+                    case 0: probeDir = sideAxis; break;
+                    case 1: probeDir = -sideAxis; break;
+                    case 2: probeDir = (threatFlat + sideAxis * 0.85f).normalized; break;
+                    case 3: probeDir = (threatFlat - sideAxis * 0.85f).normalized; break;
+                    default: probeDir = threatFlat; break;
+                }
+
+                bool hitWall = Physics.Raycast(myPos + Vector3.up * 0.68f, probeDir, out RaycastHit hit, 6.8f, envMask, QueryTriggerInteraction.Ignore) ||
+                               Physics.Raycast(myPos + Vector3.up * 1.05f, probeDir, out hit, 6.8f, envMask, QueryTriggerInteraction.Ignore);
+                if (!hitWall || Mathf.Abs(hit.normal.y) >= 0.45f)
+                    continue;
+
+                Vector3 pushInward = new Vector3(hit.normal.x, 0f, hit.normal.z);
+                if (pushInward.sqrMagnitude < 0.001f)
+                    continue;
+                pushInward.Normalize();
+
+                Vector3 cand = new Vector3(hit.point.x, myPos.y, hit.point.z) + pushInward * 0.62f;
+                if (!AiCore.IsSafeBridgeDeckStep(myPos, cand, out Vector3 snappedDeck))
+                    continue;
+
+                float moveDist = Vector3.Distance(myPos, snappedDeck);
+                if (moveDist > 8.5f)
+                    continue;
+
+                // Score parapet/pillar spot: strong bonus if crouched chest is directly shielded from threatDir,
+                // plus lateral wall-hug bonus that clears the exposed bridge centerline.
+                bool blocksThreatCrouched = Physics.Raycast(
+                    snappedDeck + Vector3.up * 0.62f,
+                    threatFlat,
+                    2.6f,
+                    envMask,
+                    QueryTriggerInteraction.Ignore);
+
+                float score = (blocksThreatCrouched ? 12.0f : 4.5f) - moveDist * 0.45f;
+                if (score > bestScore)
+                {
+                    bestScore = score;
+                    bestSpot = snappedDeck;
+                    found = true;
+                }
+            }
+
+            return found;
+        }
+
         private static bool TrySeekNearbyCover(SoldierAI ai, Soldier soldier)
         {
             if (ai == null || soldier == null || soldier.IsOnVehicle() || soldier.transform == null)
@@ -664,6 +735,8 @@ namespace EasyRed2HumanAI
                 _nextLocalCoverSeekTime[ptr] = now + 1.5f;
 
                 Vector3 myPos = soldier.transform.position;
+                bool isOnBridge = VisionConfig.EnableBridgeCrossingDiscipline.Value &&
+                                  AiCore.IsOnBridgeOrNarrowCrossing(myPos);
                 Vector3 threatDir = GetEffectiveThreatDirection(soldier, soldier.joinedSquad, myPos, soldier.transform.forward);
                 CombatCover bestCover = null;
                 float bestDistSq = float.MaxValue;
@@ -689,11 +762,14 @@ namespace EasyRed2HumanAI
                                 continue;
 
                             Vector3 covPos = cc.GetCoverPosition();
-                            if (Mathf.Abs(covPos.y - myPos.y) > 2.4f)
+                            if (Mathf.Abs(covPos.y - myPos.y) > (isOnBridge ? 1.15f : 2.4f))
                                 continue;
 
                             float dSq = (covPos - myPos).sqrMagnitude;
                             if (dSq >= bestDistSq)
+                                continue;
+
+                            if (isOnBridge && !AiCore.IsSafeBridgeDeckStep(myPos, covPos, out _))
                                 continue;
 
                             if (!cc.IsCoverAvailable(threatDir, soldier.faction))
@@ -707,7 +783,8 @@ namespace EasyRed2HumanAI
 
                 // Consider nearby idle/wrecked tank or armored vehicle hulls as physical cover if closer than static cover!
                 if (bestDistSq > 7.0f * 7.0f &&
-                    TryFindTankHullCoverOrEscortSpot(soldier, myPos, threatDir, false, out Vector3 tankCoverPos, out _))
+                    TryFindTankHullCoverOrEscortSpot(soldier, myPos, threatDir, false, out Vector3 tankCoverPos, out _) &&
+                    (!isOnBridge || AiCore.IsSafeBridgeDeckStep(myPos, tankCoverPos, out tankCoverPos)))
                 {
                     float tankDistSq = (tankCoverPos - myPos).sqrMagnitude;
                     if (tankDistSq < bestDistSq)
@@ -724,6 +801,15 @@ namespace EasyRed2HumanAI
                 {
                     _localCoverProtectedUntil[ptr] = now + 7.5f;
                     soldier.CoverPosition(bestCover.Cast<AiDestination>());
+                    return true;
+                }
+
+                // Bridge Parapet / Balustrade / Pillar wall-hug fallback when static cover nodes weren't baked onto the span
+                if (isOnBridge && TryFindBridgeParapetOrPillarSpot(soldier, myPos, threatDir, out Vector3 parapetSpot))
+                {
+                    DestinationWithoutCover bridgeDest = new DestinationWithoutCover(parapetSpot, SoldierPose.Crouch);
+                    _localCoverProtectedUntil[ptr] = now + 6.5f;
+                    soldier.CoverPosition(bridgeDest.Cast<AiDestination>());
                     return true;
                 }
             }
@@ -1123,7 +1209,12 @@ namespace EasyRed2HumanAI
                 return;
             }
 
-            if (bip == null || ai.IsMoving() || !ai.HasEnemyAndCanFireAtHim || dist <= 5.0f)
+            bool isOnBridge = VisionConfig.EnableBridgeCrossingDiscipline.Value &&
+                              AiCore.IsOnBridgeOrNarrowCrossing(soldier.transform.position);
+            bool canEngageOrMountOverWall = ai.HasEnemyAndCanFireAtHim ||
+                                            (ai.visibleTarget != null && (soldier.IsOnCover() || soldier.IsTowardWall() || isOnBridge));
+
+            if (bip == null || ai.IsMoving() || !canEngageOrMountOverWall || dist <= 5.0f)
                 return;
 
             if (_nextBipodDeployCheckTime.TryGetValue(ptr, out float nextCheck) && Time.time < nextCheck)
@@ -1131,7 +1222,8 @@ namespace EasyRed2HumanAI
 
             _nextBipodDeployCheckTime[ptr] = Time.time + 1.25f;
 
-            if (soldier.isInBodyAnimation || AiCore.HorizontalAngleToDirection(soldier, targetPos - soldier.transform.position) > 28f)
+            float maxDeployAngle = isOnBridge ? 36f : 28f;
+            if (soldier.isInBodyAnimation || AiCore.HorizontalAngleToDirection(soldier, targetPos - soldier.transform.position) > maxDeployAngle)
                 return;
 
             if (!soldier.CanStartBipodDeploy())
@@ -1159,14 +1251,38 @@ namespace EasyRed2HumanAI
             Vector3 scanBase = soldier.transform.position + fwd * 0.35f;
             float feetY = soldier.transform.position.y;
 
-            if (soldier.m_pose == SoldierPose.Prone)
+            // Waist-high wall / bridge balustrade mount (+0.85m scan -> Crouch)
             {
-                if (soldier.ScanBipodSurfaceAt(bip, scanBase + Vector3.up * 0.85f, right, out Vector3 crouchAnchor, out Collider crouchSupport) &&
+                Vector3 crouchAnchor = Vector3.zero;
+                Collider crouchSupport = null;
+                bool foundCrouchMount =
+                    soldier.ScanBipodSurfaceAt(bip, scanBase + Vector3.up * 0.85f, right, out crouchAnchor, out crouchSupport) &&
                     crouchSupport != null &&
-                    crouchAnchor.y > feetY + 0.45f)
+                    crouchAnchor.y > feetY + 0.45f &&
+                    crouchAnchor.y < feetY + 1.05f;
+
+                if (!foundCrouchMount && isOnBridge)
+                {
+                    for (int side = -1; side <= 1; side += 2)
+                    {
+                        Vector3 diagFwd = (fwd + right * (0.52f * side)).normalized;
+                        Vector3 diagRight = new Vector3(diagFwd.z, 0f, -diagFwd.x);
+                        Vector3 diagBase = soldier.transform.position + diagFwd * 0.40f;
+                        if (soldier.ScanBipodSurfaceAt(bip, diagBase + Vector3.up * 0.85f, diagRight, out crouchAnchor, out crouchSupport) &&
+                            crouchSupport != null &&
+                            crouchAnchor.y > feetY + 0.45f &&
+                            crouchAnchor.y < feetY + 1.05f)
+                        {
+                            foundCrouchMount = true;
+                            break;
+                        }
+                    }
+                }
+
+                if (foundCrouchMount && (soldier.m_pose != SoldierPose.Crouch || isOnBridge || !ai.HasEnemyAndCanFireAtHim))
                 {
                     SetBotPose(ai, soldier, SoldierPose.Crouch, true);
-                    _bipodStandUntil[ptr] = Time.time + 3.0f;
+                    _bipodStandUntil[ptr] = Time.time + 3.5f;
                     _noProneUntil[ptr] = Time.time + 10.0f;
                     soldier.OperateBipod(bip, crouchAnchor, crouchSupport, true, false);
                     BipodsDeployed++;
@@ -1174,11 +1290,33 @@ namespace EasyRed2HumanAI
                 }
             }
 
-            if (soldier.m_pose != SoldierPose.Idle && (soldier.IsOnCover() || soldier.IsTowardWall() || IsMuzzleBlockedByWall(soldier, targetPos, dist)))
+            if (soldier.m_pose != SoldierPose.Idle && (isOnBridge || soldier.IsOnCover() || soldier.IsTowardWall() || IsMuzzleBlockedByWall(soldier, targetPos, dist)))
             {
-                if (soldier.ScanBipodSurfaceAt(bip, scanBase + Vector3.up * 1.30f, right, out Vector3 standAnchor, out Collider standSupport) &&
+                Vector3 standAnchor = Vector3.zero;
+                Collider standSupport = null;
+                bool foundStandMount =
+                    soldier.ScanBipodSurfaceAt(bip, scanBase + Vector3.up * 1.30f, right, out standAnchor, out standSupport) &&
                     standSupport != null &&
-                    standAnchor.y > feetY + 0.92f)
+                    standAnchor.y > feetY + 0.92f;
+
+                if (!foundStandMount && isOnBridge)
+                {
+                    for (int side = -1; side <= 1; side += 2)
+                    {
+                        Vector3 diagFwd = (fwd + right * (0.52f * side)).normalized;
+                        Vector3 diagRight = new Vector3(diagFwd.z, 0f, -diagFwd.x);
+                        Vector3 diagBase = soldier.transform.position + diagFwd * 0.40f;
+                        if (soldier.ScanBipodSurfaceAt(bip, diagBase + Vector3.up * 1.30f, diagRight, out standAnchor, out standSupport) &&
+                            standSupport != null &&
+                            standAnchor.y > feetY + 0.92f)
+                        {
+                            foundStandMount = true;
+                            break;
+                        }
+                    }
+                }
+
+                if (foundStandMount)
                 {
                     SetBotPose(ai, soldier, SoldierPose.Idle, true);
                     _bipodStandUntil[ptr] = Time.time + 4.5f;
@@ -2034,6 +2172,7 @@ namespace EasyRed2HumanAI
                         }
 
                         // If caught moving in the open under MG/rifle suppression (> 8.5m from destination), seek nearby local cover within 13.5m
+                        // (including deck-safe bridge parapets/pillars when EnableBridgeCrossingDiscipline is active)
                         if (suppression >= 20f &&
                             !soldier.IsOnCover() &&
                             !HasActiveGoapCoverLock(ptr, Time.time) &&
@@ -2042,7 +2181,6 @@ namespace EasyRed2HumanAI
                             !isStaffingEmplacement &&
                             !soldier.IsCharging() &&
                             !inPointBlankMelee &&
-                            !isOnBridge &&
                             (soldier.transform.position - __instance.MoveDestination).sqrMagnitude > 8.5f * 8.5f)
                         {
                             TrySeekNearbyCover(__instance, soldier);
@@ -2054,7 +2192,6 @@ namespace EasyRed2HumanAI
                         bool holdOverwatchFireNow = false;
                         if (VisionConfig.EnableBoundingOverwatch.Value &&
                             !VisionConfig.EnableTacticalGoapPlanner.Value &&
-                            !isOnBridge &&
                             !isEvadingArmor &&
                             !isHealingTeammate &&
                             !isStaffingEmplacement &&
@@ -2660,6 +2797,16 @@ namespace EasyRed2HumanAI
             if (!isOverrun)
             {
                 return false;
+            }
+
+            // Before surrendering at mid-close range (> 11m), able-bodied isolated soldiers first attempt
+            // an "Oh Shit!" break-contact sprint rearward (with smoke if carried) toward friendly lines/cover!
+            if (VisionConfig.EnableTacticalRetreatsAndRegroup.Value &&
+                !soldier.isBleeding &&
+                closestEnemyDistSq > 11.0f * 11.0f &&
+                TryTriggerImmediateIndividualFallback(soldier, myPos))
+            {
+                return true;
             }
 
             if (!AiCore.TryConsumeBotRpcBudget(0.60f))
@@ -3412,24 +3559,38 @@ namespace EasyRed2HumanAI
         [HarmonyPatch(typeof(Squad), nameof(Squad.SendUnitsToCovers))]
         public static class Squad_SendUnitsToCovers_Patch
         {
-            public static void Prefix(Squad __instance, Vector3 __0)
+            public static void Prefix(Squad __instance, Vector3 __0, ref float __1)
             {
                 try
                 {
-                    if (!VisionConfig.EnableMod.Value ||
-                        !VisionConfig.EnableSmartWallSideCover.Value ||
-                        __instance == null)
-                    {
+                    if (!VisionConfig.EnableMod.Value || __instance == null)
                         return;
-                    }
 
                     if (__instance.Leader != null && !AiCore.IsLocallyOwnedBot(__instance.Leader))
                         return;
 
-                    Vector3 threatDir = GetEffectiveThreatDirection(__instance.Leader, __instance, __0, __instance.formationDirection);
-                    if (threatDir.sqrMagnitude > 0.01f)
+                    // Keep squad members INSIDE the actual MissionTask capture radius instead of scattering onto
+                    // outer perimeter covers 5-15m outside the active cap circle!
+                    if (VisionConfig.EnableMacroObjectiveDirector.Value &&
+                        __instance.currentTask != null)
                     {
-                        __instance.formationDirection = threatDir;
+                        Vector3 dTask = __instance.currentTask.GetTaskDestination() - __0;
+                        if (dTask.x * dTask.x + dTask.z * dTask.z <= 22.0f * 22.0f)
+                        {
+                            float taskRadius = Mathf.Max(10.0f, __instance.currentTask.GetTaskAreaRadius());
+                            float maxCapSpread = Mathf.Max(8.5f, taskRadius * 0.80f);
+                            if (__1 > maxCapSpread)
+                                __1 = maxCapSpread;
+                        }
+                    }
+
+                    if (VisionConfig.EnableSmartWallSideCover.Value)
+                    {
+                        Vector3 threatDir = GetEffectiveThreatDirection(__instance.Leader, __instance, __0, __instance.formationDirection);
+                        if (threatDir.sqrMagnitude > 0.01f)
+                        {
+                            __instance.formationDirection = threatDir;
+                        }
                     }
                 }
                 catch { }

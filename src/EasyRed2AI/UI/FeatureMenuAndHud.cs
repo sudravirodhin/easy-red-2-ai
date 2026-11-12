@@ -69,6 +69,7 @@ namespace EasyRed2HumanAI
                     CleanupExpiredFiringRecords();
                     VeteranAndTacticsPatches.RenderVeteran3DMarkersAndCleanup();
                     VeteranAndTacticsPatches.UpdateMacroObjectiveAndEmplacementDirector();
+                    VeteranAndTacticsPatches.UpdateConquestQuartermasterIfNeeded();
                     VeteranAndTacticsPatches.UpdateQuickTapSpot(_showConfigMenu || _showMapPicker);
                     if (_showMapPicker)
                         BattleManager_OnGUI_Patch.StepResolveSelectedCampaignBattles();
@@ -117,9 +118,9 @@ namespace EasyRed2HumanAI
                             VeteranAndTacticsPatches.CleanupDictionaries();
                             ShowToast(
                                 $"[Battle Hardened v{Plugin.PluginVersion} Telemetry] MaxFrame:{AiCore.RollingMaxFrameMs:F1}ms (Hitches:{AiCore.TotalHitchesOver28ms}) | Vets:{VeteranAndTacticsPatches.ActiveVeteransCount} (Prom:{VeteranAndTacticsPatches.FieldPromotionsCount}) | ExtraTicks:{AiCore.TotalAdaptiveAiExtraTicks} (PingSkip:{AiCore.TotalPingGovernorSkippedCycles}) | FFSaved:{VeteranAndTacticsPatches.FriendlyFirePrevented} | MedRedirect:{VeteranAndTacticsPatches.MedicTriageRedirectsCount}\n" +
-                                $"GOAP:{VeteranAndTacticsPatches.GoapPlansExecutedCount} (Anvil:{VeteranAndTacticsPatches.TeamNetAnvilHammerCount} Flank:{VeteranAndTacticsPatches.GoapPinAndFlankCount} Charge:{VeteranAndTacticsPatches.SquadChargesOrderedCount} Covert:{VeteranAndTacticsPatches.SquadCovertOrdersCount} Follow:{VeteranAndTacticsPatches.SquadFollowOrdersCount} Smoke:{VeteranAndTacticsPatches.GoapSmokeScreensCount} RadioCut:{VeteranAndTacticsPatches.RadioNetCutoffsCount}) | WepUp:{VeteranAndTacticsPatches.RoleWeaponUpgradesCount} | BuddyResup:{VeteranAndTacticsPatches.BuddyResuppliesCount} | RadioLoot:{VeteranAndTacticsPatches.FieldRadiosInheritedCount} | Helmets:{VeteranAndTacticsPatches.HelmetsRecoveredCount} | Dragged:{VeteranAndTacticsPatches.CasualtiesDraggedCount}\n" +
-                                $"Drops:{VeteranAndTacticsPatches.SelfPreservationDrops} | Peeks:{VeteranAndTacticsPatches.AutoPeeksTriggered} | IndoorCrouch:{VeteranAndTacticsPatches.IndoorPronePreventedCount} | Pies:{VeteranAndTacticsPatches.CornerPiesExecutedCount} | TankCov:{VeteranAndTacticsPatches.TankHullCoverUsesCount} | Bounds:{VeteranAndTacticsPatches.BoundingOverwatchHoldsCount} | Doors:{VeteranAndTacticsPatches.DoorsStrategicallyClosedCount} | Bipods:{VeteranAndTacticsPatches.BipodsDeployed} | WallBlk:{VeteranAndTacticsPatches.WallsBlocked} | Melee:{VeteranAndTacticsPatches.MeleeAttacksTriggered} | Surr:{VeteranAndTacticsPatches.ShellShockSurrendersCount}/Lib:{VeteranAndTacticsPatches.ComradesLiberated}\n" +
-                                $"Garrisons:{VeteranAndTacticsPatches.MacroGarrisonsAssignedCount} | Emplace:{VeteranAndTacticsPatches.StaticGunsStaffedCount} | APC:{VeteranAndTacticsPatches.SmartApcDismountsCount} | TankHold:{VeteranAndTacticsPatches.TankStandoffHoldsCount} | TankSpread:{VeteranAndTacticsPatches.ArmoredDispersionAdjustmentsCount} | SmartAmmo:{VeteranAndTacticsPatches.SmartAmmoSwitchesCount} | Unsticks:{VeteranAndTacticsPatches.TankRockUnsticksCount} | Repairs:{VeteranAndTacticsPatches.ShelteredRepairsCount} | RoadkillSaved:{VeteranAndTacticsPatches.FriendlyRoadkillsPreventedCount} (ClientRK:{VeteranAndTacticsPatches.RemoteClientRoadkillsAssistedCount})\n" +
+                                $"GOAP:{VeteranAndTacticsPatches.GoapPlansExecutedCount} (Anvil:{VeteranAndTacticsPatches.TeamNetAnvilHammerCount} Flank:{VeteranAndTacticsPatches.GoapPinAndFlankCount} Charge:{VeteranAndTacticsPatches.SquadChargesOrderedCount} Covert:{VeteranAndTacticsPatches.SquadCovertOrdersCount} Follow:{VeteranAndTacticsPatches.SquadFollowOrdersCount} Retreat:{VeteranAndTacticsPatches.TacticalRetreatsCount} Smoke:{VeteranAndTacticsPatches.GoapSmokeScreensCount} RadioCut:{VeteranAndTacticsPatches.RadioNetCutoffsCount}) | WepUp:{VeteranAndTacticsPatches.RoleWeaponUpgradesCount} | BuddyResup:{VeteranAndTacticsPatches.BuddyResuppliesCount} | RadioLoot:{VeteranAndTacticsPatches.FieldRadiosInheritedCount} | Helmets:{VeteranAndTacticsPatches.HelmetsRecoveredCount} | Dragged:{VeteranAndTacticsPatches.CasualtiesDraggedCount}\n" +
+                                $"Drops:{VeteranAndTacticsPatches.SelfPreservationDrops} | Peeks:{VeteranAndTacticsPatches.AutoPeeksTriggered} | IndoorCrouch:{VeteranAndTacticsPatches.IndoorPronePreventedCount} | Pies:{VeteranAndTacticsPatches.CornerPiesExecutedCount} | TankCov:{VeteranAndTacticsPatches.TankHullCoverUsesCount} | Bounds:{VeteranAndTacticsPatches.BoundingOverwatchHoldsCount} | Doors:{VeteranAndTacticsPatches.DoorsStrategicallyClosedCount} | Bipods:{VeteranAndTacticsPatches.BipodsDeployed} | WallBlk:{VeteranAndTacticsPatches.WallsBlocked} | FragBlk:{VeteranAndTacticsPatches.UselessTankFragsBlockedCount} | Melee:{VeteranAndTacticsPatches.MeleeAttacksTriggered} | Surr:{VeteranAndTacticsPatches.ShellShockSurrendersCount}/Lib:{VeteranAndTacticsPatches.ComradesLiberated}\n" +
+                                $"Garrisons:{VeteranAndTacticsPatches.MacroGarrisonsAssignedCount} | ConqBuy:{VeteranAndTacticsPatches.ConquestPurchasesCount} | Emplace:{VeteranAndTacticsPatches.StaticGunsStaffedCount} | APC:{VeteranAndTacticsPatches.SmartApcDismountsCount} | TankHold:{VeteranAndTacticsPatches.TankStandoffHoldsCount} | TankSpread:{VeteranAndTacticsPatches.ArmoredDispersionAdjustmentsCount} | SmartAmmo:{VeteranAndTacticsPatches.SmartAmmoSwitchesCount} | Unsticks:{VeteranAndTacticsPatches.TankRockUnsticksCount} | Repairs:{VeteranAndTacticsPatches.ShelteredRepairsCount} | RoadkillSaved:{VeteranAndTacticsPatches.FriendlyRoadkillsPreventedCount} (ClientRK:{VeteranAndTacticsPatches.RemoteClientRoadkillsAssistedCount})\n" +
                                 $"CombArms:{VeteranAndTacticsPatches.CombinedArmsPriorityAssistsCount} (Kamikaze:{VeteranAndTacticsPatches.KamikazeDivesTriggeredCount}) | Callouts:{VeteranAndTacticsPatches.LocalCalloutsSharedCount} | Supp:{VeteranAndTacticsPatches.SuppressiveEventsCount} | WoodPen:{VeteranAndTacticsPatches.ThinCoverPenetrationsCount} | TopAP:{VeteranAndTacticsPatches.AircraftTopAttackPenetrationsAssistedCount} (HostAssist:{VeteranAndTacticsPatches.HostVanillaClientApAssistsCount}) | CrewBlastBlk:{VeteranAndTacticsPatches.EnclosedCrewExplosionHitsBlockedCount} | CrewClipBlk:{VeteranAndTacticsPatches.EnclosedCrewBulletClipsBlockedCount} | AirMgBlk:{VeteranAndTacticsPatches.AirplanePilotMgHitsBlockedCount} | Chutes:{VeteranAndTacticsPatches.ParachutesDriftedCount} | BloodOcc:{VeteranAndTacticsPatches.BloodSmokeWaterOccludedCount}",
                                 9.5f);
                         }
@@ -134,16 +135,16 @@ namespace EasyRed2HumanAI
                         AiCore.LogDebug(
                             "Heartbeat",
                             $"FPS:{fps:F0} ({dtMs:F1}ms, Max15s:{AiCore.RollingMaxFrameMs:F1}ms, Hitches:{AiCore.TotalHitchesOver28ms}) | Vets:{VeteranAndTacticsPatches.ActiveVeteransCount} (Prom:{VeteranAndTacticsPatches.FieldPromotionsCount}) | " +
-                            $"GOAP:{VeteranAndTacticsPatches.GoapPlansExecutedCount} (Anvil:{VeteranAndTacticsPatches.TeamNetAnvilHammerCount} PinFlank:{VeteranAndTacticsPatches.GoapPinAndFlankCount} Charge:{VeteranAndTacticsPatches.SquadChargesOrderedCount} Covert:{VeteranAndTacticsPatches.SquadCovertOrdersCount} Follow:{VeteranAndTacticsPatches.SquadFollowOrdersCount} Smoke:{VeteranAndTacticsPatches.GoapSmokeScreensCount} WepUp:{VeteranAndTacticsPatches.RoleWeaponUpgradesCount} BuddyResup:{VeteranAndTacticsPatches.BuddyResuppliesCount} RadioLoot:{VeteranAndTacticsPatches.FieldRadiosInheritedCount} Helmets:{VeteranAndTacticsPatches.HelmetsRecoveredCount} Dragged:{VeteranAndTacticsPatches.CasualtiesDraggedCount} RadioCut:{VeteranAndTacticsPatches.RadioNetCutoffsCount}) | " +
+                            $"GOAP:{VeteranAndTacticsPatches.GoapPlansExecutedCount} (Anvil:{VeteranAndTacticsPatches.TeamNetAnvilHammerCount} PinFlank:{VeteranAndTacticsPatches.GoapPinAndFlankCount} Charge:{VeteranAndTacticsPatches.SquadChargesOrderedCount} Covert:{VeteranAndTacticsPatches.SquadCovertOrdersCount} Follow:{VeteranAndTacticsPatches.SquadFollowOrdersCount} Retreat:{VeteranAndTacticsPatches.TacticalRetreatsCount} Smoke:{VeteranAndTacticsPatches.GoapSmokeScreensCount} WepUp:{VeteranAndTacticsPatches.RoleWeaponUpgradesCount} BuddyResup:{VeteranAndTacticsPatches.BuddyResuppliesCount} RadioLoot:{VeteranAndTacticsPatches.FieldRadiosInheritedCount} Helmets:{VeteranAndTacticsPatches.HelmetsRecoveredCount} Dragged:{VeteranAndTacticsPatches.CasualtiesDraggedCount} RadioCut:{VeteranAndTacticsPatches.RadioNetCutoffsCount}) | " +
                             $"Drops:{VeteranAndTacticsPatches.SelfPreservationDrops} | Peeks:{VeteranAndTacticsPatches.AutoPeeksTriggered} | IndoorCrouch:{VeteranAndTacticsPatches.IndoorPronePreventedCount} | Pies:{VeteranAndTacticsPatches.CornerPiesExecutedCount} | TankCov:{VeteranAndTacticsPatches.TankHullCoverUsesCount} | " +
                             $"Callouts:{VeteranAndTacticsPatches.LocalCalloutsSharedCount} (KillVoice:{VeteranAndTacticsPatches.BotKillCalloutsCount}) | Supp:{VeteranAndTacticsPatches.SuppressiveEventsCount} | " +
-                            $"Bounds:{VeteranAndTacticsPatches.BoundingOverwatchHoldsCount} | Garrisons:{VeteranAndTacticsPatches.MacroGarrisonsAssignedCount} | " +
+                            $"Bounds:{VeteranAndTacticsPatches.BoundingOverwatchHoldsCount} | Garrisons:{VeteranAndTacticsPatches.MacroGarrisonsAssignedCount} | ConqBuy:{VeteranAndTacticsPatches.ConquestPurchasesCount} | " +
                             $"Emplace:{VeteranAndTacticsPatches.StaticGunsStaffedCount} | APC:{VeteranAndTacticsPatches.SmartApcDismountsCount} | " +
                             $"TankHold:{VeteranAndTacticsPatches.TankStandoffHoldsCount} | TankSpread:{VeteranAndTacticsPatches.ArmoredDispersionAdjustmentsCount} | SmartAmmo:{VeteranAndTacticsPatches.SmartAmmoSwitchesCount} | Unsticks:{VeteranAndTacticsPatches.TankRockUnsticksCount} | MedRedirect:{VeteranAndTacticsPatches.MedicTriageRedirectsCount} | RoadkillSaved:{VeteranAndTacticsPatches.FriendlyRoadkillsPreventedCount} (ClientRK:{VeteranAndTacticsPatches.RemoteClientRoadkillsAssistedCount}) | CombArms:{VeteranAndTacticsPatches.CombinedArmsPriorityAssistsCount} (Kamikaze:{VeteranAndTacticsPatches.KamikazeDivesTriggeredCount}) | " +
                             $"Bridges:{VeteranAndTacticsPatches.BridgeCrossingsAssistedCount} | Surr:{VeteranAndTacticsPatches.ShellShockSurrendersCount} (Lib:{VeteranAndTacticsPatches.ComradesLiberated}) | " +
                             $"WoodPen:{VeteranAndTacticsPatches.ThinCoverPenetrationsCount} | TopAP:{VeteranAndTacticsPatches.AircraftTopAttackPenetrationsAssistedCount} (HostAssist:{VeteranAndTacticsPatches.HostVanillaClientApAssistsCount}) | CrewBlastBlk:{VeteranAndTacticsPatches.EnclosedCrewExplosionHitsBlockedCount} | CrewClipBlk:{VeteranAndTacticsPatches.EnclosedCrewBulletClipsBlockedCount} | AirMgBlk:{VeteranAndTacticsPatches.AirplanePilotMgHitsBlockedCount} | PlaneAudio:{VeteranAndTacticsPatches.PlaneAudioLoopsDesyncedCount} | Chutes:{VeteranAndTacticsPatches.ParachutesDriftedCount} | BloodOcc:{VeteranAndTacticsPatches.BloodSmokeWaterOccludedCount} | " +
                             $"Doors:{VeteranAndTacticsPatches.DoorsStrategicallyClosedCount} | Bipods:{VeteranAndTacticsPatches.BipodsDeployed} | WallBlk:{VeteranAndTacticsPatches.WallsBlocked} | " +
-                            $"Melee:{VeteranAndTacticsPatches.MeleeAttacksTriggered} | TankBlk:{VeteranAndTacticsPatches.UselessTankFirePrevented} (Crew:{VeteranAndTacticsPatches.ExposedCrewTargeted}) | " +
+                            $"Melee:{VeteranAndTacticsPatches.MeleeAttacksTriggered} | TankBlk:{VeteranAndTacticsPatches.UselessTankFirePrevented} (Crew:{VeteranAndTacticsPatches.ExposedCrewTargeted}, Frag:{VeteranAndTacticsPatches.UselessTankFragsBlockedCount}) | " +
                             $"Ticks:{AiCore.TotalAdaptiveAiExtraTicks} (PingSkip:{AiCore.TotalPingGovernorSkippedCycles}) | FFSaved:{VeteranAndTacticsPatches.FriendlyFirePrevented} | Repairs:{VeteranAndTacticsPatches.ShelteredRepairsCount}",
                             15.0f);
                     }
@@ -446,22 +447,26 @@ namespace EasyRed2HumanAI
                             VisionConfig.EnableTacticalVoiceCallouts,
                             VisionConfig.EnableRadiomanIntelNet,
                             VisionConfig.EnableMacroObjectiveDirector,
+                            VisionConfig.EnableConquestEconomyQuartermaster,
                             VisionConfig.EnableProactiveEmplacementStaffing,
                             VisionConfig.EnableCombinedArmsPrioritySupport);
                         DrawToggleButton(colLeftX, ref yL, colW, rowH, "3-Tier GOAP Planner & Squad Blackboard", VisionConfig.EnableTacticalGoapPlanner);
                         DrawToggleButton(colLeftX, ref yL, colW, rowH, "Audible GOAP Plan Voice Callouts", VisionConfig.EnableTacticalVoiceCallouts);
                         DrawToggleButton(colLeftX, ref yL, colW, rowH, "Radioman-Gated Team Intel Net", VisionConfig.EnableRadiomanIntelNet);
                         DrawToggleButton(colLeftX, ref yL, colW, rowH, "Objective Garrison & Counterattack Director", VisionConfig.EnableMacroObjectiveDirector);
+                        DrawToggleButton(colLeftX, ref yL, colW, rowH, "Dynamic Operations Ticket Quartermaster", VisionConfig.EnableConquestEconomyQuartermaster);
                         DrawToggleButton(colLeftX, ref yL, colW, rowH, "Proactive Static Gun & Halftrack Staffing", VisionConfig.EnableProactiveEmplacementStaffing);
                         DrawToggleButton(colLeftX, ref yL, colW, rowH, "Combined-Arms Known Target Priority", VisionConfig.EnableCombinedArmsPrioritySupport);
 
                         yL += 8f;
                         DrawSectionHeaderWithBundle(colLeftX, ref yL, colW, "Emergent Squad & Battlefield Actions",
+                            VisionConfig.EnableTacticalRetreatsAndRegroup,
                             VisionConfig.EnableBuddyResupply,
                             VisionConfig.EnableEmergentWearableScavenge,
                             VisionConfig.EnableBuddyCasualtyDragging,
                             VisionConfig.EnableShellShockSurrender,
                             VisionConfig.EnableComradeLiberation);
+                        DrawToggleButton(colLeftX, ref yL, colW, rowH, "3-Tier Tactical Retreats & Regroup", VisionConfig.EnableTacticalRetreatsAndRegroup);
                         DrawToggleButton(colLeftX, ref yL, colW, rowH, "Buddy Resupply (Medic Bandage & Ammo Share)", VisionConfig.EnableBuddyResupply);
                         DrawToggleButton(colLeftX, ref yL, colW, rowH, "Field Radio Inheritance & Helmet Gifting", VisionConfig.EnableEmergentWearableScavenge);
                         DrawToggleButton(colLeftX, ref yL, colW, rowH, "Buddy Casualty Dragging to Cover / Medic", VisionConfig.EnableBuddyCasualtyDragging);
@@ -487,10 +492,10 @@ namespace EasyRed2HumanAI
                         DrawToggleButton(colRightX, ref yR, colW, rowH, "Stand BEHIND Walls (Smart Wall Cover)", VisionConfig.EnableSmartWallSideCover);
                         DrawToggleButton(colRightX, ref yR, colW, rowH, "Seek Cover Before Bandaging", VisionConfig.BandageOnlyAfterFindingCover);
                         DrawToggleButton(colRightX, ref yR, colW, rowH, "Auto-Peek Over Low Cover", VisionConfig.EnableAutoPeekOverCover);
-                        DrawToggleButton(colRightX, ref yR, colW, rowH, "Gunner Bipod Wall & Ground Mounting", VisionConfig.EnableGunnerBipodWallMounting);
+                        DrawToggleButton(colRightX, ref yR, colW, rowH, "Gunner Bipod Wall, Bridge & Ground Mounting", VisionConfig.EnableGunnerBipodWallMounting);
                         DrawToggleButton(colRightX, ref yR, colW, rowH, "Point-Blank Bayonet & Melee CQB", VisionConfig.EnablePointBlankMelee);
                         DrawToggleButton(colRightX, ref yR, colW, rowH, "Strategic Door & Shutter Discipline", VisionConfig.EnableStrategicDoorDiscipline);
-                        DrawToggleButton(colRightX, ref yR, colW, rowH, "Bridge & Narrow Crossing Discipline", VisionConfig.EnableBridgeCrossingDiscipline);
+                        DrawToggleButton(colRightX, ref yR, colW, rowH, "Bridge Cover, Wall Hug & Crossing Discipline", VisionConfig.EnableBridgeCrossingDiscipline);
                         DrawToggleButton(colRightX, ref yR, colW, rowH, "Wall & Fence Vaulting", VisionConfig.EnableWallVaulting);
                         DrawToggleButton(colRightX, ref yR, colW, rowH, "Anti-Stacking Personal Spacing", VisionConfig.EnableAntiStacking);
                         DrawToggleButton(colRightX, ref yR, colW, rowH, "Smart APC / Transport Dismount Under Fire", VisionConfig.EnableSmartApcDismount);
@@ -1460,6 +1465,7 @@ namespace EasyRed2HumanAI
                 ClearDoorCaches();
                 ClearCombinedArmsCaches();
                 ClearGoapCaches();
+                ClearConquestQuartermasterState();
             }
 
             AiCore.EnsureWorldSnapshot();
@@ -1577,6 +1583,9 @@ namespace EasyRed2HumanAI
                 AiCore.PruneDict(_cornerPieCache, _reusableAlivePtrs);
                 AiCore.PruneDict(_nextCornerPieCountTime, _reusableAlivePtrs);
                 AiCore.PruneDict(_lastDamageByVictim, _reusableAlivePtrs);
+                AiCore.PruneDict(_nextIndividualFallbackTime, _reusableAlivePtrs);
+                AiCore.PruneDict(_individualFallbackUntil, _reusableAlivePtrs);
+                AiCore.PruneDict(_individualFallbackDest, _reusableAlivePtrs);
                 AiCore.PruneSet(_bayonetCheckedSoldiers, _reusableAlivePtrs);
                 AiCore.PruneSet(_isTurningToWatchSector, _reusableAlivePtrs);
 
@@ -1603,6 +1612,8 @@ namespace EasyRed2HumanAI
                 AiCore.PruneDict(_nextAiSquadChargeTime, _reusableAlivePtrs);
                 AiCore.PruneDict(_nextAiCovertOrderTime, _reusableAlivePtrs);
                 AiCore.PruneDict(_nextAiFollowOrderTime, _reusableAlivePtrs);
+                AiCore.PruneDict(_nextAiSquadRetreatTime, _reusableAlivePtrs);
+                AiCore.PruneDict(_aiSquadRetreatUntil, _reusableAlivePtrs);
                 AiCore.PruneSet(_aiCovertHoldFireSquads, _reusableAlivePtrs);
                 AiCore.PruneSet(_initialHqSpawnBriefingConsumed, _reusableAlivePtrs);
 

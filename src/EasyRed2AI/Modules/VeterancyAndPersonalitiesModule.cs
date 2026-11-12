@@ -675,7 +675,6 @@ namespace EasyRed2HumanAI
                 try
                 {
                     if (!VisionConfig.EnableMod.Value ||
-                        VisionConfig.FriendlyFireConeDegrees.Value <= 0.1f ||
                         __instance == null ||
                         __instance.Pointer == IntPtr.Zero ||
                         !__instance.IsAI() ||
@@ -685,7 +684,7 @@ namespace EasyRed2HumanAI
                         return true;
                     }
 
-                    // Allow non-lethal smoke grenades to be thrown near friendlies
+                    // Allow non-lethal smoke grenades to be thrown near friendlies and for screening armor
                     if (__0 == null || __0.TryCast<VirtualSmokeGrenade>() != null)
                     {
                         return true;
@@ -697,18 +696,40 @@ namespace EasyRed2HumanAI
                         return false;
                     }
 
-                    Vector3 targetPos = __1.GetCenterOfUnit();
-                    float dist = Vector3.Distance(__instance.transform.position, targetPos);
-                    if (!IsSafeToThrowGrenadeAt(__instance, targetPos, dist, 11.5f))
+                    // Prevent AI soldiers from wasting standard frag grenades on buttoned-up tanks/armored vehicles
+                    if (VisionConfig.PreventSmallArmsFireAtTanks.Value && __1.IsWheeledVehicleOrTank())
                     {
-                        __instance.throw_end_time = Time.time + 3.0f;
-                        if (VisionConfig.DebugLogging.Value)
+                        Vehicle targetVeh = __1.TryCast<Vehicle>();
+                        if (targetVeh != null && !CanThrowableDamageOrFlushVehicle(__instance, __0, targetVeh))
                         {
-                            AiCore.LogDebug(
-                                "GrenadeFFBlocked",
-                                $"Blocked danger-close lethal grenade throw by {__instance.faction} soldier ({dist:F0}m).");
+                            __instance.throw_end_time = Time.time + 4.0f;
+                            UselessTankFragsBlockedCount++;
+                            if (VisionConfig.DebugLogging.Value)
+                            {
+                                AiCore.LogDebug(
+                                    "TankFragBlocked",
+                                    $"Blocked ineffective frag throw ({__0.item_id}) by {__instance.faction} soldier at buttoned-up {targetVeh.name}.",
+                                    3.0f);
+                            }
+                            return false;
                         }
-                        return false;
+                    }
+
+                    if (VisionConfig.FriendlyFireConeDegrees.Value > 0.1f)
+                    {
+                        Vector3 targetPos = __1.GetCenterOfUnit();
+                        float dist = Vector3.Distance(__instance.transform.position, targetPos);
+                        if (!IsSafeToThrowGrenadeAt(__instance, targetPos, dist, 11.5f))
+                        {
+                            __instance.throw_end_time = Time.time + 3.0f;
+                            if (VisionConfig.DebugLogging.Value)
+                            {
+                                AiCore.LogDebug(
+                                    "GrenadeFFBlocked",
+                                    $"Blocked danger-close lethal grenade throw by {__instance.faction} soldier ({dist:F0}m).");
+                            }
+                            return false;
+                        }
                     }
                 }
                 catch { }

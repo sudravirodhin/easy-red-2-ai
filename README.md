@@ -1,4 +1,4 @@
-# Easy Red 2: Battle Hardened (`v0.7.6`)
+# Easy Red 2: Battle Hardened (`v0.7.7`)
 *3-Tier Tactical GOAP, Squad Blackboard, Radioman Intel Net, Veterancy, Personalities & Combined-Arms Overhaul*
 
 > [!IMPORTANT]
@@ -27,20 +27,20 @@ A comprehensive **BepInEx 6 (IL2CPP)** AI, combined-arms, and fairness overhaul 
 
 Download your preferred package from the **[Releases](https://github.com/sudravirodhin/easy-red-2-ai/releases)** page:
 
-### Option A: With BepInEx Included (`EasyRed2HumanAI-v0.7.6-with-BepInEx.zip`) — *Recommended for Fresh Installs*
+### Option A: With BepInEx Included (`EasyRed2HumanAI-v0.7.7-with-BepInEx.zip`) — *Recommended for Fresh Installs*
 Includes **[BepInEx 6.0.0-be.791 (Unity.IL2CPP-win-x64)](https://builds.bepinex.dev/projects/bepinex_be)**, the `.NET 6` runtime, Unity `2022.3.62` base libraries, pre-generated IL2CPP `interop` assemblies for Easy Red 2 Build `921`, and `EasyRed2HumanAI.dll` (with no other third-party mods).
 1. Open your **Easy Red 2** installation folder (e.g. `Steam\steamapps\common\Easy Red 2`, where `Easy Red 2.exe` is located).
-2. Extract all contents of `EasyRed2HumanAI-v0.7.6-with-BepInEx.zip` directly into the `Easy Red 2` folder.
+2. Extract all contents of `EasyRed2HumanAI-v0.7.7-with-BepInEx.zip` directly into the `Easy Red 2` folder.
 3. Launch the game!
 
-### Option B: Without BepInEx / Plugin Only (`EasyRed2HumanAI-v0.7.6-Plugin-Only.zip` or `EasyRed2HumanAI.dll`)
+### Option B: Without BepInEx / Plugin Only (`EasyRed2HumanAI-v0.7.7-Plugin-Only.zip` or `EasyRed2HumanAI.dll`)
 For users who already have **[BepInEx 6 Bleeding Edge (`BepInEx-Unity.IL2CPP-win-x64`)](https://builds.bepinex.dev/projects/bepinex_be)** installed:
-1. Download `EasyRed2HumanAI-v0.7.6-Plugin-Only.zip` (or `EasyRed2HumanAI.dll` directly).
+1. Download `EasyRed2HumanAI-v0.7.7-Plugin-Only.zip` (or `EasyRed2HumanAI.dll` directly).
 2. Place `EasyRed2HumanAI.dll` into:
    ```text
    Easy Red 2\BepInEx\plugins\EasyRed2HumanAI.dll
    ```
-   *(Using **[Quartermaster - ER2 Mod Manager](https://www.nexusmods.com/easyred2/mods/107)**? Import `EasyRed2HumanAI-v0.7.6-Plugin-Only.zip` directly in Quartermaster's Mods tab—do not import `with-BepInEx.zip`.)*
+   *(Using **[Quartermaster - ER2 Mod Manager](https://www.nexusmods.com/easyred2/mods/107)**? Import `EasyRed2HumanAI-v0.7.7-Plugin-Only.zip` directly in Quartermaster's Mods tab—do not import `with-BepInEx.zip`.)*
 
 ### Linux & Steam Deck Setup (via Steam Proton)
 `EasyRed2HumanAI` works out of the box on **Linux Desktop** and **SteamOS / Steam Deck** with 100% Windows Co-op cross-play compatibility by running the Windows IL2CPP build under **Proton**:
@@ -49,16 +49,16 @@ For users who already have **[BepInEx 6 Bleeding Edge (`BepInEx-Unity.IL2CPP-win
    * Check **"Force the use of a specific Steam Play compatibility tool"** and select **Proton Experimental** or **Proton 9.0+**. Let Steam finish downloading the Windows executable (`Easy Red 2.exe`).
 2. **Extract the Mod**:
    * Right-click **Easy Red 2** → **Manage** → **Browse local files** (`~/.steam/steam/steamapps/common/Easy Red 2/`).
-   * Extract all contents of **`EasyRed2HumanAI-v0.7.6-with-BepInEx.zip`** directly into that folder (so `winhttp.dll`, `doorstop_config.ini`, `dotnet/`, and `BepInEx/` sit next to `Easy Red 2.exe`).
+   * Extract all contents of **`EasyRed2HumanAI-v0.7.7-with-BepInEx.zip`** directly into that folder (so `winhttp.dll`, `doorstop_config.ini`, `dotnet/`, and `BepInEx/` sit next to `Easy Red 2.exe`).
 3. **Add the Wine DLL Override Launch Option** *(Required on Linux/Proton so Wine loads BepInEx's `winhttp.dll` proxy instead of Wine's built-in `winhttp`)*:
    * In Steam → **Easy Red 2** → **Properties** → **General** → **Launch Options**, paste:
      ```bash
      WINEDLLOVERRIDES="winhttp=n,b" %command%
      ```
-4. Launch the game! Verify `BepInEx/LogOutput.log` shows `Easy Red 2 - Battle Hardened v0.7.6 loaded!`. Both Windows and Linux/Proton players can seamlessly Host or Join each other's Multiplayer Co-op lobbies.
+4. Launch the game! Verify `BepInEx/LogOutput.log` shows `Easy Red 2 - Battle Hardened v0.7.7 loaded!`. Both Windows and Linux/Proton players can seamlessly Host or Join each other's Multiplayer Co-op lobbies.
 
 ### Switching to Vanilla or Uninstalling (`Uninstall-BepInEx-Mod.bat`)
-Included in `EasyRed2HumanAI-v0.7.6-with-BepInEx.zip` (and in the root of this repository) is **[`Uninstall-BepInEx-Mod.bat`](Uninstall-BepInEx-Mod.bat)**. Double-click it inside your `Easy Red 2` folder when the game is closed to:
+Included in `EasyRed2HumanAI-v0.7.7-with-BepInEx.zip` (and in the root of this repository) is **[`Uninstall-BepInEx-Mod.bat`](Uninstall-BepInEx-Mod.bat)**. Double-click it inside your `Easy Red 2` folder when the game is closed to:
 * **`[1] Play Vanilla Temporarily`**: Moves `BepInEx`, `dotnet`, and `winhttp.dll` into `_BepInEx_Disabled_Backup\` so the game runs 100% pure vanilla without losing your configs or other plugins.
 * **`[2] Restore Modded Game`**: Moves everything back from `_BepInEx_Disabled_Backup\` in one click.
 * **`[3] Uninstall Completely`**: Permanently deletes `BepInEx`, `dotnet`, `winhttp.dll`, `doorstop_config.ini`, `.doorstop_version`, and `changelog.txt`.
@@ -127,6 +127,12 @@ Alongside shared tactical realism goals (some inspired by [`Easy-Red-2-Realism-O
   * **Enclosed Tank Crew Small-Arms / Collider-Clip Protection & Ricochet Obituary Fix**: Buttoned-up crewmen (`!seat.showUnitSet`) inside intact armored ground hulls (`effArmor >= 8mm`) can no longer be killed by small-arms bullets (`< 12mm` / non-AP / non-HE) clipping through `BodyPart`/`ItemHelmet` colliders or point-blank muzzles poking inside outer hull colliders; non-penetrating small-arms ricochets and friendly pings on `VehicleDamagablePart` no longer overwrite death attribution (`"Vehicle Hit"`); and `IsFriendlyInLineOfFire` now scans flat `WorldSoldiers` directly (protecting detached crewmen, remote Co-op human players, and allied sub-factions with a wider `1.65m` friendly ground-vehicle corridor).
   * **Tier 2 Squad Leader Execution GOAP (`Charge!` / `Covert Hold-Fire` / `Follow` Column)**: AI Squad Leaders dynamically evaluate cost-weighted native squad orders (`Squad.Charge`, `Squad.SetHoldFireOrder`, `Squad.FollowLeader`) based on TeamNet directives, Officer personality (`[Spearhead]`, `[Tactician]`, `[Old Guard]`), 20-nation doctrine, desperate cap saves (`>= 45%` enemy capture progress), low invader tickets (`<= 24%`), active smoke screens, and stealth flank approaches—auto-releasing `HoldFire` (scoped strictly to AI-issued covert orders so Lua-scripted `holdFire` is untouched) and `Follow` columns the instant contact is made.
   * **Vanilla `ResourcesManager.FactionCanDamageFaction` `NullReferenceException` Hitch Fix**: Guards `ResourcesManager.FactionCanDamageFaction(Soldier shooter, string hitfaction)` when unowned map/artillery shrapnel or projectiles from a despawned shooter hit a `VehicleDamagablePart` with `shooter == null` (eliminating a `~176ms` vanilla exception hitch observed in Co-op).
+* **Bridge Parapet Cover & Bipods, Dynamic Operations (`ConquestEconomy`) Net Quartermaster, Strict Frag-vs-Armor Gate, 3-Tier Tactical Retreats & Relentless Both-Sides Objective Play (`v0.7.7`)**:
+  * **Bridge Parapet Cover, Wall Hugging & Bipod Propping (`EnableBridgeCrossingDiscipline`, `EnableGunnerBipodWallMounting`)**: Bridge infantry no longer sprint upright down the exposed centerline—soldiers seek deck-safe `CombatCover`, tank hulls, or hug stone bridge parapets/pillars (`TryFindBridgeParapetOrPillarSpot` guarded by `AiCore.IsSafeBridgeDeckStep` so no bot ever steps off a span into water), execute short parapet-to-parapet bounds (`HoldOverwatchFire` + `BoundWithOverwatch`), and prop MG/gunner bipods (`BipodCheck(true)`) on both waist-high (`0.45m–1.05m`) and chest-high (`> 0.92m`) bridge walls and diagonal (`±28°`) balustrades.
+  * **Dynamic Operations (`ConquestEconomy`) Net Quartermaster & Player Ticket Buffer (`EnableConquestEconomyQuartermaster`)**: Fixes vanilla's omission where `SpawnManager.CanSpawn(false)` and `<SpawnAISquad>d__45.MoveNext` bypassed `ConquestEconomy` completely (allowing AI to spawn `400–500` ticket tanks and planes for `0` tickets while players paid full price). Host-authoritative (`MasterClient`) Quartermaster charges `ConquestEconomy.Charge` on actual AI spawns, reserves a protected **`ConquestPlayerTicketBuffer` (`135` base, `+75` per extra Co-op player, `+60` while a human teammate is on the respawn screen; `0` on AI-only factions)** so players are never starved of tickets, surges cheap infantry waves when depleted, and banks surplus tickets (`<= 50s` window) to buy `220–500` ticket Heavy Armor and Combat Aircraft counters.
+  * **Strict Frag-vs-Armor Gate (`CanThrowableDamageOrFlushVehicle` + `Soldier.Throw`)**: Stops both mod routines and vanilla `SoldierAI` throws from wasting `< 12mm` fragmentation grenades (`VirtualGrenade` / `GrenadeType.infantryGrenate`) on buttoned-up tanks (`effArmor >= 8mm` with zero exposed crew), while allowing AT grenades (`VirtualATGrenade`), Molotovs/phosphorus (`phosporusGrenade`), satchel/TNT charges, smoke screens, soft-skinned vehicle frags, and open-topped crew kills (`FragBlk` telemetry).
+  * **3-Tier Tactical Retreats — "Oh Shit" Break-Contact & Fighting Regroup (`EnableTacticalRetreatsAndRegroup`)**: Adds `SquadNetDirective.Regroup_SectorWithdrawal` (Tier 3 Radio Net withdrawal + support call when shattered/outnumbered or facing uncountered close armor), Tier 2 Squad Leader fighting withdrawal (`TryPopSquadRetreatSmoke` + `VoiceClip.timeToRetreat` + `HoldArea` toward rear friendly squads/armor or hard cover), and Tier 1 individual break-contact sprints (`TacticalFallbackRetreat` + `TryTriggerImmediateIndividualFallback` before `SurrenderSynched` when an escape lane exists).
+  * **Relentless Both-Sides Objective Play ("Player as a Cog in the Machine")**: Clamps `Squad.SendUnitsToCovers` spread radius to `0.80 * GetTaskAreaRadius()` when targeting `currentTask` so 100% of squadmates take cover **inside** the capture circle rather than camping outside the boundary; tracks live friendly vs. enemy headcounts inside the circle (`FriendlyUnitsInsideObjective` vs. `EnemyUnitsInsideObjective`) to trigger `ObjectiveCapContestUrgent` and `Squad.Charge` break-ins whenever capture majority isn't secured; tightens Conquest flag drain response (`rawPct < 0.98f`); rescues undefended bleeding flags from quiet secondary garrisons; and distributes multi-flag attacks across simultaneous frontline objectives (`PickBestAttackObjectiveForSquad`).
 
 > *(Want the deep-dive engineering breakdown of what vanilla's `GameAssembly.dll` did under the hood and why each change was made? Read **[`docs/design-and-justifications.md`](docs/design-and-justifications.md)**!)*
 
@@ -194,8 +200,8 @@ Instead of every bot using identical suppression thresholds, peeking rhythms, an
   * Automatic Co-op-safe bayonet fixing (`integratedBayonet.SetMounted(true)`), CQB lunging/knife-drawing/butt-strokes within `2.5m–3.8m`, dual barrel-height (`spine` + `heldGun`) wall-shooting prevention and auto-peek (`Prone → Crouch → Stand` + lateral corner sidestep), active MG bipod mounting (`BipodCheck(true)`), friendly-fire hold-fire cones (`5.0°–6.5°`), `2.4m` anti-stacking spacing, wall vaulting, and surrendered comrade liberation.
 * **Strategic Door & Window Shutter Discipline (`EnableStrategicDoorDiscipline`)**:
   * Prevents bots from mindlessly popping open closed window shutters and side doors simply by walking past them (`Soldier.CheckAndOpenDoor`), opens closed doors blocking an active indoor firing lane (`<= 2.5m`), automatically closes doors behind bots once they and any trailing squadmates have passed through, and pulls open doors/window shutters closed only when heavily suppressed or bleeding (`SetDoorLayer`)—never slamming firing lanes shut mid-reload.
-* **Bridge & Narrow Crossing Discipline (`EnableBridgeCrossingDiscipline`)**:
-  * Fixes vanilla's primary bridge-crossing bug in `SoldierAI.GetSpacingFromSquad`, which randomly scatters squadmates' pathfinding waypoints **5m–35m sideways** (`Random.Range(5, 35)`)—flinging waypoints off bridge decks into mid-air over rivers/ravines where `CPathFinding.A` snaps paths down to riverbed/water nodes (`terrainNodesUnderBridges`). Also prevents bots on bridges (`IsOnBridgeOrNarrowCrossing` quantized spatial cache) from dropping `Prone`, pausing mid-bridge for overwatch, or nudging laterally off bridge edges.
+* **Bridge Cover, Wall Hugging, Bipod Propping & Crossing Discipline (`EnableBridgeCrossingDiscipline`)**:
+  * Fixes vanilla's primary bridge-crossing bug in `SoldierAI.GetSpacingFromSquad`, which randomly scatters squadmates' pathfinding waypoints **5m–35m sideways** (`Random.Range(5, 35)`)—flinging waypoints off bridge decks into mid-air over rivers/ravines where `CPathFinding.A` snaps paths down to riverbed/water nodes (`terrainNodesUnderBridges`). Prevents bots on bridges from dropping `Prone`, while allowing infantry to seek deck-safe `CombatCover`, tank hulls, or hug stone bridge parapets/pillars (`AiCore.IsSafeBridgeDeckStep`), execute parapet-to-parapet bounds, and prop MG bipods on bridge walls and diagonal railings.
 * **Shell-Shocked & Skittish Dynamic Surrender (`EnableShellShockSurrender`)**:
   * In vanilla, `Soldier.SurrenderSynched` is only triggered by scripted mission-area transitions. With `EnableShellShockSurrender`, isolated and heavily suppressed/shell-shocked **Skittish** (`[Cautious]` / `[Triage]`) or **Green Rookie** soldiers who are overrun at close range (`<= 18m`) with no inspiring Squad Leader (`[Spearhead]` / `[Old Guard]`) nearby can dynamically lay down their arms (`SurrenderSynched`)—and can later be liberated back into combat (`EnableComradeLiberation`) if friendly forces counterattack.
 
@@ -217,8 +223,8 @@ Instead of every bot using identical suppression thresholds, peeking rhythms, an
   * AI tanks with a clear main-gun line of sight hold practical standoff distance (`50m` Brawler, `72m` Support, `95m` Sniper) using `StopAndRotateTowardTarget` instead of driving into infantry AT-grenade range, and engage reverse gear (`ForceRetroFor` / `MoveTankRetro`) when enemy threats close within `35m`.
 * **Friendly Infantry Right-of-Way & Anti-Roadkill (`EnableFriendlyVehicleRightOfWay`)**:
   * AI-driven tanks and wheeled vehicles scan their forward/reverse travel corridor (`0.18s` cached spatial check) for friendly foot soldiers and repairing crew (`SomeoneIsRepairing`), holding their brakes via `AIVehicle.resumeDriveTime` (without triggering false `VehicleStuckCheck` reroutes) while gently nudging friendly AI infantry to step aside (`MoveDirectlyToward` + `DisableHitByVehicleFor`). Also patches `VehicleWithWheels.OnTriggerEnter` so friendly vehicles never deal lethal `1000` roadkill damage to same-faction soldiers or the human player on contact, instead pushing them clear of the tracks/wheels.
-* **Smart Anti-Armor Target, Fire & Evade Discipline (`PreventSmallArmsFireAtTanks`)**:
-  * Redirects small arms at **exposed vehicle crew (`Seats.showUnitSet`)** and **un-flattened rubber tires (`VehicleDamageableWheelPart`)**, aims AT rifles at **unbroken tank tracks (`VehicleDamageableTrackPart`)** and penetrable plates, throws normal & AT grenades at close range, and stops useless rifle/SMG fire against heavy tank hulls—while infantry caught out in the open (`<= 85m`) with no way to hurt an approaching tank **proactively scramble behind walls/hard cover or bound diagonally out of the tank's sightline**.
+* **Smart Anti-Armor Target, Fire, Frag Gate & Evade Discipline (`PreventSmallArmsFireAtTanks`)**:
+  * Redirects small arms at **exposed vehicle crew (`Seats.showUnitSet`)** and **un-flattened rubber tires (`VehicleDamageableWheelPart`)**, aims AT rifles at **unbroken tank tracks (`VehicleDamageableTrackPart`)** and penetrable plates, blocks wasteful `< 12mm` frag grenade throws against buttoned-up armor (`CanThrowableDamageOrFlushVehicle` — reserving frags for soft-skinned vehicles and open-topped crew while permitting AT grenades, Molotovs, satchels, and smoke), and stops useless rifle/SMG fire against heavy tank hulls—while infantry caught out in the open (`<= 85m`) with no way to hurt an approaching tank **proactively scramble behind walls/hard cover, bound diagonally out of sight, or execute tactical break-contact retreats**.
 
 ---
 

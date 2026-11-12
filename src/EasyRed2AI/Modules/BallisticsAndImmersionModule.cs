@@ -35,11 +35,19 @@ namespace EasyRed2HumanAI
             public float PhaseSeed;
         }
 
+        private struct CachedGrenadeBlastInfo
+        {
+            public GrenadeType Type;
+            public float MaxPenMm;
+            public bool Valid;
+        }
+
         private static readonly Dictionary<IntPtr, PlaneAudioState> _planeAudioStates = new Dictionary<IntPtr, PlaneAudioState>(32);
         private static readonly Dictionary<IntPtr, int> _colliderImpactCache = new Dictionary<IntPtr, int>(512);
         private static readonly Dictionary<IntPtr, ParachuteDriftState> _parachuteDriftStates = new Dictionary<IntPtr, ParachuteDriftState>(32);
         private static readonly Dictionary<IntPtr, float> _vehicleExplosionArmorCache = new Dictionary<IntPtr, float>(64);
         private static readonly Dictionary<IntPtr, TrailRenderer[]> _cachedTracerTrails = new Dictionary<IntPtr, TrailRenderer[]>(64);
+        private static readonly Dictionary<string, CachedGrenadeBlastInfo> _grenadeBlastCache = new Dictionary<string, CachedGrenadeBlastInfo>(32, StringComparer.OrdinalIgnoreCase);
 
         public static int PlaneAudioLoopsDesyncedCount { get; private set; }
         public static int ThinCoverPenetrationsCount { get; private set; }
@@ -50,6 +58,7 @@ namespace EasyRed2HumanAI
         public static int EnclosedCrewBulletClipsBlockedCount { get; internal set; }
         public static int HostVanillaClientApAssistsCount { get; private set; }
         public static int BloodSmokeWaterOccludedCount { get; private set; }
+        public static int UselessTankFragsBlockedCount { get; internal set; }
 
         internal static bool ActiveCrewSpallContext;
         internal static float ActiveCrewSpallMultiplier = 1.0f;
@@ -67,6 +76,8 @@ namespace EasyRed2HumanAI
                 _vehicleExplosionArmorCache.Clear();
             if (forceClear || _cachedTracerTrails.Count > 128)
                 _cachedTracerTrails.Clear();
+            if (forceClear || _grenadeBlastCache.Count > 64)
+                _grenadeBlastCache.Clear();
             if (forceClear || _inspectedBloodFxRoots.Count > 128)
             {
                 _inspectedBloodFxRoots.Clear();
@@ -815,6 +826,106 @@ namespace EasyRed2HumanAI
                 if (seat != null && seat.unitSet != null && seat.unitSet.Pointer == victimPtr)
                     return !seat.showUnitSet;
             }
+            return false;
+        }
+
+        /// <summary>
+        /// Determines whether a thrown item can actually damage, blind, burn, or kill exposed crew on <paramref name="targetVeh"/>.
+        /// Prevents AI soldiers from wasting standard fragmentation grenades (&lt; 12mm blast penetration) against buttoned-up
+        /// tanks and enclosed armored vehicles while allowing AT grenades, Molotov/phosphorus grenades, smoke screens,
+        /// soft-skinned vehicle attacks, and open-topped crew kills.
+        /// </summary>
+        internal static bool CanThrowableDamageOrFlushVehicle(Soldier thrower, VirtualItem throwable, Vehicle targetVeh)
+        {
+            if (throwable == null || targetVeh == null || targetVeh.Pointer == IntPtr.Zero)
+                return false;
+
+            if (throwable.TryCast<VirtualSmokeGrenade>() != null || throwable.TryCast<VirtualATGrenade>() != null)
+                return true;
+
+            string itemId = throwable.item_id ?? string.Empty;
+            if (!_grenadeBlastCache.TryGetValue(itemId, out CachedGrenadeBlastInfo info))
+            {
+                info = default;
+                try
+                {
+                    ItemObject prefab = throwable.GetItemPrefab();
+                    ItemGrenade ig = prefab != null ? prefab.TryCast<ItemGrenade>() : null;
+                    if (ig != null)
+                    {
+                        info.Type = ig.grenadeType;
+                        info.MaxPenMm = ig.explosionMaxPenetration;
+                        info.Valid = true;
+                    }
+                }
+                catch { }
+
+                if (!string.IsNullOrEmpty(itemId))
+                {
+                    if (_grenadeBlastCache.Count > 96)
+                        _grenadeBlastCache.Clear();
+                    _grenadeBlastCache[itemId] = info;
+                }
+            }
+
+            if (info.Valid &&
+                (info.Type == GrenadeType.smokeGrenade ||
+                 info.Type == GrenadeType.ATGrenade ||
+                 info.Type == GrenadeType.phosporusGrenade))
+            {
+                return true;
+            }
+
+            // Modded incendiary / satchel / anti-tank throwable name fallback
+            if (!string.IsNullOrEmpty(itemId) &&
+                (itemId.IndexOf("molotov", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                 itemId.IndexOf("satchel", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                 itemId.IndexOf("geballte", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                 itemId.IndexOf("hafthohl", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                 itemId.IndexOf("panzerwurf", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                 itemId.IndexOf("gammon", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                 itemId.IndexOf("hawkins", StringComparison.OrdinalIgnoreCase) >= 0))
+            {
+                return true;
+            }
+
+            if (targetVeh.IsCoverDestroyed())
+                return true;
+
+            float effArmor = GetEffectiveVehicleExplosionArmor(targetVeh);
+            // Soft-skinned trucks/jeeps (< 6mm hull -> effArmor == 0) take full blast/wheel damage from frags
+            if (effArmor <= 0.1f)
+                return true;
+
+            // High-penetration HE charges (>= 12mm and able to defeat effective roof/hull blast armor)
+            if (info.Valid && info.MaxPenMm >= Mathf.Max(12.0f, effArmor))
+                return true;
+
+            // Open-topped tank destroyers / halftracks / unbuttoned commanders: allow fragging exposed alive enemy crew
+            if (!targetVeh.IsAirVehicle())
+            {
+                var seats = targetVeh.seats;
+                if (seats != null)
+                {
+                    string myFaction = thrower != null ? thrower.faction : null;
+                    int seatCount = seats.Length;
+                    for (int i = 0; i < seatCount; i++)
+                    {
+                        Seats seat = seats[i];
+                        if (seat == null || !seat.showUnitSet)
+                            continue;
+
+                        Soldier crew = seat.unitSet;
+                        if (crew != null && crew.IsAlive &&
+                            (string.IsNullOrEmpty(myFaction) ||
+                             (crew.faction != myFaction && !ResourcesManager.IsSameFaction(myFaction, crew.faction))))
+                        {
+                            return true;
+                        }
+                    }
+                }
+            }
+
             return false;
         }
 
