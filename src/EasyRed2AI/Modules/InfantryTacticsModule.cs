@@ -1875,9 +1875,7 @@ namespace EasyRed2HumanAI
 
                     bool isHealingTeammate = IsActivelyHealingTeammate(soldier, out _);
 
-                    bool isStaffingEmplacement = _assignedEmplacementUntil.TryGetValue(ptr, out float empUntil) &&
-                                                 Time.time < empUntil &&
-                                                 !soldier.IsOnVehicle();
+                    bool isStaffingEmplacement = IsActivelyHeadingToEmplacement(soldier, Time.time);
 
                     // Execute 3-Tier Bitmask GOAP Planner & Squad Blackboard (Pin/Flank/Smoke/Overwatch/Rescue)
                     if (VisionConfig.EnableTacticalGoapPlanner.Value && !isRepairingVehicle && !isHealingTeammate)
@@ -3121,7 +3119,7 @@ namespace EasyRed2HumanAI
                                 {
                                     bool crouchClear = HasClearLineOfFireFromCrouch(soldier, __0, dist);
                                     bool standClear = !crouchClear && HasClearLineOfFireFromStanding(soldier, __0, dist);
-                                    bool isStaffingStaticGun = _assignedEmplacementUntil.TryGetValue(ptr, out float empUntilT) && Time.time < empUntilT;
+                                    bool isStaffingStaticGun = IsActivelyHeadingToEmplacement(soldier, Time.time);
                                     // Allow short lateral jamb/embrasure sidestep even when snapped to cover once both crouch & standing shots are blocked!
                                     bool canSidestep = !soldier.IsCharging() && !isOnBridge && !isStaffingStaticGun;
                                     float peekDur = GetJitteredPeekDuration(ptr, 4.1f);
@@ -3307,7 +3305,8 @@ namespace EasyRed2HumanAI
                     float now = Time.time;
                     bool protectedCover =
                         (VisionConfig.EnableTacticalGoapPlanner.Value && HasActiveGoapCoverLock(ptr, now)) ||
-                        (_localCoverProtectedUntil.TryGetValue(ptr, out float protUntil) && now < protUntil);
+                        (_localCoverProtectedUntil.TryGetValue(ptr, out float protUntil) && now < protUntil) ||
+                        IsActivelyHeadingToEmplacement(soldier, now);
 
                     if (protectedCover)
                     {

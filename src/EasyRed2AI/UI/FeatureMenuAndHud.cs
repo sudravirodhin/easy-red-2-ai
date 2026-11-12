@@ -1383,6 +1383,7 @@ namespace EasyRed2HumanAI
                 AiCore.PruneDict(_localCoverProtectedUntil, _reusableAlivePtrs);
                 AiCore.PruneDict(_nextBotDoorCheckTime, _reusableAlivePtrs);
                 AiCore.PruneDict(_assignedEmplacementUntil, _reusableAlivePtrs);
+                AiCore.PruneDict(_assignedEmplacementVehicle, _reusableAlivePtrs);
                 AiCore.PruneDict(_nextFriendlyStepAsideTime, _reusableAlivePtrs);
                 AiCore.PruneDict(_botGoapPlans, _reusableAlivePtrs);
                 AiCore.PruneDict(_botScavengeCaches, _reusableAlivePtrs);

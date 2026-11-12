@@ -5492,22 +5492,47 @@ namespace EasyRed2HumanAI
             if (bestSquad == null)
                 return false;
 
-            // If within 18m of the friendly Squad Leader, pull the lone soldier directly into the squad!
+            // If within 18m of the friendly Squad Leader, merge the lone soldier properly into the squad via Squad.Join!
+            // Vanilla Squad.AddIfNotInSquad (0x1808001A0) only inserts into bestSquad.units without updating self.joinedSquad
+            // or leaving the old dead squad, which stranded merged survivors on their dead squad's stale order.
+            // Squad.Join (0x180806A00) leaves the old squad, updates self.joinedSquad, syncs RPC_JoinSquad online, and updates GUI.
             if (bestSq <= 18f * 18f)
             {
                 try
                 {
-                    if (bestSquad.units != null && bestSquad.units.Count < 10 && bestSquad.AddIfNotInSquad(self))
+                    Soldier targetLeader = bestSquad.Leader;
+                    if (bestSquad.units != null &&
+                        bestSquad.units.Count < 10 &&
+                        targetLeader != null &&
+                        AiCore.IsLocallyOwnedBot(self) &&
+                        AiCore.IsLocallyOwnedBot(targetLeader) &&
+                        !bestSquad.InInside(self) &&
+                        AiCore.TryConsumeBotRpcBudget())
                     {
-                        GoapPlansExecutedCount++;
-                        if (VisionConfig.DebugLogging.Value)
+                        bestSquad.Join(self);
+                        if (self.joinedSquad != null && self.joinedSquad.Pointer == bestSquad.Pointer)
                         {
-                            AiCore.LogDebug(
-                                "GoapMerge",
-                                $"{myFaction} lone survivor / bailed crewman merged into friendly squad '{bestSquad.squadName}'.",
-                                3.0f);
+                            if (ai != null)
+                            {
+                                Vector3 targetOrderPos = (bestSquad.order != Order.follow && bestSquad.moveOrderPosition.sqrMagnitude > 0.1f)
+                                    ? bestSquad.moveOrderPosition
+                                    : linkUpPos;
+                                float targetRadius = bestSquad.order != Order.follow
+                                    ? Mathf.Clamp(bestSquad.moveOrderRadius * 0.5f, 3.5f, 12.0f)
+                                    : 3.5f;
+                                AiCore.MoveBotTowardPosition(ai, self, targetOrderPos, targetRadius, 4.0f);
+                            }
+
+                            GoapPlansExecutedCount++;
+                            if (VisionConfig.DebugLogging.Value)
+                            {
+                                AiCore.LogDebug(
+                                    "GoapMerge",
+                                    $"{myFaction} lone survivor / bailed crewman merged into friendly squad '{bestSquad.squadName}'.",
+                                    3.0f);
+                            }
+                            return true;
                         }
-                        return true;
                     }
                 }
                 catch { }

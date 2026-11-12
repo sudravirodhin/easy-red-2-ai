@@ -658,6 +658,7 @@ namespace EasyRed2HumanAI
         private static float _nextMacroDirectorTime;
         internal static readonly Dictionary<IntPtr, IntPtr> _garrisonAssignedObjectiveBySquad = new Dictionary<IntPtr, IntPtr>(64);
         internal static readonly Dictionary<IntPtr, float> _assignedEmplacementUntil = new Dictionary<IntPtr, float>(128);
+        internal static readonly Dictionary<IntPtr, IntPtr> _assignedEmplacementVehicle = new Dictionary<IntPtr, IntPtr>(128);
         internal static readonly Dictionary<IntPtr, float> _nextApcCheckTime = new Dictionary<IntPtr, float>(64);
         internal static readonly Dictionary<IntPtr, float> _nextApcDismountCooldown = new Dictionary<IntPtr, float>(64);
         internal static readonly Dictionary<IntPtr, float> _nextTankStandoffCountTime = new Dictionary<IntPtr, float>(64);
@@ -804,6 +805,7 @@ namespace EasyRed2HumanAI
             _macroDirectorStarvedSince = 0f;
             _garrisonAssignedObjectiveBySquad.Clear();
             _assignedEmplacementUntil.Clear();
+            _assignedEmplacementVehicle.Clear();
             _nextApcCheckTime.Clear();
             _nextApcDismountCooldown.Clear();
             _nextTankStandoffCountTime.Clear();
@@ -3414,7 +3416,7 @@ namespace EasyRed2HumanAI
                                     MacroGarrisonsAssignedCount++;
                                     if (VisionConfig.DebugLogging.Value)
                                     {
-                                        AiCore.LogDebug("MacroDirector", $"{faction} squad '{bestSquad.squadName}' assigned to garrison held objective '{heldObj.GetDisplayName()}'.");
+                                        AiCore.LogDebug("MacroDirector", $"{faction} squad '{bestSquad.squadName}' assigned to garrison held objective '{GetObjectiveDebugLabel(heldObj)}'.");
                                     }
                                 }
                             }
@@ -3441,7 +3443,7 @@ namespace EasyRed2HumanAI
                                 ConsumeInitialHqSpawnBriefingIfNoRadio(sq);
                                 if (VisionConfig.DebugLogging.Value)
                                 {
-                                    AiCore.LogDebug("MacroDirector", $"{faction} squad '{sq.squadName}' directed to attack/counterattack '{bestUnheld.GetDisplayName()}'.");
+                                    AiCore.LogDebug("MacroDirector", $"{faction} squad '{sq.squadName}' directed to attack/counterattack '{GetObjectiveDebugLabel(bestUnheld)}'.");
                                 }
                             }
                         }
@@ -3533,7 +3535,7 @@ namespace EasyRed2HumanAI
                                 MacroGarrisonsAssignedCount++;
                                 if (VisionConfig.DebugLogging.Value)
                                 {
-                                    AiCore.LogDebug("MacroDirector", $"{faction} reserve squad '{bestReserve.squadName}' shifted to defend threatened objective '{heldObj.GetDisplayName()}'.");
+                                    AiCore.LogDebug("MacroDirector", $"{faction} reserve squad '{bestReserve.squadName}' shifted to defend threatened objective '{GetObjectiveDebugLabel(heldObj)}'.");
                                 }
                             }
                         }
@@ -3588,7 +3590,7 @@ namespace EasyRed2HumanAI
                                 MacroGarrisonsAssignedCount++;
                                 if (VisionConfig.DebugLogging.Value)
                                 {
-                                    AiCore.LogDebug("MacroDirector", $"{faction} excess defender squad '{closestExcessSquad.squadName}' shifted from quiet '{quietObj.GetDisplayName()}' to reinforce '{primaryThreatObj.GetDisplayName()}'.");
+                                    AiCore.LogDebug("MacroDirector", $"{faction} excess defender squad '{closestExcessSquad.squadName}' shifted from quiet '{GetObjectiveDebugLabel(quietObj)}' to reinforce '{GetObjectiveDebugLabel(primaryThreatObj)}'.");
                                 }
                                 break;
                             }
@@ -3981,15 +3983,16 @@ namespace EasyRed2HumanAI
                     continue;
 
                 // Note: Vehicle.CanFight() (0x18085B7E0) returns false whenever a vehicle/emplacement is empty!
-                // Check !IsDisabled() && !IsCoverDestroyed() instead so empty MG tripods, bunker MGs, AT guns, and AA guns are staffed.
-                if (!AiCore.IsLocallyOwnedVehicle(veh) || veh.IsDisabled() || veh.IsCoverDestroyed() || veh.IsAirVehicle() || veh.PlayerIsInside())
+                // Match vanilla Vehicle.IsCoverAvailable (0x18085F9A0) by also rejecting IsLocked() and out-of-ammo turrets
+                // so bots never walk toward Lua-locked/prop emplacements or dry guns.
+                if (!AiCore.IsLocallyOwnedVehicle(veh) || veh.IsLocked() || veh.IsDisabled() || veh.IsCoverDestroyed() || veh.IsAirVehicle() || veh.PlayerIsInside())
                     continue;
 
                 bool isStaticGun = veh.TryCast<MovableVehicle>() == null;
                 bool isUnmannedCombatVehicle = !isStaticGun && !veh.HasDriver() && !veh.IsTransportVehicle();
 
                 Turret mainTurret = veh.GetMainTurret(false);
-                if (mainTurret == null || mainTurret.WeaponsCount() <= 0)
+                if (mainTurret == null || mainTurret.WeaponsCount() <= 0 || !HasAnyEmplacementTurretAmmo(veh, mainTurret))
                     continue;
 
                 if (!isStaticGun && mainTurret.GetSittedUnit(veh) != null)
@@ -4010,6 +4013,9 @@ namespace EasyRed2HumanAI
                     {
                         ref AiCore.SquadSnapshot sqSnap = ref squads[s];
                         if (!sqSnap.IsVehicleCrew || !sqSnap.LeaderIsAlive || sqSnap.IsPlayerInSquad || sqSnap.LeaderOnVehicle || sqSnap.UnitCount < 2)
+                            continue;
+
+                        if (HasHostileVehicleOccupant(veh, sqSnap.Faction))
                             continue;
 
                         float dSq = (sqSnap.RefPos - vehPos).sqrMagnitude;
@@ -4046,7 +4052,8 @@ namespace EasyRed2HumanAI
                                 Soldier cUnit = bestBailedCrew.units[cIdx];
                                 if (cUnit != null && AiCore.IsLocallyOwnedBot(cUnit) && !cUnit.IsOnVehicle())
                                 {
-                                    _assignedEmplacementUntil[cUnit.Pointer] = now + 24.0f;
+                                    _assignedEmplacementUntil[cUnit.Pointer] = now + 20.0f;
+                                    _assignedEmplacementVehicle[cUnit.Pointer] = vehPtr;
                                     cUnit.CoverPosition(crewVehDest);
                                 }
                             }
@@ -4064,7 +4071,8 @@ namespace EasyRed2HumanAI
                     continue;
 
                 Soldier bestCandidate = null;
-                float bestDistSq = 55.0f * 55.0f;
+                float bestScoreDistSq = 65.0f * 65.0f;
+                float bestRealDistSq = 0f;
                 int inboundBotsCount = 0;
 
                 for (int s = 0; s < sqCount; s++)
@@ -4073,16 +4081,32 @@ namespace EasyRed2HumanAI
                     if (!sqSnap.LeaderIsAlive || sqSnap.LeaderOnVehicle || sqSnap.IsPlayerInSquad || sqSnap.UnitCount == 0)
                         continue;
 
+                    // Never send a soldier to board a multi-seat gun that currently has a live enemy occupant!
+                    if (HasHostileVehicleOccupant(veh, sqSnap.Faction))
+                        continue;
+
                     Squad sq = sqSnap.Ref;
                     Soldier leader = sqSnap.Leader;
                     if (sq == null || leader == null)
                         continue;
 
                     bool isBailedCrew = sqSnap.IsVehicleCrew && !sq.SomeoneIsRepairing();
+                    if (!isBailedCrew && sq.InChargeTime())
+                        continue;
+
                     float empMult = GetFactionCommandProfile(sqSnap.Faction).EmplacementSearchMult;
-                    float maxSquadDist = (isBailedCrew ? 75.0f : 60.0f) * empMult;
+                    float maxSquadDist = (isBailedCrew ? 75.0f : 42.0f) * empMult;
                     if ((sqSnap.RefPos - vehPos).sqrMagnitude > maxSquadDist * maxSquadDist)
                         continue;
+
+                    // Keep regular infantry squads tethered near their active squad order area so advancing squads
+                    // never peel riflemen 50m+ backwards off an assault axis to chase distant rear bunkers.
+                    if (!isBailedCrew && sq.order != Order.follow && sq.moveOrderPosition.sqrMagnitude > 0.1f)
+                    {
+                        float maxOrderOffset = Mathf.Max(sq.moveOrderRadius + 22.0f, 34.0f);
+                        if ((vehPos - sq.moveOrderPosition).sqrMagnitude > maxOrderOffset * maxOrderOffset)
+                            continue;
+                    }
 
                     int uEnd = sqSnap.UnitStartIndex + sqSnap.UnitCount;
                     for (int uIdx = sqSnap.UnitStartIndex; uIdx < uEnd; uIdx++)
@@ -4096,10 +4120,9 @@ namespace EasyRed2HumanAI
                         {
                             if (_assignedEmplacementUntil.TryGetValue(uSnap.Ptr, out float claimUntil) && now >= claimUntil)
                             {
-                                // Anti-stuck safeguard: bot failed to reach/board emplacement within 24s; release and cooldown
-                                u.targetDestination = null;
-                                _assignedEmplacementUntil.Remove(uSnap.Ptr);
-                                _unreachableEmplacementUntil[uSnap.Ptr] = now + 120.0f;
+                                // Anti-stuck safeguard: bot failed to reach/board emplacement within window; release and cooldown
+                                u.CoverPosition(null);
+                                ClearEmplacementAssignment(uSnap.Ptr, markUnreachable: true, 120.0f);
                                 continue;
                             }
                             inboundBotsCount++;
@@ -4127,6 +4150,7 @@ namespace EasyRed2HumanAI
                     if (emplacementOverrun)
                         continue;
 
+                    float maxSoldierDistSq = isBailedCrew ? (65.0f * 65.0f) : (32.0f * 32.0f);
                     for (int uIdx = sqSnap.UnitStartIndex; uIdx < uEnd; uIdx++)
                     {
                         ref AiCore.SoldierSnapshot uSnap = ref soldiers[uIdx];
@@ -4137,18 +4161,25 @@ namespace EasyRed2HumanAI
                         if (Mathf.Abs(vehPos.y - uSnap.Pos.y) > 4.5f)
                             continue;
 
-                        float dSq = (uSnap.Pos - vehPos).sqrMagnitude;
-                        if (isBailedCrew)
-                            dSq *= 0.45f;
-                        if (dSq >= bestDistSq)
+                        float rawDistSq = (uSnap.Pos - vehPos).sqrMagnitude;
+                        if (rawDistSq > maxSoldierDistSq)
+                            continue;
+
+                        float scoreDistSq = isBailedCrew ? rawDistSq * 0.45f : rawDistSq;
+                        if (scoreDistSq >= bestScoreDistSq)
                             continue;
 
                         // Allow bailed-out vehicle crew leaders to crew static guns/artillery, but keep infantry Squad Leaders free
                         if (uSnap.IsSquadLeader && !isBailedCrew)
                             continue;
 
-                        if (_assignedEmplacementUntil.TryGetValue(uSnap.Ptr, out float assignedUntil) && now < assignedUntil)
+                        if (_assignedEmplacementUntil.TryGetValue(uSnap.Ptr, out float assignedUntil))
+                        {
+                            if (now < assignedUntil)
+                                continue;
+                            ClearEmplacementAssignment(uSnap.Ptr, markUnreachable: true, 90.0f);
                             continue;
+                        }
 
                         if (_unreachableEmplacementUntil.TryGetValue(uSnap.Ptr, out float unreachableUntil) && now < unreachableUntil)
                             continue;
@@ -4172,7 +4203,8 @@ namespace EasyRed2HumanAI
                         if (u.Params != null && (!u.Params.canMove || u.Params.neverLeaveVehicle))
                             continue;
 
-                        bestDistSq = dSq;
+                        bestScoreDistSq = scoreDistSq;
+                        bestRealDistSq = rawDistSq;
                         bestCandidate = u;
                     }
                 }
@@ -4182,7 +4214,8 @@ namespace EasyRed2HumanAI
 
                 if (bestCandidate != null)
                 {
-                    _assignedEmplacementUntil[bestCandidate.Pointer] = now + 24.0f;
+                    _assignedEmplacementUntil[bestCandidate.Pointer] = now + 18.0f;
+                    _assignedEmplacementVehicle[bestCandidate.Pointer] = vehPtr;
                     _combatCrouchLockUntil.Remove(bestCandidate.Pointer);
                     if (bestCandidate.aiController != null)
                     {
@@ -4194,12 +4227,122 @@ namespace EasyRed2HumanAI
                     TrySayTacticalVoice(bestCandidate, bestCandidate.joinedSquad, VoiceManager.VoiceClip.illTakeHisSeat, 0.2f);
                     if (VisionConfig.DebugLogging.Value)
                     {
-                        AiCore.LogDebug("Emplacement", $"{bestCandidate.faction} soldier assigned to crew emplacement seat ({Mathf.Sqrt(bestDistSq):F0}m away, openSeats:{openStaticSeats}).");
+                        AiCore.LogDebug("Emplacement", $"{bestCandidate.faction} soldier assigned to crew emplacement seat ({Mathf.Sqrt(bestRealDistSq):F0}m away, openSeats:{openStaticSeats}).");
                     }
                 }
             }
 
             _emplacementScanCursor = (_emplacementScanCursor + maxInspect) % vCount;
+        }
+
+        private static string GetObjectiveDebugLabel(MissionObjective obj)
+        {
+            if (obj == null)
+                return "unknown";
+            string disp = obj.GetDisplayName();
+            if (!string.IsNullOrWhiteSpace(disp))
+                return disp;
+            string raw = obj.objectiveName;
+            if (!string.IsNullOrWhiteSpace(raw))
+                return raw;
+            Vector3 p = obj.GetTaskPosition();
+            return $"({p.x:F0},{p.z:F0})";
+        }
+
+        internal static bool IsActivelyHeadingToEmplacement(Soldier soldier, float now)
+        {
+            if (soldier == null)
+                return false;
+
+            IntPtr ptr = soldier.Pointer;
+            if (!_assignedEmplacementUntil.TryGetValue(ptr, out float empUntil))
+                return false;
+
+            if (soldier.IsOnVehicle())
+            {
+                ClearEmplacementAssignment(ptr, markUnreachable: false);
+                return false;
+            }
+
+            if (now >= empUntil)
+            {
+                ClearEmplacementAssignment(ptr, markUnreachable: true, 90.0f);
+                return false;
+            }
+
+            if (!soldier.HasDestinationAssigned || soldier.targetDestination == null)
+            {
+                ClearEmplacementAssignment(ptr, markUnreachable: true, 45.0f);
+                return false;
+            }
+
+            if (_assignedEmplacementVehicle.TryGetValue(ptr, out IntPtr expectedVehPtr) &&
+                expectedVehPtr != IntPtr.Zero &&
+                soldier.targetDestination.Pointer != expectedVehPtr)
+            {
+                ClearEmplacementAssignment(ptr, markUnreachable: true, 45.0f);
+                return false;
+            }
+
+            return true;
+        }
+
+        private static void ClearEmplacementAssignment(IntPtr soldierPtr, bool markUnreachable, float cooldownSeconds = 120.0f)
+        {
+            if (soldierPtr == IntPtr.Zero)
+                return;
+            _assignedEmplacementUntil.Remove(soldierPtr);
+            _assignedEmplacementVehicle.Remove(soldierPtr);
+            if (markUnreachable)
+            {
+                _unreachableEmplacementUntil[soldierPtr] = Time.time + cooldownSeconds;
+            }
+        }
+
+        private static bool HasHostileVehicleOccupant(Vehicle veh, string faction)
+        {
+            if (veh == null || veh.seats == null || string.IsNullOrEmpty(faction))
+                return false;
+
+            var seats = veh.seats;
+            int count = seats.Length;
+            for (int i = 0; i < count; i++)
+            {
+                Seats s = seats[i];
+                Soldier occ = s != null ? s.unitSet : null;
+                if (occ != null && ResourcesManager.IsEnemyFaction(occ.faction, faction))
+                    return true;
+            }
+            return false;
+        }
+
+        private static bool HasAnyEmplacementTurretAmmo(Vehicle veh, Turret mainTurret)
+        {
+            if (mainTurret != null)
+            {
+                TurretGun mainGun = mainTurret.TryCast<TurretGun>();
+                if (mainGun != null && mainGun.HasAmmo())
+                    return true;
+                if (mainGun == null)
+                    return true;
+            }
+
+            if (veh != null && veh.seats != null)
+            {
+                var seats = veh.seats;
+                int count = seats.Length;
+                for (int i = 0; i < count; i++)
+                {
+                    Seats s = seats[i];
+                    if (s != null && s.hasTurret && s.connectedTurret != null)
+                    {
+                        TurretGun tg = s.connectedTurret.TryCast<TurretGun>();
+                        if (tg != null && tg.HasAmmo())
+                            return true;
+                    }
+                }
+            }
+            return false;
         }
 
         private static bool TryGetAvailableTurretSeatIndex(Vehicle veh, out int turretSeatIndex)
@@ -4464,8 +4607,9 @@ namespace EasyRed2HumanAI
                     if (!VisionConfig.EnableMod.Value || __instance == null || __0 == null || !__0.IsAI())
                         return true;
 
-                    if (__instance.IsCoverDestroyed() || __instance.IsDisabled())
+                    if (__instance.IsCoverDestroyed() || __instance.IsDisabled() || __instance.IsLocked() || HasHostileVehicleOccupant(__instance, __0.faction))
                     {
+                        ClearEmplacementAssignment(__0.Pointer, markUnreachable: true, 120.0f);
                         __0.CoverPosition(null);
                         return false;
                     }
@@ -4473,7 +4617,10 @@ namespace EasyRed2HumanAI
                     Squad sq = __0.joinedSquad;
                     bool isPlayerSquad = sq != null && sq.IsPlayerInSquad();
                     if (isPlayerSquad)
+                    {
+                        ClearEmplacementAssignment(__0.Pointer, markUnreachable: false);
                         return true;
+                    }
 
                     bool isExplicitBoardOrder = sq != null &&
                                                 _squadOrderedToVehicle.TryGetValue(sq.Pointer, out IntPtr orderedVehPtr) &&
@@ -4484,6 +4631,7 @@ namespace EasyRed2HumanAI
                     // Prevent non-squad AI foot soldiers from climbing uninvited into a human player's movable vehicle!
                     if (isMovable && __instance.PlayerIsInside() && !isExplicitBoardOrder)
                     {
+                        ClearEmplacementAssignment(__0.Pointer, markUnreachable: true, 60.0f);
                         __0.CoverPosition(null);
                         return false;
                     }
@@ -4492,24 +4640,31 @@ namespace EasyRed2HumanAI
                     {
                         if (!__instance.HasDriver() && TryGetAvailableDriverSeatIndex(__instance, out int driverIdx))
                         {
+                            ClearEmplacementAssignment(__0.Pointer, markUnreachable: false);
                             __instance.GetOnVehicle(driverIdx, __0);
                             return false;
                         }
                         if (TryGetAvailableTurretSeatIndex(__instance, out int crewTurretIdx))
                         {
+                            ClearEmplacementAssignment(__0.Pointer, markUnreachable: false);
                             __instance.GetOnVehicle(crewTurretIdx, __0);
                             return false;
                         }
+                        ClearEmplacementAssignment(__0.Pointer, markUnreachable: false);
                         return true;
                     }
 
                     if (isExplicitBoardOrder)
+                    {
+                        ClearEmplacementAssignment(__0.Pointer, markUnreachable: false);
                         return true;
+                    }
 
                     // Regular AI foot soldier reaching a Vehicle as cover/emplacement:
                     // 1. Never climb into a driverless movable vehicle (truck, halftrack, jeep, tank)
                     if (isMovable && !__instance.HasDriver())
                     {
+                        ClearEmplacementAssignment(__0.Pointer, markUnreachable: true, 60.0f);
                         __0.CoverPosition(null);
                         return false;
                     }
@@ -4518,10 +4673,12 @@ namespace EasyRed2HumanAI
                     //    board the Gunner seat first and the Loader/Assistant seat second!
                     if (TryGetAvailableEmplacementOrTurretSeatIndex(__instance, out int targetSeatIdx, out _))
                     {
+                        ClearEmplacementAssignment(__0.Pointer, markUnreachable: false);
                         __instance.GetOnVehicle(targetSeatIdx, __0);
                         return false;
                     }
 
+                    ClearEmplacementAssignment(__0.Pointer, markUnreachable: true, 45.0f);
                     __0.CoverPosition(null);
                     return false;
                 }
@@ -4803,7 +4960,7 @@ namespace EasyRed2HumanAI
 
                     IntPtr ptr = __0.Pointer;
                     float now = Time.time;
-                    if (_assignedEmplacementUntil.TryGetValue(ptr, out float empUntil) && now < empUntil)
+                    if (IsActivelyHeadingToEmplacement(__0, now))
                     {
                         __result = false;
                         return;
