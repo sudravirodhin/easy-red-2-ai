@@ -11,7 +11,7 @@ namespace EasyRed2HumanAI
     {
         public const string PluginGuid = "com.antigravity.easyred2.humanai";
         public const string PluginName = "Easy Red 2 - Battle Hardened";
-        public const string PluginVersion = "0.7.4";
+        public const string PluginVersion = "0.7.5";
 
         internal static Plugin Instance;
         internal static new ManualLogSource Log;
@@ -136,6 +136,7 @@ namespace EasyRed2HumanAI
             SafePatch(typeof(VeteranAndTacticsPatches.FPSGunManager_RefreshSkin_Patch));
             SafePatch(typeof(VeteranAndTacticsPatches.FPSGunManager_UpdateItemInFPSHands_Patch));
             SafePatch(typeof(VeteranAndTacticsPatches.SoldierLodManager_ApplyBodyHeadVisibility_Patch));
+            SafePatch(typeof(VeteranAndTacticsPatches.ResourcesManager_PlayImpactEffect_Patch));
 
             Log.LogInfo($"{PluginName} v{PluginVersion} loaded! (Hotkeys: F5 Map Picker, F6 Config Menu, F8 Toggle ON/OFF, F9 Reload Config, F10 Show Live Stats)");
             Log.LogInfo($"Sight Ranges -> Standing: {VisionConfig.StandingSightRange.Value}m | Crouching: {VisionConfig.CrouchingSightRange.Value}m | Prone: {VisionConfig.ProneSightRange.Value}m | MaxOpticZoom: {VisionConfig.MaxOpticZoomMultiplier.Value}x");

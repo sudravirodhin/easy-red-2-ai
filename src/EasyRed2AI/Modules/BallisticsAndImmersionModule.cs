@@ -48,23 +48,29 @@ namespace EasyRed2HumanAI
         public static int AirplanePilotMgHitsBlockedCount { get; private set; }
         public static int EnclosedCrewExplosionHitsBlockedCount { get; private set; }
         public static int HostVanillaClientApAssistsCount { get; private set; }
+        public static int BloodSmokeWaterOccludedCount { get; private set; }
 
         internal static bool ActiveCrewSpallContext;
         internal static float ActiveCrewSpallMultiplier = 1.0f;
         internal static float ActiveCrewSpallMaxDamage = 9999f;
 
-        public static void ClearBallisticsCaches()
+        public static void ClearBallisticsCaches(bool forceClear = false)
         {
-            if (_colliderImpactCache.Count > 1024)
+            if (forceClear || _colliderImpactCache.Count > 1024)
                 _colliderImpactCache.Clear();
-            if (_planeAudioStates.Count > 64)
+            if (forceClear || _planeAudioStates.Count > 64)
                 _planeAudioStates.Clear();
-            if (_parachuteDriftStates.Count > 64)
+            if (forceClear || _parachuteDriftStates.Count > 64)
                 _parachuteDriftStates.Clear();
-            if (_vehicleExplosionArmorCache.Count > 128)
+            if (forceClear || _vehicleExplosionArmorCache.Count > 128)
                 _vehicleExplosionArmorCache.Clear();
-            if (_cachedTracerTrails.Count > 128)
+            if (forceClear || _cachedTracerTrails.Count > 128)
                 _cachedTracerTrails.Clear();
+            if (forceClear || _inspectedBloodFxRoots.Count > 128)
+            {
+                _inspectedBloodFxRoots.Clear();
+                _modifiedBloodRenderers.Clear();
+            }
         }
 
         // ============================================================================
@@ -1162,6 +1168,179 @@ namespace EasyRed2HumanAI
 
                     // Prevent duplicate body shadow from bodyMesh while keeping its visible body submesh + hidden head submesh intact
                     bodyMesh.shadowCastingMode = UnityEngine.Rendering.ShadowCastingMode.Off;
+                }
+                catch { }
+            }
+        }
+
+        // ============================================================================
+        // 6. VANILLA VISUAL FIX: SMOKE & WATER BLOOD SPRAY OCCLUSION FIX
+        // Eliminates disembodied "ghost" blood sprays floating on top of smoke or water:
+        //  1) Underwater & Cross-Water Hits: BulletInstance.OnHit sets onWater = true
+        //     only when hitting Layer 4 (Water), so bullets hitting submerged/wading
+        //     Soldier BodyPart colliders spawn airborne "ImpactFX_flesh" underwater.
+        //  2) Tactical Smoke Volumes: ResourcesManager.PlayImpactEffect checks camera
+        //     frustum (PointInCameraView) without checking smoke-collider LOS, causing
+        //     red blood clouds to pop over opaque smoke screens. Swapping to vanilla's
+        //     pooled "ImpactFX_flesh_noBlood" preserves 100% of bullet-flesh impact audio.
+        //  3) Ambient Map Smoke & Water Depth Sorting: Normalizes pooled ImpactFX_flesh
+        //     ParticleSystemRenderers once per pooled instance (clamping sortingOrder <= 0,
+        //     renderQueue <= 3000, and sortingFudge >= +6.5m) so colliderless Stalingrad
+        //     building/rubble/vehicle smoke and water transparencies sort over blood mist.
+        // ============================================================================
+        private struct OriginalBloodRendererState
+        {
+            public ParticleSystemRenderer Renderer;
+            public int SortingOrder;
+            public float SortingFudge;
+            public Material SharedMat;
+            public int RenderQueue;
+        }
+
+        private static readonly HashSet<IntPtr> _inspectedBloodFxRoots = new HashSet<IntPtr>(64);
+        private static readonly List<OriginalBloodRendererState> _modifiedBloodRenderers = new List<OriginalBloodRendererState>(32);
+        private static Il2CppSystem.Action<GameObject> _cachedBloodFxCallback;
+        private static bool _loggedBloodRendererNormalization;
+
+        private static Il2CppSystem.Action<GameObject> GetOrCreateBloodFxCallback()
+        {
+            if (_cachedBloodFxCallback == null)
+            {
+                _cachedBloodFxCallback = Il2CppInterop.Runtime.DelegateSupport.ConvertDelegate<Il2CppSystem.Action<GameObject>>(
+                    new Action<GameObject>(OnBloodImpactFxSpawned));
+            }
+            return _cachedBloodFxCallback;
+        }
+
+        private static void OnBloodImpactFxSpawned(GameObject go)
+        {
+            try
+            {
+                if (go == null || go.Pointer == IntPtr.Zero || !_inspectedBloodFxRoots.Add(go.Pointer))
+                    return;
+
+                var renderers = go.GetComponentsInChildren<ParticleSystemRenderer>(true);
+                if (renderers == null)
+                    return;
+
+                for (int i = 0; i < renderers.Length; i++)
+                {
+                    ParticleSystemRenderer psr = renderers[i];
+                    if (psr == null || psr.Pointer == IntPtr.Zero)
+                        continue;
+
+                    int origOrder = psr.sortingOrder;
+                    float origFudge = psr.sortingFudge;
+                    Material sharedMat = psr.sharedMaterial;
+                    bool hasMat = sharedMat != null && sharedMat.Pointer != IntPtr.Zero;
+                    int origQueue = hasMat ? sharedMat.renderQueue : -1;
+
+                    int targetOrder = origOrder > 0 ? 0 : origOrder;
+                    float targetFudge = origFudge < 6.5f ? 6.5f : origFudge;
+                    bool clampQueue = hasMat && origQueue > 3000;
+
+                    if (targetOrder != origOrder || !Mathf.Approximately(targetFudge, origFudge) || clampQueue)
+                    {
+                        if (_modifiedBloodRenderers.Count < 256)
+                        {
+                            _modifiedBloodRenderers.Add(new OriginalBloodRendererState
+                            {
+                                Renderer = psr,
+                                SortingOrder = origOrder,
+                                SortingFudge = origFudge,
+                                SharedMat = hasMat ? sharedMat : null,
+                                RenderQueue = origQueue
+                            });
+                        }
+
+                        psr.sortingOrder = targetOrder;
+                        psr.sortingFudge = targetFudge;
+                        if (clampQueue)
+                            sharedMat.renderQueue = 3000;
+
+                        if (!_loggedBloodRendererNormalization)
+                        {
+                            _loggedBloodRendererNormalization = true;
+                            AiCore.LogDebug(
+                                "BloodVfx",
+                                $"Normalized pooled ImpactFX_flesh renderer '{psr.name}': order {origOrder}->{targetOrder}, fudge {origFudge:F1}->{targetFudge:F1}, queue {origQueue}->{(clampQueue ? 3000 : origQueue)}",
+                                10.0f);
+                        }
+                    }
+                }
+            }
+            catch { }
+        }
+
+        private static void RestoreBloodRendererDefaults()
+        {
+            for (int i = 0; i < _modifiedBloodRenderers.Count; i++)
+            {
+                OriginalBloodRendererState st = _modifiedBloodRenderers[i];
+                try
+                {
+                    if (st.Renderer != null && st.Renderer.Pointer != IntPtr.Zero)
+                    {
+                        st.Renderer.sortingOrder = st.SortingOrder;
+                        st.Renderer.sortingFudge = st.SortingFudge;
+                    }
+                    if (st.SharedMat != null && st.SharedMat.Pointer != IntPtr.Zero && st.RenderQueue > 0)
+                    {
+                        st.SharedMat.renderQueue = st.RenderQueue;
+                    }
+                }
+                catch { }
+            }
+            _modifiedBloodRenderers.Clear();
+            _inspectedBloodFxRoots.Clear();
+        }
+
+        [HarmonyPatch(typeof(ResourcesManager), nameof(ResourcesManager.PlayImpactEffect))]
+        public static class ResourcesManager_PlayImpactEffect_Patch
+        {
+            public static void Prefix(
+                Vector3 pos,
+                ref string impact_prefab_name,
+                int maxSpawnDistance,
+                ref Il2CppSystem.Action<GameObject> gameObjectFx)
+            {
+                try
+                {
+                    if (!VisionConfig.EnableMod.Value)
+                        return;
+
+                    if (string.IsNullOrEmpty(impact_prefab_name) ||
+                        !string.Equals(impact_prefab_name, "ImpactFX_flesh", StringComparison.OrdinalIgnoreCase))
+                    {
+                        return;
+                    }
+
+                    if (!VisionConfig.EnableBloodSmokeWaterOcclusion.Value)
+                    {
+                        if (_modifiedBloodRenderers.Count > 0)
+                            RestoreBloodRendererDefaults();
+                        return;
+                    }
+
+                    if (!AiCore.TryGetActiveCameraPosition(out Vector3 camPos))
+                        return;
+
+                    if (maxSpawnDistance > 0)
+                    {
+                        float maxDistSq = (float)maxSpawnDistance * (float)maxSpawnDistance;
+                        if ((pos - camPos).sqrMagnitude > maxDistSq)
+                            return;
+                    }
+
+                    if (AiCore.IsPointOccludedByWaterOrSmoke(camPos, pos))
+                    {
+                        impact_prefab_name = "ImpactFX_flesh_noBlood";
+                        BloodSmokeWaterOccludedCount++;
+                        return;
+                    }
+
+                    if (gameObjectFx == null)
+                        gameObjectFx = GetOrCreateBloodFxCallback();
                 }
                 catch { }
             }

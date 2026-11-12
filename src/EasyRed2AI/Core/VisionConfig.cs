@@ -109,6 +109,7 @@ namespace EasyRed2HumanAI
         public static ConfigEntry<bool> EnableParachuteWindDrift;
         public static ConfigEntry<bool> EnableSpectatorHudRetention;
         public static ConfigEntry<bool> EnableFirstPersonShadowFix;
+        public static ConfigEntry<bool> EnableBloodSmokeWaterOcclusion;
 
         public static void Init(ConfigFile config)
         {
@@ -647,6 +648,12 @@ namespace EasyRed2HumanAI
                 "EnableFirstPersonShadowFix",
                 true,
                 "Vanilla Visual Fix: disables duplicate shadows from disembodied first-person camera arms (FPSGunManager) and renders a full-head/body shadow proxy on the local player so first-person shadows match third-person.");
+
+            EnableBloodSmokeWaterOcclusion = config.Bind(
+                "8. Ballistics & Immersion",
+                "EnableBloodSmokeWaterOcclusion",
+                true,
+                "Vanilla Visual Fix: suppresses disembodied 'ghost' blood sprays when flesh impacts occur underwater, across a water surface, or behind/inside tactical smoke clouds (swapping to ImpactFX_flesh_noBlood so impact audio still plays), and normalizes pooled blood particle depth-sorting so ambient map smoke and water transparencies never sort behind blood mist.");
         }
 
         public static void SetBundleEntries(bool state, params ConfigEntry<bool>[] entries)

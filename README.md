@@ -1,4 +1,4 @@
-# Easy Red 2: Battle Hardened (`v0.7.4`)
+# Easy Red 2: Battle Hardened (`v0.7.5`)
 *3-Tier Tactical GOAP, Squad Blackboard, Radioman Intel Net, Veterancy, Personalities & Combined-Arms Overhaul*
 
 > [!IMPORTANT]
@@ -27,23 +27,23 @@ A comprehensive **BepInEx 6 (IL2CPP)** AI, combined-arms, and fairness overhaul 
 
 Download your preferred package from the **[Releases](https://github.com/sudravirodhin/easy-red-2-ai/releases)** page:
 
-### Option A: With BepInEx Included (`EasyRed2HumanAI-v0.7.4-with-BepInEx.zip`) — *Recommended for Fresh Installs*
+### Option A: With BepInEx Included (`EasyRed2HumanAI-v0.7.5-with-BepInEx.zip`) — *Recommended for Fresh Installs*
 Includes **[BepInEx 6.0.0-be.791 (Unity.IL2CPP-win-x64)](https://builds.bepinex.dev/projects/bepinex_be)**, the `.NET 6` runtime, Unity `2022.3.62` base libraries, pre-generated IL2CPP `interop` assemblies for Easy Red 2 Build `921`, and `EasyRed2HumanAI.dll` (with no other third-party mods).
 1. Open your **Easy Red 2** installation folder (e.g. `Steam\steamapps\common\Easy Red 2`, where `Easy Red 2.exe` is located).
-2. Extract all contents of `EasyRed2HumanAI-v0.7.4-with-BepInEx.zip` directly into the `Easy Red 2` folder.
+2. Extract all contents of `EasyRed2HumanAI-v0.7.5-with-BepInEx.zip` directly into the `Easy Red 2` folder.
 3. Launch the game!
 
-### Option B: Without BepInEx / Plugin Only (`EasyRed2HumanAI-v0.7.4-Plugin-Only.zip` or `EasyRed2HumanAI.dll`)
+### Option B: Without BepInEx / Plugin Only (`EasyRed2HumanAI-v0.7.5-Plugin-Only.zip` or `EasyRed2HumanAI.dll`)
 For users who already have **[BepInEx 6 Bleeding Edge (`BepInEx-Unity.IL2CPP-win-x64`)](https://builds.bepinex.dev/projects/bepinex_be)** installed:
-1. Download `EasyRed2HumanAI-v0.7.4-Plugin-Only.zip` (or `EasyRed2HumanAI.dll` directly).
+1. Download `EasyRed2HumanAI-v0.7.5-Plugin-Only.zip` (or `EasyRed2HumanAI.dll` directly).
 2. Place `EasyRed2HumanAI.dll` into:
    ```text
    Easy Red 2\BepInEx\plugins\EasyRed2HumanAI.dll
    ```
-   *(Using **[Quartermaster - ER2 Mod Manager](https://www.nexusmods.com/easyred2/mods/107)**? Import `EasyRed2HumanAI-v0.7.4-Plugin-Only.zip` directly in Quartermaster's Mods tab—do not import `with-BepInEx.zip`.)*
+   *(Using **[Quartermaster - ER2 Mod Manager](https://www.nexusmods.com/easyred2/mods/107)**? Import `EasyRed2HumanAI-v0.7.5-Plugin-Only.zip` directly in Quartermaster's Mods tab—do not import `with-BepInEx.zip`.)*
 
 ### Switching to Vanilla or Uninstalling (`Uninstall-BepInEx-Mod.bat`)
-Included in `EasyRed2HumanAI-v0.7.4-with-BepInEx.zip` (and in the root of this repository) is **[`Uninstall-BepInEx-Mod.bat`](Uninstall-BepInEx-Mod.bat)**. Double-click it inside your `Easy Red 2` folder when the game is closed to:
+Included in `EasyRed2HumanAI-v0.7.5-with-BepInEx.zip` (and in the root of this repository) is **[`Uninstall-BepInEx-Mod.bat`](Uninstall-BepInEx-Mod.bat)**. Double-click it inside your `Easy Red 2` folder when the game is closed to:
 * **`[1] Play Vanilla Temporarily`**: Moves `BepInEx`, `dotnet`, and `winhttp.dll` into `_BepInEx_Disabled_Backup\` so the game runs 100% pure vanilla without losing your configs or other plugins.
 * **`[2] Restore Modded Game`**: Moves everything back from `_BepInEx_Disabled_Backup\` in one click.
 * **`[3] Uninstall Completely`**: Permanently deletes `BepInEx`, `dotnet`, `winhttp.dll`, `doorstop_config.ini`, `.doorstop_version`, and `changelog.txt`.
@@ -105,6 +105,8 @@ Alongside shared tactical realism goals (some inspired by [`Easy-Red-2-Realism-O
 * **Lone-Survivor Squad Merging (`Squad.Join`) & Emplacement Staffing Anti-Stall Guards (`v0.7.4`)**:
   * **Full `Squad.Join` Merging for Lone Survivors & Bailed Crews (`TryLinkUpOrJoinFriendlySquad`)**: Replaces `Squad.AddIfNotInSquad` (which only inserted into `bestSquad.units` without leaving the dead squad or updating `self.joinedSquad`) with ownership-verified, RPC-paced `Squad.Join(self)` + immediate squad-order handoff so merged survivors advance seamlessly with their new squad instead of lingering on their wiped-out squad's stale order.
   * **Emplacement Staffing Lock, Hostile-Occupant, Ammo & `SquadOrdersRoutine` De-Confliction (`RunProactiveEmplacementStaffing`, `SoldierAI.CalculateMoveOrderDestination`)**: Rejects `Vehicle.IsLocked()`, dry turrets (`!TurretGun.HasAmmo()`), and multi-seat guns occupied by hostile factions (`ResourcesManager.IsEnemyFaction`); tethers infantry emplacement searches to their active squad order area; protects active emplacement approaches inside `SoldierAI.CalculateMoveOrderDestination` so vanilla's `2.0s` `SquadOrdersRoutine` never wipes out `targetDestination` mid-approach; and immediately releases `IsActivelyHeadingToEmplacement` with an anti-loop cooldown if boarding is interrupted or unreachable.
+* **Smoke & Water Blood Spray Occlusion Fix (`v0.7.5` — `EnableBloodSmokeWaterOcclusion`)**:
+  * **Eliminates Disembodied "Ghost" Blood Sprays Through Smoke & Water (`ResourcesManager.PlayImpactEffect`)**: Fixes three vanilla URP VFX quirks where bright red `"ImpactFX_flesh"` sprays drew in mid-air over opaque smoke clouds or water surfaces: (1) bullets hitting submerged or cross-water `Soldier` `BodyPart` colliders (`FollowingWater.WaterLevel` / Layer 4 `Water`) had `onWater = false` and spawned airborne blood clouds underwater; (2) hits behind or inside tactical smoke volumes (`SmokeGrenade`, `SmokeArtillery`, `visionMask & ~bulletMask`) bypassed smoke occlusion because `PlayImpactEffect` only checked camera frustum (`PointInCameraView`) — now cleanly swapped to vanilla's pooled `"ImpactFX_flesh_noBlood"` so 100% of bullet-flesh impact audio plays with zero ghost blood; and (3) pooled `"ImpactFX_flesh"` `ParticleSystemRenderer`s are normalized once per pooled instance (`sortingOrder <= 0`, `renderQueue <= 3000`, `sortingFudge >= +6.5m`) so colliderless ambient map smoke (e.g. Stalingrad burning rubble/building/vehicle plumes) and water transparencies sort naturally over blood mist.
 
 > *(Want the deep-dive engineering breakdown of what vanilla's `GameAssembly.dll` did under the hood and why each change was made? Read **[`docs/design-and-justifications.md`](docs/design-and-justifications.md)**!)*
 
@@ -210,6 +212,8 @@ Instead of every bot using identical suppression thresholds, peeking rhythms, an
   * Softens paratrooper vertical descent speed by **~25%** and applies smooth horizontal canopy wind drift while high above ground (`> 18m` AGL), tapering off cleanly before landing.
 * **Spectator / Free-Camera HUD Retention (`EnableSpectatorHudRetention`)**:
   * Keeps the tactical HUD and 3D unit markers visible when entering Free/Spectator Camera (`F`) until you explicitly press the Cinematic Camera Hide/Show GUI toggle.
+* **Smoke & Water Blood Spray Occlusion Fix (`EnableBloodSmokeWaterOcclusion`)**:
+  * Client-side visual fix that swaps occluded underwater, cross-water, and through-smoke flesh hits to vanilla's pooled `"ImpactFX_flesh_noBlood"` (preserving impact audio) and normalizes pooled blood `ParticleSystemRenderer` transparent depth-sorting so ambient map smoke and water never render behind blood mist.
 
 ---
 

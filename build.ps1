@@ -132,6 +132,7 @@ $cscArgs = @(
     "/r:$interopDir\UnityEngine.CoreModule.dll",
     "/r:$interopDir\UnityEngine.AudioModule.dll",
     "/r:$interopDir\UnityEngine.AnimationModule.dll",
+    "/r:$interopDir\UnityEngine.ParticleSystemModule.dll",
     "/r:$interopDir\UnityEngine.PhysicsModule.dll",
     "/r:$interopDir\UnityEngine.TerrainPhysicsModule.dll",
     "/r:$interopDir\UnityEngine.IMGUIModule.dll",

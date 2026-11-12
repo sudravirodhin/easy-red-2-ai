@@ -18,6 +18,9 @@ namespace EasyRed2HumanAI
     public static class AiCore
     {
         private static int _cachedSolidEnvMask;
+        private static int _cachedSmokeOcclusionMask;
+        private static IntPtr _cachedWaterInstancePtr;
+        private static Renderer _cachedWaterRenderer;
         private static float _nextAllowedBotRpcTime;
         private static float _nextRoomCheckTime;
         private static int _cachedRoomPlayerCount = 1;
@@ -810,6 +813,96 @@ namespace EasyRed2HumanAI
             int terrainLayer = LayerMask.NameToLayer("Terrain");
             _cachedSolidEnvMask = terrainLayer >= 0 ? ((1 << 0) | (1 << terrainLayer)) : (1 << 0);
             return _cachedSolidEnvMask;
+        }
+
+        public static int GetSmokeOcclusionMask()
+        {
+            if (_cachedSmokeOcclusionMask != 0)
+                return _cachedSmokeOcclusionMask;
+
+            try
+            {
+                int vm = ResourcesManager.visionMask.value;
+                int bm = ResourcesManager.bulletMask.value;
+                int diff = vm & ~bm;
+                if (diff != 0)
+                {
+                    _cachedSmokeOcclusionMask = diff;
+                    return diff;
+                }
+            }
+            catch { }
+
+            int tfxLayer = LayerMask.NameToLayer("TransparentFX");
+            _cachedSmokeOcclusionMask = tfxLayer >= 0 ? (1 << tfxLayer) : (1 << 1);
+            return _cachedSmokeOcclusionMask;
+        }
+
+        public static bool TryGetActiveCameraPosition(out Vector3 camPos)
+        {
+            try
+            {
+                Camera cam = ResourcesManager.mainCamera;
+                if (cam == null || cam.Pointer == IntPtr.Zero || !cam.isActiveAndEnabled)
+                    cam = Camera.main;
+
+                if (cam != null && cam.Pointer != IntPtr.Zero && cam.transform != null)
+                {
+                    camPos = cam.transform.position;
+                    return true;
+                }
+            }
+            catch { }
+
+            camPos = Vector3.zero;
+            return false;
+        }
+
+        /// <summary>
+        /// Checks whether an impact point is submerged below or across an active <see cref="FollowingWater"/>
+        /// or Layer 4 (<c>Water</c>) surface, or occluded from <paramref name="camPos"/> by a tactical smoke volume
+        /// (<c>visionMask &amp; ~bulletMask</c>).
+        /// </summary>
+        public static bool IsPointOccludedByWaterOrSmoke(Vector3 camPos, Vector3 impactPos)
+        {
+            try
+            {
+                FollowingWater water = FollowingWater.instance;
+                if (water != null && water.Pointer != IntPtr.Zero && water.isActiveAndEnabled)
+                {
+                    if (water.Pointer != _cachedWaterInstancePtr)
+                    {
+                        _cachedWaterInstancePtr = water.Pointer;
+                        _cachedWaterRenderer = FollowingWater.GetRenderer();
+                    }
+
+                    if (_cachedWaterRenderer != null &&
+                        _cachedWaterRenderer.Pointer != IntPtr.Zero &&
+                        _cachedWaterRenderer.enabled)
+                    {
+                        float waterY = FollowingWater.WaterLevel;
+                        // Submerged flesh hit or sightline crossing the rendered water plane
+                        if (impactPos.y < waterY - 0.03f || (camPos.y - waterY) * (impactPos.y - waterY) < 0f)
+                            return true;
+                    }
+                }
+            }
+            catch { }
+
+            int smokeMask = GetSmokeOcclusionMask();
+            int lineMask = smokeMask | (1 << 4); // Smoke volumes (TransparentFX) + local Water colliders (Layer 4)
+            float distSq = (impactPos - camPos).sqrMagnitude;
+            if (distSq > 0.25f && Physics.Linecast(camPos, impactPos, lineMask))
+                return true;
+
+            // PhysX Linecast starting inside a SphereCollider skips its own shell; CheckSphere catches inside-smoke hits
+            if (distSq > 4.0f && Physics.CheckSphere(impactPos, 0.20f, smokeMask))
+                return true;
+
+            if (distSq > 6.25f && Physics.CheckSphere(camPos, 0.15f, smokeMask))
+                return true;
+
+            return false;
         }
 
         public static bool RaycastEnvironment(Vector3 origin, Vector3 dir, float maxDist, Transform ignoreRoot, out RaycastHit envHit)
