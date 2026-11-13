@@ -1,4 +1,4 @@
-# Easy Red 2: Battle Hardened (`v0.7.7`)
+# Easy Red 2: Battle Hardened (`v0.7.8`)
 *3-Tier Tactical GOAP, Squad Blackboard, Radioman Intel Net, Veterancy, Personalities & Combined-Arms Overhaul*
 
 > [!IMPORTANT]
@@ -8,7 +8,21 @@
 > **Credit & Inspiration:**
 > Special credit and thanks to **[AtlasActual (`Easy-Red-2-Realism-Overhaul`)](https://github.com/AtlasActual/Easy-Red-2-Realism-Overhaul)** for pioneering several of the combined-arms, objective-coordination, and tactical realism concepts that inspired parts of this project's roadmap and feature sets.
 
-A comprehensive **BepInEx 6 (IL2CPP)** AI, combined-arms, and fairness overhaul for **Easy Red 2** designed to reduce frustrating *"how did they see me?"* and *"what just killed me?"* moments while making battlefield AI behave like coordinated human squads. It replaces vanilla's robotic X-ray spotting, erratic stance oscillation, indoor floor-clipping prone drops, unguarded rear objectives, suicidal APC charges, and point-blank tank rushes with human-like perception, last-known suppression, bounding overwatch, a `6.0s` Macro Objective & Emplacement Director, Tank Standoff, Anti-Bombing Echelon Dispersion & Reverse discipline, a 15-minute linear Veteran progression system, **30 Role-Based AI Personalities**, **Client-Side Plane Audio Smoothing**, **Thin-Cover Wood Bullet Penetration**, an **in-game 5-Tab `F6` Feature Menu**, a standalone **`F5` In-Game Campaign & Mission Picker**, and full Death Screen Kill Attribution.
+### Tired of disposable bots on a WW2 battlefield?
+
+* Tired of watching riflemen **mag-dump small arms and waste frag grenades on buttoned-up Tiger tanks**—or bandage right in the middle of an open street under MG fire?
+* Tired of getting **X-ray sniped from 300m through bushes** the instant one teammate fires a shot—or dying to mystery blasts with no idea what hit you?
+* Tired of **capturing every objective alone** while friendly squads camp 15 meters *outside* the cap circle, abandon newly taken flags, or ride halftracks straight into point-blank destruction?
+
+### What if the bots *didn't want to die*—and fought with *F.E.A.R.*-style AI?
+
+In vanilla, bots act like expendable targets waiting to respawn. In **Battle Hardened**, every soldier fights like his life actually matters—backed by a **F.E.A.R.-inspired Goal-Oriented Action Planner (GOAP)**, **shared Squad Blackboards**, and **audible callouts** scaled up to 140+ soldiers, tanks, artillery, and aircraft with **zero frame-time spikes**:
+
+* **Bots That Value Their Own Lives**: Bleeding soldiers sprint to hard cover before bandaging. Helpless infantry scramble behind walls or break contact when armor rolls in instead of plinking steel. Riflemen pick up knocked-off helmets, drag wounded buddies out of the killzone, bail out of suppressed APCs early, hold tanks at real standoff distances (reversing out of AT-grenade range), pop smoke to retreat and regroup when mauled, and can even break and surrender when isolated and shell-shocked.
+* **Survival Rewards the Living (15-Minute Veterancy)**: Because bots fight to stay alive, the ones who survive harden in real time—earning field promotions (`Pvt.` → `1st Sgt.`, `[Vet I]` → `[Vet III ★]`) with visible 3D uniform rank decals, steadier nerves, and sharper reactions across **30 role personalities** and **20 national doctrines**. And when you fall, an anonymous WW2 obituary tells you **what** killed you—weapon or ordnance, hit zone, and distance—alongside your fallen soldier's **age (`1925 - 1944 (Age 19)`)**.
+* **F.E.A.R.-Style Squad Coordination**: Gunners pin your last-known cover and shout *"Covering fire!"* to unlock genuine lateral flanking bounds, low-wall pop-up peeks, bridge parapet bipod mounting, and blind-corner pieing—borrowing ammo from squadmates and inheriting fallen radios, syringes, MGs, or Bazookas on the fly.
+* **Be a Cog in the Machine, Not the Babysitter**: Both armies play relentlessly to win. Squads fight *inside* capture circles, garrison vulnerable flags, staff empty MG/AT emplacements, budget Operations tickets (while reserving a buffer for human players), and link over **Radioman-gated Team Intel Nets** to launch *Anvil & Hammer* pincers—even dispatching an AI squad to flank enemies pinning *you*.
+* **Fairness, Co-op Polish & Live Controls**: Built for **BepInEx 6 (IL2CPP)** with humanized stance-aware vision cones, thin-cover wood bullet penetration, enclosed tank crew protection, smoothed multiplayer aircraft physics & engine audio, an in-game **`F5` Campaign & Mission Picker**, and a **5-Tab `F6` Modular Feature Menu** to toggle any feature live mid-battle.
 
 ---
 
@@ -27,20 +41,20 @@ A comprehensive **BepInEx 6 (IL2CPP)** AI, combined-arms, and fairness overhaul 
 
 Download your preferred package from the **[Releases](https://github.com/sudravirodhin/easy-red-2-ai/releases)** page:
 
-### Option A: With BepInEx Included (`EasyRed2HumanAI-v0.7.7-with-BepInEx.zip`) — *Recommended for Fresh Installs*
+### Option A: With BepInEx Included (`EasyRed2HumanAI-v0.7.8-with-BepInEx.zip`) — *Recommended for Fresh Installs*
 Includes **[BepInEx 6.0.0-be.791 (Unity.IL2CPP-win-x64)](https://builds.bepinex.dev/projects/bepinex_be)**, the `.NET 6` runtime, Unity `2022.3.62` base libraries, pre-generated IL2CPP `interop` assemblies for Easy Red 2 Build `921`, and `EasyRed2HumanAI.dll` (with no other third-party mods).
 1. Open your **Easy Red 2** installation folder (e.g. `Steam\steamapps\common\Easy Red 2`, where `Easy Red 2.exe` is located).
-2. Extract all contents of `EasyRed2HumanAI-v0.7.7-with-BepInEx.zip` directly into the `Easy Red 2` folder.
+2. Extract all contents of `EasyRed2HumanAI-v0.7.8-with-BepInEx.zip` directly into the `Easy Red 2` folder.
 3. Launch the game!
 
-### Option B: Without BepInEx / Plugin Only (`EasyRed2HumanAI-v0.7.7-Plugin-Only.zip` or `EasyRed2HumanAI.dll`)
+### Option B: Without BepInEx / Plugin Only (`EasyRed2HumanAI-v0.7.8-Plugin-Only.zip` or `EasyRed2HumanAI.dll`)
 For users who already have **[BepInEx 6 Bleeding Edge (`BepInEx-Unity.IL2CPP-win-x64`)](https://builds.bepinex.dev/projects/bepinex_be)** installed:
-1. Download `EasyRed2HumanAI-v0.7.7-Plugin-Only.zip` (or `EasyRed2HumanAI.dll` directly).
+1. Download `EasyRed2HumanAI-v0.7.8-Plugin-Only.zip` (or `EasyRed2HumanAI.dll` directly).
 2. Place `EasyRed2HumanAI.dll` into:
    ```text
    Easy Red 2\BepInEx\plugins\EasyRed2HumanAI.dll
    ```
-   *(Using **[Quartermaster - ER2 Mod Manager](https://www.nexusmods.com/easyred2/mods/107)**? Import `EasyRed2HumanAI-v0.7.7-Plugin-Only.zip` directly in Quartermaster's Mods tab—do not import `with-BepInEx.zip`.)*
+   *(Using **[Quartermaster - ER2 Mod Manager](https://www.nexusmods.com/easyred2/mods/107)**? Import `EasyRed2HumanAI-v0.7.8-Plugin-Only.zip` directly in Quartermaster's Mods tab—do not import `with-BepInEx.zip`.)*
 
 ### Linux & Steam Deck Setup (via Steam Proton)
 `EasyRed2HumanAI` works out of the box on **Linux Desktop** and **SteamOS / Steam Deck** with 100% Windows Co-op cross-play compatibility by running the Windows IL2CPP build under **Proton**:
@@ -49,16 +63,16 @@ For users who already have **[BepInEx 6 Bleeding Edge (`BepInEx-Unity.IL2CPP-win
    * Check **"Force the use of a specific Steam Play compatibility tool"** and select **Proton Experimental** or **Proton 9.0+**. Let Steam finish downloading the Windows executable (`Easy Red 2.exe`).
 2. **Extract the Mod**:
    * Right-click **Easy Red 2** → **Manage** → **Browse local files** (`~/.steam/steam/steamapps/common/Easy Red 2/`).
-   * Extract all contents of **`EasyRed2HumanAI-v0.7.7-with-BepInEx.zip`** directly into that folder (so `winhttp.dll`, `doorstop_config.ini`, `dotnet/`, and `BepInEx/` sit next to `Easy Red 2.exe`).
+   * Extract all contents of **`EasyRed2HumanAI-v0.7.8-with-BepInEx.zip`** directly into that folder (so `winhttp.dll`, `doorstop_config.ini`, `dotnet/`, and `BepInEx/` sit next to `Easy Red 2.exe`).
 3. **Add the Wine DLL Override Launch Option** *(Required on Linux/Proton so Wine loads BepInEx's `winhttp.dll` proxy instead of Wine's built-in `winhttp`)*:
    * In Steam → **Easy Red 2** → **Properties** → **General** → **Launch Options**, paste:
      ```bash
      WINEDLLOVERRIDES="winhttp=n,b" %command%
      ```
-4. Launch the game! Verify `BepInEx/LogOutput.log` shows `Easy Red 2 - Battle Hardened v0.7.7 loaded!`. Both Windows and Linux/Proton players can seamlessly Host or Join each other's Multiplayer Co-op lobbies.
+4. Launch the game! Verify `BepInEx/LogOutput.log` shows `Easy Red 2 - Battle Hardened v0.7.8 loaded!`. Both Windows and Linux/Proton players can seamlessly Host or Join each other's Multiplayer Co-op lobbies.
 
 ### Switching to Vanilla or Uninstalling (`Uninstall-BepInEx-Mod.bat`)
-Included in `EasyRed2HumanAI-v0.7.7-with-BepInEx.zip` (and in the root of this repository) is **[`Uninstall-BepInEx-Mod.bat`](Uninstall-BepInEx-Mod.bat)**. Double-click it inside your `Easy Red 2` folder when the game is closed to:
+Included in `EasyRed2HumanAI-v0.7.8-with-BepInEx.zip` (and in the root of this repository) is **[`Uninstall-BepInEx-Mod.bat`](Uninstall-BepInEx-Mod.bat)**. Double-click it inside your `Easy Red 2` folder when the game is closed to:
 * **`[1] Play Vanilla Temporarily`**: Moves `BepInEx`, `dotnet`, and `winhttp.dll` into `_BepInEx_Disabled_Backup\` so the game runs 100% pure vanilla without losing your configs or other plugins.
 * **`[2] Restore Modded Game`**: Moves everything back from `_BepInEx_Disabled_Backup\` in one click.
 * **`[3] Uninstall Completely`**: Permanently deletes `BepInEx`, `dotnet`, `winhttp.dll`, `doorstop_config.ini`, `.doorstop_version`, and `changelog.txt`.
@@ -133,6 +147,8 @@ Alongside shared tactical realism goals (some inspired by [`Easy-Red-2-Realism-O
   * **Strict Frag-vs-Armor Gate (`CanThrowableDamageOrFlushVehicle` + `Soldier.Throw`)**: Stops both mod routines and vanilla `SoldierAI` throws from wasting `< 12mm` fragmentation grenades (`VirtualGrenade` / `GrenadeType.infantryGrenate`) on buttoned-up tanks (`effArmor >= 8mm` with zero exposed crew), while allowing AT grenades (`VirtualATGrenade`), Molotovs/phosphorus (`phosporusGrenade`), satchel/TNT charges, smoke screens, soft-skinned vehicle frags, and open-topped crew kills (`FragBlk` telemetry).
   * **3-Tier Tactical Retreats — "Oh Shit" Break-Contact & Fighting Regroup (`EnableTacticalRetreatsAndRegroup`)**: Adds `SquadNetDirective.Regroup_SectorWithdrawal` (Tier 3 Radio Net withdrawal + support call when shattered/outnumbered or facing uncountered close armor), Tier 2 Squad Leader fighting withdrawal (`TryPopSquadRetreatSmoke` + `VoiceClip.timeToRetreat` + `HoldArea` toward rear friendly squads/armor or hard cover), and Tier 1 individual break-contact sprints (`TacticalFallbackRetreat` + `TryTriggerImmediateIndividualFallback` before `SurrenderSynched` when an escape lane exists).
   * **Relentless Both-Sides Objective Play ("Player as a Cog in the Machine")**: Clamps `Squad.SendUnitsToCovers` spread radius to `0.80 * GetTaskAreaRadius()` when targeting `currentTask` so 100% of squadmates take cover **inside** the capture circle rather than camping outside the boundary; tracks live friendly vs. enemy headcounts inside the circle (`FriendlyUnitsInsideObjective` vs. `EnemyUnitsInsideObjective`) to trigger `ObjectiveCapContestUrgent` and `Squad.Charge` break-ins whenever capture majority isn't secured; tightens Conquest flag drain response (`rawPct < 0.98f`); rescues undefended bleeding flags from quiet secondary garrisons; and distributes multi-flag attacks across simultaneous frontline objectives (`PickBestAttackObjectiveForSquad`).
+* **End-to-End GOAP, Locomotion & Anti-Armor Anti-Paralysis Pass (`v0.7.8`)**:
+  * **Zero-Conflict Goal, Overwatch & Locomotion Pipeline**: Preserves F.E.A.R. *Pin-and-Flank* overwatch (`AllyPinningThreat`) during final objective break-ins (`<= 45m`–`75m`), alternates non-bipod `HoldOverwatchFire` suppressors on a staggered `3.4s` fire / `5.1s` advance cycle (and prevents open-deck bridge stops unless behind a parapet or bipod-mounted), protects raw-position GOAP/retreat/scavenge/radio/drag/lone-wolf moves (`TryGetProtectedBotMoveOverride`) from vanilla's `2.0s` `SquadOrdersRoutine` rubber-banding, auto-equips stowed Slot 1/2 AT launchers (`SwitchTo(slot)`) against armor instead of fleeing with a rifle in hand, unifies armor-evasion + fallen-AT-scavenge + standing escape sprints, immediately advances `ThrowSmokeScreen` Step 0 when a sector is already smoked, and shields active `17s` squad retreats from Macro/TeamNet/Emplacement order overwrites.
 
 > *(Want the deep-dive engineering breakdown of what vanilla's `GameAssembly.dll` did under the hood and why each change was made? Read **[`docs/design-and-justifications.md`](docs/design-and-justifications.md)**!)*
 

@@ -450,19 +450,61 @@ namespace EasyRed2HumanAI
             return bestFootEnemy != null;
         }
 
+        internal static bool TryEquipOrHoldStowedAtWeaponAgainstVehicle(Soldier soldier, Vehicle targetVeh, float dist)
+        {
+            if (soldier == null || targetVeh == null || soldier.IsOnVehicle() || dist > 95f)
+                return false;
+
+            GenericGun g0 = soldier.GetHeldGun(0);
+            if (g0 != null && g0.IsAtWeapon() && (g0.GetCurrentAmmoCount() > 0 || !soldier.IsOutOfAmmosFor(g0)))
+                return true;
+
+            for (int slot = 1; slot <= 2; slot++)
+            {
+                GenericGun g = soldier.GetHeldGun(slot);
+                if (g == null || !g.IsAtWeapon() || (g.GetCurrentAmmoCount() <= 0 && soldier.IsOutOfAmmosFor(g)))
+                    continue;
+
+                float engageWindow = Mathf.Max(55f, g.DamageRange() + 18f);
+                if (dist > engageWindow)
+                    continue;
+
+                if (!soldier.isInHandsAnimation &&
+                    !soldier.isInBodyAnimation &&
+                    soldier.CanSwitchHeldItem &&
+                    (!Photon.Pun.PhotonNetwork.InRoom || AiCore.TryConsumeBotRpcBudget(0.35f)))
+                {
+                    soldier.SetGunTriggerPressed(false);
+                    soldier.SwitchTo(slot);
+                }
+                return true;
+            }
+
+            return false;
+        }
+
         private static bool TryEvadeArmorToCover(SoldierAI ai, Soldier soldier, Vehicle targetVeh, float dist)
         {
-            if (ai == null || !AiCore.IsLocallyOwnedBot(soldier) || targetVeh == null || targetVeh.transform == null)
+            if (ai == null || !AiCore.IsLocallyOwnedBot(soldier) || targetVeh == null || targetVeh.transform == null || soldier.transform == null)
                 return false;
 
             if (dist > 85f || soldier.IsOnVehicle() || soldier.UsingBipod() || soldier.isInBodyAnimation)
                 return false;
 
-            // If the soldier carries an AT grenade and is within assault distance (<= 38m), let them close in to throw it
-            if (dist <= 38f && soldier.inventory != null && soldier.inventory.FindItemOfType<VirtualATGrenade>() != null)
-                return false;
-
+            IntPtr ptr = soldier.Pointer;
+            float now = Time.time;
             Vector3 myPos = soldier.transform.position;
+
+            // Defer cleanly if the soldier is already executing a GOAP/individual fallback sprint OR sprinting to grab a nearby fallen AT weapon!
+            if (IsInIndividualOrGoapFallback(ptr, now) ||
+                (soldier.GetSuppressionValue() < 62f && HasPendingAtWeaponScavenge(ptr, myPos, 24.0f)))
+            {
+                return false;
+            }
+
+            // If the soldier carries any usable AT capability (launcher, AT grenade, satchel, Molotov, Gammon) within assault range, close & engage!
+            if (dist <= 42f && HasUsableAntiTankCapability(soldier))
+                return false;
             Vector3 toTank = targetVeh.transform.position - myPos;
             toTank.y = 0f;
             Vector3 threatDir = toTank.sqrMagnitude > 0.01f ? toTank.normalized : soldier.transform.forward;
@@ -3735,6 +3777,7 @@ namespace EasyRed2HumanAI
             int frame = Time.frameCount;
             if (changed &&
                 sq.Leader != null &&
+                !IsSquadActivelyRetreating(sq.Pointer, now) &&
                 frame != _lastMacroImmediateOrderFrame &&
                 (!Photon.Pun.PhotonNetwork.InRoom || AiCore.TryConsumeBotRpcBudget(0.45f)))
             {
@@ -4222,7 +4265,7 @@ namespace EasyRed2HumanAI
                         continue;
 
                     bool isBailedCrew = sqSnap.IsVehicleCrew && !sq.SomeoneIsRepairing();
-                    if (!isBailedCrew && sq.InChargeTime())
+                    if (!isBailedCrew && (sq.InChargeTime() || IsSquadActivelyRetreating(sq.Pointer, now)))
                         continue;
 
                     float empMult = GetFactionCommandProfile(sqSnap.Faction).EmplacementSearchMult;

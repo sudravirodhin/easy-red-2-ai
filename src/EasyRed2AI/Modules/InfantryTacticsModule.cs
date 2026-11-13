@@ -1892,6 +1892,7 @@ namespace EasyRed2HumanAI
                         if (targetVeh != null)
                         {
                             TryThrowNormalGrenadeAtVehicle(soldier, targetVeh, __instance.distFromTarget);
+                            bool hasStowedAtReady = TryEquipOrHoldStowedAtWeaponAgainstVehicle(soldier, targetVeh, __instance.distFromTarget);
 
                             if (TryEvaluateVehicleTarget(
                                 soldier,
@@ -1915,9 +1916,9 @@ namespace EasyRed2HumanAI
                                     }
                                 }
                             }
-                            else
+                            else if (!hasStowedAtReady)
                             {
-                                // Switch any rifleman, MG gunner, or AT unit away from an invulnerable tank
+                                // Switch any rifleman, MG gunner, or dry AT unit away from an invulnerable tank
                                 // to visible enemy infantry advancing behind or beside the tank!
                                 if (TryFindVisibleFootEnemy(soldier, out Spottable altEnemy, out float altDist))
                                 {
@@ -2155,7 +2156,9 @@ namespace EasyRed2HumanAI
                     }
                     else if (__instance.IsMoving())
                     {
+                        bool inFallbackSprint = IsInIndividualOrGoapFallback(ptr, Time.time);
                         bool isLongMove = isEvadingArmor ||
+                                          inFallbackSprint ||
                                           isStaffingEmplacement ||
                                           (soldier.transform.position - __instance.MoveDestination).sqrMagnitude > 3.5f * 3.5f;
                         bool inCombatCrouchLock = !isLongMove &&
@@ -2176,6 +2179,7 @@ namespace EasyRed2HumanAI
                         if (suppression >= 20f &&
                             !soldier.IsOnCover() &&
                             !HasActiveGoapCoverLock(ptr, Time.time) &&
+                            !inFallbackSprint &&
                             !isEvadingArmor &&
                             !isHealingTeammate &&
                             !isStaffingEmplacement &&
@@ -2274,9 +2278,11 @@ namespace EasyRed2HumanAI
                         }
                         else if (VisionConfig.EnforceStandingWhenOutOfCombat.Value)
                         {
-                            bool shouldBoundCrouched = (inBoundingOverwatch && suppression >= 10f) ||
-                                                       suppression >= 12f ||
-                                                       (__instance.HasEnemyAndCanFireAtHim && dist <= 75f);
+                            bool isUrgentEscapeSprint = isEvadingArmor || inFallbackSprint;
+                            bool shouldBoundCrouched = !isUrgentEscapeSprint &&
+                                                       ((inBoundingOverwatch && suppression >= 10f) ||
+                                                        suppression >= 12f ||
+                                                        (__instance.HasEnemyAndCanFireAtHim && dist <= 75f));
                             if (soldier.m_pose == SoldierPose.Prone || __instance.actualPose == SoldierPose.Prone)
                             {
                                 SoldierPose liftPose = (inCombatCrouchLock || suppression >= 12f || stealthCrouch || shouldBoundCrouched)
@@ -2905,7 +2911,8 @@ namespace EasyRed2HumanAI
 
                     if (VisionConfig.EnableSelfPreservationStance.Value &&
                         !soldier.IsOnVehicle() &&
-                        !soldier.IsCharging())
+                        !soldier.IsCharging() &&
+                        !IsInIndividualOrGoapFallback(ptr, Time.time))
                     {
                         bool soughtCover = TrySeekNearbyCover(__instance, soldier);
 
@@ -3459,15 +3466,27 @@ namespace EasyRed2HumanAI
                     Soldier soldier = __instance.character;
                     if (!AiCore.IsLocallyOwnedBot(soldier) ||
                         soldier.IsOnVehicle() ||
-                        soldier.IsCharging() ||
-                        !soldier.HasDestinationAssigned ||
-                        soldier.targetDestination == null)
+                        soldier.IsCharging())
                     {
                         return true;
                     }
 
                     IntPtr ptr = soldier.Pointer;
                     float now = Time.time;
+
+                    // Preserve active raw-position GOAP/retreat/casualty-drag/scavenge/radio/lone-wolf move overrides
+                    // even when soldier.targetDestination is null or still points at stale forward cover!
+                    if (TryGetProtectedBotMoveOverride(ptr, now, out Vector3 moveOverride))
+                    {
+                        __result = moveOverride;
+                        return false;
+                    }
+
+                    if (!soldier.HasDestinationAssigned || soldier.targetDestination == null)
+                    {
+                        return true;
+                    }
+
                     bool protectedCover =
                         (VisionConfig.EnableTacticalGoapPlanner.Value && HasActiveGoapCoverLock(ptr, now)) ||
                         (_localCoverProtectedUntil.TryGetValue(ptr, out float protUntil) && now < protUntil) ||
@@ -3904,6 +3923,8 @@ namespace EasyRed2HumanAI
                     _botGoapPlans.Remove(ptr);
                     _botScavengeCaches.Remove(ptr);
                     _localCoverProtectedUntil.Remove(ptr);
+                    _individualFallbackUntil.Remove(ptr);
+                    _individualFallbackDest.Remove(ptr);
                     _isTurningToWatchSector.Remove(ptr);
                     _ffBlockedUntil.Remove(ptr);
                     _wallBlockedUntil.Remove(ptr);
