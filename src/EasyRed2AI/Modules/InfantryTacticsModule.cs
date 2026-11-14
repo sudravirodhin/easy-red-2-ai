@@ -926,7 +926,12 @@ namespace EasyRed2HumanAI
         internal static Vector3 GetCachedMoveEndpoint(AiCore.SoldierFastHandles h, SoldierAI ai, Soldier soldier, out int nodesCount)
         {
             int frame = Time.frameCount;
-            if (h != null && h.LastEndpointFrame == frame)
+            float now = Time.time;
+            bool hasPath = !ReferenceEquals(ai, null) && ai.HasPath;
+
+            if (h != null &&
+                (h.LastEndpointFrame == frame ||
+                 (now < h.NextEndpointCheckTime && (hasPath == (h.CachedNodesCount >= 0)))))
             {
                 nodesCount = h.CachedNodesCount;
                 return h.CachedEndpoint;
@@ -934,11 +939,22 @@ namespace EasyRed2HumanAI
 
             Vector3 ep;
             int nc = -1;
-            var p = ai.path;
-            if (!ReferenceEquals(p, null) && p.Pointer != IntPtr.Zero)
+            if (hasPath)
             {
-                ep = p.Destination;
-                nc = p.NodesCount;
+                var p = ai.path;
+                if (!ReferenceEquals(p, null) && p.Pointer != IntPtr.Zero)
+                {
+                    ep = p.Destination;
+                    nc = p.NodesCount;
+                }
+                else
+                {
+                    ep = ai.MoveDestination;
+                }
+            }
+            else if (h != null && AiCore.ResolveTargetDestination(h) != AiCore.CachedDestKind.None && h.CachedCover != null)
+            {
+                ep = h.CachedCover.GetCoverPosition();
             }
             else if (!ReferenceEquals(soldier, null) && soldier.HasDestinationAssigned && soldier.targetDestination != null)
             {
@@ -952,6 +968,7 @@ namespace EasyRed2HumanAI
             if (h != null)
             {
                 h.LastEndpointFrame = frame;
+                h.NextEndpointCheckTime = now + 0.10f;
                 h.CachedEndpoint = ep;
                 h.CachedNodesCount = nc;
             }
@@ -1299,7 +1316,8 @@ namespace EasyRed2HumanAI
                                   AiCore.IsOnBridgeOrNarrowCrossing(myPos);
                 Vector3 threatDir = GetEffectiveThreatDirection(soldier, soldier.joinedSquad, myPos, h.Tr.forward);
                 CombatCover bestCover = null;
-                float bestDistSq = float.MaxValue;
+                float bestScoreSq = float.MaxValue;
+                float bestRawDistSq = float.MaxValue;
 
                 var octree = CoverManager.staticCovers;
                 if (octree != null)
@@ -1326,7 +1344,7 @@ namespace EasyRed2HumanAI
                                 continue;
 
                             float dSq = (covPos - myPos).sqrMagnitude;
-                            if (dSq >= bestDistSq)
+                            if (dSq * 0.42f >= bestScoreSq)
                                 continue;
 
                             if (isOnBridge && !AiCore.IsSafeBridgeDeckStep(myPos, covPos, out _))
@@ -1335,24 +1353,37 @@ namespace EasyRed2HumanAI
                             if (!cc.IsCoverAvailable(threatDir, myFaction))
                                 continue;
 
-                            bestDistSq = dSq;
+                            if (VisionConfig.EnableSmartWallSideCover.Value &&
+                                IsPositionOnExposedSideOfWall(covPos, threatDir, null, out _))
+                            {
+                                continue;
+                            }
+
+                            bool isLeewardSheltered = IsPositionShelteredByFrontCover(covPos, threatDir, null);
+                            float scoreSq = isLeewardSheltered ? (dSq * 0.42f) : (dSq * 1.45f);
+                            if (scoreSq >= bestScoreSq)
+                                continue;
+
+                            bestScoreSq = scoreSq;
+                            bestRawDistSq = dSq;
                             bestCover = cc;
                         }
                     }
                 }
 
-                // Consider nearby idle/wrecked tank or armored vehicle hulls as physical cover if closer than static cover!
-                if (bestDistSq > 7.0f * 7.0f &&
+                // Consider nearby idle/wrecked tank or armored vehicle hulls as leeward physical cover if closer/better than static cover!
+                if (bestRawDistSq > 4.5f * 4.5f &&
                     TryFindTankHullCoverOrEscortSpot(soldier, myPos, threatDir, false, out Vector3 tankCoverPos, out _) &&
                     (!VisionConfig.EnableFriendlyFireAvoidance.Value || !AiCore.IsCoverInPlayerAimLane(tankCoverPos, threatDir)) &&
                     (!isOnBridge || AiCore.IsSafeBridgeDeckStep(myPos, tankCoverPos, out tankCoverPos)))
                 {
                     float tankDistSq = (tankCoverPos - myPos).sqrMagnitude;
-                    if (tankDistSq < bestDistSq)
+                    if (tankDistSq * 0.55f < bestScoreSq)
                     {
                         DestinationWithoutCover tankDest = new DestinationWithoutCover(tankCoverPos, SoldierPose.Crouch);
                         _localCoverProtectedUntil[ptr] = now + 6.5f;
                         soldier.CoverPosition(tankDest.Cast<AiDestination>());
+                        AiCore.InvalidateTargetDestinationCache(soldier);
                         TankHullCoverUsesCount++;
                         return true;
                     }
@@ -1362,6 +1393,7 @@ namespace EasyRed2HumanAI
                 {
                     _localCoverProtectedUntil[ptr] = now + 7.5f;
                     soldier.CoverPosition(bestCover.Cast<AiDestination>());
+                    AiCore.InvalidateTargetDestinationCache(soldier);
                     return true;
                 }
 
@@ -1373,6 +1405,7 @@ namespace EasyRed2HumanAI
                     DestinationWithoutCover bridgeDest = new DestinationWithoutCover(parapetSpot, SoldierPose.Crouch);
                     _localCoverProtectedUntil[ptr] = now + 6.5f;
                     soldier.CoverPosition(bridgeDest.Cast<AiDestination>());
+                    AiCore.InvalidateTargetDestinationCache(soldier);
                     return true;
                 }
             }
@@ -1590,7 +1623,7 @@ namespace EasyRed2HumanAI
         }
 
         // =====================================================================
-        // Smart Wall-Side Cover & Threat Direction (Stand BEHIND Walls)
+        // Smart Wall-Side Cover & Threat Direction (Stand Leeward of Weapons Fire)
         // =====================================================================
         private static Vector3 GetEffectiveThreatDirection(Soldier soldier, Squad squad, Vector3 referencePos, Vector3 fallbackDir)
         {
@@ -1602,6 +1635,18 @@ namespace EasyRed2HumanAI
                 if (toTarget.sqrMagnitude > 0.25f)
                     return toTarget.normalized;
             }
+
+            string faction = soldier != null
+                ? AiCore.GetCachedFaction(soldier)
+                : (squad != null && squad.Leader != null ? AiCore.GetCachedFaction(squad.Leader) : null);
+
+            bool hasLiveGunfire = VisionPatches.TryGetDominantEnemyGunfireDirection(
+                referencePos,
+                faction,
+                145.0f,
+                3.8f,
+                out Vector3 gunfireDir,
+                out float gunfireDist);
 
             if (squad != null && squad.units != null)
             {
@@ -1627,8 +1672,18 @@ namespace EasyRed2HumanAI
                 }
 
                 if (bestToEnemy.sqrMagnitude > 0.25f)
+                {
+                    // If an unseen enemy is actively firing much closer to this soldier (< 48m and < 0.65x squad target dist),
+                    // take cover on the leeward side of the live gunfire rather than exposing our back to the shooter!
+                    if (hasLiveGunfire && gunfireDist <= 48.0f && (gunfireDist * gunfireDist) < bestDistSq * 0.42f)
+                        return gunfireDir;
+
                     return bestToEnemy.normalized;
+                }
             }
+
+            if (hasLiveGunfire)
+                return gunfireDir;
 
             if (VisionConfig.EnableThreatSectorConcentration.Value &&
                 soldier != null &&
@@ -1639,7 +1694,6 @@ namespace EasyRed2HumanAI
                 return sectorDir;
             }
 
-            string faction = soldier != null ? soldier.faction : (squad != null && squad.Leader != null ? squad.Leader.faction : null);
             if (AiCore.TryGetEnemySpawnDirection(faction, referencePos, out Vector3 enemySpawnDir))
             {
                 return enemySpawnDir;
@@ -1654,8 +1708,8 @@ namespace EasyRed2HumanAI
             if (threatDir.sqrMagnitude < 0.001f)
                 return false;
 
-            return AiCore.IsDirectionBlockedByEnvironment(pos + Vector3.up * 0.50f, threatDir, 1.85f, ignoreRoot) ||
-                   AiCore.IsDirectionBlockedByEnvironment(pos + Vector3.up * 0.88f, threatDir, 1.85f, ignoreRoot);
+            return AiCore.IsMovementBlockedByObstacle(pos + Vector3.up * 0.46f, threatDir, 1.85f) ||
+                   AiCore.IsMovementBlockedByObstacle(pos + Vector3.up * 0.85f, threatDir, 1.85f);
         }
 
         private static bool IsPositionOnExposedSideOfWall(Vector3 pos, Vector3 threatDir, Transform ignoreRoot, out RaycastHit rearWallHit)
@@ -1668,22 +1722,66 @@ namespace EasyRed2HumanAI
                 return false;
 
             // Never mistake the interior back wall of a room, bunker, or pillbox for an exposed exterior wall face
-            if (AiCore.HasLowCeilingOverhead(pos, 3.5f) ||
-                AiCore.IsDirectionBlockedByEnvironment(pos + Vector3.up * 0.65f, threatDir, 4.5f, ignoreRoot))
+            if (AiCore.HasLowCeilingOverhead(pos, 3.5f))
+                return false;
+
+            int obsMask = AiCore.GetMovementObstacleMask();
+            if (Physics.Raycast(pos + Vector3.up * 0.82f, -threatDir, out rearWallHit, 1.95f, obsMask, QueryTriggerInteraction.Ignore) &&
+                Mathf.Abs(rearWallHit.normal.y) < 0.58f)
+            {
+                return true;
+            }
+
+            if (Physics.Raycast(pos + Vector3.up * 0.46f, -threatDir, out rearWallHit, 1.95f, obsMask, QueryTriggerInteraction.Ignore) &&
+                Mathf.Abs(rearWallHit.normal.y) < 0.58f)
+            {
+                return true;
+            }
+
+            return false;
+        }
+
+        private static bool TryValidateLeewardCandidateGround(
+            Vector3 currentPos,
+            Vector3 candidateXZ,
+            Vector3 threatDir,
+            Transform ignoreRoot,
+            bool currentIsOutdoor,
+            out Vector3 validPos)
+        {
+            validPos = Vector3.zero;
+            int groundMask = AiCore.GetSolidEnvironmentMask();
+            Vector3 groundRayStart = new Vector3(candidateXZ.x, currentPos.y + 1.35f, candidateXZ.z);
+            if (!Physics.Raycast(groundRayStart, Vector3.down, out RaycastHit groundHit, 3.0f, groundMask, QueryTriggerInteraction.Ignore))
+                return false;
+
+            if (groundHit.normal.y < 0.65f || groundHit.collider == null || groundHit.collider.gameObject.layer == 4)
+                return false;
+
+            Vector3 candidatePos = groundHit.point;
+            if (Mathf.Abs(candidatePos.y - currentPos.y) > 1.50f)
+                return false;
+
+            int obsMask = AiCore.GetMovementObstacleMask();
+            if (Physics.CheckSphere(candidatePos + Vector3.up * 0.85f, 0.24f, obsMask, QueryTriggerInteraction.Ignore))
+                return false;
+
+            Vector3 right = new Vector3(threatDir.z, 0f, -threatDir.x);
+            Vector3 chestPos = candidatePos + Vector3.up * 0.80f;
+            if (AiCore.IsMovementBlockedByObstacle(chestPos, right, 0.35f) &&
+                AiCore.IsMovementBlockedByObstacle(chestPos, -right, 0.35f))
             {
                 return false;
             }
 
-            Vector3 rearOrigin = pos + Vector3.up * 0.75f;
-            if (Physics.Raycast(rearOrigin, -threatDir, out rearWallHit, 1.95f, AiCore.GetSolidEnvironmentMask(), QueryTriggerInteraction.Ignore))
-            {
-                if (Mathf.Abs(rearWallHit.normal.y) < 0.55f)
-                {
-                    return true;
-                }
-            }
+            if (currentIsOutdoor && AiCore.IsDirectionBlockedByEnvironment(candidatePos + Vector3.up * 0.85f, Vector3.up, 6.0f, ignoreRoot))
+                return false;
 
-            return false;
+            if (!IsPositionShelteredByFrontCover(candidatePos, threatDir, ignoreRoot))
+                return false;
+
+            validPos = candidatePos;
+            return true;
         }
 
         private static bool TryFindShelteredSideOfWall(Vector3 currentPos, Vector3 threatDir, Transform ignoreRoot, out Vector3 shelteredPos)
@@ -1692,51 +1790,40 @@ namespace EasyRed2HumanAI
             if (!IsPositionOnExposedSideOfWall(currentPos, threatDir, ignoreRoot, out RaycastHit rearWallHit))
                 return false;
 
-            int envMask = AiCore.GetSolidEnvironmentMask();
-            Vector3 probeOrigin = rearWallHit.point - threatDir * 2.30f;
-            if (!Physics.Raycast(probeOrigin, threatDir, out RaycastHit backFaceHit, 2.25f, envMask, QueryTriggerInteraction.Ignore))
-                return false;
-
-            float wallThickness = Vector3.Distance(rearWallHit.point, backFaceHit.point);
-            if (wallThickness < 0.04f || wallThickness > 1.65f)
-                return false;
-
-            Vector3 candidateXZ = backFaceHit.point - threatDir * 0.85f;
-            Vector3 groundRayStart = new Vector3(candidateXZ.x, currentPos.y + 1.35f, candidateXZ.z);
-            if (!Physics.Raycast(groundRayStart, Vector3.down, out RaycastHit groundHit, 3.0f, envMask, QueryTriggerInteraction.Ignore))
-                return false;
-
-            if (groundHit.normal.y < 0.65f)
-                return false;
-
-            Vector3 candidatePos = groundHit.point;
-            if (Mathf.Abs(candidatePos.y - currentPos.y) > 1.50f)
-                return false;
-
-            Vector3 backSurfaceCheck = backFaceHit.point - threatDir * 0.08f;
-            Vector3 toCandidate = (candidatePos + Vector3.up * 0.75f) - backSurfaceCheck;
-            if (toCandidate.sqrMagnitude > 0.01f &&
-                AiCore.IsDirectionBlockedByEnvironment(backSurfaceCheck, toCandidate.normalized, toCandidate.magnitude, ignoreRoot))
-            {
-                return false;
-            }
-
-            Vector3 right = new Vector3(threatDir.z, 0f, -threatDir.x);
-            Vector3 chestPos = candidatePos + Vector3.up * 0.80f;
-            if (AiCore.IsDirectionBlockedByEnvironment(chestPos, right, 0.35f, ignoreRoot) &&
-                AiCore.IsDirectionBlockedByEnvironment(chestPos, -right, 0.35f, ignoreRoot))
-            {
-                return false;
-            }
-
             bool currentIsOutdoor = !AiCore.IsDirectionBlockedByEnvironment(currentPos + Vector3.up * 0.85f, Vector3.up, 6.0f, ignoreRoot);
-            if (currentIsOutdoor && AiCore.IsDirectionBlockedByEnvironment(candidatePos + Vector3.up * 0.85f, Vector3.up, 6.0f, ignoreRoot))
+            int obsMask = AiCore.GetMovementObstacleMask();
+
+            // 1. Direct Leeward Step-Behind for walls, sandbag parapets, fences, and earthen berms up to 2.85m thick
+            Vector3 probeOrigin = rearWallHit.point - threatDir * 3.15f;
+            if (Physics.Raycast(probeOrigin, threatDir, out RaycastHit backFaceHit, 3.10f, obsMask, QueryTriggerInteraction.Ignore))
             {
-                return false;
+                float wallThickness = Vector3.Distance(rearWallHit.point, backFaceHit.point);
+                if (wallThickness >= 0.03f && wallThickness <= 2.85f)
+                {
+                    Vector3 candidateXZ = backFaceHit.point - threatDir * 0.85f;
+                    if (TryValidateLeewardCandidateGround(currentPos, candidateXZ, threatDir, ignoreRoot, currentIsOutdoor, out shelteredPos))
+                        return true;
+                }
             }
 
-            shelteredPos = candidatePos;
-            return true;
+            // 2. Corner Wrap-Around Fallback for solid buildings / thick bunkers (> 2.85m) where stepping straight through isn't possible
+            Vector3 right = new Vector3(threatDir.z, 0f, -threatDir.x);
+            for (int sideIdx = 0; sideIdx < 2; sideIdx++)
+            {
+                Vector3 latDir = sideIdx == 0 ? right : -right;
+                for (int step = 0; step < 2; step++)
+                {
+                    float latDist = step == 0 ? 1.95f : 3.20f;
+                    if (AiCore.IsMovementBlockedByObstacle(currentPos + Vector3.up * 0.80f, latDir, latDist))
+                        break;
+
+                    Vector3 wrapXZ = currentPos + latDir * latDist - threatDir * 1.35f;
+                    if (TryValidateLeewardCandidateGround(currentPos, wrapXZ, threatDir, ignoreRoot, currentIsOutdoor, out shelteredPos))
+                        return true;
+                }
+            }
+
+            return false;
         }
 
         private static void HandleGunnerBipodAndWallMounting(SoldierAI ai, Soldier soldier, AttachmentBipod bip, Vector3 targetPos, float dist)
@@ -3486,7 +3573,7 @@ namespace EasyRed2HumanAI
         {
             public static bool Prefix(SoldierAI __instance, ref bool __result)
             {
-                long profStart = HitchProfiler.Begin();
+                long profStart = _inMovementRoutine ? 0L : HitchProfiler.Begin();
                 try
                 {
                     if (!VisionConfig.EnableMod.Value || ReferenceEquals(__instance, null))
@@ -3762,7 +3849,8 @@ namespace EasyRed2HumanAI
                 catch { }
                 finally
                 {
-                    HitchProfiler.End(HitchBucket.MovementRoutine, profStart);
+                    if (profStart != 0L)
+                        HitchProfiler.End(HitchBucket.MovementRoutine, profStart);
                 }
                 return true;
             }
@@ -4267,7 +4355,7 @@ namespace EasyRed2HumanAI
             Soldier soldier,
             IntPtr botPtr,
             Transform tr,
-            Vector3 vaultPos,
+            ref Vector3 vaultPos,
             float now,
             out string vaultOrRejectReason)
         {
@@ -4283,29 +4371,63 @@ namespace EasyRed2HumanAI
             }
             fwd.Normalize();
 
-            // 1. Make sure the bot's move destination actually crosses forward across the obstacle
-            Vector3 toDest = ai.MoveDestination - myPos;
-            toDest.y = 0f;
-            if (toDest.sqrMagnitude > 0.36f && Vector3.Dot(fwd, toDest.normalized) < 0.45f)
+            // 1. Check current path-segment move vector (ai.dir) OR final MoveDestination so multi-node paths
+            //    that turn a corner 50-150m later are never falsely rejected as "not_moving_across"!
+            Vector3 curMoveDir = ai.dir;
+            curMoveDir.y = 0f;
+            bool movingForwardAlongSegment = curMoveDir.sqrMagnitude > 0.04f && Vector3.Dot(fwd, curMoveDir.normalized) >= 0.30f;
+            if (!movingForwardAlongSegment)
             {
-                vaultOrRejectReason = "not_moving_across";
-                return false;
+                Vector3 toDest = ai.MoveDestination - myPos;
+                toDest.y = 0f;
+                if (toDest.sqrMagnitude > 0.36f && Vector3.Dot(fwd, toDest.normalized) < 0.30f)
+                {
+                    vaultOrRejectReason = "not_moving_across";
+                    return false;
+                }
             }
 
-            // 2. Front-face probe:
-            // Native Soldier.CanVault (0x180742C40) detects the obstacle at pos + fwd*0.50f + up*0.50f (r=0.30f),
-            // while vaultPos is probed at pos + fwd*1.12f (0x180742FCC) — which lands on the FAR-SIDE floor (vaultPos.y ≈ myPos.y)
-            // for thin walls/fences, or on the upper parapet lip (vaultPos.y ≈ myPos.y + 0.6m..1.5m) for trench exits!
-            int envMask = AiCore.GetSolidEnvironmentMask();
-            Vector3 rayOriginLow = myPos + Vector3.up * 0.50f - fwd * 0.15f;
-            if (!Physics.Raycast(rayOriginLow, fwd, out RaycastHit frontHit, 1.30f, envMask, QueryTriggerInteraction.Ignore))
+            // 2. Front-face probe using ResourcesManager.vaultMask | groundMask (Default | Terrain | InvisibleTrepassableWall):
+            //    Matches native Soldier.CanVault (0x180742C40), which detects simplified InvisibleTrepassableWall collision
+            //    boxes on sandbags, fences, parapets, and window sills via a r=0.30f CheckSphere at +0.50m.
+            int vaultMask = AiCore.GetMovementObstacleMask();
+            int groundMask = AiCore.GetSolidEnvironmentMask();
+            RaycastHit frontHit;
+            Vector3 sphereOrigin = myPos + Vector3.up * 0.50f - fwd * 0.22f;
+            bool foundFace = Physics.SphereCast(sphereOrigin, 0.22f, fwd, out frontHit, 1.15f, vaultMask, QueryTriggerInteraction.Ignore);
+            if (!foundFace || frontHit.distance <= 0.001f)
             {
-                Vector3 rayOriginMid = myPos + Vector3.up * 0.82f - fwd * 0.15f;
-                if (!Physics.Raycast(rayOriginMid, fwd, out frontHit, 1.30f, envMask, QueryTriggerInteraction.Ignore))
+                if (!Physics.Raycast(myPos + Vector3.up * 0.38f - fwd * 0.15f, fwd, out frontHit, 1.30f, vaultMask, QueryTriggerInteraction.Ignore) &&
+                    !Physics.Raycast(myPos + Vector3.up * 0.78f - fwd * 0.15f, fwd, out frontHit, 1.30f, vaultMask, QueryTriggerInteraction.Ignore))
                 {
                     vaultOrRejectReason = "no_solid_face";
                     return false;
                 }
+            }
+
+            // 2B. Validate & repair vanilla CanVault's vaultPos:
+            //     At 0x180742FD3 / 0x18074301C, if CanVault's landing raycast misses or exceeds height delta, vanilla leaves
+            //     vaultPos == Vector3.zero (0,0,0) AND still returns true! Always verify or re-sample a valid landing spot!
+            Vector2 landingHoriz = new Vector2(vaultPos.x - myPos.x, vaultPos.z - myPos.z);
+            bool landingValid = vaultPos.sqrMagnitude > 0.04f &&
+                                landingHoriz.sqrMagnitude >= 0.16f &&
+                                landingHoriz.sqrMagnitude <= 2.50f * 2.50f &&
+                                Mathf.Abs(vaultPos.y - myPos.y) <= 1.68f &&
+                                !Physics.CheckSphere(vaultPos + Vector3.up * 0.95f, 0.20f, vaultMask, QueryTriggerInteraction.Ignore);
+            if (!landingValid)
+            {
+                Vector3 landProbeStart = myPos + fwd * Mathf.Clamp(frontHit.distance + 0.68f, 0.95f, 1.55f) + Vector3.up * 1.68f;
+                if (!Physics.Raycast(landProbeStart, Vector3.down, out RaycastHit landHit, 3.20f, groundMask, QueryTriggerInteraction.Ignore) ||
+                    landHit.normal.y < 0.62f ||
+                    landHit.collider == null ||
+                    landHit.collider.gameObject.layer == 4 ||
+                    Mathf.Abs(landHit.point.y - myPos.y) > 1.68f ||
+                    Physics.CheckSphere(landHit.point + Vector3.up * 0.95f, 0.20f, vaultMask, QueryTriggerInteraction.Ignore))
+                {
+                    vaultOrRejectReason = "no_landing";
+                    return false;
+                }
+                vaultPos = landHit.point;
             }
 
             Collider frontCol = frontHit.collider;
@@ -4316,34 +4438,53 @@ namespace EasyRed2HumanAI
             {
                 // Carved terrain trench walls are steep unwalkable cuts (|normal.y| <= 0.62f, >= ~52 deg)
                 // with a genuine step-up onto the parapet lip; ordinary hills/bumps are rejected.
-                if (Mathf.Abs(frontHit.normal.y) > 0.62f || vaultLandingRise < 0.48f)
+                if (Mathf.Abs(frontHit.normal.y) > 0.62f || vaultLandingRise < 0.45f)
                 {
                     vaultOrRejectReason = "terrain_slope";
                     return false;
                 }
             }
-            else if (Mathf.Abs(frontHit.normal.y) > 0.56f)
+            else if (Mathf.Abs(frontHit.normal.y) > 0.60f)
             {
-                // Allow vertical walls AND battered wooden trench revetment planks / sandbags (|normal.y| <= 0.56f),
+                // Allow vertical walls AND battered wooden trench revetment planks / sandbags (|normal.y| <= 0.60f),
                 // while rejecting walkable <= 45 deg sloped ramps (|normal.y| >= 0.707f).
                 vaultOrRejectReason = "sloped_surface";
                 return false;
             }
 
-            // 3. Measure true obstacle crest height directly above the wall face (0.16m into the obstacle),
-            // including TerrainCollider lips behind wooden trench revetments.
+            // 3. Reject full-height walls (> 1.68m) and measure true obstacle crest height at BOTH +3cm (thin 4-12cm wooden
+            //    fences / stone walls where +16cm previously overshot onto the far-side floor!) AND +20cm (thicker parapets).
+            Vector3 intoWall = new Vector3(-frontHit.normal.x, 0f, -frontHit.normal.z);
+            intoWall = intoWall.sqrMagnitude > 0.01f ? intoWall.normalized : fwd;
+
+            if (Physics.CheckSphere(
+                    new Vector3(frontHit.point.x + intoWall.x * 0.06f, myPos.y + 1.76f, frontHit.point.z + intoWall.z * 0.06f),
+                    0.07f,
+                    vaultMask,
+                    QueryTriggerInteraction.Ignore))
+            {
+                vaultOrRejectReason = "too_high";
+                return false;
+            }
+
             float crestHeight = vaultLandingRise;
             Collider crestCol = null;
-            Vector3 crestProbeOrigin = new Vector3(
-                frontHit.point.x + fwd.x * 0.16f,
-                myPos.y + 1.80f,
-                frontHit.point.z + fwd.z * 0.16f);
-            if (Physics.Raycast(crestProbeOrigin, Vector3.down, out RaycastHit crestHit, 1.54f, envMask, QueryTriggerInteraction.Ignore))
+            for (int pIdx = 0; pIdx < 2; pIdx++)
             {
-                crestCol = crestHit.collider;
-                float probedCrest = crestHit.point.y - myPos.y;
-                if (probedCrest > crestHeight)
-                    crestHeight = probedCrest;
+                float inset = pIdx == 0 ? 0.03f : 0.20f;
+                Vector3 crestProbeOrigin = new Vector3(
+                    frontHit.point.x + intoWall.x * inset,
+                    myPos.y + 1.74f,
+                    frontHit.point.z + intoWall.z * inset);
+                if (Physics.Raycast(crestProbeOrigin, Vector3.down, out RaycastHit crestHit, 1.50f, vaultMask, QueryTriggerInteraction.Ignore))
+                {
+                    float probedCrest = crestHit.point.y - myPos.y;
+                    if (probedCrest > crestHeight)
+                    {
+                        crestHeight = probedCrest;
+                        crestCol = crestHit.collider;
+                    }
+                }
             }
 
             // 3B. Barbed Wire Discipline:
@@ -4377,7 +4518,7 @@ namespace EasyRed2HumanAI
                 vaultOrRejectReason = "barbed_wire_unstuck";
             }
 
-            if (crestHeight < 0.44f)
+            if (crestHeight < 0.38f)
             {
                 vaultOrRejectReason = "flat_or_low";
                 return false;
@@ -4392,7 +4533,7 @@ namespace EasyRed2HumanAI
             // Reject staircases or continuous hills/bluffs that keep rising beyond the lip, while allowing
             // genuine trench exits where the ground levels off onto the parapet / battlefield above!
             Vector3 farOrigin = myPos + fwd * (frontHit.distance + 0.88f) + Vector3.up * (crestHeight + 0.65f);
-            if (Physics.Raycast(farOrigin, Vector3.down, out RaycastHit farHit, crestHeight + 1.85f, envMask, QueryTriggerInteraction.Ignore))
+            if (Physics.Raycast(farOrigin, Vector3.down, out RaycastHit farHit, crestHeight + 1.85f, groundMask, QueryTriggerInteraction.Ignore))
             {
                 if (farHit.point.y > myPos.y + crestHeight + 0.18f)
                 {
@@ -4412,7 +4553,7 @@ namespace EasyRed2HumanAI
                     }
 
                     Vector3 beyondOrigin = myPos + fwd * (frontHit.distance + 1.48f) + Vector3.up * (crestHeight + 0.85f);
-                    if (Physics.Raycast(beyondOrigin, Vector3.down, out RaycastHit beyondHit, crestHeight + 2.05f, envMask, QueryTriggerInteraction.Ignore) &&
+                    if (Physics.Raycast(beyondOrigin, Vector3.down, out RaycastHit beyondHit, crestHeight + 2.05f, groundMask, QueryTriggerInteraction.Ignore) &&
                         beyondHit.point.y > farHit.point.y + 0.24f)
                     {
                         vaultOrRejectReason = "terrain_hillside";
@@ -4469,7 +4610,7 @@ namespace EasyRed2HumanAI
 
                     if (soldier.CanVault(out Vector3 vaultPos))
                     {
-                        if (!IsValidVaultObstacle(__instance, soldier, ptr, h.Tr, vaultPos, now, out string vaultOrRejectReason))
+                        if (!IsValidVaultObstacle(__instance, soldier, ptr, h.Tr, ref vaultPos, now, out string vaultOrRejectReason))
                         {
                             SlopedVaultsRejectedCount++;
                             _nextVaultCheckTime[ptr] = now + (vaultOrRejectReason == "barbed_wire" ? 0.55f : 0.85f);
@@ -5215,15 +5356,15 @@ namespace EasyRed2HumanAI
 
                     if (!_coverExposureCache.TryGetValue(cacheKey, out bool isExposed))
                     {
-                        // Cap uncached IsPositionOnExposedSideOfWall raycast sweeps to <= 12 per frame
-                        // so a CoverManager.GetCovers sweep in a virgin area never spikes frame time!
+                        // Cap uncached IsPositionOnExposedSideOfWall raycast sweeps to <= 40 per frame
+                        // so CoverManager.GetCovers octree sweeps filter windward walls cleanly without spiking frame time!
                         int curFrame = Time.frameCount;
                         if (curFrame != _coverExposureProbeFrame)
                         {
                             _coverExposureProbeFrame = curFrame;
                             _coverExposureUncachedProbesThisFrame = 0;
                         }
-                        if (_coverExposureUncachedProbesThisFrame >= 12)
+                        if (_coverExposureUncachedProbesThisFrame >= 40)
                             return;
 
                         _coverExposureUncachedProbesThisFrame++;

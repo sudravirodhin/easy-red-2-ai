@@ -135,6 +135,73 @@ namespace EasyRed2HumanAI
             return false;
         }
 
+        /// <summary>
+        /// Zero-allocation scan over the 32-entry live gunfire ring buffer to compute the dominant
+        /// incoming enemy gunfire direction weighted by proximity and recency.
+        /// Ensures infantry take cover on the leeward side of actual incoming weapons fire even when
+        /// their own <c>visibleTarget</c> is null or occluded behind the wall/parapet!
+        /// </summary>
+        public static bool TryGetDominantEnemyGunfireDirection(
+            Vector3 observerPos,
+            string observerFaction,
+            float maxRadius,
+            float maxAgeSeconds,
+            out Vector3 fireDir,
+            out float nearestDist)
+        {
+            fireDir = Vector3.zero;
+            nearestDist = -1f;
+            if (string.IsNullOrEmpty(observerFaction) || maxRadius <= 0f || maxAgeSeconds <= 0f)
+                return false;
+
+            float now = Time.time;
+            float maxDistSq = maxRadius * maxRadius;
+            float bestDistSq = maxDistSq + 1f;
+            Vector3 weightedSum = Vector3.zero;
+
+            for (int i = 0; i < GunfireRingSize; i++)
+            {
+                ref RecentGunfireEntry e = ref _gunfireRing[i];
+                if (e.ShooterPtr == IntPtr.Zero)
+                    continue;
+
+                float age = now - e.FiredTime;
+                if (age < 0f || age > maxAgeSeconds)
+                    continue;
+
+                float dx = e.Pos.x - observerPos.x;
+                float dy = e.Pos.y - observerPos.y;
+                float dz = e.Pos.z - observerPos.z;
+                float distSq = dx * dx + dy * dy + dz * dz;
+                if (distSq < 0.25f || distSq > maxDistSq)
+                    continue;
+
+                if (!AiCore.AreEnemyFactions(observerFaction, e.Faction))
+                    continue;
+
+                if (distSq < bestDistSq)
+                    bestDistSq = distSq;
+
+                float horizLen = Mathf.Sqrt(dx * dx + dz * dz);
+                if (horizLen < 0.25f)
+                    continue;
+
+                float freshness = 1.25f - 0.75f * (age / maxAgeSeconds);
+                float weight = freshness / (12.0f + distSq);
+                weightedSum.x += (dx / horizLen) * weight;
+                weightedSum.z += (dz / horizLen) * weight;
+            }
+
+            if (weightedSum.sqrMagnitude > 1e-10f && bestDistSq <= maxDistSq)
+            {
+                fireDir = weightedSum.normalized;
+                nearestDist = Mathf.Sqrt(bestDistSq);
+                return true;
+            }
+
+            return false;
+        }
+
         public static bool HasFiredRecently(Soldier s, float windowSeconds = 4.5f)
         {
             if (s == null || s.Pointer == IntPtr.Zero)
@@ -1851,6 +1918,8 @@ namespace EasyRed2HumanAI
             return true;
         }
 
+        internal static bool _inMovementRoutine;
+
         // =====================================================================
         // Corner-Pieing & Stationary Threat-Sector Gaze (SoldierAI.MovementRoutine)
         // =====================================================================
@@ -1867,6 +1936,7 @@ namespace EasyRed2HumanAI
 
             public static bool Prefix(SoldierAI __instance, float __0, out MovementRoutineState __state)
             {
+                _inMovementRoutine = true;
                 __state = new MovementRoutineState { ProfStart = HitchProfiler.Begin() };
                 try
                 {
@@ -1899,15 +1969,15 @@ namespace EasyRed2HumanAI
                         }
                     }
 
+                    float now = Time.time;
                     if (soldier.IsCarried() ||
                         soldier.IsOnVehicle() ||
-                        __instance.HeldMortar != null ||
+                        AiCore.HasHeldMortarCached(h, __instance, now) ||
                         soldier.HasSurrended())
                     {
                         return true;
                     }
 
-                    float now = Time.time;
                     Vector3 myPos = h.Tr != null ? h.Tr.position : Vector3.zero;
 
                     if (!__instance.IsMoving())
@@ -1960,12 +2030,11 @@ namespace EasyRed2HumanAI
                     Vector3 endpoint = GetCachedMoveEndpoint(h, __instance, soldier, out int nodesCount);
                     float remDistSq = h.Tr != null ? (endpoint - myPos).sqrMagnitude : 100f;
 
-                    // Prevent Trench-Wall Walk-Through:
+                    // Prevent Trench-Wall Walk-Through (Zero Open-Field PhysX Spiral):
                     // Native Soldier.RefreshControllerEnabled (0x18075E080) disables m_controller on grounded AI bots
-                    // whenever moveDirectlyToward_end <= Time.time, causing Soldier.ApplyMove (0x18073DD7C) to execute
-                    // raw Transform.Translate with zero horizontal wall collision while CheckGroundStatus snaps Y onto
-                    // steep trench walls like ramps! Calling ForceControllerEnabled() sets Soldier's [this+0x158] timer
-                    // so CharacterController collision stays active on final segments and near steep trench/wall faces.
+                    // so open-field movement uses O(1) Transform.Translate instead of 130x5 PhysX CharacterController.Move
+                    // capsule sweeps on FixedSteps catch-up frames. Enable ForceControllerEnabled() ONLY when the 0.24s
+                    // waist obstacle raycast actually detects a steep wall/trench/sandbag face ahead (and skip during >45ms catch-up frames).
                     if (h.Tr != null)
                     {
                         _trenchCollisionGuardCache.TryGetValue(h.Ptr, out TrenchCollisionGuardState tcGuard);
@@ -1984,7 +2053,7 @@ namespace EasyRed2HumanAI
                                         moveDir,
                                         out RaycastHit steepHit,
                                         1.75f,
-                                        AiCore.GetSolidEnvironmentMask(),
+                                        AiCore.GetMovementObstacleMask(),
                                         QueryTriggerInteraction.Ignore) &&
                                     Mathf.Abs(steepHit.normal.y) < 0.72f)
                                 {
@@ -1994,7 +2063,7 @@ namespace EasyRed2HumanAI
                             _trenchCollisionGuardCache[h.Ptr] = tcGuard;
                         }
 
-                        if (nodesCount < 2 || now < tcGuard.ForceUntilTime)
+                        if (now < tcGuard.ForceUntilTime && Time.unscaledDeltaTime < 0.045f)
                         {
                             soldier.ForceControllerEnabled();
                         }
@@ -2097,11 +2166,12 @@ namespace EasyRed2HumanAI
                     Soldier soldier = h.Ref;
                     IntPtr ptr = h.Ptr;
 
+                    float now = Time.time;
                     if (__state.DestKind == AiCore.CachedDestKind.VehicleRepair ||
                         __state.DestKind == AiCore.CachedDestKind.MedicHeal ||
                         __instance.IsMoving() ||
                         __instance.HasEnemyAndCanFireAtHim ||
-                        __instance.HeldMortar != null ||
+                        AiCore.HasHeldMortarCached(h, __instance, now) ||
                         soldier.IsOnVehicle() ||
                         soldier.isInBodyAnimation ||
                         soldier.isInHandsAnimation ||
@@ -2130,7 +2200,6 @@ namespace EasyRed2HumanAI
                         return;
                     }
 
-                    float now = Time.time;
                     Vector3 watchDir;
                     bool hasWatchDir;
 
@@ -2229,6 +2298,7 @@ namespace EasyRed2HumanAI
                 catch { }
                 finally
                 {
+                    _inMovementRoutine = false;
                     HitchProfiler.End(HitchBucket.MovementRoutine, __state.ProfStart);
                 }
             }

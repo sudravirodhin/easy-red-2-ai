@@ -483,6 +483,81 @@ namespace EasyRed2HumanAI
             return false;
         }
 
+        internal static bool IsTankThreateningPosition(Vehicle tankVeh, Vector3 observerPos, float maxThreatDist = 85f)
+        {
+            if (tankVeh == null || tankVeh.Pointer == IntPtr.Zero || !tankVeh.CanFight() || tankVeh.transform == null)
+                return false;
+
+            Vector3 tankPos = tankVeh.transform.position;
+            Vector3 toObs = observerPos - tankPos;
+            float distSq = toObs.sqrMagnitude;
+            if (distSq > maxThreatDist * maxThreatDist)
+                return false;
+
+            // 1. Point-blank crush / hull-traverse danger zone
+            if (distSq <= 14.0f * 14.0f)
+                return true;
+
+            float dist3D = Mathf.Sqrt(Mathf.Max(0.01f, distSq));
+            Vector3 dir3D = toObs / dist3D;
+
+            // 2. Closing hull moving toward the soldier within 24m
+            if (dist3D <= 24.0f)
+            {
+                MovableVehicle mv = tankVeh.TryCast<MovableVehicle>();
+                if (mv != null && mv.rb != null && Vector3.Dot(mv.rb.velocity, dir3D) > 1.2f)
+                    return true;
+            }
+
+            // 3. Unbuttoned commander / open-top / periscope spotter within 52m with unobstructed LOS
+            if (dist3D <= 52.0f)
+            {
+                AiCore.VehicleFastHandles vh = AiCore.GetOrCreateVehicleHandles(tankVeh);
+                string tankFaction = GetVehicleCrewFaction(tankVeh);
+                AiCore.GetCachedVehicleSpotterStatus(vh, tankFaction, Time.time, out bool hasOpenSpotter, out _);
+                if (hasOpenSpotter &&
+                    !AiCore.RaycastEnvironment(tankPos + Vector3.up * 2.1f, dir3D, Mathf.Max(0.5f, dist3D - 1.5f), tankVeh.transform.root, out _))
+                {
+                    return true;
+                }
+            }
+
+            // 4. Staffed turret/hull-MG firing arcs or active target lock near the observer
+            var seats = tankVeh.seats;
+            if (seats != null)
+            {
+                Vector3 toObsFlat = new Vector3(toObs.x, 0f, toObs.z);
+                Vector3 dirToObsFlat = toObsFlat.sqrMagnitude > 0.001f ? toObsFlat.normalized : Vector3.forward;
+                Turret mainTurret = tankVeh.GetMainTurret(false);
+                int seatCount = seats.Length;
+                for (int i = 0; i < seatCount; i++)
+                {
+                    Seats seat = seats[i];
+                    if (seat == null || seat.unitSet == null || !seat.unitSet.IsAlive || seat.connectedTurret == null)
+                        continue;
+
+                    Turret turret = seat.connectedTurret;
+                    if (turret.autoPilot != null &&
+                        AiCore.TryGetSpottableCenter(turret.autoPilot.CurrentVisibleTarget, out Vector3 vtPos) &&
+                        (vtPos - observerPos).sqrMagnitude <= 14.0f * 14.0f)
+                    {
+                        return true;
+                    }
+
+                    Vector3 fireDir = turret.GetFireDir();
+                    Vector3 fireDirFlat = new Vector3(fireDir.x, 0f, fireDir.z);
+                    if (fireDirFlat.sqrMagnitude > 0.001f)
+                    {
+                        float halfCone = (mainTurret != null && turret.Pointer == mainTurret.Pointer) ? 48f : 38f;
+                        if (Vector3.Angle(fireDirFlat.normalized, dirToObsFlat) <= halfCone)
+                            return true;
+                    }
+                }
+            }
+
+            return false;
+        }
+
         private static bool TryEvadeArmorToCover(SoldierAI ai, Soldier soldier, Vehicle targetVeh, float dist)
         {
             if (ai == null || !AiCore.IsLocallyOwnedBot(soldier) || targetVeh == null || targetVeh.transform == null || soldier.transform == null)
@@ -504,6 +579,10 @@ namespace EasyRed2HumanAI
 
             // If the soldier carries any usable AT capability (launcher, AT grenade, satchel, Molotov, Gammon) within assault range, close & engage!
             if (dist <= 42f && HasUsableAntiTankCapability(soldier))
+                return false;
+
+            // Only panic-evade when the tank is actually threatening our position (turret/MG cone, open commander LOS, or closing hull)
+            if (!IsTankThreateningPosition(targetVeh, myPos, 85f))
                 return false;
             Vector3 toTank = targetVeh.transform.position - myPos;
             toTank.y = 0f;
@@ -724,7 +803,10 @@ namespace EasyRed2HumanAI
         internal static readonly Dictionary<IntPtr, float> _nextPlaneOrbitSteerTime = new Dictionary<IntPtr, float>(32);
         internal static readonly Dictionary<IntPtr, float> _nextCombinedArmsAssistCountTime = new Dictionary<IntPtr, float>(64);
         internal static readonly HashSet<IntPtr> _activeKamikazePlanes = new HashSet<IntPtr>();
+        internal static readonly Dictionary<IntPtr, bool> _kamikazeDecisionByPlane = new Dictionary<IntPtr, bool>(16);
         internal static readonly Dictionary<IntPtr, float> _nextKamikazeTargetSearchTime = new Dictionary<IntPtr, float>(16);
+        internal static readonly Dictionary<IntPtr, Squad> _lastKnownVehicleCrewSquad = new Dictionary<IntPtr, Squad>(32);
+        private static float _nextGroundedCrewRetreatCheckTime;
         public static int CombinedArmsPriorityAssistsCount;
         public static int ArmoredDispersionAdjustmentsCount;
         public static int KamikazeDivesTriggeredCount;
@@ -750,6 +832,7 @@ namespace EasyRed2HumanAI
             public Vector3 EscapeTargetPos;
             public float ExpireTime;
             public float CooldownUntil;
+            public float NextCheckTime;
         }
 
         private static readonly Dictionary<IntPtr, RemoteVehicleMotionState> _remoteVehicleMotion = new Dictionary<IntPtr, RemoteVehicleMotionState>(32);
@@ -800,6 +883,7 @@ namespace EasyRed2HumanAI
         private struct ActiveGroundVehicleInfo
         {
             public IntPtr VehPtr;
+            public Vehicle Veh;
             public string Faction;
             public Vector3 Position;
             public Vector3 Forward;
@@ -851,7 +935,10 @@ namespace EasyRed2HumanAI
             _currentDirectorBattleData = null;
             _emplacementScanCursor = 0;
             _activeKamikazePlanes.Clear();
+            _kamikazeDecisionByPlane.Clear();
             _nextKamikazeTargetSearchTime.Clear();
+            _lastKnownVehicleCrewSquad.Clear();
+            _nextGroundedCrewRetreatCheckTime = 0f;
             _tankHighCenteredDuration.Clear();
             _nextTankUnstickCountTime.Clear();
             _hotStartedPlayerPlanes.Clear();
@@ -1147,6 +1234,7 @@ namespace EasyRed2HumanAI
                             _activeGroundVehicles.Add(new ActiveGroundVehicleInfo
                             {
                                 VehPtr = v.Pointer,
+                                Veh = v,
                                 Faction = vf,
                                 Position = vPos,
                                 Forward = vFwd,
@@ -3052,13 +3140,28 @@ namespace EasyRed2HumanAI
             if (_activeKamikazePlanes.Contains(plane.veh.Pointer))
                 return true;
 
-            // Trigger 1: Crippled / heavily damaged aircraft (>= 45 hull damage) refuses to bail out or retreat
-            bool isCrippled = plane.veh.GetDamage() >= 45;
+            // Kamikaze is strictly a last-resort sacrifice for severely crippled Japanese aircraft:
+            // dropping bombs or expending forward gun ammo NEVER triggers kamikaze (intact planes RTB/refill normally).
+            bool severelyDamaged =
+                plane.veh.GetDamage() >= 80 ||
+                plane.veh.hasMissingParts ||
+                !plane.veh.useWingsL ||
+                !plane.veh.useWingsR;
 
-            // Trigger 2: Winchester ("No Return") — all bombs dropped AND all forward pilot gun ammo expended
-            bool expendedAllOrdnanceAndAmmo = !plane.HasBombsToDeliver() && !plane.PilotGunHasAnyAmmo();
+            if (!severelyDamaged)
+                return false;
 
-            return isCrippled || expendedAllOrdnanceAndAmmo;
+            IntPtr vehPtr = plane.veh.Pointer;
+            if (_kamikazeDecisionByPlane.TryGetValue(vehPtr, out bool committed))
+                return committed;
+
+            SoldierPersonality pilotPers = GetVehicleCrewPersonality(plane.veh);
+            float chance = pilotPers == SoldierPersonality.Pilot_Disciplined
+                ? 0f
+                : (pilotPers == SoldierPersonality.Pilot_Daredevil ? 0.55f : 0.30f);
+            committed = chance > 0f && UnityEngine.Random.value < chance;
+            _kamikazeDecisionByPlane[vehPtr] = committed;
+            return committed;
         }
 
         private static Spottable FindBestKamikazeTarget(AIPlane plane, string myFaction)
@@ -3069,12 +3172,42 @@ namespace EasyRed2HumanAI
             Spottable bestTarget = null;
             float bestScore = -99999f;
 
-            // 1. Prioritize known enemy tanks, combat vehicles, and radio-requested / marked strongpoints
+            // 1. Highest Priority: Operational enemy tanks and ground combat vehicles
+            int gvCount = _activeGroundVehicles.Count;
+            for (int i = 0; i < gvCount; i++)
+            {
+                ActiveGroundVehicleInfo gv = _activeGroundVehicles[i];
+                if (string.IsNullOrEmpty(gv.Faction) ||
+                    AiCore.AreSameSideFactions(myFaction, gv.Faction) ||
+                    gv.Veh == null ||
+                    gv.Veh.Pointer == IntPtr.Zero ||
+                    !gv.Veh.CanFight())
+                {
+                    continue;
+                }
+
+                Spottable vSpot = gv.Veh.TryCast<Spottable>();
+                if (!IsSpottableTargetValid(vSpot))
+                    continue;
+
+                float dist = Vector3.Distance(planePos, gv.Position);
+                if (dist > 2800.0f)
+                    continue;
+
+                float score = (gv.IsTank ? 320.0f : 230.0f) - (dist * 0.05f);
+                if (score > bestScore)
+                {
+                    bestScore = score;
+                    bestTarget = vSpot;
+                }
+            }
+
+            // 2. Radio-spotted / known enemy clusters (armor/vehicles heavily favored; infantry strictly last resort)
             int clusterCount = _knownEnemyClusters.Count;
             for (int i = 0; i < clusterCount; i++)
             {
                 KnownEnemyCluster cluster = _knownEnemyClusters[i];
-                if (cluster.Faction == myFaction)
+                if (AiCore.AreSameSideFactions(myFaction, cluster.Faction))
                     continue;
 
                 for (int pass = 0; pass < 2; pass++)
@@ -3088,13 +3221,18 @@ namespace EasyRed2HumanAI
                     if (dist > 2600.0f)
                         continue;
 
-                    float bonus = 35.0f;
+                    float score;
                     if (pass == 0)
                     {
-                        bonus = cand.TryCast<VehicleTank>() != null ? 140.0f : 95.0f;
+                        float vehBase = cand.TryCast<VehicleTank>() != null ? 320.0f : 235.0f;
+                        score = vehBase + Mathf.Min(cluster.BasePriority, 45.0f) - (dist * 0.05f);
+                    }
+                    else
+                    {
+                        // Infantry clusters score well below any enemy armor, vehicle, bomber, or fighter
+                        score = Mathf.Min(cluster.BasePriority, 25.0f) + 15.0f - (dist * 0.06f);
                     }
 
-                    float score = cluster.BasePriority + bonus - (dist * 0.06f);
                     if (score > bestScore)
                     {
                         bestScore = score;
@@ -3103,13 +3241,13 @@ namespace EasyRed2HumanAI
                 }
             }
 
-            // 2. Check airborne enemy heavy bombers (Shinten Seikūtai aerial ramming)
+            // 3. Airborne enemy bombers & fighters (Shinten Seikūtai aerial ramming — always preferred over infantry)
             int airCount = _airborneAircraft.Count;
             IntPtr selfVehPtr = plane.veh.Pointer;
             for (int i = 0; i < airCount; i++)
             {
                 AirborneAircraftInfo info = _airborneAircraft[i];
-                if (info.Faction == myFaction ||
+                if (AiCore.AreSameSideFactions(myFaction, info.Faction) ||
                     info.Plane == null ||
                     info.Plane.Pointer == IntPtr.Zero ||
                     info.Plane.Pointer == selfVehPtr ||
@@ -3121,16 +3259,12 @@ namespace EasyRed2HumanAI
                     continue;
                 }
 
-                // Prefer ramming enemy heavy bombers, or any nearby enemy aircraft if no ground target is known
-                if (!info.IsBomber && bestTarget != null)
-                    continue;
-
                 Vector3 airPos = info.Plane.transform != null ? info.Plane.transform.position : info.Position;
                 float dist = Vector3.Distance(planePos, airPos);
-                if (dist > 1800.0f)
+                if (dist > 2400.0f)
                     continue;
 
-                float score = (info.IsBomber ? 115.0f : 45.0f) - (dist * 0.06f);
+                float score = (info.IsBomber ? 275.0f : 210.0f) - (dist * 0.05f);
                 if (score > bestScore)
                 {
                     bestScore = score;
@@ -3138,8 +3272,8 @@ namespace EasyRed2HumanAI
                 }
             }
 
-            // 3. Fallback: direct visual scan of battlefield squads if all ground radio nets are down
-            if (bestTarget == null)
+            // 4. Direct visual scan of battlefield squads if no high-value armor/plane was found yet
+            if (bestTarget == null || bestScore < 120.0f)
             {
                 AiCore.EnsureWorldSnapshot();
                 int sqCount = AiCore.WorldSquadCount;
@@ -3147,7 +3281,7 @@ namespace EasyRed2HumanAI
                 for (int s = 0; s < sqCount; s++)
                 {
                     ref AiCore.SquadSnapshot sqSnap = ref squads[s];
-                    if (!sqSnap.LeaderIsAlive || string.IsNullOrEmpty(sqSnap.Faction) || sqSnap.Faction == myFaction)
+                    if (!sqSnap.LeaderIsAlive || string.IsNullOrEmpty(sqSnap.Faction) || AiCore.AreSameSideFactions(myFaction, sqSnap.Faction))
                         continue;
 
                     Soldier leader = sqSnap.Leader;
@@ -3156,14 +3290,14 @@ namespace EasyRed2HumanAI
 
                     Vehicle mountedVeh = sqSnap.LeaderOnVehicle ? leader.GetCurrentVehicle() : null;
                     Spottable cand = null;
-                    float baseVal = 30.0f;
+                    float baseVal = 12.0f;
 
                     if (mountedVeh != null && mountedVeh.CanFight() && !mountedVeh.IsAirVehicle())
                     {
                         cand = mountedVeh.Cast<Spottable>();
-                        baseVal = mountedVeh.TryCast<VehicleTank>() != null ? 135.0f : 90.0f;
+                        baseVal = mountedVeh.TryCast<VehicleTank>() != null ? 310.0f : 220.0f;
                     }
-                    else
+                    else if (bestTarget == null)
                     {
                         cand = leader.Cast<Spottable>();
                     }
@@ -3175,7 +3309,7 @@ namespace EasyRed2HumanAI
                     if (dist > 2800.0f)
                         continue;
 
-                    float score = baseVal - (dist * 0.06f);
+                    float score = baseVal - (dist * (baseVal >= 200f ? 0.05f : 0.06f));
                     if (score > bestScore)
                     {
                         bestScore = score;
@@ -3202,7 +3336,7 @@ namespace EasyRed2HumanAI
                 {
                     AiCore.LogDebug(
                         "Kamikaze",
-                        $"Imperial Japanese aircraft (dmg:{plane.veh.GetDamage()}, bombs:{plane.HasBombsToDeliver()}, gunAmmo:{plane.PilotGunHasAnyAmmo()}) committed to final Tokkōtai kamikaze dive!");
+                        $"Imperial Japanese aircraft (dmg:{plane.veh.GetDamage()}, missingParts:{plane.veh.hasMissingParts}) committed to final Tokkōtai kamikaze dive!");
                 }
             }
 
@@ -3230,11 +3364,20 @@ namespace EasyRed2HumanAI
 
             if (target.IsAirVehicle())
             {
-                // Aerial ramming (Shinten Seikūtai)
+                // Aerial ramming (Shinten Seikūtai) with velocity lead intercept
                 plane.planeState = AIPlane.PlaneAIState.doingDive;
                 plane.exitDiveEndTime = 0f;
                 Vehicle airVeh = target.TryCast<Vehicle>();
-                Vector3 leadOffset = (airVeh != null && airVeh.transform != null) ? airVeh.transform.forward * 10.0f : Vector3.zero;
+                float airDist = Vector3.Distance(planePos, targetPos);
+                Vector3 leadOffset = Vector3.zero;
+                if (airVeh != null)
+                {
+                    MovableVehicle airMv = airVeh.TryCast<MovableVehicle>();
+                    if (airMv != null && airMv.rb != null && airMv.rb.velocity.sqrMagnitude > 4f)
+                        leadOffset = airMv.rb.velocity * Mathf.Clamp(airDist / 95.0f, 0.15f, 1.35f);
+                    else if (airVeh.transform != null)
+                        leadOffset = airVeh.transform.forward * 12.0f;
+                }
                 plane.flyTargetPosition = targetPos + leadOffset;
                 if (!isPostfix)
                 {
@@ -3246,21 +3389,37 @@ namespace EasyRed2HumanAI
             Vector3 flatDelta = targetPos - planePos;
             flatDelta.y = 0f;
             float horizDist = flatDelta.magnitude;
+            Vector3 horizDir = horizDist > 0.5f ? (flatDelta / horizDist) : Vector3.forward;
             float heightAboveTarget = planePos.y - targetPos.y;
 
-            if (horizDist > 300.0f && heightAboveTarget < horizDist * 0.40f)
+            // Sample terrain elevation ahead along the approach so crippled planes climb over ridges instead of smashing short into hills
+            float terrMid = ResourcesManager.GetTerrainAltitude(planePos + horizDir * Mathf.Min(horizDist * 0.50f, 180.0f), 0f);
+            float terrFar = ResourcesManager.GetTerrainAltitude(planePos + horizDir * Mathf.Min(horizDist * 0.82f, 360.0f), 0f);
+            float maxTerrainAheadY = Mathf.Max(targetPos.y, Mathf.Max(terrMid, terrFar));
+
+            Vector3 toTarget3D = (targetPos + Vector3.up * 2.5f) - planePos;
+            float dist3D = toTarget3D.magnitude;
+            bool losBlockedByRidge =
+                horizDist > 140.0f &&
+                dist3D > 16.0f &&
+                AiCore.RaycastEnvironment(planePos, toTarget3D / dist3D, dist3D - 12.0f, plane.transform.root, out _);
+
+            if ((horizDist > 165.0f && heightAboveTarget < horizDist * 0.72f) ||
+                planePos.y < maxTerrainAheadY + 75.0f ||
+                losBlockedByRidge)
             {
-                // Stage 1: Climb/cruise to roll-in apex directly over the target so the plane doesn't clip terrain short
+                // Stage 1: Climb to high roll-in apex over the target so the steep terminal dive clears all terrain
                 plane.planeState = AIPlane.PlaneAIState.preparingDive;
-                float desiredApexY = Mathf.Max(targetPos.y + 170.0f, planePos.y + 15.0f);
-                plane.flyTargetPosition = new Vector3(targetPos.x, desiredApexY, targetPos.z);
+                float minSafeApexY = Mathf.Max(targetPos.y + 245.0f, Mathf.Max(maxTerrainAheadY + 145.0f, planePos.y + 20.0f));
+                plane.flyTargetPosition = new Vector3(targetPos.x, minSafeApexY, targetPos.z);
             }
             else
             {
-                // Stage 2: Terminal steep Kamikaze dive — aim 3.5m below target center so the aircraft never levels off
+                // Stage 2: Steep terminal dive with gravity-droop compensation above 90m so the aircraft impacts the target instead of the dirt short of it
                 plane.planeState = AIPlane.PlaneAIState.doingDive;
                 plane.exitDiveEndTime = 0f;
-                plane.flyTargetPosition = targetPos - Vector3.up * 3.5f;
+                float aimOffsetY = horizDist > 90.0f ? Mathf.Clamp(horizDist * 0.065f, 1.0f, 15.0f) : -1.5f;
+                plane.flyTargetPosition = targetPos + Vector3.up * aimOffsetY;
             }
 
             if (!isPostfix)
@@ -3312,8 +3471,11 @@ namespace EasyRed2HumanAI
                 return;
             }
 
-            if (isPostfix || now < breakState.CooldownUntil)
+            if (isPostfix || now < breakState.CooldownUntil || now < breakState.NextCheckTime)
                 return;
+
+            breakState.NextCheckTime = now + 0.10f;
+            _planeDogfightBreakOff[vehPtr] = breakState;
 
             string myFaction = GetVehicleCrewFaction(plane.veh);
             if (string.IsNullOrEmpty(myFaction))
@@ -3328,15 +3490,15 @@ namespace EasyRed2HumanAI
             myFwd.Normalize();
 
             SoldierPersonality pilotPers = GetVehicleCrewPersonality(plane.veh);
-            float headOnBreakDist = 260.0f;
+            float headOnBreakDist = 155.0f;
             if (pilotPers == SoldierPersonality.Pilot_Ace || pilotPers == SoldierPersonality.Pilot_Disciplined)
-                headOnBreakDist = 285.0f;
+                headOnBreakDist = 170.0f;
             else if (pilotPers == SoldierPersonality.Pilot_Daredevil)
-                headOnBreakDist = 205.0f;
+                headOnBreakDist = 125.0f;
 
             bool triggerBreak = false;
 
-            // 1. Check current targetToAttack first if it is an airborne aircraft
+            // 1. Check current targetToAttack first: break ONLY after firing through the head-on window on a true reciprocal nose-to-nose collision course!
             Spottable curAtk = plane.targetToAttack;
             if (curAtk != null && curAtk.Pointer != IntPtr.Zero && curAtk.IsAirVehicle())
             {
@@ -3351,8 +3513,8 @@ namespace EasyRed2HumanAI
                         Vector3 enemyFwd = enemyVp.transform.forward;
                         float approachDot = Vector3.Dot(toEnemyDir, myFwd);
                         float mergeDot = Vector3.Dot(myFwd, enemyFwd);
-                        if ((approachDot > 0.28f && mergeDot < -0.25f) ||
-                            (dist <= 130.0f && approachDot > 0.42f))
+                        if ((approachDot > 0.84f && mergeDot < -0.65f) ||
+                            (dist <= 48.0f && approachDot > 0.72f && mergeDot < 0.25f))
                         {
                             triggerBreak = true;
                         }
@@ -3360,14 +3522,14 @@ namespace EasyRed2HumanAI
                 }
             }
 
-            // 2. Also scan _airborneAircraft within 300m so an AI plane breaks off even when a player/fighter merges head-on while it was targeting someone else
+            // 2. Scan _airborneAircraft for un-targeted reciprocal head-on collision courses
             if (!triggerBreak)
             {
                 int airCount = _airborneAircraft.Count;
                 for (int i = 0; i < airCount; i++)
                 {
                     AirborneAircraftInfo info = _airborneAircraft[i];
-                    if (info.Faction == myFaction ||
+                    if (AiCore.AreSameSideFactions(myFaction, info.Faction) ||
                         info.Plane == null ||
                         info.Plane.Pointer == IntPtr.Zero ||
                         info.Plane.Pointer == vehPtr ||
@@ -3386,8 +3548,8 @@ namespace EasyRed2HumanAI
                     Vector3 enemyFwd = info.Plane.transform.forward;
                     float approachDot = Vector3.Dot(toEnemyDir, myFwd);
                     float mergeDot = Vector3.Dot(myFwd, enemyFwd);
-                    if ((approachDot > 0.28f && mergeDot < -0.25f) ||
-                        (dist <= 125.0f && approachDot > 0.45f))
+                    if ((approachDot > 0.84f && mergeDot < -0.65f) ||
+                        (dist <= 48.0f && approachDot > 0.72f && mergeDot < 0.25f))
                     {
                         triggerBreak = true;
                         break;
@@ -3397,15 +3559,18 @@ namespace EasyRed2HumanAI
 
             if (triggerBreak)
             {
-                // Standard right-hand climbing break turn: opposing aircraft each break to THEIR right, cleanly separating both flight paths!
+                // Right-hand break turn with hard altitude ceiling so dogfighting fighters never spiral up into space
+                float groundY = Mathf.Max(0f, ResourcesManager.GetTerrainAltitude(myPos, 0f));
+                float maxSafeAlt = Mathf.Min(plane.veh.maxFlyHeight > 80f ? plane.veh.maxFlyHeight * 0.88f : 420f, groundY + 340f);
+                float climbDelta = myPos.y >= maxSafeAlt - 45.0f ? -28.0f : 38.0f;
+
                 Vector3 rightVec = plane.transform.right;
-                Vector3 escapePos = myPos + myFwd * 235.0f + rightVec * 215.0f + Vector3.up * 68.0f;
-                if (escapePos.y < myPos.y + 45.0f)
-                    escapePos.y = myPos.y + 45.0f;
+                Vector3 escapePos = myPos + myFwd * 195.0f + rightVec * 195.0f;
+                escapePos.y = Mathf.Clamp(myPos.y + climbDelta, groundY + 95.0f, Mathf.Max(groundY + 135.0f, maxSafeAlt));
 
                 breakState.EscapeTargetPos = escapePos;
-                breakState.ExpireTime = now + 2.75f;
-                breakState.CooldownUntil = now + 4.25f;
+                breakState.ExpireTime = now + 2.10f;
+                breakState.CooldownUntil = now + 4.50f;
                 _planeDogfightBreakOff[vehPtr] = breakState;
 
                 plane.followTarget = false;
@@ -3419,7 +3584,7 @@ namespace EasyRed2HumanAI
                     plane.nextUpdateCheck = now + 0.30f;
                 }
 
-                AiCore.LogDebug("DogfightBreak", $"{myFaction} fighter executed climbing right-hand break turn to avoid head-on collision.");
+                AiCore.LogDebug("DogfightBreak", $"{myFaction} fighter executed right-hand break turn to avoid head-on collision.");
             }
         }
 
@@ -5784,6 +5949,7 @@ namespace EasyRed2HumanAI
                         __1 != null && !string.IsNullOrEmpty(__1.faction) && __1.faction != "Civilian")
                     {
                         _lastKnownVehicleFaction[__instance.Pointer] = __1.faction;
+                        RegisterVehicleCrewSquad(__instance, __1);
                     }
 
                     if (__state.DisplacedBot == null || !__state.DisplacedBot.IsAlive || __instance == null)
@@ -5931,6 +6097,488 @@ namespace EasyRed2HumanAI
             }
         }
 
+        private static void RegisterVehicleCrewSquad(Vehicle veh, Soldier occupant)
+        {
+            if (veh == null || veh.Pointer == IntPtr.Zero || occupant == null || occupant.Pointer == IntPtr.Zero)
+                return;
+
+            Squad sq = occupant.joinedSquad;
+            if (sq == null || sq.Pointer == IntPtr.Zero || sq.isChargeSquad || veh.IsTransportVehicle())
+                return;
+
+            AiCore.VehicleFastHandles vh = AiCore.GetOrCreateVehicleHandles(veh);
+            if (vh == null || vh.IsParachute)
+                return;
+
+            if (vh.IsPlane || vh.IsAir)
+            {
+                if (sq.isOpenForJoiners)
+                {
+                    var units = sq.units;
+                    int uCount = units != null ? units.Count : 0;
+                    Vector3 vPos = veh.transform != null ? veh.transform.position : Vector3.zero;
+                    for (int i = 0; i < uCount; i++)
+                    {
+                        Soldier u = units[i];
+                        if (u == null || u.Pointer == IntPtr.Zero || !u.IsAlive)
+                            continue;
+                        if (u.IsMedic() || u.hasMg || u.IsRadioman() || u.isAtUnit)
+                            return;
+                        if (!u.IsOnVehicle() && u.transform != null && (u.transform.position - vPos).sqrMagnitude > 40.0f * 40.0f)
+                            return;
+                    }
+                }
+
+                AiCore.MarkConfirmedPlaneCrewSquad(sq);
+                _lastKnownVehicleCrewSquad[veh.Pointer] = sq;
+                return;
+            }
+
+            if (sq.isOpenForJoiners)
+                return;
+
+            if (vh.IsTank)
+            {
+                AiCore.MarkConfirmedVehicleCrewSquad(sq);
+                _lastKnownVehicleCrewSquad[veh.Pointer] = sq;
+                return;
+            }
+
+            VehicleWithWheels wheeled = veh.TryCast<VehicleWithWheels>();
+            if (wheeled != null && wheeled.RetreatCrewOnDestroy() && !wheeled.IsTransportVehicle())
+            {
+                AiCore.MarkConfirmedVehicleCrewSquad(sq);
+                _lastKnownVehicleCrewSquad[veh.Pointer] = sq;
+            }
+        }
+
+        private static void RegisterPlaneCrewFromSeats(VehiclePlane vp)
+        {
+            if (vp == null || vp.Pointer == IntPtr.Zero || vp.IsTransportVehicle() || vp.seats == null)
+                return;
+
+            var seats = vp.seats;
+            int len = seats.Length;
+            for (int i = 0; i < len; i++)
+            {
+                Seats s = seats[i];
+                Soldier u = s != null ? s.unitSet : null;
+                if (u != null && u.Pointer != IntPtr.Zero)
+                {
+                    if (!string.IsNullOrEmpty(u.faction) && u.faction != "Civilian")
+                        _lastKnownVehicleFaction[vp.Pointer] = u.faction;
+                    RegisterVehicleCrewSquad(vp, u);
+                }
+            }
+        }
+
+        internal static bool AssignCrewSquadRetreatTask(
+            Squad crewSq,
+            string faction,
+            Vector3 originPos,
+            bool allowWaterSurface,
+            bool replaceExistingIfFar)
+        {
+            if (crewSq == null || crewSq.Pointer == IntPtr.Zero || crewSq.CountMembers <= 0)
+                return false;
+
+            MissionTaskRetreat existingRet = crewSq.currentTask != null
+                ? crewSq.currentTask.TryCast<MissionTaskRetreat>()
+                : null;
+            if (existingRet != null)
+            {
+                if (!replaceExistingIfFar)
+                    return false;
+
+                Vector3 curDest = existingRet.GetTaskDestination();
+                Vector3 dFlat = curDest - originPos;
+                dFlat.y = 0f;
+                if (dFlat.sqrMagnitude <= 210.0f * 210.0f)
+                    return false;
+
+                try
+                {
+                    if (existingRet.gui != null && existingRet.gui.gameObject != null)
+                        UnityEngine.Object.Destroy(existingRet.gui.gameObject);
+                    existingRet.RemoveTaskForever();
+                }
+                catch { }
+            }
+            else if (IsSquadOnRetreatTask(crewSq))
+            {
+                return false;
+            }
+
+            if (string.IsNullOrEmpty(faction) || faction == "Civilian")
+            {
+                var units = crewSq.units;
+                int uCount = units != null ? units.Count : 0;
+                for (int i = 0; i < uCount; i++)
+                {
+                    Soldier u = units[i];
+                    if (u != null && u.Pointer != IntPtr.Zero && !string.IsNullOrEmpty(u.faction) && u.faction != "Civilian")
+                    {
+                        faction = u.faction;
+                        break;
+                    }
+                }
+            }
+
+            if (string.IsNullOrEmpty(faction) || faction == "Civilian")
+                return false;
+
+            if (!AiCore.TryComputeCrewRetreatDestination(faction, originPos, out Vector3 retreatPos, allowWaterSurface))
+                return false;
+
+            var retTask = new MissionTaskRetreat(retreatPos, crewSq, false);
+            crewSq.currentTask = retTask.Cast<SquadTask>();
+            if (ResourcesManager.instance != null)
+            {
+                ResourcesManager.instance.StartCoroutine(crewSq.UpdateSquadTaskUI());
+            }
+
+            Soldier leader = crewSq.Leader;
+            if (!crewSq.IsPlayerInSquad() && leader != null && leader.IsAlive && AiCore.IsLocallyOwnedBot(leader))
+            {
+                TrySayTacticalVoice(leader, crewSq, VoiceManager.VoiceClip.timeToRetreat, 0.25f);
+                crewSq.HoldArea(retreatPos, 15.0f, false);
+            }
+
+            if (VisionConfig.DebugLogging.Value)
+            {
+                AiCore.LogDebug(
+                    "CrewBailout",
+                    $"{faction} crew '{crewSq.squadName}' assigned Retreat ({Vector3.Distance(originPos, retreatPos):F0}m rearward, playerSquad={crewSq.IsPlayerInSquad()}).");
+            }
+
+            return true;
+        }
+
+        internal static bool HandlePlaneRetreatCrew(AIPlane aiPlane)
+        {
+            if (aiPlane == null)
+                return true;
+
+            VehiclePlane veh = aiPlane.veh;
+            if (veh == null || veh.Pointer == IntPtr.Zero)
+                return true;
+
+            // Replace vanilla AIPlane.RetreatCrew (0x180572ED0), which:
+            //   1) Crashes with NullReferenceException on all sp_ME_ / V2 maps where BattleManager.instance.currentPhase == null,
+            //   2) Silently skips MissionTaskRetreat over water/ocean or outside Terrain bounds, and
+            //   3) Computes the retreat point mid-air before parachutes drift 200m-500m away!
+            _vehiclesCrewRetreatedFrom.Add(veh.Pointer);
+
+            Soldier sampleCrew = null;
+            var seats = veh.seats;
+            if (seats != null)
+            {
+                int seatCount = seats.Length;
+                for (int i = 0; i < seatCount; i++)
+                {
+                    Seats seat = seats[i];
+                    Soldier unit = seat != null ? seat.unitSet : null;
+                    if (unit == null || unit.Pointer == IntPtr.Zero)
+                        continue;
+
+                    if (sampleCrew == null)
+                        sampleCrew = unit;
+
+                    RegisterVehicleCrewSquad(veh, unit);
+
+                    Syncher syn = unit.GetSyncher();
+                    if (syn == null || !syn.OwnSyncher)
+                        continue;
+
+                    unit.CoverPosition(null);
+                    _localCoverProtectedUntil.Remove(unit.Pointer);
+                    ClearEmplacementAssignment(unit.Pointer, markUnreachable: false);
+
+                    if (unit.IsAI())
+                    {
+                        veh.GetOffVehicle(unit);
+                    }
+                }
+            }
+
+            if (veh.IsTransportVehicle())
+                return false;
+
+            Squad crewSq = sampleCrew != null ? sampleCrew.joinedSquad : null;
+            if ((crewSq == null || crewSq.Pointer == IntPtr.Zero) &&
+                _lastKnownVehicleCrewSquad.TryGetValue(veh.Pointer, out Squad cachedSq) &&
+                cachedSq != null &&
+                cachedSq.Pointer != IntPtr.Zero)
+            {
+                crewSq = cachedSq;
+            }
+
+            if (crewSq != null)
+            {
+                AiCore.MarkConfirmedPlaneCrewSquad(crewSq);
+
+                // If the plane crashed/burned on the ground, assign Retreat immediately.
+                // If airborne, UpdateGroundedCrewRetreatTasks() assigns Retreat right where the parachutes actually touch down!
+                if (veh.isGrounded && veh.transform != null)
+                {
+                    string fac = sampleCrew != null ? sampleCrew.faction : null;
+                    if (string.IsNullOrEmpty(fac))
+                        _lastKnownVehicleFaction.TryGetValue(veh.Pointer, out fac);
+                    AssignCrewSquadRetreatTask(crewSq, fac, veh.transform.position, allowWaterSurface: true, replaceExistingIfFar: true);
+                }
+            }
+
+            return false;
+        }
+
+        private static bool HasIntactFlyablePlaneNearby(Vector3 pos, float maxRadius)
+        {
+            var allVehicles = Vehicle.allVehicles;
+            if (allVehicles == null)
+                return false;
+
+            float rSq = maxRadius * maxRadius;
+            int vCount = allVehicles.Count;
+            for (int i = 0; i < vCount; i++)
+            {
+                Vehicle veh = allVehicles[i];
+                if (veh == null || veh.Pointer == IntPtr.Zero || veh.transform == null || veh.IsDisabled() || _vehiclesCrewRetreatedFrom.Contains(veh.Pointer))
+                    continue;
+
+                AiCore.VehicleFastHandles vh = AiCore.GetOrCreateVehicleHandles(veh);
+                if (vh == null || (!vh.IsPlane && !vh.IsAir) || vh.IsParachute || veh.IsTransportVehicle())
+                    continue;
+
+                if (!veh.CanFight())
+                    continue;
+
+                Vector3 d = veh.transform.position - pos;
+                d.y = 0f;
+                if (d.sqrMagnitude <= rSq)
+                    return true;
+            }
+
+            return false;
+        }
+
+        private static bool IsNearFriendlyAirfieldOrSpawn(string faction, Vector3 pos)
+        {
+            if (!string.IsNullOrEmpty(faction) &&
+                AiCore.TryGetNearestFriendlySpawnPosition(faction, pos, out Vector3 spawnPos))
+            {
+                Vector3 d = spawnPos - pos;
+                d.y = 0f;
+                if (d.sqrMagnitude <= 260.0f * 260.0f)
+                    return true;
+            }
+
+            int rsCount = _activeRepairStations.Count;
+            for (int i = 0; i < rsCount; i++)
+            {
+                RepairStation rs = _activeRepairStations[i];
+                if (rs == null || rs.Pointer == IntPtr.Zero || rs.transform == null)
+                    continue;
+
+                Vector3 d = rs.transform.position - pos;
+                d.y = 0f;
+                if (d.sqrMagnitude <= 200.0f * 200.0f)
+                    return true;
+            }
+
+            return false;
+        }
+
+        private static void EvaluateGroundedAircrewSquad(Squad sq)
+        {
+            if (sq == null || sq.Pointer == IntPtr.Zero || sq.CountMembers <= 0)
+                return;
+
+            Soldier localPlayerGrounded = null;
+            Vector3 groundSum = Vector3.zero;
+            int groundedCount = 0;
+            bool anyAliveInActivePlane = false;
+            bool anyAliveInParachute = false;
+            bool localPlayerInPlaneOrChute = false;
+            string faction = null;
+
+            var units = sq.units;
+            int uCount = units != null ? units.Count : 0;
+            for (int uIdx = 0; uIdx < uCount; uIdx++)
+            {
+                Soldier u = units[uIdx];
+                if (u == null || u.Pointer == IntPtr.Zero || !u.IsAlive || u.transform == null)
+                    continue;
+
+                if (string.IsNullOrEmpty(faction) && !string.IsNullOrEmpty(u.faction) && u.faction != "Civilian")
+                    faction = u.faction;
+
+                bool isLocalPlayer = u.IsPlayer();
+                if (u.IsOnVehicle())
+                {
+                    Vehicle curVeh = u.GetCurrentVehicle();
+                    AiCore.VehicleFastHandles cvh = AiCore.GetOrCreateVehicleHandles(curVeh);
+                    if (cvh != null && cvh.IsParachute)
+                    {
+                        anyAliveInParachute = true;
+                        if (isLocalPlayer)
+                            localPlayerInPlaneOrChute = true;
+                        continue;
+                    }
+
+                    if (curVeh != null && !curVeh.IsDisabled() && !_vehiclesCrewRetreatedFrom.Contains(curVeh.Pointer))
+                    {
+                        anyAliveInActivePlane = true;
+                        if (isLocalPlayer)
+                            localPlayerInPlaneOrChute = true;
+                    }
+                    continue;
+                }
+
+                Vector3 uPos = u.transform.position;
+                float groundY = Mathf.Max(0f, ResourcesManager.GetTerrainAltitude(uPos, 0f));
+                if (uPos.y > groundY + 18.0f &&
+                    !AiCore.RaycastEnvironment(uPos + Vector3.up * 0.8f, Vector3.down, 18.0f, u.transform.root, out _))
+                {
+                    anyAliveInParachute = true;
+                    if (isLocalPlayer)
+                        localPlayerInPlaneOrChute = true;
+                    continue;
+                }
+
+                groundSum += uPos;
+                groundedCount++;
+                if (isLocalPlayer)
+                    localPlayerGrounded = u;
+            }
+
+            if (groundedCount == 0 || localPlayerInPlaneOrChute)
+                return;
+
+            if (localPlayerGrounded == null && (anyAliveInActivePlane || anyAliveInParachute))
+                return;
+
+            Vector3 groundPos = localPlayerGrounded != null
+                ? localPlayerGrounded.transform.position
+                : (groundSum / groundedCount);
+
+            if (HasIntactFlyablePlaneNearby(groundPos, 45.0f) && IsNearFriendlyAirfieldOrSpawn(faction, groundPos))
+                return;
+
+            AssignCrewSquadRetreatTask(sq, faction, groundPos, allowWaterSurface: true, replaceExistingIfFar: true);
+        }
+
+        private static void EvaluateGroundedLocalPlayerTankCrew(Soldier localPlayer, Squad sq)
+        {
+            if (localPlayer == null ||
+                sq == null ||
+                !localPlayer.IsAlive ||
+                localPlayer.IsOnVehicle() ||
+                localPlayer.transform == null ||
+                IsSquadOnRetreatTask(sq) ||
+                sq.SomeoneIsRepairing())
+            {
+                return;
+            }
+
+            var allVehicles = Vehicle.allVehicles;
+            if (allVehicles == null)
+                return;
+
+            Vector3 pPos = localPlayer.transform.position;
+            Soldier mech = sq.GetMechanic();
+            bool squadHasMechanic = mech != null && mech.IsAlive && mech.GetRepairTools() != null;
+            bool hasDisabledCrewVehNearby = false;
+
+            int vCount = allVehicles.Count;
+            for (int i = 0; i < vCount; i++)
+            {
+                Vehicle veh = allVehicles[i];
+                if (veh == null || veh.Pointer == IntPtr.Zero || veh.transform == null || veh.IsAirVehicle() || veh.IsTransportVehicle())
+                    continue;
+
+                float dSq = (veh.transform.position - pPos).sqrMagnitude;
+                if (dSq > 65.0f * 65.0f)
+                    continue;
+
+                if (_vehiclesCrewRetreatedFrom.Contains(veh.Pointer) ||
+                    (veh.IsDisabled() && (!veh.CanBeRepaired() || !squadHasMechanic)))
+                {
+                    if (_lastKnownVehicleCrewSquad.TryGetValue(veh.Pointer, out Squad knownSq) &&
+                        knownSq != null &&
+                        knownSq.Pointer == sq.Pointer)
+                    {
+                        hasDisabledCrewVehNearby = true;
+                    }
+                    continue;
+                }
+
+                if (dSq <= 45.0f * 45.0f &&
+                    !veh.IsLocked() &&
+                    !veh.IsCoverDestroyed() &&
+                    (!veh.IsDisabled() || (veh.CanBeRepaired() && squadHasMechanic)))
+                {
+                    string vf = GetVehicleCrewFaction(veh);
+                    if (string.IsNullOrEmpty(vf) || vf == "Civilian" || vf == localPlayer.faction)
+                        return;
+                }
+            }
+
+            if (hasDisabledCrewVehNearby)
+            {
+                AssignCrewSquadRetreatTask(sq, localPlayer.faction, pPos, allowWaterSurface: false, replaceExistingIfFar: false);
+            }
+        }
+
+        public static void UpdateGroundedCrewRetreatTasks()
+        {
+            if (!VisionConfig.EnableMod.Value)
+                return;
+
+            float now = Time.time;
+            if (now < _nextGroundedCrewRetreatCheckTime)
+                return;
+            _nextGroundedCrewRetreatCheckTime = now + 1.0f;
+
+            try
+            {
+                IntPtr localPlayerSqPtr = IntPtr.Zero;
+                PlayerController pc = PlayerController.currentController;
+                Soldier localPlayer = pc != null ? pc.ControlledCharacter : null;
+                if (localPlayer != null && localPlayer.Pointer != IntPtr.Zero && localPlayer.IsAlive)
+                {
+                    Squad pSq = localPlayer.joinedSquad;
+                    if (pSq != null && pSq.Pointer != IntPtr.Zero)
+                    {
+                        localPlayerSqPtr = pSq.Pointer;
+                        if (AiCore.IsConfirmedPlaneCrewSquad(pSq))
+                        {
+                            EvaluateGroundedAircrewSquad(pSq);
+                        }
+                        else if (AiCore.IsTrueVehicleCrewSquad(pSq))
+                        {
+                            EvaluateGroundedLocalPlayerTankCrew(localPlayer, pSq);
+                        }
+                    }
+                }
+
+                AiCore.EnsureWorldSnapshot();
+                int sqCount = AiCore.WorldSquadCount;
+                var squads = AiCore.WorldSquads;
+                for (int i = 0; i < sqCount; i++)
+                {
+                    Squad sq = squads[i].Ref;
+                    if (sq == null || sq.Pointer == IntPtr.Zero || sq.Pointer == localPlayerSqPtr)
+                        continue;
+
+                    if (AiCore.IsConfirmedPlaneCrewSquad(sq))
+                    {
+                        EvaluateGroundedAircrewSquad(sq);
+                    }
+                }
+            }
+            catch { }
+        }
+
         [HarmonyPatch(typeof(AIVehicle), nameof(AIVehicle.RetreatCrew))]
         public static class AIVehicle_RetreatCrew_Patch
         {
@@ -5964,6 +6612,16 @@ namespace EasyRed2HumanAI
                             if (unit == null || unit.Pointer == IntPtr.Zero)
                                 continue;
 
+                            if (sampleCrew == null)
+                                sampleCrew = unit;
+
+                            if (unit.joinedSquad != null)
+                            {
+                                // Classify while unit is still seated inside veh (even for remote-owned crew in Co-op)!
+                                RegisterVehicleCrewSquad(veh, unit);
+                                AiCore.IsTrueVehicleCrewSquad(unit.joinedSquad);
+                            }
+
                             Syncher syn = unit.GetSyncher();
                             if (syn == null || !syn.OwnSyncher)
                                 continue;
@@ -5972,12 +6630,6 @@ namespace EasyRed2HumanAI
                             _localCoverProtectedUntil.Remove(unit.Pointer);
                             ClearEmplacementAssignment(unit.Pointer, markUnreachable: false);
                             sampleCrew = unit;
-
-                            if (unit.joinedSquad != null)
-                            {
-                                // Classify while unit is still seated inside veh before GetOffVehicle detaches it!
-                                AiCore.IsTrueVehicleCrewSquad(unit.joinedSquad);
-                            }
 
                             if (unit.IsAI())
                             {
@@ -5990,44 +6642,34 @@ namespace EasyRed2HumanAI
                     if (wheeled != null && !wheeled.RetreatCrewOnDestroy())
                         return false;
 
+                    if (veh.IsTransportVehicle())
+                        return false;
+
                     Squad crewSq = sampleCrew != null ? sampleCrew.joinedSquad : null;
-                    if (crewSq != null && !crewSq.isOpenForJoiners && !veh.IsTransportVehicle())
+                    if ((crewSq == null || crewSq.Pointer == IntPtr.Zero) &&
+                        _lastKnownVehicleCrewSquad.TryGetValue(veh.Pointer, out Squad cachedSq) &&
+                        cachedSq != null &&
+                        cachedSq.Pointer != IntPtr.Zero)
+                    {
+                        crewSq = cachedSq;
+                    }
+
+                    if (crewSq != null && !crewSq.isOpenForJoiners)
                     {
                         AiCore.MarkConfirmedVehicleCrewSquad(crewSq);
                     }
 
-                    if (crewSq != null &&
-                        AiCore.IsTrueVehicleCrewSquad(crewSq) &&
-                        !crewSq.IsPlayerInSquad() &&
-                        BattleManager.BattleHasObjectives() &&
-                        !IsSquadOnRetreatTask(crewSq))
+                    if (crewSq != null && AiCore.IsTrueVehicleCrewSquad(crewSq))
                     {
-                        Soldier auth = (crewSq.Leader != null && crewSq.Leader.IsAlive) ? crewSq.Leader : sampleCrew;
-                        if (AiCore.IsLocallyOwnedBot(auth))
-                        {
-                            Vector3 originPos = veh.transform != null
-                                ? veh.transform.position
-                                : (auth.transform != null ? auth.transform.position : Vector3.zero);
+                        string fac = sampleCrew != null ? sampleCrew.faction : null;
+                        if (string.IsNullOrEmpty(fac))
+                            _lastKnownVehicleFaction.TryGetValue(veh.Pointer, out fac);
 
-                            if (AiCore.TryComputeCrewRetreatDestination(sampleCrew.faction, originPos, out Vector3 retreatPos))
-                            {
-                                var retTask = new MissionTaskRetreat(retreatPos, crewSq, false);
-                                crewSq.currentTask = retTask.Cast<SquadTask>();
-                                TrySayTacticalVoice(auth, crewSq, VoiceManager.VoiceClip.timeToRetreat, 0.25f);
-                                crewSq.HoldArea(retreatPos, 15.0f, false);
-                                if (ResourcesManager.instance != null)
-                                {
-                                    ResourcesManager.instance.StartCoroutine(crewSq.UpdateSquadTaskUI());
-                                }
+                        Vector3 originPos = veh.transform != null
+                            ? veh.transform.position
+                            : (crewSq.Leader != null && crewSq.Leader.transform != null ? crewSq.Leader.transform.position : Vector3.zero);
 
-                                if (VisionConfig.DebugLogging.Value)
-                                {
-                                    AiCore.LogDebug(
-                                        "CrewBailout",
-                                        $"{sampleCrew.faction} bailed crew '{crewSq.squadName}' ordered to evacuate ({Vector3.Distance(originPos, retreatPos):F0}m rearward).");
-                                }
-                            }
-                        }
+                        AssignCrewSquadRetreatTask(crewSq, fac, originPos, allowWaterSurface: false, replaceExistingIfFar: false);
                     }
                 }
                 catch { }
@@ -7797,6 +8439,7 @@ namespace EasyRed2HumanAI
                         return;
 
                     GetVehicleCrewFaction(__instance);
+                    RegisterPlaneCrewFromSeats(__instance);
                     if (VisionConfig.EnableCoopAirborneSpawnFix.Value)
                     {
                         TryHotStartAirbornePlane(__instance, true);

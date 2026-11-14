@@ -72,6 +72,7 @@ namespace EasyRed2HumanAI
                 try
                 {
                     AiCore.RecordFrameTiming();
+                    AiCore.WarmWorldSnapshotIfDue();
                     UpdatePendingMpMapSwitch();
                     CleanupExpiredFiringRecords();
                     VeteranAndTacticsPatches.RenderVeteran3DMarkersAndCleanup();
@@ -79,9 +80,10 @@ namespace EasyRed2HumanAI
                     VeteranAndTacticsPatches.UpdateConquestQuartermasterIfNeeded();
                     VeteranAndTacticsPatches.UpdateFriendlyPlayerCrosshairYield();
                     VeteranAndTacticsPatches.UpdateFriendlyVehicleCollisionRestores();
+                    VeteranAndTacticsPatches.UpdateGroundedCrewRetreatTasks();
                     VeteranAndTacticsPatches.UpdateMultiplayerBattleStatSync();
                     VeteranAndTacticsPatches.UpdateQuickTapSpot(_showConfigMenu || _showMapPicker);
-                    VeteranAndTacticsPatches.UpdateLocalPlayerFirstPersonShadowRig();
+                    VeteranAndTacticsPatches.CheckLocalPlayerFirstPersonShadowTeardown();
                     if (_showMapPicker)
                         BattleManager_OnGUI_Patch.StepResolveSelectedCampaignBattles();
 

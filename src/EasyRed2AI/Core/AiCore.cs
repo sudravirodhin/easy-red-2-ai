@@ -19,6 +19,7 @@ namespace EasyRed2HumanAI
     public static class AiCore
     {
         private static int _cachedSolidEnvMask;
+        private static int _cachedMovementObstacleMask;
         private static int _cachedSmokeOcclusionMask;
         private static IntPtr _cachedWaterInstancePtr;
         private static Renderer _cachedWaterRenderer;
@@ -82,9 +83,13 @@ namespace EasyRed2HumanAI
 
             public IntPtr CachedDestPtr;
             public CachedDestKind DestKind;
+            public float NextDestCheckTime;
             public CombatCover CachedCover;
             public VehicleRepairTask CachedRepairTask;
             public MedicHealingDestination CachedHealDest;
+
+            public float NextMortarCheckTime;
+            public bool CachedHasHeldMortar;
 
             public Squad CachedSquad;
             public float NextSquadRefreshTime;
@@ -92,6 +97,7 @@ namespace EasyRed2HumanAI
             public int LastMoveTimeFrame = -1;
             public bool CachedIsMoveTimeResult;
             public int LastEndpointFrame = -1;
+            public float NextEndpointCheckTime;
             public Vector3 CachedEndpoint;
             public int CachedNodesCount;
         }
@@ -234,6 +240,7 @@ namespace EasyRed2HumanAI
         private static readonly Dictionary<IntPtr, int> _squadDiagIds = new Dictionary<IntPtr, int>(96);
         private static readonly Dictionary<string, string> _formattedFactionDisplayCache = new Dictionary<string, string>(32, StringComparer.Ordinal);
         private static readonly HashSet<IntPtr> _confirmedVehicleCrewSquads = new HashSet<IntPtr>(64);
+        private static readonly HashSet<IntPtr> _confirmedPlaneCrewSquads = new HashSet<IntPtr>(32);
         private static readonly HashSet<IntPtr> _confirmedInfantrySquads = new HashSet<IntPtr>(128);
 
         public static void MarkConfirmedVehicleCrewSquad(Squad sq)
@@ -244,31 +251,47 @@ namespace EasyRed2HumanAI
             _confirmedVehicleCrewSquads.Add(sq.Pointer);
         }
 
+        public static void MarkConfirmedPlaneCrewSquad(Squad sq)
+        {
+            if (sq == null || sq.Pointer == IntPtr.Zero)
+                return;
+            _confirmedInfantrySquads.Remove(sq.Pointer);
+            _confirmedVehicleCrewSquads.Add(sq.Pointer);
+            _confirmedPlaneCrewSquads.Add(sq.Pointer);
+        }
+
+        public static bool IsConfirmedPlaneCrewSquad(Squad sq)
+        {
+            return sq != null && sq.Pointer != IntPtr.Zero && _confirmedPlaneCrewSquads.Contains(sq.Pointer);
+        }
+
         public static void PruneSquadClassificationCaches(HashSet<IntPtr> activeSquadPtrs)
         {
             if (activeSquadPtrs == null)
                 return;
             PruneSet(_confirmedVehicleCrewSquads, activeSquadPtrs);
+            PruneSet(_confirmedPlaneCrewSquads, activeSquadPtrs);
             PruneSet(_confirmedInfantrySquads, activeSquadPtrs);
         }
 
         /// <summary>
         /// Native Squad.get_IsVehicleCrew (0x18080D0A0) literally compiles to `!this.isOpenForJoiners`,
         /// which returns true for EVERY closed/scripted foot-infantry squad and Volga/beach landing-boat squad!
-        /// This helper classifies genuine Tank, Aircraft, and Combat-Vehicle crews (and remembers them after bailout)
-        /// without ever misclassifying closed infantry or troop-transport squads.
+        /// This helper classifies genuine Tank, Aircraft (including 6-10 seat Heavy Bombers), and Combat-Vehicle crews
+        /// (and remembers them after bailout) without ever misclassifying closed infantry or paratrooper/troop-transport squads.
         /// </summary>
         public static bool IsTrueVehicleCrewSquad(Squad sq)
         {
             if (ReferenceEquals(sq, null) || sq == null || sq.Pointer == IntPtr.Zero)
                 return false;
 
-            if (sq.isOpenForJoiners)
-                return false;
-
             IntPtr ptr = sq.Pointer;
             if (_confirmedVehicleCrewSquads.Contains(ptr))
                 return true;
+
+            if (sq.isOpenForJoiners)
+                return false;
+
             if (_confirmedInfantrySquads.Contains(ptr))
                 return false;
 
@@ -279,23 +302,21 @@ namespace EasyRed2HumanAI
                 if (uCount <= 0)
                     return false;
 
-                if (uCount > 5 || sq.isChargeSquad)
+                if (sq.isChargeSquad)
                 {
                     _confirmedInfantrySquads.Add(ptr);
                     return false;
                 }
 
+                // 1. Inspect seated vehicles BEFORE checking uCount > 5 so 6-10 seat Heavy Bomber crews
+                //    are recognized as aircrew rather than misclassified as foot infantry, while checking
+                //    veh.IsTransportVehicle() FIRST so C-47 / Ju-52 paratroopers & LCVPs stay infantry!
+                bool hasInfantrySpecialist = false;
                 for (int i = 0; i < uCount; i++)
                 {
                     Soldier u = units[i];
                     if (ReferenceEquals(u, null) || u == null || u.Pointer == IntPtr.Zero)
                         continue;
-
-                    if (u.IsMedic() || u.hasSyringe || u.hasMg || u.isMarksMan || u.IsRadioman() || u.IsAmmoBoxCarrier() || u.isAtUnit)
-                    {
-                        _confirmedInfantrySquads.Add(ptr);
-                        return false;
-                    }
 
                     if (u.IsOnVehicle())
                     {
@@ -303,34 +324,51 @@ namespace EasyRed2HumanAI
                         VehicleFastHandles vh = GetOrCreateVehicleHandles(veh);
                         if (vh != null && !vh.IsParachute)
                         {
-                            if (vh.IsTank || vh.IsPlane || vh.IsAir)
-                            {
-                                _confirmedVehicleCrewSquads.Add(ptr);
-                                return true;
-                            }
-
                             if (veh.IsTransportVehicle())
                             {
                                 _confirmedInfantrySquads.Add(ptr);
                                 return false;
                             }
 
+                            if (vh.IsPlane || vh.IsAir)
+                            {
+                                MarkConfirmedPlaneCrewSquad(sq);
+                                return true;
+                            }
+
+                            if (vh.IsTank)
+                            {
+                                _confirmedVehicleCrewSquads.Add(ptr);
+                                return true;
+                            }
+
                             VehicleWithWheels wheeled = veh.TryCast<VehicleWithWheels>();
                             if (wheeled != null)
                             {
-                                if (wheeled.RetreatCrewOnDestroy() && !wheeled.IsTransportVehicle())
-                                {
-                                    _confirmedVehicleCrewSquads.Add(ptr);
-                                    return true;
-                                }
                                 if (wheeled.IsTransportVehicle())
                                 {
                                     _confirmedInfantrySquads.Add(ptr);
                                     return false;
                                 }
+                                if (wheeled.RetreatCrewOnDestroy())
+                                {
+                                    _confirmedVehicleCrewSquads.Add(ptr);
+                                    return true;
+                                }
                             }
                         }
                     }
+
+                    if (u.IsMedic() || u.hasSyringe || u.hasMg || u.isMarksMan || u.IsRadioman() || u.IsAmmoBoxCarrier() || u.isAtUnit)
+                    {
+                        hasInfantrySpecialist = true;
+                    }
+                }
+
+                if (uCount > 5 || hasInfantrySpecialist)
+                {
+                    _confirmedInfantrySquads.Add(ptr);
+                    return false;
                 }
 
                 Soldier mech = sq.GetMechanic();
@@ -697,12 +735,57 @@ namespace EasyRed2HumanAI
             return h.CachedSquad;
         }
 
+        public static void InvalidateTargetDestinationCache(Soldier s)
+        {
+            if (ReferenceEquals(s, null) || s.Pointer == IntPtr.Zero)
+                return;
+            if (_soldierHandlesByPtr.TryGetValue(s.Pointer, out SoldierFastHandles h) && h != null)
+            {
+                h.NextDestCheckTime = 0f;
+                h.NextEndpointCheckTime = 0f;
+                h.LastEndpointFrame = -1;
+            }
+        }
+
+        public static bool HasHeldMortarCached(SoldierFastHandles h, SoldierAI ai, float now)
+        {
+            if (h == null || ReferenceEquals(ai, null))
+                return false;
+
+            if (now >= h.NextMortarCheckTime)
+            {
+                h.NextMortarCheckTime = now + 0.35f;
+                var m = ai.HeldMortar;
+                h.CachedHasHeldMortar = !ReferenceEquals(m, null) && m != null;
+            }
+            return h.CachedHasHeldMortar;
+        }
+
         public static CachedDestKind ResolveTargetDestination(SoldierFastHandles h)
         {
             if (h == null || h.Ref == null)
                 return CachedDestKind.None;
 
-            AiDestination dest = h.Ref.targetDestination;
+            Soldier s = h.Ref;
+            if (!s.HasDestinationAssigned)
+            {
+                if (h.CachedDestPtr != IntPtr.Zero)
+                {
+                    h.CachedDestPtr = IntPtr.Zero;
+                    h.DestKind = CachedDestKind.None;
+                    h.CachedCover = null;
+                    h.CachedRepairTask = null;
+                    h.CachedHealDest = null;
+                }
+                return CachedDestKind.None;
+            }
+
+            float now = Time.time;
+            if (h.CachedDestPtr != IntPtr.Zero && now < h.NextDestCheckTime)
+                return h.DestKind;
+
+            h.NextDestCheckTime = now + 0.16f;
+            AiDestination dest = s.targetDestination;
             IntPtr destPtr = (!ReferenceEquals(dest, null) && dest != null) ? dest.Pointer : IntPtr.Zero;
             if (destPtr == IntPtr.Zero)
             {
@@ -1553,17 +1636,44 @@ namespace EasyRed2HumanAI
             return false;
         }
 
+        private static bool TrySampleDryGroundAltitude(Vector3 cand, out float groundY)
+        {
+            float terrainY = ResourcesManager.GetTerrainAltitude(cand, 0f);
+            if (terrainY >= 0.12f)
+            {
+                groundY = terrainY;
+                return true;
+            }
+
+            // Outside Unity Terrain bounds (or on mesh islands/custom airfields where GetTerrainAltitude returns 0f),
+            // probe solid environment colliders directly so out-of-bounds grounded pilots still resolve dry footing!
+            Vector3 probeStart = new Vector3(cand.x, Mathf.Max(cand.y, 0f) + 85.0f, cand.z);
+            if (Physics.Raycast(probeStart, Vector3.down, out RaycastHit hit, 180.0f, GetSolidEnvironmentMask(), QueryTriggerInteraction.Ignore) &&
+                hit.point.y >= 0.05f &&
+                hit.normal.y >= 0.45f)
+            {
+                groundY = hit.point.y;
+                return true;
+            }
+
+            groundY = terrainY;
+            return false;
+        }
+
         private static bool TryNormalizeFootSpawnPoint(Vector3 rawPos, out Vector3 groundedPos)
         {
             groundedPos = rawPos;
-            float groundY = ResourcesManager.GetTerrainAltitude(rawPos, 0f);
-            // Skip aircraft sky-spawns (> 14m above terrain) and deep-water boat/landing-craft spawns (< -0.35m)
-            if (rawPos.y > groundY + 14.0f || groundY < -0.35f)
-                return false;
+            if (TrySampleDryGroundAltitude(rawPos, out float groundY))
+            {
+                if (rawPos.y > groundY + 14.0f)
+                    return false;
 
-            // Snap Y to terrain altitude so 3D distance checks (e.g. MissionTaskRetreat.IsInsideTaskArea) trigger on foot
-            groundedPos = new Vector3(rawPos.x, Mathf.Max(groundY, 0.05f), rawPos.z);
-            return true;
+                // Snap Y to ground altitude so 3D distance checks (e.g. MissionTaskRetreat.IsInsideTaskArea) trigger on foot
+                groundedPos = new Vector3(rawPos.x, Mathf.Max(groundY, 0.05f), rawPos.z);
+                return true;
+            }
+
+            return false;
         }
 
         private static bool TrySampleDryRetreatPoint(Vector3 originPos, Vector3 horizDir, float dist, out Vector3 dryPos)
@@ -1574,14 +1684,17 @@ namespace EasyRed2HumanAI
                 return false;
             horizDir.Normalize();
 
-            for (int attempt = 0; attempt < 3; attempt++)
+            for (int attempt = 0; attempt < 5; attempt++)
             {
-                Vector3 dir = attempt == 0
-                    ? horizDir
-                    : Quaternion.Euler(0f, attempt == 1 ? 28f : -28f, 0f) * horizDir;
+                float yaw = 0f;
+                if (attempt == 1) yaw = 28f;
+                else if (attempt == 2) yaw = -28f;
+                else if (attempt == 3) yaw = 60f;
+                else if (attempt == 4) yaw = -60f;
+
+                Vector3 dir = attempt == 0 ? horizDir : (Quaternion.Euler(0f, yaw, 0f) * horizDir);
                 Vector3 cand = originPos + dir * dist;
-                float alt = ResourcesManager.GetTerrainAltitude(cand, 0f);
-                if (alt >= 0.15f)
+                if (TrySampleDryGroundAltitude(cand, out float alt))
                 {
                     dryPos = new Vector3(cand.x, alt, cand.z);
                     return true;
@@ -1679,12 +1792,62 @@ namespace EasyRed2HumanAI
             return false;
         }
 
+        private static bool TryGetAnyFriendlySpawnHorizontalAnchor(string myFaction, Vector3 fromPos, out Vector3 anchorPos)
+        {
+            anchorPos = Vector3.zero;
+            if (string.IsNullOrEmpty(myFaction))
+                return false;
+
+            try
+            {
+                var spawns = SpawnManager.activeSpawns;
+                if (spawns != null && spawns.Count > 0)
+                {
+                    float bestSq = float.MaxValue;
+                    bool found = false;
+                    for (int i = 0; i < spawns.Count; i++)
+                    {
+                        SpawnManager sp = spawns[i];
+                        if (sp == null || sp.Pointer == IntPtr.Zero || sp.gameObject == null || !sp.gameObject.activeInHierarchy)
+                            continue;
+
+                        string spFact = sp.GetFaction();
+                        if (string.IsNullOrEmpty(spFact) || spFact == "Civilian")
+                            continue;
+
+                        if (spFact != myFaction && !AreSameSideFactions(myFaction, spFact))
+                            continue;
+
+                        Vector3 raw = sp.GetSpawnPosition();
+                        Vector3 d = raw - fromPos;
+                        d.y = 0f;
+                        float dSq = d.sqrMagnitude;
+                        if (dSq < bestSq)
+                        {
+                            bestSq = dSq;
+                            anchorPos = raw;
+                            found = true;
+                        }
+                    }
+                    if (found)
+                        return true;
+                }
+            }
+            catch { }
+
+            return false;
+        }
+
         /// <summary>
-        /// Computes a dry-land rear evacuation point for bailed-out vehicle crews across classic <see cref="BattlePhase"/> maps,
-        /// <c>sp_ME_...</c> Mission Editor V2 maps (where <c>BattleManager.instance.currentPhase == null</c>), and pure Lua maps.
-        /// Never fails on intermediate rivers/ponds or missing <see cref="BattlePhase"/> references.
+        /// Computes a rear evacuation point (~85m-125m toward friendly lines) for bailed-out tank crews and grounded aircrews
+        /// across classic <see cref="BattlePhase"/> maps, <c>sp_ME_...</c> Mission Editor V2 maps (where <c>currentPhase == null</c>),
+        /// out-of-bounds mesh terrain, and open ocean/carrier maps (when <paramref name="allowWaterSurfaceFallback"/> is true).
         /// </summary>
-        public static bool TryComputeCrewRetreatDestination(string myFaction, Vector3 originPos, out Vector3 retreatPos)
+        public static bool TryComputeCrewRetreatDestination(
+            string myFaction,
+            Vector3 originPos,
+            out Vector3 retreatPos,
+            bool allowWaterSurfaceFallback = false)
         {
             retreatPos = Vector3.zero;
             if (string.IsNullOrEmpty(myFaction))
@@ -1692,34 +1855,54 @@ namespace EasyRed2HumanAI
 
             try
             {
+                bool originIsDry = TrySampleDryGroundAltitude(originPos, out _);
+
                 if (TryGetNearestFriendlySpawnPosition(myFaction, originPos, out Vector3 spawnPos))
                 {
                     Vector3 toSpawn = spawnPos - originPos;
                     toSpawn.y = 0f;
                     float dist = toSpawn.magnitude;
 
-                    if (dist >= 18.0f && dist <= 110.0f)
+                    if (dist >= 18.0f && dist <= 115.0f)
                     {
                         retreatPos = spawnPos;
                         return true;
                     }
 
-                    if (dist > 110.0f)
+                    if (dist > 115.0f)
                     {
                         Vector3 dir = toSpawn / dist;
                         if (TrySampleDryRetreatPoint(originPos, dir, 95.0f, out retreatPos) ||
                             TrySampleDryRetreatPoint(originPos, dir, 125.0f, out retreatPos) ||
-                            TrySampleDryRetreatPoint(originPos, dir, 68.0f, out retreatPos))
+                            TrySampleDryRetreatPoint(originPos, dir, 68.0f, out retreatPos) ||
+                            TrySampleDryRetreatPoint(originPos, dir, 155.0f, out retreatPos))
                         {
                             return true;
                         }
 
-                        // Intermediate chord crossed a river/pond — use the verified dry friendly spawn directly!
+                        // Pilot ditched or parachuted into open sea/lake far from shore: place a reachable 85m water-surface extraction zone!
+                        if ((allowWaterSurfaceFallback || !originIsDry) && dist > 175.0f)
+                        {
+                            retreatPos = new Vector3(originPos.x + dir.x * 85.0f, 0.0f, originPos.z + dir.z * 85.0f);
+                            return true;
+                        }
+
+                        if (dist <= 175.0f)
+                        {
+                            retreatPos = spawnPos;
+                            return true;
+                        }
+
+                        if (TrySampleDryRetreatPoint(originPos, dir, 42.0f, out retreatPos))
+                        {
+                            return true;
+                        }
+
                         retreatPos = spawnPos;
                         return true;
                     }
 
-                    // Vehicle was knocked out right near friendly spawn (< 18m): step further rearward away from enemy
+                    // Vehicle/plane crew landed right near friendly spawn (< 18m): step further rearward away from enemy
                     if (TryGetEnemySpawnDirection(myFaction, originPos, out Vector3 enemyDir) &&
                         TrySampleDryRetreatPoint(originPos, -enemyDir, 28.0f, out retreatPos))
                     {
@@ -1729,6 +1912,30 @@ namespace EasyRed2HumanAI
                     if (dist >= 6.0f)
                     {
                         retreatPos = spawnPos;
+                        return true;
+                    }
+                }
+
+                // Carrier / Air-Superiority / Boat-Spawn fallback (where friendly spawns exist only in the sky or on ships):
+                if (TryGetAnyFriendlySpawnHorizontalAnchor(myFaction, originPos, out Vector3 anySpawnAnchor))
+                {
+                    Vector3 toAnchor = anySpawnAnchor - originPos;
+                    toAnchor.y = 0f;
+                    float aDist = toAnchor.magnitude;
+                    Vector3 aDir = aDist > 1.0f
+                        ? (toAnchor / aDist)
+                        : (TryGetEnemySpawnDirection(myFaction, originPos, out Vector3 eDir) ? -eDir : Vector3.back);
+
+                    if (TrySampleDryRetreatPoint(originPos, aDir, 95.0f, out retreatPos) ||
+                        TrySampleDryRetreatPoint(originPos, aDir, 65.0f, out retreatPos) ||
+                        TrySampleDryRetreatPoint(originPos, aDir, 130.0f, out retreatPos))
+                    {
+                        return true;
+                    }
+
+                    if (allowWaterSurfaceFallback || !originIsDry)
+                    {
+                        retreatPos = new Vector3(originPos.x + aDir.x * 85.0f, 0.0f, originPos.z + aDir.z * 85.0f);
                         return true;
                     }
                 }
@@ -1759,8 +1966,7 @@ namespace EasyRed2HumanAI
                     {
                         if (!snap.IsVehicleCrew && dSq > bestFriendlySq)
                         {
-                            float alt = ResourcesManager.GetTerrainAltitude(snap.RefPos, 0f);
-                            if (alt >= 0.15f)
+                            if (TrySampleDryGroundAltitude(snap.RefPos, out float alt))
                             {
                                 bestFriendlySq = dSq;
                                 bestFriendlyPos = new Vector3(snap.RefPos.x, alt, snap.RefPos.z);
@@ -1784,11 +1990,25 @@ namespace EasyRed2HumanAI
                     {
                         return true;
                     }
+
+                    if (allowWaterSurfaceFallback || !originIsDry)
+                    {
+                        away.y = 0f;
+                        Vector3 awayDir = away.sqrMagnitude > 0.01f ? away.normalized : Vector3.back;
+                        retreatPos = new Vector3(originPos.x + awayDir.x * 85.0f, 0.0f, originPos.z + awayDir.z * 85.0f);
+                        return true;
+                    }
                 }
 
                 if (hasFriendly)
                 {
                     retreatPos = bestFriendlyPos;
+                    return true;
+                }
+
+                if (allowWaterSurfaceFallback || !originIsDry)
+                {
+                    retreatPos = new Vector3(originPos.x, 0.0f, originPos.z - 85.0f);
                     return true;
                 }
             }
@@ -2062,6 +2282,39 @@ namespace EasyRed2HumanAI
             int terrainLayer = LayerMask.NameToLayer("Terrain");
             _cachedSolidEnvMask = terrainLayer >= 0 ? ((1 << 0) | (1 << terrainLayer)) : (1 << 0);
             return _cachedSolidEnvMask;
+        }
+
+        /// <summary>
+        /// Returns <c>ResourcesManager.vaultMask | groundMask</c> (<c>Default | Terrain | InvisibleTrepassableWall</c>),
+        /// which includes simplified invisible collision walls placed on sandbags, fences, parapets, and window sills.
+        /// Use for physical movement, vaulting, and wall-cover geometry probes (keep <see cref="GetSolidEnvironmentMask"/>
+        /// for optical sightlines and bullet LOS where <c>InvisibleTrepassableWall</c> is transparent).
+        /// </summary>
+        public static int GetMovementObstacleMask()
+        {
+            if (_cachedMovementObstacleMask != 0)
+                return _cachedMovementObstacleMask;
+
+            int mask = GetSolidEnvironmentMask();
+            try
+            {
+                int vm = ResourcesManager.vaultMask.value;
+                if (vm != 0)
+                    mask |= vm;
+            }
+            catch { }
+
+            int invWallLayer = LayerMask.NameToLayer("InvisibleTrepassableWall");
+            if (invWallLayer >= 0)
+                mask |= (1 << invWallLayer);
+
+            _cachedMovementObstacleMask = mask;
+            return mask;
+        }
+
+        public static bool IsMovementBlockedByObstacle(Vector3 origin, Vector3 dir, float dist)
+        {
+            return Physics.Raycast(origin, dir, dist, GetMovementObstacleMask(), QueryTriggerInteraction.Ignore);
         }
 
         public static int GetSmokeOcclusionMask()
@@ -2394,10 +2647,12 @@ namespace EasyRed2HumanAI
             dest.y = targetPos.y;
             float moveDist = Mathf.Max(0.25f, flatDist - standoffDist);
 
-            // Long runs (> 16m) or wall-obstructed paths must use multi-node CPathFinding (NodesCount >= 2)
+            // Long runs (> 16m) or wall/sandbag-obstructed paths must use multi-node CPathFinding (NodesCount >= 2)
             // rather than a 1-node straight-line MoveDirectlyToward segment.
+            float probeDist = Mathf.Min(moveDist, 7.5f);
             if (moveDist > 16.0f ||
-                IsDirectionBlockedByEnvironment(myPos + Vector3.up * 0.85f, dir, Mathf.Min(moveDist, 7.5f), soldier.transform.root))
+                IsMovementBlockedByObstacle(myPos + Vector3.up * 0.48f, dir, probeDist) ||
+                IsMovementBlockedByObstacle(myPos + Vector3.up * 0.85f, dir, probeDist))
             {
                 if (ai.moveDirectlyToward_end > Time.time)
                     ai.moveDirectlyToward_end = 0f;
@@ -3008,19 +3263,34 @@ namespace EasyRed2HumanAI
             return false;
         }
 
+        public static void WarmWorldSnapshotIfDue()
+        {
+            if (!VisionConfig.EnableMod.Value || Time.timeSinceLevelLoad < 2.0f || IsHeavyWorkFrame() || Time.unscaledDeltaTime > 0.026f)
+                return;
+
+            float now = Time.time;
+            if (_lastWorldSnapshotTime < 0f || (now - _lastWorldSnapshotTime) >= 0.32f)
+            {
+                EnsureWorldSnapshot(0.32f);
+            }
+        }
+
         public static void EnsureWorldSnapshot(float maxAge = 0.35f)
         {
             float now = Time.time;
-            if (now >= _lastWorldSnapshotTime)
+            if (now >= _lastWorldSnapshotTime && _lastWorldSnapshotTime > 0f)
             {
                 float age = now - _lastWorldSnapshotTime;
                 if (age < maxAge)
                     return;
 
-                // If heavy spatial/octree work (e.g. SquadLeaderRoutine) already ran on this frame, reuse the slightly older
-                // snapshot for 1 more frame so the O(N) snapshot rebuild lands on a clean frame!
-                if (IsHeavyWorkFrame() && age < maxAge + 0.30f)
+                // If heavy spatial/octree work already ran on this frame OR the previous frame just hitched (> 35ms),
+                // reuse the slightly older snapshot so the O(N) snapshot rebuild lands on a clean frame!
+                if ((IsHeavyWorkFrame() && age < maxAge + 0.30f) ||
+                    (Time.unscaledDeltaTime > 0.035f && age < maxAge + 0.55f))
+                {
                     return;
+                }
             }
 
             NotifyDirectorWorkThisFrame();
@@ -3323,6 +3593,9 @@ namespace EasyRed2HumanAI
 
         public static void ClearSpatialCaches()
         {
+            _cachedSolidEnvMask = 0;
+            _cachedMovementObstacleMask = 0;
+            _cachedSmokeOcclusionMask = 0;
             _turretVehicleCache.Clear();
             _turretTraitsCache.Clear();
             _ceilingCache.Clear();
@@ -3334,6 +3607,7 @@ namespace EasyRed2HumanAI
             _soldierHandlesByAiPtr.Clear();
             _squadDiagIds.Clear();
             _confirmedVehicleCrewSquads.Clear();
+            _confirmedPlaneCrewSquads.Clear();
             _confirmedInfantrySquads.Clear();
             _formattedFactionDisplayCache.Clear();
             _nextSoldierDiagId = 0;

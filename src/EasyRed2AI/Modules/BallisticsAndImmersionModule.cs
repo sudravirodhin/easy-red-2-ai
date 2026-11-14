@@ -206,7 +206,7 @@ namespace EasyRed2HumanAI
         {
             private const int ImpactUnknownOrBlocked = -1;
 
-            public static void Prefix(
+            public static bool Prefix(
                 BulletInstance __instance,
                 Vector3 hitDirection,
                 BulletData bulletData,
@@ -214,24 +214,37 @@ namespace EasyRed2HumanAI
                 out bool __state)
             {
                 __state = false;
+
+                // Prevent vanilla BulletInstance.OnHit NullReferenceException (0x1809DE99C / 0x1809E03ED)
+                // when two simultaneous projectiles/explosions destroy a destructible prop collider on the same tick!
+                if (__instance == null || __instance.Pointer == IntPtr.Zero || bulletData == null || bulletData.Pointer == IntPtr.Zero)
+                    return false;
+
+                Collider hitCol = hit.collider;
+                if (hitCol == null || hitCol.Pointer == IntPtr.Zero || hitCol.transform == null)
+                    return false;
+
                 VeteranAndTacticsPatches.BeginProjectileImpactContext(__instance, bulletData, hitDirection);
 
                 try
                 {
-                    if (__instance != null)
+                    // Guard against vanilla BulletInstance.OnHit -> Soldier.SyncSay -> Creature.GetSyncher NRE (0x1809DFBA2)
+                    // when a long-flight artillery/mortar/aircraft shooter died, despawned, or lost its syncher mid-flight.
+                    Soldier rawShooter = __instance.shooter;
+                    if (!ReferenceEquals(rawShooter, null))
                     {
-                        // Guard against vanilla BulletInstance.OnHit -> Soldier.SyncSay -> Creature.GetSyncher NRE
-                        // when a long-flight artillery/mortar shooter died & despawned while the shell was in mid-air.
-                        Soldier rawShooter = __instance.shooter;
-                        if (!ReferenceEquals(rawShooter, null) &&
-                            (rawShooter == null || rawShooter.Pointer == IntPtr.Zero || rawShooter.gameObject == null))
+                        if (rawShooter == null ||
+                            rawShooter.Pointer == IntPtr.Zero ||
+                            rawShooter.gameObject == null ||
+                            rawShooter.IsDead ||
+                            (Photon.Pun.PhotonNetwork.InRoom && rawShooter.GetSyncher() == null))
                         {
                             __instance.shooter = null;
                         }
                     }
 
-                    if (!VisionConfig.EnableMod.Value || __instance == null || bulletData == null)
-                        return;
+                    if (!VisionConfig.EnableMod.Value)
+                        return true;
 
                     // Prevent diving aircraft AP cannons/HMGs from falsely ricocheting off simplified
                     // tank hull/turret box colliders before VehicleDamagablePart.TryPenetrateArmor runs,
@@ -302,6 +315,7 @@ namespace EasyRed2HumanAI
                     }
                 }
                 catch { }
+                return true;
             }
 
             public static void Postfix(
@@ -1966,6 +1980,8 @@ namespace EasyRed2HumanAI
         private static int _lastBoundUniformBoneCount;
         private static IntPtr _lastBoundHeldWeaponPtr;
         private static int _lastBoundHeldWeaponRendererCount;
+        private static int _lastBoundHeldWeaponChildCount = -1;
+        private static float _nextHeldWeaponAttachmentCheckTime;
         private static float _nextViewmodelShadowScanTime;
         private static bool _fpsShadowMaterialsDirty = true;
         private static bool _fpsPropertyBlockDirty = true;
@@ -2158,6 +2174,8 @@ namespace EasyRed2HumanAI
                 _lastBoundUniformBoneCount = -1;
                 _lastBoundHeldWeaponPtr = IntPtr.Zero;
                 _lastBoundHeldWeaponRendererCount = -1;
+                _lastBoundHeldWeaponChildCount = -1;
+                _nextHeldWeaponAttachmentCheckTime = 0f;
                 _nextViewmodelShadowScanTime = 0f;
             }
             catch { }
@@ -2281,13 +2299,27 @@ namespace EasyRed2HumanAI
             float wScale = (tps != null && tps.localScaleInHands > 0.01f) ? tps.localScaleInHands : 1.0f;
             rootTr.localScale = new Vector3(wScale, wScale, wScale);
 
-            var meshFilters = held.GetComponentsInChildren<MeshFilter>(false);
-            int mfCount = meshFilters != null ? meshFilters.Length : 0;
-
-            if (held.Pointer != _lastBoundHeldWeaponPtr || mfCount != _lastBoundHeldWeaponRendererCount)
+            // Zero-Allocation Steady State: only invoke GetComponentsInChildren<MeshFilter> when the held weapon
+            // pointer changes (or its child attachment count changes on a 1 Hz check for attached bayonets/scopes),
+            // eliminating finalizable Il2CppArrayBase<MeshFilter> allocations on 99.9% of frames!
+            bool needRebuild = held.Pointer != _lastBoundHeldWeaponPtr;
+            float now = Time.unscaledTime;
+            if (!needRebuild && now >= _nextHeldWeaponAttachmentCheckTime)
             {
+                _nextHeldWeaponAttachmentCheckTime = now + 1.0f;
+                int childCount = held.transform.childCount;
+                if (childCount != _lastBoundHeldWeaponChildCount)
+                    needRebuild = true;
+            }
+
+            if (needRebuild)
+            {
+                var meshFilters = held.GetComponentsInChildren<MeshFilter>(false);
+                int mfCount = meshFilters != null ? meshFilters.Length : 0;
                 _lastBoundHeldWeaponPtr = held.Pointer;
                 _lastBoundHeldWeaponRendererCount = mfCount;
+                _lastBoundHeldWeaponChildCount = held.transform.childCount;
+                _nextHeldWeaponAttachmentCheckTime = now + 1.0f;
 
                 for (int i = rootTr.childCount - 1; i >= 0; i--)
                 {
@@ -2501,11 +2533,34 @@ namespace EasyRed2HumanAI
                 float now = Time.unscaledTime;
                 if (curHeldPtr != _lastBoundHeldWeaponPtr || now >= _nextViewmodelShadowScanTime)
                 {
-                    _nextViewmodelShadowScanTime = now + 0.20f;
+                    _nextViewmodelShadowScanTime = now + 1.25f;
                     SuppressActiveViewmodelShadows(fpsGun);
                 }
 
                 SyncThirdPersonWeaponShadowProxy(player);
+            }
+            catch { }
+        }
+
+        public static void CheckLocalPlayerFirstPersonShadowTeardown()
+        {
+            if (_activeShadowRigSoldierPtr == IntPtr.Zero && _suppressedFpsViewmodelRenderers.Count == 0)
+                return;
+
+            try
+            {
+                Soldier player = Soldier.CurrentControlledSoldierOrNull();
+                bool wantRig = VisionConfig.EnableMod.Value &&
+                               VisionConfig.EnableFirstPersonShadowFix.Value &&
+                               player != null &&
+                               player.Pointer != IntPtr.Zero &&
+                               player.IsAlive &&
+                               player.IsFPSPlayer() &&
+                               !player.IsOnVehicle();
+                if (!wantRig)
+                {
+                    TeardownActiveFpsShadowRig(destroyObjects: player == null || !player.IsAlive);
+                }
             }
             catch { }
         }

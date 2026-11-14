@@ -1034,6 +1034,11 @@ namespace EasyRed2HumanAI
                     {
                         return false;
                     }
+
+                    if (VisionConfig.EnableMod.Value)
+                    {
+                        return HandlePlaneRetreatCrew(__instance);
+                    }
                 }
                 catch { }
                 return true;

@@ -1330,7 +1330,7 @@ namespace EasyRed2HumanAI
                 }
             }
 
-            _nextBattleStatFlushUnscaledTime = Time.unscaledTime + 0.25f;
+            _nextBattleStatFlushUnscaledTime = Time.unscaledTime + 2.0f;
             if (sendImmediate)
             {
                 try { Photon.Pun.PhotonNetwork.SendAllOutgoingCommands(); } catch { }
@@ -1490,9 +1490,42 @@ namespace EasyRed2HumanAI
         [HarmonyPatch(typeof(BattleManager), nameof(BattleManager.OnWin))]
         public static class BattleManager_OnWin_Patch
         {
-            public static void Prefix()
+            public static void Prefix(string __0)
             {
-                try { FlushDirtyMasterBattleStats(sendImmediate: true); } catch { }
+                try
+                {
+                    // Pre-surrender surviving losing-side AI soldiers BEFORE native BattleManager.OnWin sends its
+                    // SyncWin RPC so final prisoner counts are captured in our pre-OnWin Lua_Globals.set flush and
+                    // arrive on remote clients in the exact same Photon outgoing batch as SyncWin!
+                    if (IsOnlineMasterForStatSync() && !string.IsNullOrEmpty(__0))
+                    {
+                        var aliveList = Creature.aliveCreatures;
+                        if (aliveList != null)
+                        {
+                            for (int i = aliveList.Count - 1; i >= 0; i--)
+                            {
+                                Creature c = aliveList[i];
+                                if (c == null || c.Pointer == IntPtr.Zero || !c.IsAlive || c.IsDead)
+                                    continue;
+
+                                Soldier s = c.TryCast<Soldier>();
+                                if (s == null ||
+                                    s.Pointer == IntPtr.Zero ||
+                                    s.IsPlayer() ||
+                                    s.HasSurrended() ||
+                                    AiCore.AreSameSideFactions(s.faction, __0))
+                                {
+                                    continue;
+                                }
+
+                                try { s.SurrenderSynched(); } catch { }
+                            }
+                        }
+                    }
+
+                    FlushDirtyMasterBattleStats(sendImmediate: true);
+                }
+                catch { }
             }
 
             public static void Postfix()
