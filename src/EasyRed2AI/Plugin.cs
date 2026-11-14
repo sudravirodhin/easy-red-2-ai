@@ -11,7 +11,7 @@ namespace EasyRed2HumanAI
     {
         public const string PluginGuid = "com.antigravity.easyred2.humanai";
         public const string PluginName = "Easy Red 2 - Battle Hardened";
-        public const string PluginVersion = "0.7.8";
+        public const string PluginVersion = "0.8.3";
 
         internal static Plugin Instance;
         internal static new ManualLogSource Log;
@@ -53,6 +53,8 @@ namespace EasyRed2HumanAI
 
             // Bundle 2-5: Infantry Combat, Cover, Macro & Vehicles, Veterancy & Personalities, UI & QoL
             SafePatch(typeof(VeteranAndTacticsPatches.SoldierAI_SequentialUpdate_Patch));
+            SafePatch(typeof(VeteranAndTacticsPatches.SoldierAI_TryStopBleeding_Patch));
+            SafePatch(typeof(VeteranAndTacticsPatches.SoldierAI_IsMoveTime_Patch));
             SafePatch(typeof(VeteranAndTacticsPatches.SoldierAI_ProcessAiAccuracy_Patch));
             SafePatch(typeof(VeteranAndTacticsPatches.SoldierAI_OnSuppressed_Patch));
             SafePatch(typeof(VeteranAndTacticsPatches.SoldierAI_UpdateMoveDirection_Patch));
@@ -99,6 +101,7 @@ namespace EasyRed2HumanAI
             SafePatch(typeof(VeteranAndTacticsPatches.Vehicle_OnDisableVehicle_Patch));
             SafePatch(typeof(VeteranAndTacticsPatches.MovableVehicle_OnDisableVehicle_Patch));
             SafePatch(typeof(VeteranAndTacticsPatches.Vehicle_OnRepaired_Patch));
+            SafePatch(typeof(VeteranAndTacticsPatches.AIVehicle_RetreatCrew_Patch));
             SafePatch(typeof(VeteranAndTacticsPatches.Vehicle_SetPhysicsEnabled_Patch));
             SafePatch(typeof(VeteranAndTacticsPatches.AIVehicle_MovableVehicleRoutine_Patch));
             SafePatch(typeof(VeteranAndTacticsPatches.Vehicle_OnVehicleSuppressed_Patch));
@@ -118,11 +121,15 @@ namespace EasyRed2HumanAI
             SafePatch(typeof(VeteranAndTacticsPatches.SpawnManager_CanSpawn_Patch));
             SafePatch(typeof(VeteranAndTacticsPatches.SpawnManager_SpawnAISquadMoveNext_Patch));
 
-            // 64-Character Multiplayer Room Name Limit patches
+            // 64-Character Multiplayer Room Name Limit & Battle-Stat Sync Fix patches
             SafePatch(typeof(VeteranAndTacticsPatches.ServerListMenu_Awake_Patch));
             SafePatch(typeof(VeteranAndTacticsPatches.ServerListMenu_Start_Patch));
             SafePatch(typeof(VeteranAndTacticsPatches.ServerListMenu_OnCreateMatchPressed_Patch));
             SafePatch(typeof(VeteranAndTacticsPatches.MatchData_SetMultiplayerRoomSettings_Patch));
+            SafePatch(typeof(VeteranAndTacticsPatches.BattleManager_AddBattleStat_Patch));
+            SafePatch(typeof(VeteranAndTacticsPatches.BattleManager_CountBattleStat_Patch));
+            SafePatch(typeof(VeteranAndTacticsPatches.BattleManager_OnWin_Patch));
+            SafePatch(typeof(VeteranAndTacticsPatches.EndBattleGUI_EndBattle_Patch));
 
             // Bundle 6: Ballistics, Plane Audio De-Throbber, First-Person Shadow Fix & Battlefield Immersion
             SafePatch(typeof(VeteranAndTacticsPatches.VehiclePlane_UpdateMotorSound_Patch));
@@ -136,12 +143,19 @@ namespace EasyRed2HumanAI
             SafePatch(typeof(VeteranAndTacticsPatches.BodyPart_TryDamageWithExplosion_Patch));
             SafePatch(typeof(VeteranAndTacticsPatches.VehicleParachute_MoveDown_Patch));
             SafePatch(typeof(VeteranAndTacticsPatches.CinematicCameraGUI_EnableCinematicCamera_Patch));
-            SafePatch(typeof(VeteranAndTacticsPatches.FPSGunManager_RefreshSkin_Patch));
-            SafePatch(typeof(VeteranAndTacticsPatches.FPSGunManager_UpdateItemInFPSHands_Patch));
+            SafePatch(typeof(VeteranAndTacticsPatches.MissionStatusGUI_LateUpdate_Patch));
+            SafePatch(typeof(VeteranAndTacticsPatches.ObjectiveGUI_LateUpdate_Patch));
+            SafePatch(typeof(VeteranAndTacticsPatches.SoldierLodManager_ApplyFace_Patch));
             SafePatch(typeof(VeteranAndTacticsPatches.SoldierLodManager_ApplyBodyHeadVisibility_Patch));
             SafePatch(typeof(VeteranAndTacticsPatches.ResourcesManager_PlayImpactEffect_Patch));
 
-            Log.LogInfo($"{PluginName} v{PluginVersion} loaded! (Hotkeys: F5 Map Picker, F6 Config Menu, F8 Toggle ON/OFF, F9 Reload Config, F10 Show Live Stats)");
+            // HitchAutopsy Flight Recorder & Per-Bot JSONL Action Trace (both default OFF)
+            HitchProfiler.RefreshConfigState();
+            BotActionTrace.RefreshConfigState();
+            string hitchTag = HitchProfiler.Enabled ? " [HitchAutopsy Flight Recorder ACTIVE]" : "";
+            string traceTag = BotActionTrace.IsEnabled ? " [BotActionTrace ACTIVE]" : "";
+
+            Log.LogInfo($"{PluginName} v{PluginVersion}{hitchTag}{traceTag} loaded! (Hotkeys: F5 Map Picker, F6 Config Menu, F8 Toggle ON/OFF, F9 Reload Config, F10 Show Live Stats)");
             Log.LogInfo($"Sight Ranges -> Standing: {VisionConfig.StandingSightRange.Value}m | Crouching: {VisionConfig.CrouchingSightRange.Value}m | Prone: {VisionConfig.ProneSightRange.Value}m | MaxOpticZoom: {VisionConfig.MaxOpticZoomMultiplier.Value}x");
             Log.LogInfo($"Tactics -> VeteranCurve: {VisionConfig.VeteranFullMaturitySeconds.Value}s | FFCone: {VisionConfig.FriendlyFireConeDegrees.Value} deg | AntiWall: {VisionConfig.EnableWallShootingPrevention.Value} | Vaulting: {VisionConfig.EnableWallVaulting.Value} | ExtendedRoomNames: {VisionConfig.EnableExtendedRoomNames.Value}");
         }

@@ -5,6 +5,7 @@ using Corvostudio.Weapons;
 using HarmonyLib;
 using Photon.Pun;
 using UnityEngine;
+using UnityEngine.UI;
 
 namespace EasyRed2HumanAI
 {
@@ -82,6 +83,11 @@ namespace EasyRed2HumanAI
             {
                 _inspectedBloodFxRoots.Clear();
                 _modifiedBloodRenderers.Clear();
+            }
+            if (forceClear)
+            {
+                _fpsHeadShadowProxies.Clear();
+                ResetObjectiveBarFactionState();
             }
         }
 
@@ -303,6 +309,7 @@ namespace EasyRed2HumanAI
                 RaycastHit hit,
                 bool __state)
             {
+                long profStart = HitchProfiler.Begin();
                 try
                 {
                     if (__state && __instance != null)
@@ -406,6 +413,10 @@ namespace EasyRed2HumanAI
                     AiCore.LogDebug("Ballistics", $"Bullet penetrated {thickness:F2}m {impactType} cover (in={impactSpeed:F0}m/s -> out={exitSpeed:F0}m/s, pen={bulletData.mmPenetration}mm).", 5.0f);
                 }
                 catch { }
+                finally
+                {
+                    HitchProfiler.End(HitchBucket.BallisticsExpl, profStart);
+                }
             }
 
             private static int ClassifyColliderImpactType(Collider col)
@@ -757,8 +768,13 @@ namespace EasyRed2HumanAI
         [HarmonyPatch(typeof(Soldier), nameof(Soldier.Damage), new Type[] { typeof(float) })]
         public static class Soldier_Damage_Patch
         {
-            public static bool Prefix(ref float __0)
+            public static bool Prefix(Soldier __instance, ref float __0, out bool __state)
             {
+                __state = !ReferenceEquals(__instance, null) &&
+                          __instance != null &&
+                          __instance.Pointer != IntPtr.Zero &&
+                          __instance.IsAlive;
+
                 if (!ActiveCrewSpallContext)
                     return true;
 
@@ -767,6 +783,24 @@ namespace EasyRed2HumanAI
 
                 __0 = Mathf.Min(__0 * ActiveCrewSpallMultiplier, ActiveCrewSpallMaxDamage);
                 return __0 > 0.05f;
+            }
+
+            public static void Postfix(Soldier __instance, bool __state)
+            {
+                if (!__state || !VisionConfig.EnableMod.Value)
+                    return;
+
+                try
+                {
+                    if (!ReferenceEquals(__instance, null) &&
+                        __instance != null &&
+                        __instance.Pointer != IntPtr.Zero &&
+                        !__instance.IsAlive)
+                    {
+                        NotifySquadMemberKilled(__instance);
+                    }
+                }
+                catch { }
             }
         }
 
@@ -907,7 +941,7 @@ namespace EasyRed2HumanAI
                 var seats = targetVeh.seats;
                 if (seats != null)
                 {
-                    string myFaction = thrower != null ? thrower.faction : null;
+                    string myFaction = thrower != null ? AiCore.GetCachedFaction(thrower) : null;
                     int seatCount = seats.Length;
                     for (int i = 0; i < seatCount; i++)
                     {
@@ -918,7 +952,7 @@ namespace EasyRed2HumanAI
                         Soldier crew = seat.unitSet;
                         if (crew != null && crew.IsAlive &&
                             (string.IsNullOrEmpty(myFaction) ||
-                             (crew.faction != myFaction && !ResourcesManager.IsSameFaction(myFaction, crew.faction))))
+                             !AiCore.AreSameSideFactions(myFaction, AiCore.GetCachedFaction(crew))))
                         {
                             return true;
                         }
@@ -950,6 +984,7 @@ namespace EasyRed2HumanAI
         {
             public static bool Prefix(BodyPart __instance, float __0)
             {
+                long profStart = HitchProfiler.Begin();
                 try
                 {
                     if (!VisionConfig.EnableMod.Value ||
@@ -987,6 +1022,10 @@ namespace EasyRed2HumanAI
                     return false;
                 }
                 catch { }
+                finally
+                {
+                    HitchProfiler.End(HitchBucket.BallisticsExpl, profStart);
+                }
                 return true;
             }
         }
@@ -1105,11 +1144,104 @@ namespace EasyRed2HumanAI
         }
 
         // ============================================================================
-        // 4. SPECTATOR / FREE-CAMERA HUD RETENTION
-        // Keeps the player HUD and 3D tactical markers visible when entering Free /
-        // Cinematic Camera (F) until the user explicitly presses the Cinematic Camera
-        // Hide/Show GUI toggle.
+        // 4. SPECTATOR / FREE-CAMERA HUD, 'F' VIEW CYCLE & OBJECTIVE BAR FACTION NAMES
+        //  - Decouples tactical overlays from CinematicCameraGUI.GUIVisible() so hiding
+        //    the Free Camera UI banner does not wipe out Bot Stats or Objectives.
+        //  - Pressing 'F' in Free Camera / Auto-Spectator cycles:
+        //      Full Tactical -> Objectives Only -> Clean Cinema
+        //  - Keeps both MissionStatusGUI (top bar) and ObjectiveGUI (3D A/B/C markers)
+        //    live in Spectator Mode while filtering out private MissionTaskRetreat tasks.
+        //  - Displays human-readable Faction + Side labels (e.g. "Germany (Axis)",
+        //    "USSR (Allies)") flanking the Left and Right flags on the Objective Bar.
         // ============================================================================
+        internal enum SpectatorTacticalHudMode : byte
+        {
+            FullTactical = 0,
+            ObjectivesOnly = 1,
+            CleanCinema = 2
+        }
+
+        internal static SpectatorTacticalHudMode ActiveSpectatorHudMode = SpectatorTacticalHudMode.FullTactical;
+        private static float _nextSpectatorMissionRefreshTime;
+
+        private static IntPtr _cachedMissionStatusGuiPtr;
+        private static GameObject _leftFactionTextGo;
+        private static GameObject _rightFactionTextGo;
+        private static Text _leftFactionText;
+        private static Text _rightFactionText;
+        private static LayoutElement _leftFactionLayout;
+        private static LayoutElement _rightFactionLayout;
+        private static float _leftAppliedPrefW;
+        private static float _rightAppliedPrefW;
+        private static string _lastLeftFacStr;
+        private static string _lastRightFacStr;
+
+        private static void ResetObjectiveBarFactionState()
+        {
+            _cachedMissionStatusGuiPtr = IntPtr.Zero;
+            _leftFactionTextGo = null;
+            _rightFactionTextGo = null;
+            _leftFactionText = null;
+            _rightFactionText = null;
+            _leftFactionLayout = null;
+            _rightFactionLayout = null;
+            _leftAppliedPrefW = 0f;
+            _rightAppliedPrefW = 0f;
+            _lastLeftFacStr = null;
+            _lastRightFacStr = null;
+        }
+
+        internal static string CycleSpectatorTacticalHudMode()
+        {
+            ActiveSpectatorHudMode = (SpectatorTacticalHudMode)(((int)ActiveSpectatorHudMode + 1) % 3);
+            MaintainSpectatorHudVisibility();
+            switch (ActiveSpectatorHudMode)
+            {
+                case SpectatorTacticalHudMode.FullTactical:
+                    return "[Battle Hardened] Spectator View (F): FULL TACTICAL (Objectives + Bot GOAP Inspector)";
+                case SpectatorTacticalHudMode.ObjectivesOnly:
+                    return "[Battle Hardened] Spectator View (F): OBJECTIVES ONLY (Objective Bar + 3D Markers)";
+                default:
+                    return "[Battle Hardened] Spectator View (F): CLEAN CINEMA (All Tactical Overlays Hidden)";
+            }
+        }
+
+        internal static bool IsSpectatorCameraModeActive(out bool isFreeCamera, out bool canShowOverlays)
+        {
+            isFreeCamera = false;
+            canShowOverlays = false;
+
+            try
+            {
+                if (SavableData.Settings != null &&
+                    SavableData.Settings.system != null &&
+                    !SavableData.Settings.system.enableGUI)
+                {
+                    return false;
+                }
+
+                if (CinematicCameraGUI.instance != null && CinematicCameraGUI.cinematicCameraEnabled)
+                {
+                    isFreeCamera = true;
+                    canShowOverlays = !RespawnPanel.GUIenabled;
+                    return true;
+                }
+
+                Soldier controlled = Soldier.CurrentControlledSoldierOrNull();
+                if ((controlled == null || !controlled.IsAlive) &&
+                    CameraDirector.Instance != null &&
+                    CameraDirector.Instance.isActiveAndEnabled)
+                {
+                    isFreeCamera = false;
+                    canShowOverlays = !RespawnPanel.GUIenabled;
+                    return true;
+                }
+            }
+            catch { }
+
+            return false;
+        }
+
         public static void MaintainSpectatorHudVisibility()
         {
             if (!VisionConfig.EnableMod.Value || !VisionConfig.EnableSpectatorHudRetention.Value)
@@ -1118,12 +1250,262 @@ namespace EasyRed2HumanAI
             if (CinematicCameraGUI.instance == null || !CinematicCameraGUI.cinematicCameraEnabled)
                 return;
 
-            bool wantHudVisible = CinematicCameraGUI.GUIVisible();
+            // Only retain PlayerGUI (weapon/ammo/stance widgets) when a live controlled character exists
+            // and the Cinematic Camera's own GUI is visible outside Clean Cinema mode!
+            Soldier controlled = Soldier.CurrentControlledSoldierOrNull();
+            bool hasLiveControlledSoldier = controlled != null && controlled.IsAlive;
+            bool wantPlayerHud = CinematicCameraGUI.GUIVisible() &&
+                                 hasLiveControlledSoldier &&
+                                 !RespawnPanel.GUIenabled &&
+                                 ActiveSpectatorHudMode != SpectatorTacticalHudMode.CleanCinema;
+
             PlayerGUI playerGui = PlayerGUI.instance;
             if (playerGui != null && playerGui.gui_obj != null)
             {
-                if (playerGui.gui_obj.activeSelf != wantHudVisible)
-                    playerGui.gui_obj.SetActive(wantHudVisible);
+                if (playerGui.gui_obj.activeSelf != wantPlayerHud)
+                    playerGui.gui_obj.SetActive(wantPlayerHud);
+            }
+        }
+
+        private static Text CreateObjectiveBarFactionLabel(
+            string objectName,
+            Transform mainRowTransform,
+            Text templateText,
+            bool isLeftSide,
+            out GameObject createdGo,
+            out LayoutElement createdLayout)
+        {
+            createdGo = new GameObject(objectName);
+            RectTransform rt = createdGo.AddComponent<RectTransform>();
+            rt.SetParent(mainRowTransform, false);
+            rt.anchorMin = new Vector2(0f, 1f);
+            rt.anchorMax = new Vector2(0f, 1f);
+            rt.pivot = new Vector2(0.5f, 0.5f);
+            rt.sizeDelta = new Vector2(100f, 22f);
+            rt.localScale = Vector3.one;
+
+            // Participate directly in mainRow's HorizontalLayoutGroup (padding=8,8,3,3, spacing=6) so
+            // panel's ContentSizeFitter(PreferredSize) and mainRow's stretched 'bg' (+ left/right 'l'/'r'
+            // pointed arrow caps) automatically expand around both faction names!
+            createdLayout = createdGo.AddComponent<LayoutElement>();
+            createdLayout.ignoreLayout = false;
+            createdLayout.preferredHeight = 22f;
+            createdLayout.preferredWidth = -1f;
+
+            Text txt = createdGo.AddComponent<Text>();
+            if (templateText != null)
+            {
+                txt.font = templateText.font;
+                txt.fontSize = Mathf.Clamp(templateText.fontSize - 1, 13, 18);
+            }
+            else
+            {
+                txt.font = Resources.GetBuiltinResource<Font>("Arial.ttf");
+                txt.fontSize = 14;
+            }
+            txt.fontStyle = FontStyle.Bold;
+            // Align toward the inner flag so the +6px outer LayoutElement width cushions the pointed arrow cap
+            txt.alignment = isLeftSide ? TextAnchor.MiddleRight : TextAnchor.MiddleLeft;
+            txt.horizontalOverflow = HorizontalWrapMode.Overflow;
+            txt.verticalOverflow = VerticalWrapMode.Overflow;
+            txt.raycastTarget = false;
+            txt.color = new Color(0.96f, 0.94f, 0.88f, 0.96f);
+
+            Shadow shadow = createdGo.AddComponent<Shadow>();
+            shadow.effectColor = new Color(0f, 0f, 0f, 0.88f);
+            shadow.effectDistance = new Vector2(1.25f, -1.25f);
+
+            return txt;
+        }
+
+        private static void RebuildObjectiveBarLayout(MissionStatusGUI gui)
+        {
+            if (gui == null)
+                return;
+
+            if (gui.mainRow != null)
+            {
+                RectTransform mainRowRt = gui.mainRow.GetComponent<RectTransform>();
+                if (mainRowRt != null)
+                    LayoutRebuilder.ForceRebuildLayoutImmediate(mainRowRt);
+            }
+            if (gui.panel != null)
+            {
+                RectTransform panelRt = gui.panel.GetComponent<RectTransform>();
+                if (panelRt != null)
+                    LayoutRebuilder.ForceRebuildLayoutImmediate(panelRt);
+            }
+        }
+
+        private static void UpdateMissionStatusFactionLabels(MissionStatusGUI gui)
+        {
+            if (gui == null || gui.Pointer == IntPtr.Zero || gui.mainRow == null)
+                return;
+
+            if (!VisionConfig.EnableObjectiveBarFactionNames.Value)
+            {
+                bool changedOff = false;
+                if (_leftFactionTextGo != null && _leftFactionTextGo.activeSelf)
+                {
+                    _leftFactionTextGo.SetActive(false);
+                    changedOff = true;
+                }
+                if (_rightFactionTextGo != null && _rightFactionTextGo.activeSelf)
+                {
+                    _rightFactionTextGo.SetActive(false);
+                    changedOff = true;
+                }
+                if (changedOff)
+                    RebuildObjectiveBarLayout(gui);
+                return;
+            }
+
+            if (gui.flagInvaders == null || gui.flagDefenders == null)
+                return;
+
+            BattleData bd = BattleManager.GetCurrentBattleData();
+            string invFac = bd != null ? bd.GetInvadersFaction() : null;
+            string defFac = bd != null ? bd.GetDefendersFaction() : null;
+
+            if ((string.IsNullOrEmpty(invFac) || string.IsNullOrEmpty(defFac)) && bd != null)
+            {
+                AiCore.EnsureWorldSnapshot();
+                int sqCount = AiCore.WorldSquadCount;
+                var squads = AiCore.WorldSquads;
+                for (int i = 0; i < sqCount; i++)
+                {
+                    string f = squads[i].Faction;
+                    if (string.IsNullOrEmpty(f))
+                        continue;
+                    if (bd.IsInvaderFaction(f))
+                    {
+                        if (string.IsNullOrEmpty(invFac))
+                            invFac = f;
+                    }
+                    else if (string.IsNullOrEmpty(defFac))
+                    {
+                        defFac = f;
+                    }
+                    if (!string.IsNullOrEmpty(invFac) && !string.IsNullOrEmpty(defFac))
+                        break;
+                }
+            }
+
+            bool mirrored = gui.flagsMirrored;
+            string leftFormatted = AiCore.FormatFactionWithAlliance(mirrored ? defFac : invFac);
+            string rightFormatted = AiCore.FormatFactionWithAlliance(mirrored ? invFac : defFac);
+
+            Transform mainRowTr = gui.mainRow.transform;
+            bool layoutDirty = false;
+
+            if (_cachedMissionStatusGuiPtr != gui.Pointer ||
+                _leftFactionText == null ||
+                _rightFactionText == null ||
+                _leftFactionTextGo == null ||
+                _rightFactionTextGo == null)
+            {
+                _cachedMissionStatusGuiPtr = gui.Pointer;
+                _lastLeftFacStr = null;
+                _lastRightFacStr = null;
+                _leftAppliedPrefW = 0f;
+                _rightAppliedPrefW = 0f;
+                _leftFactionText = CreateObjectiveBarFactionLabel(
+                    "BH_FactionLeft",
+                    mainRowTr,
+                    gui.ticketsText,
+                    isLeftSide: true,
+                    out _leftFactionTextGo,
+                    out _leftFactionLayout);
+                _rightFactionText = CreateObjectiveBarFactionLabel(
+                    "BH_FactionRight",
+                    mainRowTr,
+                    gui.ticketsText,
+                    isLeftSide: false,
+                    out _rightFactionTextGo,
+                    out _rightFactionLayout);
+                layoutDirty = true;
+            }
+
+            // Keep BH_FactionLeft immediately before flag_invaders (and after sibling 0 'bg' so it renders above the bar)
+            int flagInvIdx = gui.flagInvaders.transform.GetSiblingIndex();
+            int leftIdx = _leftFactionTextGo.transform.GetSiblingIndex();
+            int desiredLeftIdx = leftIdx < flagInvIdx ? flagInvIdx - 1 : flagInvIdx;
+            if (mainRowTr.childCount > 0 && mainRowTr.GetChild(0) != _leftFactionTextGo.transform && flagInvIdx > 0 && desiredLeftIdx < 1)
+                desiredLeftIdx = 1;
+            if (leftIdx != desiredLeftIdx)
+            {
+                _leftFactionTextGo.transform.SetSiblingIndex(desiredLeftIdx);
+                layoutDirty = true;
+            }
+
+            // Keep BH_FactionRight as the last child in mainRow (immediately after flag_defenders)
+            int lastIdx = mainRowTr.childCount - 1;
+            if (_rightFactionTextGo.transform.GetSiblingIndex() != lastIdx)
+            {
+                _rightFactionTextGo.transform.SetAsLastSibling();
+                layoutDirty = true;
+            }
+
+            if (_lastLeftFacStr != leftFormatted)
+            {
+                _lastLeftFacStr = leftFormatted;
+                _leftFactionText.text = leftFormatted;
+                _leftAppliedPrefW = 0f;
+                layoutDirty = true;
+            }
+            if (_lastRightFacStr != rightFormatted)
+            {
+                _lastRightFacStr = rightFormatted;
+                _rightFactionText.text = rightFormatted;
+                _rightAppliedPrefW = 0f;
+                layoutDirty = true;
+            }
+
+            bool showLeft = !string.IsNullOrEmpty(leftFormatted);
+            bool showRight = !string.IsNullOrEmpty(rightFormatted);
+            if (_leftFactionTextGo.activeSelf != showLeft)
+            {
+                _leftFactionTextGo.SetActive(showLeft);
+                layoutDirty = true;
+            }
+            if (_rightFactionTextGo.activeSelf != showRight)
+            {
+                _rightFactionTextGo.SetActive(showRight);
+                layoutDirty = true;
+            }
+
+            if (showLeft && _leftAppliedPrefW <= 0f && _leftFactionLayout != null)
+            {
+                float w = _leftFactionText.preferredWidth;
+                if (w > 1f)
+                {
+                    _leftAppliedPrefW = Mathf.Ceil(w) + 6f;
+                    _leftFactionLayout.preferredWidth = _leftAppliedPrefW;
+                    layoutDirty = true;
+                }
+                else
+                {
+                    _leftFactionLayout.preferredWidth = -1f;
+                }
+            }
+            if (showRight && _rightAppliedPrefW <= 0f && _rightFactionLayout != null)
+            {
+                float w = _rightFactionText.preferredWidth;
+                if (w > 1f)
+                {
+                    _rightAppliedPrefW = Mathf.Ceil(w) + 6f;
+                    _rightFactionLayout.preferredWidth = _rightAppliedPrefW;
+                    layoutDirty = true;
+                }
+                else
+                {
+                    _rightFactionLayout.preferredWidth = -1f;
+                }
+            }
+
+            if (layoutDirty)
+            {
+                RebuildObjectiveBarLayout(gui);
             }
         }
 
@@ -1140,96 +1522,279 @@ namespace EasyRed2HumanAI
             }
         }
 
-        // ============================================================================
-        // 5. VANILLA VISUAL FIX: FIRST-PERSON SELF-SHADOW FIX
-        // In vanilla First Person:
-        //  1) SoldierLodManager.SetBodyHeadVisibility (0x18079C040) swaps the player's
-        //     head submesh materials to ResourcesManager.hideMaterial (which casts ZERO shadow)
-        //     while ItemHelmet.SetHidden() uses ShadowCastingMode.ShadowsOnly—producing a
-        //     headless torso shadow with a floating helmet hovering over an empty neck!
-        //  2) FPSGunManager leaves shadowCastingMode = On on the disembodied camera viewmodel
-        //     arms (hands_mesh, uniform_mesh, and FPS handheld weapon renderers), casting a
-        //     second giant pair of floating arms on top of the 3P body shadow!
-        // Fix (Local Player Only — Zero Bot Overhead):
-        //  - Turn ShadowCastingMode.Off on FPSGunManager viewmodel renderers.
-        //  - When !showHead (First Person), set bodyMesh.shadowCastingMode = Off (keeping
-        //    hideMaterial so the head never clips into the FPS camera) and drive a cached
-        //    ShadowsOnly child SkinnedMeshRenderer with full FaceData materials so 1st-person
-        //    shadows match 3rd-person!
-        // ============================================================================
-        private static readonly Dictionary<IntPtr, SkinnedMeshRenderer> _fpsHeadShadowProxies = new Dictionary<IntPtr, SkinnedMeshRenderer>(4);
-
-        private static void ApplyFpsViewmodelShadowMode(FPSGunManager mgr)
+        // Native MissionStatusGUI.LateUpdate (0x1804AB520) sets guiEnabled = false (skipping RefreshData) whenever
+        // ControlledCharacter == null, and unconditionally calls panel.SetActive(false) whenever cinematicCameraEnabled
+        // is true! Keep the Objective Bar live at 4 Hz in Free Cam & Auto-Spectator (unless CleanCinema is selected)
+        // and maintain formatted Left/Right Faction + Side labels across all mission types.
+        [HarmonyPatch(typeof(MissionStatusGUI), nameof(MissionStatusGUI.LateUpdate))]
+        public static class MissionStatusGUI_LateUpdate_Patch
         {
-            if (mgr == null || mgr.Pointer == IntPtr.Zero)
-                return;
-
-            var mode = (VisionConfig.EnableMod.Value && VisionConfig.EnableFirstPersonShadowFix.Value)
-                ? UnityEngine.Rendering.ShadowCastingMode.Off
-                : UnityEngine.Rendering.ShadowCastingMode.On;
-
-            SkinnedMeshRenderer hands = mgr.hands_mesh;
-            if (hands != null)
-                hands.shadowCastingMode = mode;
-
-            SkinnedMeshRenderer uni = mgr.uniform_mesh;
-            if (uni != null)
-                uni.shadowCastingMode = mode;
-
-            SkinnedMeshRenderer cachedUni = mgr.cachedUniformMesh;
-            if (cachedUni != null)
-                cachedUni.shadowCastingMode = mode;
-
-            Transform wJnt = mgr.WeaponJNT;
-            if (wJnt != null)
-            {
-                var renderers = wJnt.GetComponentsInChildren<Renderer>(true);
-                if (renderers != null)
-                {
-                    for (int i = 0; i < renderers.Length; i++)
-                    {
-                        if (renderers[i] != null)
-                            renderers[i].shadowCastingMode = mode;
-                    }
-                }
-            }
-
-            Transform wJntGen = mgr.WeaponJNT_generic;
-            if (wJntGen != null)
-            {
-                var renderers = wJntGen.GetComponentsInChildren<Renderer>(true);
-                if (renderers != null)
-                {
-                    for (int i = 0; i < renderers.Length; i++)
-                    {
-                        if (renderers[i] != null)
-                            renderers[i].shadowCastingMode = mode;
-                    }
-                }
-            }
-        }
-
-        [HarmonyPatch(typeof(FPSGunManager), nameof(FPSGunManager.RefreshSkin))]
-        public static class FPSGunManager_RefreshSkin_Patch
-        {
-            public static void Postfix(FPSGunManager __instance)
+            public static void Postfix(MissionStatusGUI __instance)
             {
                 try
                 {
-                    ApplyFpsViewmodelShadowMode(__instance);
+                    if (!VisionConfig.EnableMod.Value ||
+                        __instance == null ||
+                        __instance.panel == null)
+                    {
+                        return;
+                    }
+
+                    if (IsSpectatorCameraModeActive(out _, out bool canShowOverlays))
+                    {
+                        bool showSpecBar = canShowOverlays &&
+                                           VisionConfig.EnableSpectatorHudRetention.Value &&
+                                           ActiveSpectatorHudMode != SpectatorTacticalHudMode.CleanCinema;
+                        if (!showSpecBar)
+                        {
+                            if (__instance.panel.activeSelf)
+                                __instance.panel.SetActive(false);
+                            return;
+                        }
+
+                        if (!__instance.guiEnabled || CinematicCameraGUI.cinematicCameraEnabled)
+                        {
+                            float now = Time.unscaledTime;
+                            if (now >= _nextSpectatorMissionRefreshTime || now + 5.0f < _nextSpectatorMissionRefreshTime)
+                            {
+                                _nextSpectatorMissionRefreshTime = now + 0.25f;
+                                __instance.RefreshData();
+                            }
+
+                            bool luaMaster = MissionStatusGUI.lua_masterEnabled;
+                            bool showMainRow = !luaMaster || MissionStatusGUI.lua_vanillaBar;
+                            if (__instance.mainRow != null && __instance.mainRow.activeSelf != showMainRow)
+                                __instance.mainRow.SetActive(showMainRow);
+
+                            bool hasLuaFields = luaMaster && MissionStatusGUI.lua_fields != null && MissionStatusGUI.lua_fields.Count > 0;
+                            if (__instance.fieldsRow != null && __instance.fieldsRow.activeSelf != hasLuaFields)
+                                __instance.fieldsRow.SetActive(hasLuaFields);
+                            if (__instance.fieldsRowRight != null && __instance.fieldsRowRight.activeSelf != hasLuaFields)
+                                __instance.fieldsRowRight.SetActive(hasLuaFields);
+
+                            if (luaMaster && __instance.appliedLuaVersion != MissionStatusGUI.lua_version)
+                            {
+                                __instance.appliedLuaVersion = MissionStatusGUI.lua_version;
+                                __instance.ApplyLuaFields();
+                            }
+
+                            var slots = __instance.objSlots;
+                            if (slots != null)
+                            {
+                                float step = Mathf.Max(0.005f, Time.unscaledDeltaTime * 2.5f);
+                                int sLen = slots.Count;
+                                for (int i = 0; i < sLen; i++)
+                                {
+                                    var slot = slots[i];
+                                    if (slot != null && slot.go != null && slot.go.activeSelf && slot.fill != null)
+                                    {
+                                        slot.fill.fillAmount = Mathf.MoveTowards(slot.fill.fillAmount, slot.targetFill, step);
+                                    }
+                                }
+                            }
+                        }
+
+                        if (!__instance.panel.activeSelf)
+                            __instance.panel.SetActive(true);
+
+                        if (__instance.panelGroup != null && __instance.panelGroup.alpha < 0.90f)
+                            __instance.panelGroup.alpha = 0.95f;
+                    }
+
+                    if (__instance.panel.activeSelf)
+                    {
+                        UpdateMissionStatusFactionLabels(__instance);
+                    }
                 }
                 catch { }
             }
         }
 
-        [HarmonyPatch(typeof(FPSGunManager), nameof(FPSGunManager.UpdateItemInFPSHands))]
-        public static class FPSGunManager_UpdateItemInFPSHands_Patch
+        // Native ObjectiveGUI.LateUpdate (0x1804BA6B0) hides 3D world objective markers (guiPanel.SetActive(false))
+        // whenever cinematicCameraEnabled is true OR ControlledCharacter == null. Keep public objective markers
+        // (excluding private AI MissionTaskRetreat spheres) live in Free Cam & Auto-Spectator!
+        [HarmonyPatch(typeof(ObjectiveGUI), nameof(ObjectiveGUI.LateUpdate))]
+        public static class ObjectiveGUI_LateUpdate_Patch
         {
-            public static void Postfix(FPSGunManager __instance)
+            public static void Postfix(ObjectiveGUI __instance)
             {
                 try
                 {
-                    ApplyFpsViewmodelShadowMode(__instance);
+                    if (!VisionConfig.EnableMod.Value ||
+                        __instance == null ||
+                        __instance.guiPanel == null)
+                    {
+                        return;
+                    }
+
+                    if (!IsSpectatorCameraModeActive(out _, out bool canShowOverlays))
+                        return;
+
+                    bool allow3DMarkers = SavableData.Settings == null ||
+                                          SavableData.Settings.system == null ||
+                                          !SavableData.Settings.system.disable3DMarkers;
+                    SquadTask task = __instance.currentTask;
+                    MissionTaskHighlightPosition highlightTask = task != null ? task.TryCast<MissionTaskHighlightPosition>() : null;
+                    bool isPublicObjective = task != null &&
+                                             (highlightTask == null || !highlightTask.removed) &&
+                                             task.TryCast<MissionTaskRetreat>() == null;
+                    bool wantWorldMarker = canShowOverlays &&
+                                           allow3DMarkers &&
+                                           isPublicObjective &&
+                                           VisionConfig.EnableSpectatorHudRetention.Value &&
+                                           ActiveSpectatorHudMode != SpectatorTacticalHudMode.CleanCinema;
+
+                    if (!wantWorldMarker)
+                    {
+                        if (__instance.guiPanel.activeSelf)
+                            __instance.guiPanel.SetActive(false);
+                        return;
+                    }
+
+                    float now = Time.unscaledTime;
+                    if (now >= __instance.nextUpdateTime || __instance.nextUpdateTime - now > 5.0f)
+                    {
+                        __instance.nextUpdateTime = now + 0.25f;
+                        __instance.RefreshData();
+                    }
+
+                    if (__instance.currentBaseAlpha <= 0.05f)
+                    {
+                        __instance.currentBaseAlpha = 0.85f;
+                        __instance.slowTargetAlpha = 0.85f;
+                        if (__instance.currentAlpha < 0.15f)
+                            __instance.currentAlpha = 0.85f;
+                    }
+
+                    if (!__instance.guiPanel.activeSelf)
+                        __instance.guiPanel.SetActive(true);
+
+                    __instance.UpdateGUI();
+                    __instance.UpdateSmoothing();
+                }
+                catch { }
+            }
+        }
+
+        // ============================================================================
+        // 5. VANILLA VISUAL FIX: FIRST-PERSON SELF-SHADOW FIX
+        // Native x64 Root Causes in GameAssembly.dll:
+        //  1) SoldierLodManager.AssignFaceLod (0x18079B730) calls SoldierLodManager.ApplyFace
+        //     (0x18079B4D0 -> SetBodyHeadVisibility @ 0x18079C040, bypassing dead method
+        //     ApplyBodyHeadVisibility @ 0x18079B430!) and swaps the local player's head
+        //     submesh materials to ResourcesManager.hideMaterial (ZERO shadow), while
+        //     ItemHelmet.SetHidden() uses ShadowCastingMode.ShadowsOnly—producing a
+        //     headless torso shadow with a floating helmet hovering over an empty neck!
+        //  2) FPSGunManager.UpdateItemInFPSHands (0x180796610) calls unit.ShowRealArms(false)
+        //     (scaling 3P leftArm & rightArm to Vector3.zero) and reparents the SOLE
+        //     HandheldItem onto WeaponJNT / WeaponJNT_generic—meaning FPSGunManager's
+        //     hands_mesh, uniform_mesh, and WeaponJNT ARE the player's only arms & weapon
+        //     in First Person and MUST keep ShadowCastingMode.On!
+        // Fix (Local Player Only — Zero Bot Overhead):
+        //  - Keep FPSGunManager arms, uniform sleeves, and held weapon ShadowCastingMode.On
+        //    so animated arms and held weapons cast natural shadows alongside the head.
+        //  - Hook SoldierLodManager.ApplyFace (and ApplyBodyHeadVisibility for safety): when
+        //    isFpsPlayer hides the head (and UniformHeadCoverType == 0), set bodyMesh to
+        //    ShadowCastingMode.Off (preserving camera-safe hideMaterial on the head) and drive
+        //    a cached ShadowsOnly child SkinnedMeshRenderer with full FaceData materials
+        //    (using fd.index_body_submesh) so head, neck, helmet, torso, arms, and weapon
+        //    form a complete first-person shadow!
+        // ============================================================================
+        private static readonly Dictionary<IntPtr, SkinnedMeshRenderer> _fpsHeadShadowProxies = new Dictionary<IntPtr, SkinnedMeshRenderer>(4);
+
+        public static void RefreshLocalPlayerFirstPersonShadow()
+        {
+            try
+            {
+                Soldier localPlayer = Soldier.CurrentControlledSoldierOrNull();
+                if (localPlayer != null && localPlayer.IsAlive)
+                {
+                    localPlayer.RefreshFace();
+                }
+            }
+            catch { }
+        }
+
+        private static void SyncFpsHeadShadowProxy(
+            SoldierLodManager lodMgr,
+            Corvostudio.EasyRed2.Characters.FaceData fd,
+            bool showBody,
+            bool wantFpsShadowProxy)
+        {
+            if (lodMgr == null || lodMgr.Pointer == IntPtr.Zero)
+                return;
+
+            SkinnedMeshRenderer bodyMesh = lodMgr.bodyMesh;
+            if (bodyMesh == null || bodyMesh.Pointer == IntPtr.Zero || bodyMesh.transform == null)
+                return;
+
+            IntPtr lodPtr = lodMgr.Pointer;
+            if (!wantFpsShadowProxy || fd == null || fd.materials == null)
+            {
+                bodyMesh.shadowCastingMode = UnityEngine.Rendering.ShadowCastingMode.On;
+                if (_fpsHeadShadowProxies.TryGetValue(lodPtr, out SkinnedMeshRenderer existingProxy) &&
+                    existingProxy != null &&
+                    existingProxy.Pointer != IntPtr.Zero)
+                {
+                    existingProxy.enabled = false;
+                }
+                return;
+            }
+
+            if (!_fpsHeadShadowProxies.TryGetValue(lodPtr, out SkinnedMeshRenderer proxy) ||
+                proxy == null ||
+                proxy.Pointer == IntPtr.Zero)
+            {
+                if (_fpsHeadShadowProxies.Count > 16)
+                    _fpsHeadShadowProxies.Clear();
+
+                GameObject proxyGo = new GameObject("BH_FpsHeadShadowProxy");
+                proxyGo.transform.SetParent(bodyMesh.transform, false);
+                proxyGo.layer = bodyMesh.gameObject.layer;
+                proxy = proxyGo.AddComponent<SkinnedMeshRenderer>();
+                _fpsHeadShadowProxies[lodPtr] = proxy;
+            }
+
+            proxy.sharedMesh = bodyMesh.sharedMesh;
+            proxy.bones = bodyMesh.bones;
+            proxy.rootBone = bodyMesh.rootBone;
+            proxy.localBounds = bodyMesh.localBounds;
+            proxy.quality = bodyMesh.quality;
+            proxy.updateWhenOffscreen = bodyMesh.updateWhenOffscreen;
+            proxy.shadowCastingMode = UnityEngine.Rendering.ShadowCastingMode.ShadowsOnly;
+            proxy.receiveShadows = false;
+            SoldierLodManager.SetBodyHeadVisibility(proxy, fd.materials, fd.index_body_submesh, showBody, true);
+            if (lodMgr.ShaderPropertyBlock != null)
+            {
+                proxy.SetPropertyBlock(lodMgr.ShaderPropertyBlock);
+            }
+            proxy.enabled = true;
+
+            // Prevent duplicate body shadow from bodyMesh while keeping its visible body submesh + hidden head submesh intact
+            bodyMesh.shadowCastingMode = UnityEngine.Rendering.ShadowCastingMode.Off;
+        }
+
+        [HarmonyPatch(typeof(SoldierLodManager), nameof(SoldierLodManager.ApplyFace))]
+        public static class SoldierLodManager_ApplyFace_Patch
+        {
+            public static void Postfix(
+                SoldierLodManager __instance,
+                bool __0,
+                Corvostudio.EasyRed2.Characters.FaceData __1,
+                UniformSleeveCoverType __2,
+                UniformHeadCoverType __3)
+            {
+                try
+                {
+                    // Match native SoldierLodManager.ApplyFace (0x18079B69A):
+                    // showBody = (usct != 2), and in 3rd-person showHead = (uhct == 0).
+                    bool showBody = (int)__2 != 2;
+                    bool headVisibleIn3P = (int)__3 == 0;
+                    bool wantProxy = VisionConfig.EnableMod.Value &&
+                                     VisionConfig.EnableFirstPersonShadowFix.Value &&
+                                     __0 &&
+                                     headVisibleIn3P;
+                    SyncFpsHeadShadowProxy(__instance, __1, showBody, wantProxy);
                 }
                 catch { }
             }
@@ -1246,58 +1811,10 @@ namespace EasyRed2HumanAI
             {
                 try
                 {
-                    if (__instance == null || __instance.Pointer == IntPtr.Zero)
-                        return;
-
-                    SkinnedMeshRenderer bodyMesh = __instance.bodyMesh;
-                    if (bodyMesh == null || bodyMesh.Pointer == IntPtr.Zero || bodyMesh.transform == null)
-                        return;
-
-                    IntPtr lodPtr = __instance.Pointer;
-                    bool wantFpsShadowProxy = VisionConfig.EnableMod.Value &&
-                                              VisionConfig.EnableFirstPersonShadowFix.Value &&
-                                              __1 &&  // showBody == true
-                                              !__2 && // showHead == false (First-Person camera!)
-                                              __0 != null &&
-                                              __0.materials != null;
-
-                    if (!wantFpsShadowProxy)
-                    {
-                        bodyMesh.shadowCastingMode = UnityEngine.Rendering.ShadowCastingMode.On;
-                        if (_fpsHeadShadowProxies.TryGetValue(lodPtr, out SkinnedMeshRenderer existingProxy) &&
-                            existingProxy != null && existingProxy.Pointer != IntPtr.Zero)
-                        {
-                            existingProxy.enabled = false;
-                        }
-                        return;
-                    }
-
-                    if (!_fpsHeadShadowProxies.TryGetValue(lodPtr, out SkinnedMeshRenderer proxy) ||
-                        proxy == null ||
-                        proxy.Pointer == IntPtr.Zero)
-                    {
-                        if (_fpsHeadShadowProxies.Count > 16)
-                            _fpsHeadShadowProxies.Clear();
-
-                        GameObject proxyGo = new GameObject("BH_FpsHeadShadowProxy");
-                        proxyGo.transform.SetParent(bodyMesh.transform, false);
-                        proxyGo.layer = bodyMesh.gameObject.layer;
-                        proxy = proxyGo.AddComponent<SkinnedMeshRenderer>();
-                        _fpsHeadShadowProxies[lodPtr] = proxy;
-                    }
-
-                    proxy.sharedMesh = bodyMesh.sharedMesh;
-                    proxy.bones = bodyMesh.bones;
-                    proxy.rootBone = bodyMesh.rootBone;
-                    proxy.localBounds = bodyMesh.localBounds;
-                    proxy.updateWhenOffscreen = bodyMesh.updateWhenOffscreen;
-                    proxy.shadowCastingMode = UnityEngine.Rendering.ShadowCastingMode.ShadowsOnly;
-                    proxy.receiveShadows = false;
-                    SoldierLodManager.SetBodyHeadVisibility(proxy, __0.materials, 0, true, true);
-                    proxy.enabled = true;
-
-                    // Prevent duplicate body shadow from bodyMesh while keeping its visible body submesh + hidden head submesh intact
-                    bodyMesh.shadowCastingMode = UnityEngine.Rendering.ShadowCastingMode.Off;
+                    bool wantProxy = VisionConfig.EnableMod.Value &&
+                                     VisionConfig.EnableFirstPersonShadowFix.Value &&
+                                     !__2;
+                    SyncFpsHeadShadowProxy(__instance, __0, __1, wantProxy);
                 }
                 catch { }
             }
@@ -1432,8 +1949,10 @@ namespace EasyRed2HumanAI
                 Vector3 pos,
                 ref string impact_prefab_name,
                 int maxSpawnDistance,
-                ref Il2CppSystem.Action<GameObject> gameObjectFx)
+                ref Il2CppSystem.Action<GameObject> gameObjectFx,
+                out long __state)
             {
+                __state = HitchProfiler.Begin();
                 try
                 {
                     if (!VisionConfig.EnableMod.Value)
@@ -1473,6 +1992,11 @@ namespace EasyRed2HumanAI
                         gameObjectFx = GetOrCreateBloodFxCallback();
                 }
                 catch { }
+            }
+
+            public static void Postfix(long __state)
+            {
+                HitchProfiler.End(HitchBucket.BloodImpactFx, __state);
             }
         }
     }

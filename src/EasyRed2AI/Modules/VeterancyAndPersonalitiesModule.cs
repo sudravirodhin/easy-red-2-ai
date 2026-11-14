@@ -56,6 +56,7 @@ namespace EasyRed2HumanAI
         {
             public float SpawnTime;
             public float BonusSeconds;
+            public float NextRoleCheckTime;
             public int PromotedTier;
             public Rank BaseRank;
             public string BaseName;
@@ -66,6 +67,8 @@ namespace EasyRed2HumanAI
 
         private static readonly Dictionary<IntPtr, SoldierRecord> _records = new Dictionary<IntPtr, SoldierRecord>(512);
         private static readonly Dictionary<IntPtr, float> _nextPromotionCheckTime = new Dictionary<IntPtr, float>(256);
+        internal static readonly Dictionary<IntPtr, (SoldierPersonality Pers, float ExpireTime)> _cachedVehiclePersonalities =
+            new Dictionary<IntPtr, (SoldierPersonality Pers, float ExpireTime)>(64);
 
         // Telemetry counters for debug / toast feedback
         public static int ActiveVeteransCount;
@@ -89,6 +92,7 @@ namespace EasyRed2HumanAI
         public static int SuppressiveEventsCount;
         public static int BoundingOverwatchHoldsCount;
         public static int MacroGarrisonsAssignedCount;
+        public static int MacroObjectivePivotsCount;
         public static int StaticGunsStaffedCount;
         public static int SmartApcDismountsCount;
         public static int TankStandoffHoldsCount;
@@ -103,12 +107,12 @@ namespace EasyRed2HumanAI
 
             if (s.IsOnVehicle())
             {
-                Vehicle v = s.GetCurrentVehicle();
-                if (v != null)
+                AiCore.VehicleFastHandles vh = AiCore.GetOrCreateVehicleHandles(s.GetCurrentVehicle());
+                if (vh != null)
                 {
-                    if (v.TryCast<VehiclePlane>() != null)
+                    if (vh.IsPlane)
                         return 10; // Aircraft Pilot / Aircrew
-                    if (v.TryCast<VehicleTank>() != null)
+                    if (vh.IsTank)
                         return 8;  // Armored Tank / Tracked Vehicle Crew
                 }
                 return 9;          // Light / Wheeled / Halftrack / AA Crew
@@ -207,6 +211,7 @@ namespace EasyRed2HumanAI
         private static SoldierRecord GetOrCreateRecord(Soldier s)
         {
             IntPtr ptr = s.Pointer;
+            float now = Time.time;
             if (!_records.TryGetValue(ptr, out SoldierRecord rec))
             {
                 string rawName = s.name_surname ?? "";
@@ -215,10 +220,12 @@ namespace EasyRed2HumanAI
                     rawName = rawName.Substring(0, bracketIdx);
 
                 byte roleCat = DetermineRoleCategory(s);
+                float jitter = (AiCore.GetDeterministicHash(ptr, 43) & 63) * 0.04f;
                 rec = new SoldierRecord
                 {
-                    SpawnTime = Time.time,
+                    SpawnTime = now,
                     BonusSeconds = 0f,
+                    NextRoleCheckTime = now + 4.0f + jitter,
                     PromotedTier = 0,
                     BaseRank = s.rank,
                     BaseName = rawName,
@@ -227,23 +234,24 @@ namespace EasyRed2HumanAI
                 };
                 _records[ptr] = rec;
             }
-            else
+            else if (now >= rec.NextRoleCheckTime)
             {
+                rec.NextRoleCheckTime = now + 4.0f;
                 byte currentRoleCat = DetermineRoleCategory(s);
                 if (currentRoleCat != rec.RoleCategory)
                 {
                     rec.RoleCategory = currentRoleCat;
                     rec.Personality = RollPersonalityForRole(s, currentRoleCat);
                     rec.NameInitialized = false;
-                    _records[ptr] = rec;
                 }
+                _records[ptr] = rec;
             }
             return rec;
         }
 
         public static SoldierPersonality GetPersonality(Soldier s)
         {
-            if (s == null || s.Pointer == IntPtr.Zero || !VisionConfig.EnableMod.Value || !VisionConfig.EnableRolePersonalities.Value)
+            if (ReferenceEquals(s, null) || s.Pointer == IntPtr.Zero || !VisionConfig.EnableMod.Value || !VisionConfig.EnableRolePersonalities.Value)
                 return SoldierPersonality.None;
 
             SoldierRecord rec = GetOrCreateRecord(s);
@@ -258,9 +266,15 @@ namespace EasyRed2HumanAI
 
         public static SoldierPersonality GetVehicleCrewPersonality(Vehicle v)
         {
-            if (v == null || v.Pointer == IntPtr.Zero || !VisionConfig.EnableMod.Value || !VisionConfig.EnableRolePersonalities.Value || !VisionConfig.EnableVehicleAndPilotPersonalities.Value)
+            if (ReferenceEquals(v, null) || v.Pointer == IntPtr.Zero || !VisionConfig.EnableMod.Value || !VisionConfig.EnableRolePersonalities.Value || !VisionConfig.EnableVehicleAndPilotPersonalities.Value)
                 return SoldierPersonality.None;
 
+            IntPtr vPtr = v.Pointer;
+            float now = Time.time;
+            if (_cachedVehiclePersonalities.TryGetValue(vPtr, out var cached) && now < cached.ExpireTime)
+                return cached.Pers;
+
+            SoldierPersonality resolved = SoldierPersonality.None;
             var seats = v.seats;
             if (seats != null)
             {
@@ -270,29 +284,36 @@ namespace EasyRed2HumanAI
                     Seats seat = seats[i];
                     if (seat != null && seat.unitSet != null)
                     {
-                        Soldier crew = seat.unitSet.TryCast<Soldier>();
+                        Soldier crew = seat.unitSet;
                         if (crew != null && crew.IsAlive)
-                            return GetPersonality(crew);
+                        {
+                            resolved = GetPersonality(crew);
+                            break;
+                        }
                     }
                 }
             }
 
-            int roll100 = AiCore.GetDeterministicHash(v.Pointer, 73) % 100;
-            if (v.TryCast<VehiclePlane>() != null)
+            if (resolved == SoldierPersonality.None)
             {
-                if (roll100 < 35) return SoldierPersonality.Pilot_Ace;
-                if (roll100 < 70) return SoldierPersonality.Pilot_Daredevil;
-                return SoldierPersonality.Pilot_Disciplined;
+                int roll100 = AiCore.GetDeterministicHash(vPtr, 73) % 100;
+                AiCore.VehicleFastHandles vh = AiCore.GetOrCreateVehicleHandles(v);
+                if (vh != null && vh.IsPlane)
+                {
+                    resolved = roll100 < 35 ? SoldierPersonality.Pilot_Ace : (roll100 < 70 ? SoldierPersonality.Pilot_Daredevil : SoldierPersonality.Pilot_Disciplined);
+                }
+                else if (vh != null && vh.IsTank)
+                {
+                    resolved = roll100 < 35 ? SoldierPersonality.TankCrew_Brawler : (roll100 < 70 ? SoldierPersonality.TankCrew_Sniper : SoldierPersonality.TankCrew_Support);
+                }
+                else
+                {
+                    resolved = roll100 < 35 ? SoldierPersonality.LightCrew_Outrider : (roll100 < 75 ? SoldierPersonality.LightCrew_Escort : SoldierPersonality.LightCrew_FlakWatch);
+                }
             }
-            if (v.TryCast<VehicleTank>() != null)
-            {
-                if (roll100 < 35) return SoldierPersonality.TankCrew_Brawler;
-                if (roll100 < 70) return SoldierPersonality.TankCrew_Sniper;
-                return SoldierPersonality.TankCrew_Support;
-            }
-            if (roll100 < 35) return SoldierPersonality.LightCrew_Outrider;
-            if (roll100 < 75) return SoldierPersonality.LightCrew_Escort;
-            return SoldierPersonality.LightCrew_FlakWatch;
+
+            _cachedVehiclePersonalities[vPtr] = (resolved, now + 3.0f);
+            return resolved;
         }
 
         public static string GetPersonalityTag(SoldierPersonality p)
@@ -331,6 +352,12 @@ namespace EasyRed2HumanAI
                 case SoldierPersonality.Pilot_Disciplined: return "Disciplined";
                 default: return "";
             }
+        }
+
+        public static string GetPersonalityShortLabel(SoldierPersonality p)
+        {
+            string tag = GetPersonalityTag(p);
+            return string.IsNullOrEmpty(tag) ? "Infantry" : tag;
         }
 
         public static string BuildSoldierBracketTag(Soldier s, bool includeVet, bool includePersonality, bool includeStarUnicode)
@@ -394,14 +421,19 @@ namespace EasyRed2HumanAI
             }
 
             // Squad Leader Spearhead Aura (+12 suppression grit when leader is alive within 22m)
-            if (s != null && s.joinedSquad != null && s.joinedSquad.Leader != null &&
-                s.joinedSquad.Leader.IsAlive && s.joinedSquad.Leader.Pointer != s.Pointer)
+            if (!ReferenceEquals(s, null) && s != null && s.joinedSquad != null)
             {
                 Soldier leader = s.joinedSquad.Leader;
-                if (GetPersonality(leader) == SoldierPersonality.Leader_Spearhead &&
-                    (leader.transform.position - s.transform.position).sqrMagnitude <= 22f * 22f)
+                if (leader != null && leader.IsAlive && leader.Pointer != s.Pointer &&
+                    GetPersonality(leader) == SoldierPersonality.Leader_Spearhead)
                 {
-                    threshold += 12f;
+                    AiCore.SoldierFastHandles sh = AiCore.GetOrCreateSoldierHandles(s);
+                    AiCore.SoldierFastHandles lh = AiCore.GetOrCreateSoldierHandles(leader);
+                    if (sh != null && lh != null && sh.Tr != null && lh.Tr != null &&
+                        (lh.Tr.position - sh.Tr.position).sqrMagnitude <= 22f * 22f)
+                    {
+                        threshold += 12f;
+                    }
                 }
             }
 
@@ -439,7 +471,7 @@ namespace EasyRed2HumanAI
 
         public static float GetVeterancy01(Soldier s)
         {
-            if (s == null || s.Pointer == IntPtr.Zero || !VisionConfig.EnableVeteranSystem.Value)
+            if (ReferenceEquals(s, null) || s.Pointer == IntPtr.Zero || !VisionConfig.EnableVeteranSystem.Value)
                 return 0f;
 
             SoldierRecord rec = GetOrCreateRecord(s);
@@ -454,6 +486,20 @@ namespace EasyRed2HumanAI
             if (v >= 0.80f) return 3; // 12+ mins (Vet III ★)
             if (v >= 0.50f) return 2; // 7.5+ mins (Vet II)
             if (v >= 0.20f) return 1; // 3.0+ mins (Vet I)
+            return 0;
+        }
+
+        public static int GetVeteranTierByPtr(IntPtr ptr)
+        {
+            if (ptr == IntPtr.Zero || !VisionConfig.EnableVeteranSystem.Value || !_records.TryGetValue(ptr, out SoldierRecord rec))
+                return 0;
+
+            float fullSeconds = Mathf.Max(60f, VisionConfig.VeteranFullMaturitySeconds.Value);
+            float effectiveAlive = Mathf.Max(0f, Time.time - rec.SpawnTime) + rec.BonusSeconds;
+            float v = Mathf.Clamp01(effectiveAlive / fullSeconds);
+            if (v >= 0.80f) return 3;
+            if (v >= 0.50f) return 2;
+            if (v >= 0.20f) return 1;
             return 0;
         }
 
@@ -545,7 +591,12 @@ namespace EasyRed2HumanAI
         [HarmonyPatch(typeof(TurretAI), nameof(TurretAI.RefreshTargets))]
         public static class TurretAI_RefreshTargets_Patch
         {
-            public static void Postfix(TurretAI __instance, Soldier __0, bool __result)
+            public static void Prefix(out long __state)
+            {
+                __state = HitchProfiler.Begin();
+            }
+
+            public static void Postfix(TurretAI __instance, Soldier __0, bool __result, long __state)
             {
                 try
                 {
@@ -559,13 +610,27 @@ namespace EasyRed2HumanAI
 
                     _turretAiByTurretPtr[__instance.turret.Pointer] = __instance;
 
-                    Vehicle veh = AiCore.GetCachedTurretVehicle(__instance.turret);
+                    AiCore.TurretFastTraits traits = AiCore.GetCachedTurretTraits(__instance.turret);
+                    Vehicle veh = traits.VehHandles != null ? traits.VehHandles.Ref : AiCore.GetCachedTurretVehicle(__instance.turret);
                     bool ownedByGunner = __0 != null && AiCore.IsLocallyOwnedBot(__0);
                     if (!ownedByGunner && !AiCore.IsLocallyOwnedVehicle(veh))
                         return;
 
-                    // Always run danger-close indirect-fire target sanitization & combined-arms priority
-                    if (VisionConfig.EnableCombinedArmsPrioritySupport.Value || VisionConfig.FriendlyFireConeDegrees.Value > 0.1f)
+                    // Tank Commander Cupola / Periscope: stamp fresh spotted target onto VehHandles for intra-crew intercom handoff!
+                    if (traits.IsCommanderTurret)
+                    {
+                        if (traits.VehHandles != null && AiCore.IsValidAliveSpottable(__instance.CurrentVisibleTarget))
+                        {
+                            traits.VehHandles.CommanderSpottedTarget = __instance.CurrentVisibleTarget;
+                            traits.VehHandles.CommanderSpotTime = Time.time;
+                        }
+                        return;
+                    }
+
+                    // Always run danger-close indirect-fire target sanitization & combined-arms / intercom priority
+                    if (VisionConfig.EnableCombinedArmsPrioritySupport.Value ||
+                        VisionConfig.EnableDynamicHumanReactionTime.Value ||
+                        VisionConfig.FriendlyFireConeDegrees.Value > 0.1f)
                     {
                         TryPrioritizeKnownTargetForTurret(__instance, veh);
                     }
@@ -595,6 +660,10 @@ namespace EasyRed2HumanAI
                     }
                 }
                 catch { }
+                finally
+                {
+                    HitchProfiler.End(HitchBucket.TurretRefresh, __state);
+                }
             }
         }
 
@@ -613,7 +682,67 @@ namespace EasyRed2HumanAI
                     }
 
                     Turret turret = __instance.turret;
-                    _turretAiByTurretPtr[turret.Pointer] = __instance;
+                    IntPtr turretPtr = turret.Pointer;
+                    _turretAiByTurretPtr[turretPtr] = __instance;
+
+                    float now = Time.time;
+                    Spottable curTarget = __instance.CurrentVisibleTarget;
+
+                    // Dynamic Human Turret / Emplacement Sight-Lay & Trail-Shift Reaction Time:
+                    // Native TurretAI.AutoPilot rotates toward CurrentVisibleTarget while holding trigger pull until
+                    // Time.time > nextFireCheckTime (0x180830E26). Pre-sighted lanes react quickly (0.22s-0.38s),
+                    // whereas flanked static AT/HMG emplacements and off-bore tank turrets require human sight-lay settle!
+                    if (VisionConfig.EnableDynamicHumanReactionTime.Value)
+                    {
+                        AiCore.TurretFastTraits traits = AiCore.GetCachedTurretTraits(turret);
+                        Vehicle veh = traits.VehHandles != null ? traits.VehHandles.Ref : AiCore.GetCachedTurretVehicle(turret);
+                        bool owned = (__0 != null && AiCore.IsLocallyOwnedBot(__0)) || AiCore.IsLocallyOwnedVehicle(veh);
+                        if (owned && !traits.IsCommanderTurret && curTarget != null && curTarget.Pointer != IntPtr.Zero)
+                        {
+                            _turretSightReaction.TryGetValue(turretPtr, out TurretSightReactionState rState);
+                            if (curTarget.Pointer != rState.LastTargetPtr || (now - rState.LastSeenTime) > 2.4f)
+                            {
+                                float offBoreDeg = Vector3.Angle(turret.GetFireDir(), curTarget.GetCenterOfUnit() - turret.GetFirePos());
+                                float vet01 = __0 != null ? GetVeterancy01(__0) : 0f;
+                                float jitter = (AiCore.GetDeterministicHash(turretPtr, curTarget.Pointer.GetHashCode()) & 31) * 0.0055f;
+
+                                float delay;
+                                if (offBoreDeg <= 12.0f)
+                                {
+                                    // Pre-sighted lane: sights already laid on approach sector
+                                    delay = 0.22f + jitter;
+                                }
+                                else if (traits.VehHandles != null && traits.VehHandles.IsStaticEmplacement && !traits.IsAA && offBoreDeg > 28.0f)
+                                {
+                                    // Flanked static AT gun / tripod HMG: heavy manual trail / traverse shift
+                                    delay = Mathf.Lerp(0.78f, 1.25f, Mathf.Clamp01((offBoreDeg - 28.0f) / 90.0f)) + jitter;
+                                }
+                                else if (traits.IsAA || (traits.VehHandles != null && traits.VehHandles.IsPlane))
+                                {
+                                    // AA mount or defensive air gunner tracking fast lead-ring target
+                                    delay = 0.28f + Mathf.Clamp01(offBoreDeg / 160.0f) * 0.22f + jitter * 0.8f;
+                                }
+                                else
+                                {
+                                    // Tank / armored turret traverse + optical reticle settle
+                                    delay = 0.34f + Mathf.Clamp01(offBoreDeg / 120.0f) * 0.34f + jitter;
+                                }
+
+                                delay *= Mathf.Lerp(1.0f, 0.78f, vet01);
+                                __instance.nextFireCheckTime = Mathf.Max(__instance.nextFireCheckTime, now + delay);
+                                __instance.nextFireStopTime = 0f;
+                            }
+
+                            rState.LastTargetPtr = curTarget.Pointer;
+                            rState.LastSeenTime = now;
+                            _turretSightReaction[turretPtr] = rState;
+
+                            if (now < __instance.nextFireCheckTime)
+                            {
+                                turret.SetGunTriggerPressed(false, __0);
+                            }
+                        }
+                    }
 
                     // Pre-empt friendly-fire BEFORE AutoPilot calls SetGunTriggerPressed(true) (which otherwise queues
                     // TurretGun.FireOnReloadDone even if Postfix sets triggerPressed = false!).
@@ -621,22 +750,20 @@ namespace EasyRed2HumanAI
                         ShouldBlockTurretFriendlyFire(__instance, turret, __0))
                     {
                         turret.SetGunTriggerPressed(false, __0);
-                        __instance.nextFireCheckTime = Time.time + 0.30f;
+                        __instance.nextFireCheckTime = now + 0.30f;
                     }
 
                     if (!VisionConfig.EnableSmartVehicleAmmoSelection.Value)
                         return;
 
-                    Spottable curTarget = __instance.CurrentVisibleTarget;
                     if (curTarget != null && curTarget.Pointer != IntPtr.Zero)
                     {
                         bool isVehOrAir = curTarget.IsWheeledVehicleOrTank() || curTarget.IsAirVehicle();
-                        IntPtr turretPtr = __instance.turret.Pointer;
                         if (!_lastTurretTargetWasVehicle.TryGetValue(turretPtr, out bool prevWasVeh) || prevWasVeh != isVehOrAir)
                         {
                             _lastTurretTargetWasVehicle[turretPtr] = isVehOrAir;
                             __instance.nextSwitchAmmoCheck = 0f;
-                            __instance.turret.SelectBestAmmo(curTarget);
+                            turret.SelectBestAmmo(curTarget);
                         }
                     }
                 }
@@ -675,14 +802,17 @@ namespace EasyRed2HumanAI
                 try
                 {
                     if (!VisionConfig.EnableMod.Value ||
-                        __instance == null ||
+                        ReferenceEquals(__instance, null) ||
                         __instance.Pointer == IntPtr.Zero ||
                         !__instance.IsAI() ||
-                        __instance.IsPlayer() ||
-                        __instance.transform == null)
+                        __instance.IsPlayer())
                     {
                         return true;
                     }
+
+                    AiCore.SoldierFastHandles h = AiCore.GetOrCreateSoldierHandles(__instance);
+                    if (h == null || h.Tr == null)
+                        return true;
 
                     // Allow non-lethal smoke grenades to be thrown near friendlies and for screening armor
                     if (__0 == null || __0.TryCast<VirtualSmokeGrenade>() != null)
@@ -708,7 +838,7 @@ namespace EasyRed2HumanAI
                             {
                                 AiCore.LogDebug(
                                     "TankFragBlocked",
-                                    $"Blocked ineffective frag throw ({__0.item_id}) by {__instance.faction} soldier at buttoned-up {targetVeh.name}.",
+                                    $"Blocked ineffective frag throw ({__0.item_id}) by {AiCore.GetCachedFaction(h, Time.time)} soldier at buttoned-up {targetVeh.name}.",
                                     3.0f);
                             }
                             return false;
@@ -718,7 +848,7 @@ namespace EasyRed2HumanAI
                     if (VisionConfig.FriendlyFireConeDegrees.Value > 0.1f)
                     {
                         Vector3 targetPos = __1.GetCenterOfUnit();
-                        float dist = Vector3.Distance(__instance.transform.position, targetPos);
+                        float dist = Vector3.Distance(h.Tr.position, targetPos);
                         if (!IsSafeToThrowGrenadeAt(__instance, targetPos, dist, 11.5f))
                         {
                             __instance.throw_end_time = Time.time + 3.0f;
@@ -726,7 +856,7 @@ namespace EasyRed2HumanAI
                             {
                                 AiCore.LogDebug(
                                     "GrenadeFFBlocked",
-                                    $"Blocked danger-close lethal grenade throw by {__instance.faction} soldier ({dist:F0}m).");
+                                    $"Blocked danger-close lethal grenade throw by {AiCore.GetCachedFaction(h, Time.time)} soldier ({dist:F0}m).");
                             }
                             return false;
                         }
@@ -740,8 +870,9 @@ namespace EasyRed2HumanAI
         [HarmonyPatch(typeof(AIPlane), nameof(AIPlane.Update))]
         public static class AIPlane_Update_Patch
         {
-            public static void Prefix(AIPlane __instance)
+            public static void Prefix(AIPlane __instance, out long __state)
             {
+                __state = HitchProfiler.BeginTopLevel();
                 try
                 {
                     if (!VisionConfig.EnableMod.Value ||
@@ -791,7 +922,7 @@ namespace EasyRed2HumanAI
                 catch { }
             }
 
-            public static void Postfix(AIPlane __instance)
+            public static void Postfix(AIPlane __instance, long __state)
             {
                 try
                 {
@@ -802,9 +933,58 @@ namespace EasyRed2HumanAI
                     else
                     {
                         TryExecuteDogfightAntiChickenBreakOff(__instance, true);
+
+                        // Pilot Attack-Run / Dogfight Sight Alignment Reaction:
+                        // Prevent frame-zero laser bursts the instant targetToAttack switches; hold pilot gun trigger
+                        // for 0.42s-0.78s while the pilot aligns the reflector gunsight onto the new target!
+                        if (VisionConfig.EnableMod.Value &&
+                            VisionConfig.EnableDynamicHumanReactionTime.Value &&
+                            __instance != null &&
+                            AiCore.IsLocallyOwnedVehicle(__instance.veh))
+                        {
+                            IntPtr planePtr = __instance.Pointer;
+                            Spottable tgt = __instance.targetToAttack;
+                            _planeAttackReaction.TryGetValue(planePtr, out PlaneAttackReactionState pState);
+
+                            if (tgt != null && tgt.Pointer != IntPtr.Zero)
+                            {
+                                float now = Time.time;
+                                if (tgt.Pointer != pState.LastTargetPtr)
+                                {
+                                    SoldierPersonality pilotPers = GetVehicleCrewPersonality(__instance.veh);
+                                    float jitter = (AiCore.GetDeterministicHash(planePtr, tgt.Pointer.GetHashCode()) & 31) * 0.009f;
+                                    float delay = 0.48f + jitter;
+                                    if (pilotPers == SoldierPersonality.Pilot_Ace)
+                                        delay *= 0.74f;
+                                    else if (pilotPers == SoldierPersonality.Pilot_Disciplined)
+                                        delay *= 0.90f;
+
+                                    pState.LastTargetPtr = tgt.Pointer;
+                                    pState.HoldFireUntil = now + delay;
+                                    _planeAttackReaction[planePtr] = pState;
+                                }
+
+                                if (now < pState.HoldFireUntil)
+                                {
+                                    Turret pilotGun = __instance.GetPilotGun();
+                                    if (pilotGun != null)
+                                        pilotGun.SetGunTriggerPressed(false, null);
+                                }
+                            }
+                            else if (pState.LastTargetPtr != IntPtr.Zero)
+                            {
+                                pState.LastTargetPtr = IntPtr.Zero;
+                                pState.HoldFireUntil = 0f;
+                                _planeAttackReaction[planePtr] = pState;
+                            }
+                        }
                     }
                 }
                 catch { }
+                finally
+                {
+                    HitchProfiler.End(HitchBucket.Aircraft, __state);
+                }
             }
         }
 

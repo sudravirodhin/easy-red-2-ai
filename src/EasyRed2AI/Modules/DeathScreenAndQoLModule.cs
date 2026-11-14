@@ -652,9 +652,7 @@ namespace EasyRed2HumanAI
                                     bool sameFactionBullet = !fromExp &&
                                                              __4 != null &&
                                                              __4.Pointer != IntPtr.Zero &&
-                                                             !string.IsNullOrEmpty(__4.faction) &&
-                                                             !string.IsNullOrEmpty(curPlayer.faction) &&
-                                                             (__4.faction == curPlayer.faction || ResourcesManager.IsSameFaction(__4.faction, curPlayer.faction));
+                                                             AiCore.AreSameSideFactions(AiCore.GetCachedFaction(__4), AiCore.GetCachedFaction(curPlayer));
                                     bool canThreatenArmor = fromExp ||
                                                             __1 == null ||
                                                             __1.IsHe() ||
@@ -759,8 +757,7 @@ namespace EasyRed2HumanAI
                         __4 != null &&
                         __4.Pointer != IntPtr.Zero &&
                         AiCore.IsLocallyOwnedBot(__4) &&
-                        !string.IsNullOrEmpty(victim.faction) &&
-                        !ResourcesManager.IsSameFaction(__4.faction, victim.faction))
+                        !AiCore.AreSameSideFactions(AiCore.GetCachedFaction(__4), AiCore.GetCachedFaction(victim)))
                     {
                         __state = victim;
                     }
@@ -1171,6 +1168,347 @@ namespace EasyRed2HumanAI
             {
                 c.a = alpha;
                 txt.color = c;
+            }
+        }
+
+        // ============================================================================
+        // MULTIPLAYER CASUALTIES, PRISONERS & LOST VEHICLES SYNC FIX
+        // Native Root Causes (GameAssembly.dll):
+        //  1) BattleManager.AddBattleStat (0x18058B940) reads CountBattleStat -> Lua_Globals.get
+        //     from Photon Room Custom Properties (which only update AFTER the server round-trip!)
+        //     and calls Lua_Globals.set -> SetCustomProperties. Any 2+ casualties, surrenders, or
+        //     vehicle losses within one RTT overwrite each other to baseline + 1!
+        //  2) BattleManager.OnWin sends the EndBattle RPC on PhotonView immediately while async
+        //     Room Custom Properties (and post-victory ragdoll/burning-wreck casualties) arrive
+        //     later, while EndBattleGUI.EndBattle (0x180488C10) formats its 6 Text labels once!
+        // Fix:
+        //  - Maintain an authoritative synchronous short[2, 4] ledger on MasterClient, coalescing
+        //    Photon Lua_Globals.set updates at 4 Hz (zero SetCustomProperties spam) and flushing
+        //    synchronously on BattleManager.OnWin.
+        //  - Refresh EndBattleGUI's 6 casualty/prisoner/vehicle labels at 4 Hz on both Host and
+        //    Clients whenever any synced stat changes while the end-of-battle table is open!
+        // ============================================================================
+        private static readonly string[,] _battleStatIds = new string[2, 4]
+        {
+            { null, "BS.Invaders.Deceased",  "BS.Invaders.Prisoners",  "BS.Invaders.LostVehicles" },
+            { null, "BS.Defenders.Deceased", "BS.Defenders.Prisoners", "BS.Defenders.LostVehicles" }
+        };
+
+        private static readonly short[,] _authBattleStats = new short[2, 4];
+        private static readonly short[] _lastDisplayedEndStats = new short[6] { -1, -1, -1, -1, -1, -1 };
+        private static IntPtr _seededBattleManagerPtr;
+        private static bool _wasMasterClientWhenSeeded;
+        private static int _dirtyBattleStatsMask;
+        private static float _nextBattleStatFlushUnscaledTime;
+        private static float _nextEndBattleUiRefreshUnscaledTime;
+
+        public static void ResetMultiplayerBattleStatLedger()
+        {
+            Array.Clear(_authBattleStats, 0, _authBattleStats.Length);
+            for (int i = 0; i < _lastDisplayedEndStats.Length; i++)
+                _lastDisplayedEndStats[i] = -1;
+            _seededBattleManagerPtr = IntPtr.Zero;
+            _wasMasterClientWhenSeeded = false;
+            _dirtyBattleStatsMask = 0;
+            _nextBattleStatFlushUnscaledTime = 0f;
+            _nextEndBattleUiRefreshUnscaledTime = 0f;
+        }
+
+        private static bool IsOnlineMasterForStatSync()
+        {
+            return VisionConfig.EnableMod.Value &&
+                   VisionConfig.EnableMultiplayerBattleStatSyncFix.Value &&
+                   Photon.Pun.PhotonNetwork.InRoom &&
+                   !Photon.Pun.PhotonNetwork.OfflineMode &&
+                   Photon.Pun.PhotonNetwork.IsMasterClient;
+        }
+
+        private static bool TryMapBattleStatIndices(
+            BattleManager.BattleSide side,
+            BattleManager.BattleStatistic stat,
+            out int sideIdx,
+            out int statIdx,
+            out string statId)
+        {
+            sideIdx = -1;
+            statIdx = -1;
+            statId = null;
+
+            if (side == BattleManager.BattleSide.Invaders)
+                sideIdx = 0;
+            else if (side == BattleManager.BattleSide.Defenders)
+                sideIdx = 1;
+            else
+                return false;
+
+            if (stat == BattleManager.BattleStatistic.Deceased)
+                statIdx = 1;
+            else if (stat == BattleManager.BattleStatistic.Prisoners)
+                statIdx = 2;
+            else if (stat == BattleManager.BattleStatistic.LostVehicles)
+                statIdx = 3;
+            else
+                return false;
+
+            statId = _battleStatIds[sideIdx, statIdx];
+            return statId != null;
+        }
+
+        private static void EnsureMasterBattleStatLedgerSeeded()
+        {
+            BattleManager bm = BattleManager.instance;
+            IntPtr bmPtr = bm != null ? bm.Pointer : IntPtr.Zero;
+            if (bmPtr != IntPtr.Zero && _seededBattleManagerPtr == bmPtr && _wasMasterClientWhenSeeded)
+                return;
+
+            for (int s = 0; s <= 1; s++)
+            {
+                for (int st = 1; st <= 3; st++)
+                {
+                    short val = 0;
+                    string key = _battleStatIds[s, st];
+                    try
+                    {
+                        if (!string.IsNullOrEmpty(key) && Lua_Globals.has(key))
+                        {
+                            var dv = Lua_Globals.get(key);
+                            if (dv != null)
+                            {
+                                int n = (int)Math.Round(dv.Number);
+                                if (n > 0)
+                                    val = (short)Mathf.Clamp(n, 0, short.MaxValue);
+                            }
+                        }
+                    }
+                    catch { }
+                    _authBattleStats[s, st] = val;
+                }
+            }
+
+            _seededBattleManagerPtr = bmPtr;
+            _wasMasterClientWhenSeeded = true;
+            _dirtyBattleStatsMask = 0;
+        }
+
+        private static void FlushDirtyMasterBattleStats(bool sendImmediate)
+        {
+            if (!IsOnlineMasterForStatSync())
+                return;
+
+            EnsureMasterBattleStatLedgerSeeded();
+            if (_dirtyBattleStatsMask == 0)
+                return;
+
+            int mask = _dirtyBattleStatsMask;
+            _dirtyBattleStatsMask = 0;
+
+            for (int s = 0; s <= 1; s++)
+            {
+                for (int st = 1; st <= 3; st++)
+                {
+                    int bit = 1 << (s * 4 + st);
+                    if ((mask & bit) == 0)
+                        continue;
+
+                    string key = _battleStatIds[s, st];
+                    short val = _authBattleStats[s, st];
+                    try
+                    {
+                        Lua_Globals.set(MoonSharp.Interpreter.DynValue.NewNumber(val), key);
+                    }
+                    catch { }
+                }
+            }
+
+            _nextBattleStatFlushUnscaledTime = Time.unscaledTime + 0.25f;
+            if (sendImmediate)
+            {
+                try { Photon.Pun.PhotonNetwork.SendAllOutgoingCommands(); } catch { }
+            }
+        }
+
+        private static void RefreshEndBattleGuiLabels(EndBattleGUI gui, bool forceUpdate)
+        {
+            if (gui == null || gui.Pointer == IntPtr.Zero)
+                return;
+
+            short atkCas = BattleManager.CountBattleStat(BattleManager.BattleSide.Invaders, BattleManager.BattleStatistic.Deceased, out _);
+            short atkPris = BattleManager.CountBattleStat(BattleManager.BattleSide.Invaders, BattleManager.BattleStatistic.Prisoners, out _);
+            short atkVeh = BattleManager.CountBattleStat(BattleManager.BattleSide.Invaders, BattleManager.BattleStatistic.LostVehicles, out _);
+            short defCas = BattleManager.CountBattleStat(BattleManager.BattleSide.Defenders, BattleManager.BattleStatistic.Deceased, out _);
+            short defPris = BattleManager.CountBattleStat(BattleManager.BattleSide.Defenders, BattleManager.BattleStatistic.Prisoners, out _);
+            short defVeh = BattleManager.CountBattleStat(BattleManager.BattleSide.Defenders, BattleManager.BattleStatistic.LostVehicles, out _);
+
+            if (forceUpdate || _lastDisplayedEndStats[0] != atkCas)
+            {
+                _lastDisplayedEndStats[0] = atkCas;
+                if (gui.attackers_casualties != null)
+                    gui.attackers_casualties.text = atkCas.ToString();
+            }
+            if (forceUpdate || _lastDisplayedEndStats[1] != atkPris)
+            {
+                _lastDisplayedEndStats[1] = atkPris;
+                if (gui.attackers_prisoners != null)
+                    gui.attackers_prisoners.text = atkPris.ToString();
+            }
+            if (forceUpdate || _lastDisplayedEndStats[2] != atkVeh)
+            {
+                _lastDisplayedEndStats[2] = atkVeh;
+                if (gui.attackers_vehiclesLost != null)
+                    gui.attackers_vehiclesLost.text = atkVeh.ToString();
+            }
+            if (forceUpdate || _lastDisplayedEndStats[3] != defCas)
+            {
+                _lastDisplayedEndStats[3] = defCas;
+                if (gui.defenders_casualties != null)
+                    gui.defenders_casualties.text = defCas.ToString();
+            }
+            if (forceUpdate || _lastDisplayedEndStats[4] != defPris)
+            {
+                _lastDisplayedEndStats[4] = defPris;
+                if (gui.defenders_prisoners != null)
+                    gui.defenders_prisoners.text = defPris.ToString();
+            }
+            if (forceUpdate || _lastDisplayedEndStats[5] != defVeh)
+            {
+                _lastDisplayedEndStats[5] = defVeh;
+                if (gui.defenders_vehiclesLost != null)
+                    gui.defenders_vehiclesLost.text = defVeh.ToString();
+            }
+        }
+
+        public static void UpdateMultiplayerBattleStatSync()
+        {
+            if (!VisionConfig.EnableMod.Value || !VisionConfig.EnableMultiplayerBattleStatSyncFix.Value)
+                return;
+
+            if (!Photon.Pun.PhotonNetwork.InRoom || Photon.Pun.PhotonNetwork.OfflineMode)
+            {
+                if (_wasMasterClientWhenSeeded)
+                {
+                    _wasMasterClientWhenSeeded = false;
+                    _dirtyBattleStatsMask = 0;
+                }
+                return;
+            }
+
+            if (!Photon.Pun.PhotonNetwork.IsMasterClient)
+            {
+                _wasMasterClientWhenSeeded = false;
+                _dirtyBattleStatsMask = 0;
+            }
+            else
+            {
+                EnsureMasterBattleStatLedgerSeeded();
+                float now = Time.unscaledTime;
+                if (_dirtyBattleStatsMask != 0 &&
+                    (now >= _nextBattleStatFlushUnscaledTime || _nextBattleStatFlushUnscaledTime - now > 5.0f))
+                {
+                    FlushDirtyMasterBattleStats(sendImmediate: false);
+                }
+            }
+
+            EndBattleGUI endGui = BattleManager.endBattleGUI;
+            if (endGui != null && endGui.animationStarted)
+            {
+                float now = Time.unscaledTime;
+                if (now >= _nextEndBattleUiRefreshUnscaledTime || _nextEndBattleUiRefreshUnscaledTime - now > 5.0f)
+                {
+                    _nextEndBattleUiRefreshUnscaledTime = now + 0.25f;
+                    RefreshEndBattleGuiLabels(endGui, forceUpdate: false);
+                }
+            }
+        }
+
+        [HarmonyPatch(typeof(BattleManager), nameof(BattleManager.AddBattleStat))]
+        public static class BattleManager_AddBattleStat_Patch
+        {
+            public static bool Prefix(
+                BattleManager.BattleSide __0,
+                BattleManager.BattleStatistic __1,
+                short __2)
+            {
+                try
+                {
+                    if (!IsOnlineMasterForStatSync() ||
+                        !TryMapBattleStatIndices(__0, __1, out int sIdx, out int stIdx, out _))
+                    {
+                        return true;
+                    }
+
+                    if (__2 == 0)
+                        return false;
+
+                    EnsureMasterBattleStatLedgerSeeded();
+                    int updated = Mathf.Clamp(_authBattleStats[sIdx, stIdx] + __2, 0, short.MaxValue);
+                    _authBattleStats[sIdx, stIdx] = (short)updated;
+                    _dirtyBattleStatsMask |= (1 << (sIdx * 4 + stIdx));
+                    return false;
+                }
+                catch { }
+                return true;
+            }
+        }
+
+        [HarmonyPatch(typeof(BattleManager), nameof(BattleManager.CountBattleStat))]
+        public static class BattleManager_CountBattleStat_Patch
+        {
+            public static bool Prefix(
+                BattleManager.BattleSide __0,
+                BattleManager.BattleStatistic __1,
+                ref string __2,
+                ref short __result)
+            {
+                try
+                {
+                    if (!IsOnlineMasterForStatSync() ||
+                        !TryMapBattleStatIndices(__0, __1, out int sIdx, out int stIdx, out string statId))
+                    {
+                        return true;
+                    }
+
+                    EnsureMasterBattleStatLedgerSeeded();
+                    __2 = statId;
+                    __result = _authBattleStats[sIdx, stIdx];
+                    return false;
+                }
+                catch { }
+                return true;
+            }
+        }
+
+        [HarmonyPatch(typeof(BattleManager), nameof(BattleManager.OnWin))]
+        public static class BattleManager_OnWin_Patch
+        {
+            public static void Prefix()
+            {
+                try { FlushDirtyMasterBattleStats(sendImmediate: true); } catch { }
+            }
+
+            public static void Postfix()
+            {
+                try { FlushDirtyMasterBattleStats(sendImmediate: true); } catch { }
+            }
+        }
+
+        [HarmonyPatch(typeof(EndBattleGUI), nameof(EndBattleGUI.EndBattle))]
+        public static class EndBattleGUI_EndBattle_Patch
+        {
+            public static void Postfix(EndBattleGUI __instance)
+            {
+                try
+                {
+                    if (!VisionConfig.EnableMod.Value ||
+                        !VisionConfig.EnableMultiplayerBattleStatSyncFix.Value ||
+                        __instance == null)
+                    {
+                        return;
+                    }
+
+                    FlushDirtyMasterBattleStats(sendImmediate: true);
+                    RefreshEndBattleGuiLabels(__instance, forceUpdate: true);
+                }
+                catch { }
             }
         }
     }

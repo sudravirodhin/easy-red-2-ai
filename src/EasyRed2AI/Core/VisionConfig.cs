@@ -7,10 +7,14 @@ namespace EasyRed2HumanAI
     {
         public static ConfigEntry<bool> EnableMod;
         public static ConfigEntry<bool> DebugLogging;
+        public static ConfigEntry<bool> EnableHitchFlightRecorder;
+        public static ConfigEntry<bool> EnableBotActionTrace;
         public static ConfigEntry<bool> EnableDeathScreenAttribution;
         public static ConfigEntry<bool> EnableQuickTapSpot;
         public static ConfigEntry<bool> EnableExtendedRoomNames;
+        public static ConfigEntry<bool> EnableMultiplayerBattleStatSyncFix;
         public static ConfigEntry<bool> EnableAdaptiveAiTickScaling;
+        public static ConfigEntry<float> UiScaleMultiplier;
         public static ConfigEntry<KeyCode> MapPickerHotkey;
 
         // 1. Infantry Sight & Stance
@@ -27,8 +31,9 @@ namespace EasyRed2HumanAI
         public static ConfigEntry<float> MaxOpticZoomMultiplier;
         public static ConfigEntry<float> OpticLongRangeHalfFOV;
 
-        // 3. Human FOV Cones
+        // 3. Human FOV Cones & Dynamic Reaction Latency
         public static ConfigEntry<bool> EnforceHumanFOVWhenAlerted;
+        public static ConfigEntry<bool> EnableDynamicHumanReactionTime;
         public static ConfigEntry<float> CloseOmnidirectionalRange;
         public static ConfigEntry<float> MidRangeMaxDistance;
         public static ConfigEntry<float> MidRangeHalfFOV;
@@ -111,6 +116,8 @@ namespace EasyRed2HumanAI
         public static ConfigEntry<bool> EnableRealisticVehicleArmorAndTopAttack;
         public static ConfigEntry<bool> EnableParachuteWindDrift;
         public static ConfigEntry<bool> EnableSpectatorHudRetention;
+        public static ConfigEntry<bool> EnableSpectatorBotInspector;
+        public static ConfigEntry<bool> EnableObjectiveBarFactionNames;
         public static ConfigEntry<bool> EnableFirstPersonShadowFix;
         public static ConfigEntry<bool> EnableBloodSmokeWaterOcclusion;
 
@@ -127,6 +134,18 @@ namespace EasyRed2HumanAI
                 "DebugLogging",
                 false,
                 "Log periodic AI spotting/vision statistics to the BepInEx console for tuning.");
+
+            EnableHitchFlightRecorder = config.Bind(
+                "0. General",
+                "EnableHitchFlightRecorder",
+                false,
+                "Diagnostics: Enable the zero-allocation [HitchAutopsy] (>28ms frame-spike profiler) and 15s [HitchSummary] GC/subsystem flight recorder in BepInEx/LogOutput.log (default false).");
+
+            EnableBotActionTrace = config.Bind(
+                "0. General",
+                "EnableBotActionTrace",
+                false,
+                "Diagnostics: Write transition-only machine-readable per-bot GOAP, combat, bandage, melee, retreat, and vault events to BepInEx/BotActionTrace.jsonl on a background thread with zero main-thread I/O hitches (default false).");
 
             EnableDeathScreenAttribution = config.Bind(
                 "0. General",
@@ -146,11 +165,23 @@ namespace EasyRed2HumanAI
                 true,
                 "QoL: Lift vanilla's 8-character multiplayer room name cap up to 64 characters when hosting or searching for servers.");
 
+            EnableMultiplayerBattleStatSyncFix = config.Bind(
+                "0. General",
+                "EnableMultiplayerBattleStatSyncFix",
+                true,
+                "Co-op / Multiplayer Fix: Prevents Photon CustomProperties read-modify-write clobbering, EndBattleGUI RPC races, and duplicate vehicle-disable increments so Casualties, Prisoners, and Vehicles Lost match accurately across Host and all Clients.");
+
             EnableAdaptiveAiTickScaling = config.Bind(
                 "0. General",
                 "EnableAdaptiveAiTickScaling",
                 true,
                 "Performance & Responsiveness (SP & Co-op): Dynamically scales Creature.ProcessSequentialUpdates from vanilla's hardcoded 1 slot/frame up to 2-3 active on-foot SoldierAI brain ticks/frame in large battles (while skipping non-soldier vehicle/dead slots without wasting a frame tick, and backing off automatically if frame time exceeds 25ms).");
+
+            UiScaleMultiplier = config.Bind(
+                "0. General",
+                "UiScaleMultiplier",
+                1.0f,
+                "UI scale multiplier applied on top of automatic 1080p-normalized DPI scaling (e.g. 1.0 = auto 2.0x at 4K / 1.33x at 1440p; range 0.75 - 1.50) for F5, F6, F10 banners, and Spectator Bot Inspector.");
 
             MapPickerHotkey = config.Bind(
                 "0. General",
@@ -220,18 +251,24 @@ namespace EasyRed2HumanAI
                 25f,
                 "Half-angle FOV cone (degrees, so 25 = 50 deg total cone) required for a scoped sniper or turret to spot targets beyond un-scoped eye range.");
 
-            // 3. Human FOV Cones
+            // 3. Human FOV Cones & Dynamic Reaction Latency
             EnforceHumanFOVWhenAlerted = config.Bind(
                 "3. Human FOV Cones",
                 "EnforceHumanFOVWhenAlerted",
                 true,
-                "Fixes the vanilla quirk where alerted or suppressed AI skip the FOV check and get 360-degree vision out to 300m.");
+                "Enforces continuous distance-scaled 'squint' vision cones (wide close peripheral awareness tapering smoothly with distance) and platform-specific tank/emplacement/aircraft arcs.");
+
+            EnableDynamicHumanReactionTime = config.Bind(
+                "3. Human FOV Cones",
+                "EnableDynamicHumanReactionTime",
+                true,
+                "Models human 'Watching vs. Caught Out' reaction latency, eliminating vanilla's 2.5s statue freeze while enforcing realistic recognition, shoulder/turn, sight-settle, and Tank Commander -> Gunner intercom callout delays.");
 
             CloseOmnidirectionalRange = config.Bind(
                 "3. Human FOV Cones",
                 "CloseOmnidirectionalRange",
-                20f,
-                "Distance (meters) within which AI can hear/detect enemies in 360 degrees (Vanilla: 30m).");
+                12f,
+                "Point-blank distance (meters) within which on-foot infantry can hear/sense nearby enemies in 360 degrees before smoothly tapering into wide close-combat peripheral vision.");
 
             MidRangeMaxDistance = config.Bind(
                 "3. Human FOV Cones",
@@ -360,7 +397,7 @@ namespace EasyRed2HumanAI
                 "6. Tactical Self-Preservation & Muzzle Discipline",
                 "EnableFriendlyFireAvoidance",
                 true,
-                "Hold fire if a friendly soldier is in the line of fire between the shooter and the target.");
+                "Hold fire if a friendly soldier is in the line of fire, and make friendly bots avoid claiming cover or walking upright into a human player's active aiming crosshair (ducking under sights, sidestepping clear, or passing behind the player).");
 
             FriendlyFireConeDegrees = config.Bind(
                 "6. Tactical Self-Preservation & Muzzle Discipline",
@@ -664,13 +701,25 @@ namespace EasyRed2HumanAI
                 "8. Ballistics & Immersion",
                 "EnableSpectatorHudRetention",
                 true,
-                "Keep tactical HUD and 3D unit markers visible when entering Free/Spectator Camera (F) until you explicitly press the Cinematic Camera Hide/Show GUI toggle.");
+                "Keep the Mission Objectives/Tickets/Phase HUD (MissionStatusGUI) and 3D world objective/unit markers visible in Free Camera and Auto Battle Camera (press F in Spectator/Free Cam to cycle Full Tactical -> Objectives Only -> Clean Cinema).");
+
+            EnableSpectatorBotInspector = config.Bind(
+                "8. Ballistics & Immersion",
+                "EnableSpectatorBotInspector",
+                true,
+                "Display a live Spectator Bot Inspector readout (Bot #ID matching BotActionTrace.jsonl, Role/Personality, Veterancy, Net/Squad Order, GOAP Goal -> Actions, and Combat Vitals) below the top Objective Bar when aiming near a bot in Free Camera.");
+
+            EnableObjectiveBarFactionNames = config.Bind(
+                "8. Ballistics & Immersion",
+                "EnableObjectiveBarFactionNames",
+                true,
+                "QoL: Display formatted Faction + Alliance names (e.g. 'Germany (Axis)', 'USSR (Allies)') on the matching Left and Right sides of the top Objective Bar.");
 
             EnableFirstPersonShadowFix = config.Bind(
                 "8. Ballistics & Immersion",
                 "EnableFirstPersonShadowFix",
                 true,
-                "Vanilla Visual Fix: disables duplicate shadows from disembodied first-person camera arms (FPSGunManager) and renders a full-head/body shadow proxy on the local player so first-person shadows match third-person.");
+                "Vanilla Visual Fix: renders a ShadowsOnly head/neck/body proxy on the local player via SoldierLodManager.ApplyFace while keeping animated FPS arms, sleeves, and held weapon shadows intact so first-person self-shadows include head, helmet, torso, arms, and weapon without clipping into the camera.");
 
             EnableBloodSmokeWaterOcclusion = config.Bind(
                 "8. Ballistics & Immersion",
