@@ -2223,6 +2223,7 @@ namespace EasyRed2HumanAI
                 AiCore.PruneDict(_nextAiCovertOrderTime, _reusableAlivePtrs);
                 AiCore.PruneDict(_nextAiFollowOrderTime, _reusableAlivePtrs);
                 AiCore.PruneDict(_nextAiSquadRetreatTime, _reusableAlivePtrs);
+                AiCore.PruneDict(_nextSquadRadioScavengeTime, _reusableAlivePtrs);
                 AiCore.PruneDict(_aiSquadRetreatUntil, _reusableAlivePtrs);
                 AiCore.PruneDict(_aiChargeBaselineDeaths, _reusableAlivePtrs);
                 AiCore.PruneSet(_aiCovertHoldFireSquads, _reusableAlivePtrs);

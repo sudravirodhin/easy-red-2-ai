@@ -261,6 +261,7 @@ namespace EasyRed2HumanAI
             public VirtualItem TargetInventoryWearable;
             public Soldier TargetBuddyDonor;
             public Soldier TargetNeedyAllyToFeed;
+            public IntPtr ClaimingSquadPtr;
             public Vector3 TargetPosition;
             public bool NeedAmmo;
             public bool NeedBandage;
@@ -273,6 +274,7 @@ namespace EasyRed2HumanAI
             public bool IsBuddyAmmoBorrow;
             public bool IsFeedingNeedyAlly;
             public bool IsRadioPackPickup;
+            public bool IsEnemyRadioCapture;
             public bool IsHelmetPickup;
             public bool IsMedicSyringePickup;
         }
@@ -968,6 +970,24 @@ namespace EasyRed2HumanAI
             return false;
         }
 
+        private static bool IsRadioPackAlreadyClaimedForSquad(IntPtr selfPtr, IntPtr sqPtr, float now)
+        {
+            if (sqPtr == IntPtr.Zero || _botScavengeCaches.Count <= 1)
+                return false;
+
+            foreach (var kvp in _botScavengeCaches)
+            {
+                if (kvp.Key == selfPtr)
+                    continue;
+                BotScavengeCache other = kvp.Value;
+                if (now >= other.NextScanTime)
+                    continue;
+                if (other.IsRadioPackPickup && other.ClaimingSquadPtr == sqPtr)
+                    return true;
+            }
+            return false;
+        }
+
         private static void RefillSoldierPrimaryAndStowedWeapons(Soldier soldier, int minRefillQnt)
         {
             if (soldier == null)
@@ -1180,6 +1200,7 @@ namespace EasyRed2HumanAI
             public float NextRefreshTime;
             public bool IsConnectedToRadioNet;
             public bool PreviouslyHadAliveRadioman;
+            public float LastRadiomanLostTime;
             public bool HasActiveThreat;
             public bool ThreatIsArmor;
             public bool HasAliveMachineGunner;
@@ -1796,6 +1817,7 @@ namespace EasyRed2HumanAI
         internal static readonly Dictionary<IntPtr, float> _nextAiCovertOrderTime = new Dictionary<IntPtr, float>(64);
         internal static readonly Dictionary<IntPtr, float> _nextAiFollowOrderTime = new Dictionary<IntPtr, float>(64);
         internal static readonly Dictionary<IntPtr, float> _nextAiSquadRetreatTime = new Dictionary<IntPtr, float>(64);
+        internal static readonly Dictionary<IntPtr, float> _nextSquadRadioScavengeTime = new Dictionary<IntPtr, float>(64);
         internal static readonly Dictionary<IntPtr, float> _aiSquadRetreatUntil = new Dictionary<IntPtr, float>(32);
         internal static readonly Dictionary<IntPtr, float> _nextIndividualFallbackTime = new Dictionary<IntPtr, float>(128);
         internal static readonly Dictionary<IntPtr, float> _individualFallbackUntil = new Dictionary<IntPtr, float>(64);
@@ -1863,6 +1885,7 @@ namespace EasyRed2HumanAI
             _nextAiCovertOrderTime.Clear();
             _nextAiFollowOrderTime.Clear();
             _nextAiSquadRetreatTime.Clear();
+            _nextSquadRadioScavengeTime.Clear();
             _aiSquadRetreatUntil.Clear();
             _nextIndividualFallbackTime.Clear();
             _individualFallbackUntil.Clear();
@@ -3608,6 +3631,7 @@ namespace EasyRed2HumanAI
             if (board.PreviouslyHadAliveRadioman && !hasAliveRadNow)
             {
                 board.PreviouslyHadAliveRadioman = false;
+                board.LastRadiomanLostTime = now;
                 board.NetDirective = SquadNetDirective.Disconnected_Autonomous;
                 RadioNetCutoffsCount++;
                 TrySayTacticalVoice(leader, sq, VoiceManager.VoiceClip.radiomanIsDead, 0.35f);
@@ -3619,6 +3643,7 @@ namespace EasyRed2HumanAI
             else if (hasAliveRadNow)
             {
                 board.PreviouslyHadAliveRadioman = true;
+                board.LastRadiomanLostTime = 0f;
             }
 
             board.IsConnectedToRadioNet = IsSquadConnectedToRadioNet(sq);
@@ -4753,6 +4778,10 @@ namespace EasyRed2HumanAI
                                      sq != null &&
                                      !AiCore.IsTrueVehicleCrewSquad(sq) &&
                                      !board.PreviouslyHadAliveRadioman &&
+                                     !sq.HasRadioman() &&
+                                     (!_nextSquadRadioScavengeTime.TryGetValue(sq.Pointer, out float nextRadScavT) || now >= nextRadScavT) &&
+                                     !IsRadioPackAlreadyClaimedForSquad(soldier.Pointer, sq.Pointer, now) &&
+                                     suppression < 10.0f &&
                                      !isRad &&
                                      !isMedicRole &&
                                      (soldier.vest_Obj == null || !soldier.vest_Obj.isFuelTank);
@@ -5819,6 +5848,8 @@ namespace EasyRed2HumanAI
                                                 if (scavCache.IsRadioPackPickup)
                                                 {
                                                     FieldRadiosInheritedCount++;
+                                                    if (sq != null && sq.Pointer != IntPtr.Zero)
+                                                        _nextSquadRadioScavengeTime[sq.Pointer] = now + 25.0f;
                                                     lootedDesc = "floor radio pack";
                                                 }
                                                 else
@@ -5881,19 +5912,40 @@ namespace EasyRed2HumanAI
                                         if (!Photon.Pun.PhotonNetwork.InRoom || AiCore.TryConsumeBotRpcBudget(0.35f))
                                         {
                                             VirtualItem wearable = scavCache.TargetInventoryWearable;
-                                            // InventoryManager.TakeIntoInventory (0x1807E50E0) always returns false (xor al, al)
-                                            // and automatically calls soldier.SetWerable(copy, true) for VirtualWearable items!
+                                            // InventoryManager.TakeIntoInventory (0x1807E50E0) always returns false (xor al, al):
+                                            // only VirtualHelmet (+0x113..+0x1BF) auto-calls soldier.SetWerable(copy, true), whereas
+                                            // VirtualClothing (radio packs!) jumps to +0x1C1 (AddVirtualItem) unworn and MUST be
+                                            // explicitly marked as worn via soldier.SetWerable(myRadio, true)!
                                             soldier.inventory.TakeIntoInventory(wearable, targetInv);
                                             if (!targetInv.Contains(wearable))
                                             {
                                                 looted = true;
                                                 if (scavCache.IsRadioPackPickup)
                                                 {
+                                                    VirtualItem myRadio = soldier.inventory.Contains(wearable)
+                                                        ? wearable
+                                                        : (soldier.inventory.inventory != null && !string.IsNullOrEmpty(wearable.item_id)
+                                                            ? soldier.inventory.inventory.FindItemWithID(wearable.item_id)
+                                                            : wearable);
+                                                    if (myRadio != null)
+                                                    {
+                                                        soldier.SetWerable(myRadio, true);
+                                                    }
+
                                                     FieldRadiosInheritedCount++;
-                                                    lootedDesc = "field radio pack from fallen soldier";
+                                                    if (sq != null && sq.Pointer != IntPtr.Zero)
+                                                        _nextSquadRadioScavengeTime[sq.Pointer] = now + 25.0f;
+                                                    lootedDesc = scavCache.IsEnemyRadioCapture
+                                                        ? "captured enemy field radio (retuned)"
+                                                        : "field radio pack from fallen comrade";
                                                 }
                                                 else
                                                 {
+                                                    if (!soldier.hasHeadgear && soldier.inventory.Contains(wearable))
+                                                    {
+                                                        soldier.SetWerable(wearable, true);
+                                                    }
+
                                                     HelmetsRecoveredCount++;
                                                     lootedDesc = "helmet from fallen comrade";
                                                 }
@@ -6759,7 +6811,8 @@ namespace EasyRed2HumanAI
             if (_botScavengeCaches.TryGetValue(ptr, out result) &&
                 now < result.NextScanTime &&
                 (!onlyUrgentAt || result.IsAtWeaponPickup) &&
-                (!onlyUrgentBandage || result.IsBuddyBandageRefill || result.NeedBandage))
+                (!onlyUrgentBandage || result.IsBuddyBandageRefill || result.NeedBandage) &&
+                (!result.IsRadioPackPickup || wantRadioPack))
             {
                 if ((result.IsBuddyBandageRefill || result.IsBuddyAmmoBorrow) &&
                     result.TargetBuddyDonor != null &&
@@ -6837,6 +6890,15 @@ namespace EasyRed2HumanAI
             float baseSearchRadius = (needAtWeapon || needUrgentPrimary) ? 20.0f : ((wantSquadMg || wantRadioPack) ? 16.0f : 12.5f);
             float maxSearchRadius = baseSearchRadius * doctrineSearchScale;
             float bestDistSq = maxSearchRadius * maxSearchRadius;
+            IntPtr mySqPtrRadio = (soldier.joinedSquad != null) ? soldier.joinedSquad.Pointer : IntPtr.Zero;
+            float lastRadLostTime = 0f;
+            float soldierSuppForRadio = 0f;
+            if (wantRadioPack)
+            {
+                if (mySqPtrRadio != IntPtr.Zero && _squadBlackboards.TryGetValue(mySqPtrRadio, out SquadBlackboard radBoard))
+                    lastRadLostTime = radBoard.LastRadiomanLostTime;
+                soldierSuppForRadio = soldier.GetSuppressionValue();
+            }
             bool canPickUpNewWeapon = (!_nextWeaponUpgradeAllowedTime.TryGetValue(ptr, out float nextWepT) || now >= nextWepT || nextWepT - now > 120.0f);
             bool canUseBoxOrCrate = (!_nextBotBoxOrCrateResupplyTime.TryGetValue(ptr, out float nextBoxT) || now >= nextBoxT || nextBoxT - now > 45.0f);
 
@@ -7018,7 +7080,7 @@ namespace EasyRed2HumanAI
                         break;
 
                     case FloorItemKind.RadioPack:
-                        if (wantRadioPack)
+                        if (wantRadioPack && dSq <= 12.0f * 12.0f)
                         {
                             bestDistSq = dSq;
                             result = new BotScavengeCache
@@ -7028,7 +7090,8 @@ namespace EasyRed2HumanAI
                                 NeedBandage = needBandage,
                                 TargetFloorItem = item,
                                 TargetPosition = itemPos,
-                                IsRadioPackPickup = true
+                                IsRadioPackPickup = true,
+                                ClaimingSquadPtr = mySqPtrRadio
                             };
                         }
                         break;
@@ -7221,21 +7284,52 @@ namespace EasyRed2HumanAI
                     {
                         if (wantRadioPack)
                         {
-                            VirtualItem vCloth = inv.FindItemOfType<VirtualClothing>();
-                            if (vCloth != null && TryGetVirtualWearableInfo(vCloth, out CachedWearableInfo wInfo) && wInfo.IsRadio)
+                            bool isFriendlyCorpse = owner == null ||
+                                (!string.IsNullOrEmpty(sEntry.OwnerFaction) && AiCore.AreSameSideFactions(myFac, sEntry.OwnerFaction));
+                            bool canClaimThisRadio = isFriendlyCorpse
+                                ? (dSq <= 14.0f * 14.0f)
+                                : (dSq <= 10.0f * 10.0f &&
+                                   soldierSuppForRadio < 8.0f &&
+                                   (lastRadLostTime <= 0f || (now - lastRadLostTime) >= 20.0f));
+                            if (canClaimThisRadio)
                             {
-                                bestDistSq = dSq;
-                                result = new BotScavengeCache
+                                // Uniforms (isRadio == false) sit at index 0 in VirtualClothing lists; iterate all items to find the radio pack!
+                                VirtualItem candRadio = null;
+                                var clothItems = inv.inventory != null ? inv.inventory.items : null;
+                                if (clothItems != null)
                                 {
-                                    NextScanTime = now + 2.8f,
-                                    NeedAmmo = needAmmo,
-                                    NeedBandage = needBandage,
-                                    TargetInventory = inv,
-                                    TargetInventoryWearable = vCloth,
-                                    TargetPosition = invPos,
-                                    IsRadioPackPickup = true
-                                };
-                                continue;
+                                    int cLim = Mathf.Min(clothItems.Count, 24);
+                                    for (int k = 0; k < cLim; k++)
+                                    {
+                                        VirtualItem ci = clothItems[k];
+                                        if (ci != null &&
+                                            ci.TryCast<VirtualClothing>() != null &&
+                                            TryGetVirtualWearableInfo(ci, out CachedWearableInfo wInfo) &&
+                                            wInfo.IsRadio)
+                                        {
+                                            candRadio = ci;
+                                            break;
+                                        }
+                                    }
+                                }
+
+                                if (candRadio != null)
+                                {
+                                    bestDistSq = dSq;
+                                    result = new BotScavengeCache
+                                    {
+                                        NextScanTime = now + 2.8f,
+                                        NeedAmmo = needAmmo,
+                                        NeedBandage = needBandage,
+                                        TargetInventory = inv,
+                                        TargetInventoryWearable = candRadio,
+                                        TargetPosition = invPos,
+                                        IsRadioPackPickup = true,
+                                        IsEnemyRadioCapture = (owner != null && !isFriendlyCorpse),
+                                        ClaimingSquadPtr = mySqPtrRadio
+                                    };
+                                    continue;
+                                }
                             }
                         }
 

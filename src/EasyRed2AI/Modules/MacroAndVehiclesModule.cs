@@ -972,6 +972,7 @@ namespace EasyRed2HumanAI
             _nextCombinedArmsAssistCountTime.Clear();
             _squadTaskCommittedUntil.Clear();
             _nextSquadAttritionPivotTime.Clear();
+            _pendingMacroSquadOrders.Clear();
             _objectiveAttrition.Clear();
             _squadObjectiveLossTrackers.Clear();
             _nextTurretFFCheckTime.Clear();
@@ -3597,6 +3598,8 @@ namespace EasyRed2HumanAI
                 return;
 
             float now = Time.time;
+            DrainOnePendingMacroSquadOrderIfReady(now);
+
             if (now < _nextMacroDirectorTime && _nextMacroDirectorTime - now <= 10.0f)
                 return;
 
@@ -4258,16 +4261,7 @@ namespace EasyRed2HumanAI
                         if (closestEnemySq > 165f * 165f)
                             continue;
 
-                        bool hasDefenderAssigned = false;
-                        for (int sIdx = 0; sIdx < eligibleSquads.Count; sIdx++)
-                        {
-                            Squad sq = eligibleSquads[sIdx];
-                            if (sq.currentTask != null && sq.currentTask.Pointer == heldTaskPtr)
-                            {
-                                hasDefenderAssigned = true;
-                                break;
-                            }
-                        }
+                        bool hasDefenderAssigned = CountAlliedGroundSquadsOnObjective(faction, heldTaskPtr, objPos, true) > 0;
 
                         if (!hasDefenderAssigned)
                         {
@@ -4285,7 +4279,7 @@ namespace EasyRed2HumanAI
                             {
                                 if (!heldObj.CanAttractFaction(faction))
                                     _garrisonAssignedObjectiveBySquad[bestReserve.Pointer] = heldTaskPtr;
-                                AssignAiSquadMacroTask(bestReserve, heldObj, now, 50.0f);
+                                AssignAiSquadMacroTask(bestReserve, heldObj, now, 50.0f, releaseStaleCovers: true);
                                 MacroGarrisonsAssignedCount++;
                                 if (VisionConfig.DebugLogging.Value)
                                 {
@@ -4343,11 +4337,14 @@ namespace EasyRed2HumanAI
                                 }
                             }
 
-                            if (quietSquadCount >= 2 && closestExcessSquad != null)
+                            int totalQuietDefenders = Mathf.Max(
+                                quietSquadCount,
+                                CountAlliedGroundSquadsOnObjective(faction, quietTaskPtr, quietObj.GetTaskPosition(), false));
+                            if (totalQuietDefenders >= 2 && closestExcessSquad != null)
                             {
                                 if (!primaryThreatObj.CanAttractFaction(faction))
                                     _garrisonAssignedObjectiveBySquad[closestExcessSquad.Pointer] = primaryTaskPtr;
-                                AssignAiSquadMacroTask(closestExcessSquad, primaryThreatObj, now, 50.0f);
+                                AssignAiSquadMacroTask(closestExcessSquad, primaryThreatObj, now, 50.0f, releaseStaleCovers: true);
                                 MacroGarrisonsAssignedCount++;
                                 if (VisionConfig.DebugLogging.Value)
                                 {
@@ -4456,7 +4453,7 @@ namespace EasyRed2HumanAI
             Vector3 stalledPos = worstStalledObj.GetTaskPosition();
 
             // Anti-ping-pong comparative gate: only pivot off the meatgrinder if at least one OTHER active unheld
-            // objective either has < 55% of its decayed casualties (and isn't on AvoidUntil) OR has active capture progress!
+            // objective either has a genuine active breakthrough (>= 40% cap) OR is clearly less bloody with AvoidUntil expired!
             bool hasViableAlternative = false;
             for (int i = 0; i < unheldObjectives.Count; i++)
             {
@@ -4470,7 +4467,12 @@ namespace EasyRed2HumanAI
                 float altUrgency = 0f;
                 AiCore.ClassifyMissionObjectiveForFaction(alt, faction, bd, out _, out _, out altUrgency);
 
-                if (altUrgency >= 0.20f || (now >= altState.AvoidUntil && altState.DecayedLosses < worstState.DecayedLosses * 0.55f))
+                bool isGenuineBreakthrough = altUrgency >= 0.40f;
+                bool isClearlySofter = now >= altState.AvoidUntil &&
+                                       altState.DecayedLosses < worstState.DecayedLosses * 0.55f &&
+                                       (worstState.DecayedLosses - altState.DecayedLosses) >= 3.0f &&
+                                       (altUrgency >= 0.20f || altState.DecayedLosses < threshold * 0.85f);
+                if (isGenuineBreakthrough || isClearlySofter)
                 {
                     hasViableAlternative = true;
                     break;
@@ -4480,8 +4482,8 @@ namespace EasyRed2HumanAI
             if (!hasViableAlternative)
                 return;
 
-            // Count attacking squads currently on stalledObj and identify the single closest squad so (when >= 3 squads exist)
-            // 1 squad stays as a fixing/pinning force while the rest of the Team Net pivots onto the softer objective!
+            // Count attacking squads currently on stalledObj and check whether non-eligible friendly forces
+            // (players, disconnected AI squads, tanks) are already fixing the point before holding back an extra squad!
             int squadsOnStalled = 0;
             IntPtr pinningSquadPtr = IntPtr.Zero;
             float closestDistSq = float.MaxValue;
@@ -4508,11 +4510,13 @@ namespace EasyRed2HumanAI
             if (squadsOnStalled == 0)
                 return;
 
-            bool keepFixingSquad = eligibleSquads.Count >= 3 && squadsOnStalled >= 2;
+            int totalAlliedOnStalled = CountAlliedGroundSquadsOnObjective(faction, stalledTaskPtr, stalledPos, true);
+            int nonEligibleFixingUnits = Mathf.Max(0, totalAlliedOnStalled - squadsOnStalled);
+            bool keepFixingSquad = nonEligibleFixingUnits == 0 && eligibleSquads.Count >= 3 && squadsOnStalled >= 2;
 
             // Stamp AvoidUntil BEFORE PickBestAttackObjectiveForSquad runs so pivoting squads naturally avoid stalledObj
-            worstState.PivotCooldownUntil = now + 75.0f;
-            worstState.AvoidUntil = now + 55.0f;
+            worstState.PivotCooldownUntil = now + 90.0f;
+            worstState.AvoidUntil = now + 105.0f;
             _objectiveAttrition[worstKey] = worstState;
 
             int pivotedNow = 0;
@@ -4532,10 +4536,7 @@ namespace EasyRed2HumanAI
                 if (_nextSquadAttritionPivotTime.TryGetValue(sq.Pointer, out float nextPivot) && now < nextPivot)
                     continue;
 
-                // Never pull breachers or squads actively locked in a close firefight (<= 55m or suppressed) out with their backs turned!
-                float minSafePivotDist = sq.IsPlayerInSquad() ? 38.0f : 28.0f;
-                float distToStalledSq = (sq.Leader.transform.position - stalledPos).sqrMagnitude;
-                if (distToStalledSq <= minSafePivotDist * minSafePivotDist || IsSquadLockedInCloseFirefight(sq))
+                if (!CanSquadDisengageForAttritionPivot(sq, stalledPos, out bool shouldPopDisengageSmoke))
                     continue;
 
                 MissionObjective pivotObj = PickBestAttackObjectiveForSquad(
@@ -4547,9 +4548,15 @@ namespace EasyRed2HumanAI
                 if (pivotObj == null || pivotObj.missionTask == null || pivotObj.missionTask.Pointer == stalledTaskPtr)
                     continue;
 
-                _nextSquadAttritionPivotTime[sq.Pointer] = now + 65.0f;
+                if (shouldPopDisengageSmoke && _squadBlackboards.TryGetValue(sq.Pointer, out SquadBlackboard pivBoard))
+                {
+                    TryPopSquadRetreatSmoke(sq, sq.Leader, ref pivBoard, now);
+                    _squadBlackboards[sq.Pointer] = pivBoard;
+                }
+
+                _nextSquadAttritionPivotTime[sq.Pointer] = now + 135.0f;
                 _pincerOrderedTaskBySquad.Remove(sq.Pointer);
-                AssignAiSquadMacroTask(sq, pivotObj, now, 65.0f);
+                AssignAiSquadMacroTask(sq, pivotObj, now, 80.0f, releaseStaleCovers: true);
                 TrySayTacticalVoice(sq.Leader, sq, VoiceManager.VoiceClip.attackThere, 0.20f);
                 MacroObjectivePivotsCount++;
                 pivotedNow++;
@@ -4565,13 +4572,50 @@ namespace EasyRed2HumanAI
                 }
             }
 
-            // If every squad on stalledObj was already inside CQB breach range (<= 28m) so 0 squads actually pivoted,
-            // allow re-evaluating after 18s instead of locking cooldown for a full 75s.
+            // If no eligible squad could break contact (or only 1 of 3+ squads broke away), shorten re-check cooldown
+            // so newly respawned or disentangling squads can join the pivot instead of trickling 1 per 90s.
             if (pivotedNow == 0)
             {
                 worstState.PivotCooldownUntil = now + 18.0f;
                 _objectiveAttrition[worstKey] = worstState;
             }
+            else if (pivotedNow == 1 && squadsOnStalled >= 3)
+            {
+                worstState.PivotCooldownUntil = now + 32.0f;
+                _objectiveAttrition[worstKey] = worstState;
+            }
+        }
+
+        private static bool CanSquadDisengageForAttritionPivot(
+            Squad sq,
+            Vector3 stalledPos,
+            out bool shouldPopDisengageSmoke)
+        {
+            shouldPopDisengageSmoke = false;
+            if (sq == null || sq.Pointer == IntPtr.Zero || sq.Leader == null || sq.Leader.transform == null)
+                return false;
+            if (sq.InChargeTime() || _squadOrderedToVehicle.ContainsKey(sq.Pointer))
+                return false;
+
+            float minSafePivotDist = sq.IsPlayerInSquad() ? 42.0f : 30.0f;
+            if ((sq.Leader.transform.position - stalledPos).sqrMagnitude <= minSafePivotDist * minSafePivotDist)
+                return false;
+
+            float leaderSupp = sq.Leader.GetSuppressionValue();
+            if (leaderSupp >= 48.0f)
+                return false;
+
+            bool closeThreat = false;
+            if (_squadBlackboards.TryGetValue(sq.Pointer, out SquadBlackboard b) && b.HasActiveThreat)
+            {
+                float dSq = (b.ThreatPosition - b.SquadCenter).sqrMagnitude;
+                if (dSq <= 28.0f * 28.0f)
+                    return false;
+                closeThreat = dSq <= 65.0f * 65.0f;
+            }
+
+            shouldPopDisengageSmoke = leaderSupp >= 14.0f || closeThreat;
+            return true;
         }
 
         private static bool IsSquadTaskInObjectiveList(Squad sq, List<MissionObjective> objectives)
@@ -4640,9 +4684,126 @@ namespace EasyRed2HumanAI
             return false;
         }
 
+        private struct PendingMacroSquadOrder
+        {
+            public Squad SquadRef;
+            public IntPtr SquadPtr;
+            public IntPtr ExpectedTaskPtr;
+            public float ExpireTime;
+            public bool ReleaseStaleCovers;
+        }
+
+        private static readonly List<PendingMacroSquadOrder> _pendingMacroSquadOrders = new List<PendingMacroSquadOrder>(16);
         private static int _lastMacroImmediateOrderFrame = -1;
 
-        private static void AssignAiSquadMacroTask(Squad sq, MissionObjective obj, float now, float commitDuration)
+        private static void RemovePendingMacroSquadOrder(IntPtr sqPtr)
+        {
+            for (int i = _pendingMacroSquadOrders.Count - 1; i >= 0; i--)
+            {
+                if (_pendingMacroSquadOrders[i].SquadPtr == sqPtr)
+                    _pendingMacroSquadOrders.RemoveAt(i);
+            }
+        }
+
+        private static void EnqueuePendingMacroSquadOrder(Squad sq, IntPtr expectedTaskPtr, float now, bool releaseStaleCovers)
+        {
+            if (sq == null || sq.Pointer == IntPtr.Zero || expectedTaskPtr == IntPtr.Zero)
+                return;
+
+            IntPtr sqPtr = sq.Pointer;
+            PendingMacroSquadOrder entry = new PendingMacroSquadOrder
+            {
+                SquadRef = sq,
+                SquadPtr = sqPtr,
+                ExpectedTaskPtr = expectedTaskPtr,
+                ExpireTime = now + 12.0f,
+                ReleaseStaleCovers = releaseStaleCovers
+            };
+
+            for (int i = 0; i < _pendingMacroSquadOrders.Count; i++)
+            {
+                if (_pendingMacroSquadOrders[i].SquadPtr == sqPtr)
+                {
+                    _pendingMacroSquadOrders[i] = entry;
+                    return;
+                }
+            }
+
+            if (_pendingMacroSquadOrders.Count < 24)
+            {
+                _pendingMacroSquadOrders.Add(entry);
+            }
+        }
+
+        private static void DrainOnePendingMacroSquadOrderIfReady(float now)
+        {
+            if (_pendingMacroSquadOrders.Count == 0 ||
+                Time.frameCount == _lastMacroImmediateOrderFrame ||
+                AiCore.IsHeavyWorkFrame() ||
+                Time.unscaledDeltaTime > 0.026f ||
+                !AiCore.IsMasterClient())
+            {
+                return;
+            }
+
+            BattleManager bm = BattleManager.instance;
+            if (bm == null || bm.Pointer == IntPtr.Zero || BattleManager.isBattleEnded || bm.isPreview)
+            {
+                _pendingMacroSquadOrders.Clear();
+                return;
+            }
+
+            for (int i = 0; i < _pendingMacroSquadOrders.Count; )
+            {
+                PendingMacroSquadOrder p = _pendingMacroSquadOrders[i];
+                Squad sq = p.SquadRef;
+                if (sq == null ||
+                    p.SquadPtr == IntPtr.Zero ||
+                    sq.Pointer != p.SquadPtr ||
+                    now >= p.ExpireTime)
+                {
+                    _pendingMacroSquadOrders.RemoveAt(i);
+                    continue;
+                }
+
+                Soldier leader = sq.Leader;
+                if (leader == null ||
+                    leader.Pointer == IntPtr.Zero ||
+                    !leader.IsAlive ||
+                    leader.IsPlayer() ||
+                    !AiCore.IsLocallyOwnedBot(leader) ||
+                    sq.currentTask == null ||
+                    sq.currentTask.Pointer != p.ExpectedTaskPtr ||
+                    IsSquadActivelyRetreating(p.SquadPtr, now) ||
+                    sq.InChargeTime() ||
+                    _squadOrderedToVehicle.ContainsKey(p.SquadPtr))
+                {
+                    _pendingMacroSquadOrders.RemoveAt(i);
+                    continue;
+                }
+
+                if (Photon.Pun.PhotonNetwork.InRoom && !AiCore.TryConsumeBotRpcBudget(0.45f))
+                    return;
+
+                _lastMacroImmediateOrderFrame = Time.frameCount;
+                _pendingMacroSquadOrders.RemoveAt(i);
+                try
+                {
+                    if (p.ReleaseStaleCovers)
+                        sq.OrderLeaveAllVehiclesAndCovers(false, true, false);
+                    sq.Leader_OrderAttackCurrentTask(leader);
+                }
+                catch { }
+                return;
+            }
+        }
+
+        private static void AssignAiSquadMacroTask(
+            Squad sq,
+            MissionObjective obj,
+            float now,
+            float commitDuration,
+            bool releaseStaleCovers = false)
         {
             if (sq == null || obj == null || obj.missionTask == null)
                 return;
@@ -4652,18 +4813,38 @@ namespace EasyRed2HumanAI
             sq.currentTask = obj.missionTask.Cast<SquadTask>();
             _squadTaskCommittedUntil[sq.Pointer] = now + (sq.IsPlayerInSquad() ? Mathf.Max(commitDuration, 65.0f) : commitDuration);
 
+            if (changed && sq.timed_order_end > now && !sq.InChargeTime() && !IsSquadActivelyRetreating(sq.Pointer, now))
+            {
+                sq.timed_order_end = 0f;
+            }
+
             // Cap immediate Leader_OrderAttackCurrentTask (which runs CoverManager.GetCovers + reliable PhotonView.RPCs)
-            // to at most 1 squad per frame; any additional reassigned squads execute Leader_OrderAttackCurrentTask
-            // naturally on their own Squad Leader's next staggered SequentialUpdate tick!
+            // to at most 1 squad per frame; any additional reassigned squads are queued into _pendingMacroSquadOrders
+            // so every pivoted squad executes Leader_OrderAttackCurrentTask on the next non-heavy frames!
             int frame = Time.frameCount;
             if (changed &&
                 sq.Leader != null &&
-                !IsSquadActivelyRetreating(sq.Pointer, now) &&
-                frame != _lastMacroImmediateOrderFrame &&
-                (!Photon.Pun.PhotonNetwork.InRoom || AiCore.TryConsumeBotRpcBudget(0.45f)))
+                sq.Leader.IsAlive &&
+                !sq.Leader.IsPlayer() &&
+                AiCore.IsLocallyOwnedBot(sq.Leader) &&
+                !IsSquadActivelyRetreating(sq.Pointer, now))
             {
-                _lastMacroImmediateOrderFrame = frame;
-                sq.Leader_OrderAttackCurrentTask(sq.Leader);
+                if (frame != _lastMacroImmediateOrderFrame &&
+                    !AiCore.IsHeavyWorkFrame() &&
+                    (!Photon.Pun.PhotonNetwork.InRoom || AiCore.TryConsumeBotRpcBudget(0.45f)))
+                {
+                    _lastMacroImmediateOrderFrame = frame;
+                    RemovePendingMacroSquadOrder(sq.Pointer);
+                    if (releaseStaleCovers)
+                    {
+                        try { sq.OrderLeaveAllVehiclesAndCovers(false, true, false); } catch { }
+                    }
+                    sq.Leader_OrderAttackCurrentTask(sq.Leader);
+                }
+                else
+                {
+                    EnqueuePendingMacroSquadOrder(sq, newTaskPtr, now, releaseStaleCovers);
+                }
             }
 
             if (changed && sq.IsPlayerInSquad())
@@ -4764,6 +4945,46 @@ namespace EasyRed2HumanAI
             catch { }
         }
 
+        private static int CountAlliedGroundSquadsOnObjective(
+            string faction,
+            IntPtr taskPtr,
+            Vector3 objPos,
+            bool includeNearbyPlayersAndArmor = true)
+        {
+            if (taskPtr == IntPtr.Zero || string.IsNullOrEmpty(faction))
+                return 0;
+
+            AiCore.EnsureWorldSnapshot();
+            int sqCount = AiCore.WorldSquadCount;
+            var worldSquads = AiCore.WorldSquads;
+            int count = 0;
+
+            for (int i = 0; i < sqCount; i++)
+            {
+                ref AiCore.SquadSnapshot snap = ref worldSquads[i];
+                if (snap.Ptr == IntPtr.Zero || snap.UnitCount <= 0 || snap.RefOnPlane || string.IsNullOrEmpty(snap.Faction))
+                    continue;
+                if (!AiCore.AreSameSideFactions(faction, snap.Faction))
+                    continue;
+
+                Squad sq = snap.Ref;
+                if (sq != null && sq.currentTask != null && sq.currentTask.Pointer == taskPtr)
+                {
+                    count++;
+                    continue;
+                }
+
+                if (includeNearbyPlayersAndArmor &&
+                    (snap.IsPlayerInSquad || snap.LeaderOnGroundVehicle) &&
+                    (snap.RefPos - objPos).sqrMagnitude <= 85.0f * 85.0f)
+                {
+                    count++;
+                }
+            }
+
+            return count;
+        }
+
         private static MissionObjective PickBestAttackObjectiveForSquad(
             Vector3 leaderPos,
             string faction,
@@ -4786,18 +5007,10 @@ namespace EasyRed2HumanAI
                     continue;
 
                 IntPtr taskPtr = obj.missionTask.Pointer;
-                int assignedAttackers = 0;
-                if (eligibleSquads != null)
-                {
-                    for (int s = 0; s < eligibleSquads.Count; s++)
-                    {
-                        Squad other = eligibleSquads[s];
-                        if (other != null && other.currentTask != null && other.currentTask.Pointer == taskPtr)
-                            assignedAttackers++;
-                    }
-                }
+                Vector3 objPos = obj.GetTaskPosition();
+                int assignedAttackers = CountAlliedGroundSquadsOnObjective(faction, taskPtr, objPos, true);
 
-                float dist = Vector3.Distance(leaderPos, obj.GetTaskPosition()) + 25.0f;
+                float dist = Vector3.Distance(leaderPos, objPos) + 25.0f;
                 float weight = 1.0f;
 
                 // Ensure every open attack objective gets at least 1 pressuring squad instead of leaving a flank flag empty
@@ -4821,7 +5034,7 @@ namespace EasyRed2HumanAI
                     if (attrState.DecayedLosses >= 2.0f)
                         weight *= (1.0f + Mathf.Min(attrState.DecayedLosses, 16.0f) * 0.16f);
                     if (Time.time < attrState.AvoidUntil)
-                        weight *= 2.15f;
+                        weight *= 2.85f;
                 }
 
                 float score = dist * weight;
@@ -4894,12 +5107,8 @@ namespace EasyRed2HumanAI
                 if (cand.currentTask != null)
                 {
                     IntPtr curPtr = cand.currentTask.Pointer;
-                    for (int j = 0; j < eligibleSquads.Count; j++)
-                    {
-                        Squad other = eligibleSquads[j];
-                        if (other.currentTask != null && other.currentTask.Pointer == curPtr)
-                            sameTaskCount++;
-                    }
+                    string countFac = !string.IsNullOrEmpty(faction) ? faction : cand.Leader.faction;
+                    sameTaskCount = CountAlliedGroundSquadsOnObjective(countFac, curPtr, cand.currentTask.GetTaskDestination(), false);
                 }
 
                 float dSq = (cand.Leader.transform.position - targetPos).sqrMagnitude;

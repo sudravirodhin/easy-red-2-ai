@@ -1,4 +1,4 @@
-# Easy Red 2: Battle Hardened (`v0.8.5`)
+# Easy Red 2: Battle Hardened (`v0.8.6`)
 *3-Tier Tactical GOAP, Squad Blackboard, Radioman Intel Net, Veterancy, Personalities & Combined-Arms Overhaul*
 
 > [!IMPORTANT]
@@ -41,20 +41,20 @@ In vanilla, bots act like expendable targets waiting to respawn. In **Battle Har
 
 Download your preferred package from the **[Releases](https://github.com/sudravirodhin/easy-red-2-ai/releases)** page:
 
-### Option A: With BepInEx Included (`EasyRed2HumanAI-v0.8.5-with-BepInEx.zip`) — *Recommended for Fresh Installs*
+### Option A: With BepInEx Included (`EasyRed2HumanAI-v0.8.6-with-BepInEx.zip`) — *Recommended for Fresh Installs*
 Includes **[BepInEx 6.0.0-be.791 (Unity.IL2CPP-win-x64)](https://builds.bepinex.dev/projects/bepinex_be)**, the `.NET 6` runtime, Unity `2022.3.62` base libraries, pre-generated IL2CPP `interop` assemblies for Easy Red 2 Build `921`, and `EasyRed2HumanAI.dll` (with no other third-party mods).
 1. Open your **Easy Red 2** installation folder (e.g. `Steam\steamapps\common\Easy Red 2`, where `Easy Red 2.exe` is located).
-2. Extract all contents of `EasyRed2HumanAI-v0.8.5-with-BepInEx.zip` directly into the `Easy Red 2` folder.
+2. Extract all contents of `EasyRed2HumanAI-v0.8.6-with-BepInEx.zip` directly into the `Easy Red 2` folder.
 3. Launch the game!
 
-### Option B: Without BepInEx / Plugin Only (`EasyRed2HumanAI-v0.8.5-Plugin-Only.zip` or `EasyRed2HumanAI.dll`)
+### Option B: Without BepInEx / Plugin Only (`EasyRed2HumanAI-v0.8.6-Plugin-Only.zip` or `EasyRed2HumanAI.dll`)
 For users who already have **[BepInEx 6 Bleeding Edge (`BepInEx-Unity.IL2CPP-win-x64`)](https://builds.bepinex.dev/projects/bepinex_be)** installed:
-1. Download `EasyRed2HumanAI-v0.8.5-Plugin-Only.zip` (or `EasyRed2HumanAI.dll` directly).
+1. Download `EasyRed2HumanAI-v0.8.6-Plugin-Only.zip` (or `EasyRed2HumanAI.dll` directly).
 2. Place `EasyRed2HumanAI.dll` into:
    ```text
    Easy Red 2\BepInEx\plugins\EasyRed2HumanAI.dll
    ```
-   *(Using **[Quartermaster - ER2 Mod Manager](https://www.nexusmods.com/easyred2/mods/107)**? Import `EasyRed2HumanAI-v0.8.5-Plugin-Only.zip` directly in Quartermaster's Mods tab—do not import `with-BepInEx.zip`.)*
+   *(Using **[Quartermaster - ER2 Mod Manager](https://www.nexusmods.com/easyred2/mods/107)**? Import `EasyRed2HumanAI-v0.8.6-Plugin-Only.zip` directly in Quartermaster's Mods tab—do not import `with-BepInEx.zip`.)*
 
 ### Linux & Steam Deck Setup (via Steam Proton)
 `EasyRed2HumanAI` works out of the box on **Linux Desktop** and **SteamOS / Steam Deck** with 100% Windows Co-op cross-play compatibility by running the Windows IL2CPP build under **Proton**:
@@ -63,16 +63,16 @@ For users who already have **[BepInEx 6 Bleeding Edge (`BepInEx-Unity.IL2CPP-win
    * Check **"Force the use of a specific Steam Play compatibility tool"** and select **Proton Experimental** or **Proton 9.0+**. Let Steam finish downloading the Windows executable (`Easy Red 2.exe`).
 2. **Extract the Mod**:
    * Right-click **Easy Red 2** → **Manage** → **Browse local files** (`~/.steam/steam/steamapps/common/Easy Red 2/`).
-   * Extract all contents of **`EasyRed2HumanAI-v0.8.5-with-BepInEx.zip`** directly into that folder (so `winhttp.dll`, `doorstop_config.ini`, `dotnet/`, and `BepInEx/` sit next to `Easy Red 2.exe`).
+   * Extract all contents of **`EasyRed2HumanAI-v0.8.6-with-BepInEx.zip`** directly into that folder (so `winhttp.dll`, `doorstop_config.ini`, `dotnet/`, and `BepInEx/` sit next to `Easy Red 2.exe`).
 3. **Add the Wine DLL Override Launch Option** *(Required on Linux/Proton so Wine loads BepInEx's `winhttp.dll` proxy instead of Wine's built-in `winhttp`)*:
    * In Steam → **Easy Red 2** → **Properties** → **General** → **Launch Options**, paste:
      ```bash
      WINEDLLOVERRIDES="winhttp=n,b" %command%
      ```
-4. Launch the game! Verify `BepInEx/LogOutput.log` shows `Easy Red 2 - Battle Hardened v0.8.5 loaded!`. Both Windows and Linux/Proton players can seamlessly Host or Join each other's Multiplayer Co-op lobbies.
+4. Launch the game! Verify `BepInEx/LogOutput.log` shows `Easy Red 2 - Battle Hardened v0.8.6 loaded!`. Both Windows and Linux/Proton players can seamlessly Host or Join each other's Multiplayer Co-op lobbies.
 
 ### Switching to Vanilla or Uninstalling (`Uninstall-BepInEx-Mod.bat`)
-Included in `EasyRed2HumanAI-v0.8.5-with-BepInEx.zip` (and in the root of this repository) is **[`Uninstall-BepInEx-Mod.bat`](Uninstall-BepInEx-Mod.bat)**. Double-click it inside your `Easy Red 2` folder when the game is closed to:
+Included in `EasyRed2HumanAI-v0.8.6-with-BepInEx.zip` (and in the root of this repository) is **[`Uninstall-BepInEx-Mod.bat`](Uninstall-BepInEx-Mod.bat)**. Double-click it inside your `Easy Red 2` folder when the game is closed to:
 * **`[1] Play Vanilla Temporarily`**: Moves `BepInEx`, `dotnet`, and `winhttp.dll` into `_BepInEx_Disabled_Backup\` so the game runs 100% pure vanilla without losing your configs or other plugins.
 * **`[2] Restore Modded Game`**: Moves everything back from `_BepInEx_Disabled_Backup\` in one click.
 * **`[3] Uninstall Completely`**: Permanently deletes `BepInEx`, `dotnet`, `winhttp.dll`, `doorstop_config.ini`, `.doorstop_version`, and `changelog.txt`.
@@ -166,6 +166,9 @@ Alongside shared tactical realism goals (some inspired by [`Easy-Red-2-Realism-O
   * **4K / High-DPI UI Scaling, Spectator `F` Tactical View Cycle + 3D World Objectives, Auto-Expanding Objective Bar Faction + Side Names, Multiplayer Stat Sync Fix & Forensic GOAP/Vault/Crew Fixes (`v0.8.3`)**: Scales all IMGUI menus and HUD cards (`F5`, `F6`, `F10`, Death Banner, Bot Inspector) automatically for 1440p/4K/High-DPI displays (`UiScaleMultiplier` + live `-10% / Auto / +10%` buttons in `F6`); anchors the Spectator Bot Inspector at Top-Center beneath the Objective Bar (zero `"Free Camera"` overlap, decoupled from Photo Mode's UI hide toggle) and binds **`F` in Spectator / Free Cam** to cycle **`Full Tactical` $\leftrightarrow$ `Objectives Only` $\leftrightarrow$ `Clean Cinema`** with live 3D `A`/`B`/`C` world markers (`ObjectiveGUI.LateUpdate`); inserts formatted **Faction + Side names** (`Germany (Axis)`, `USSR (Allies)`, `United States (Allies)`, etc.) directly into `MissionStatusGUI.mainRow` so the dark Objective Bar background and pointed arrow caps automatically expand around the text (`EnableObjectiveBarFactionNames`); fixes vanilla's **Multiplayer Casualties, Prisoners & Lost Vehicles desync/undercount** (`EnableMultiplayerBattleStatSyncFix` — authoritative Host ledger + coalesced `4 Hz` & `OnWin` sync + live `EndBattleGUI` refresh on Host & Clients); fixes native `Squad.IsVehicleCrew` (`!isOpenForJoiners`) misclassifying closed infantry/landing-boat squads (`AiCore.IsTrueVehicleCrewSquad`); fixes thin-wall crest height probing for `Vault`; and eliminates `TacticalFallbackRetreat` chaining, `IsCharging()` self-balk bleeding deadlocks, Radioman `18m` boundary oscillation, and `0.5s` post-contact casual scavenging.
   * **Co-op Remote Client Battle-Stat Key Fix, Atomic 3-of-3 Medic Kit Inheritance, Trench-Wall Collision & Trench-Exit/Stuck-Wire Vaulting, Molotov Tank-Track Immunity + Engine-Deck Seepage & True 3rd-Person FPS Shadow Rig (`v0.8.4`)**: Fixes remote Co-op client end-of-match casualty/prisoner/lost-vehicle keys (`"BS.0.1"`..`"BS.1.3"` matching native `Int32_TypeInfo` boxing); protects fallen Medics within `25m` of friendly human players and transfers all **3 unique `VirtualSyringe` tools atomically** (`TakeIntoInventoryBatch` + rollback so dead Medics never end up with unusable 2-of-3 partial kits); keeps `Soldier.ForceControllerEnabled()` active near steep trench/wall faces so grounded bots never phase horizontally through trench walls via `Transform.Translate`; enables **trench-exit & battered-revetment vaulting** (level-off parapet verification) while keeping **barbed wire unvaultable** unless wedged for `>= 3.5s`; reclassifies **Molotov / phosphorus grenade shatters** from `HitType.Explosion` to `HitType.Fire` so steel tank tracks never snap from burning bottles while routing upper-hull fire into **engine-grille & fuel-tank seepage** (`DamageEngine` / `DamageFuelTank`); and replaces floating `FPSGunManager` viewmodel shadows with a connected **3rd-person `ShadowsOnly` rig** in First Person.
   * **140-Bot Co-op Hitch & GC Elimination, `InvisibleTrepassableWall` Vaulting Fix, On-Nose Dogfights, Grounded Pilot/Bomber & Tank Crew `"Retreat"`, Armor/Air-Priority Kamikaze, Threat-Arc Tank Fear & Gunfire-Driven Leeward Cover (`v0.8.5`)**: Eliminates the `285ms` `FixedSteps: 5` PhysX `CharacterController` catch-up freeze (gating `ForceControllerEnabled()` strictly to active trench/wall guard windows) and cuts `.NET 6` `Il2CppObjectBase` wrapper allocations (`ai.path` `CPath`, `targetDestination`, `HeldMortar`, and duplicate `GetComponentsInChildren<MeshFilter>` shadow-rig queries) to stop `120ms` Gen-1 GC pauses; fixes **`InvisibleTrepassableWall` (`Layer 14`) + thin-fence + `Vector3.zero` landing** vaulting (`AiCore.GetMovementObstacleMask()`); tightens dogfight anti-chicken breaks (`125m–170m` reciprocal merges only + altitude ceiling) so fighters shoot on-nose; restores and overhauls the **on-foot `"Retreat"` objective (`MissionTaskRetreat`) for ejected/grounded Pilots, 6–10 seat Heavy Bomber crews, and Human/AI Tank crews** (including manual bailouts, crash-landings way out of bounds, `sp_ME_` V2 maps, and `85m` water-surface extraction zones when ditching at sea—never despawning planes mid-flight!); restricts Japanese Kamikaze strictly to severely crippled aircraft (`>= 80` damage / missing wing parts) prioritizing **enemy armor and aircraft** with terrain-cleared dives; gates infantry **Tank Fear** to actual tank threat arcs (`IsTankThreateningPosition`); orients **leeward cover** against live incoming gunfire (`_gunfireRing`); adds `2.4s`/`5.2s` bot + `8.5s` squad stall recovery; flushes victory surrenders & stats *before* `SyncWin` RPC; and guards vanilla `BulletInstance.OnHit` native NREs.
+  * **Emergent Field Radio Inheritance & Enemy Radio Frequency Retuning, Full-Army Objective Staffing, Smoke-Screened Multi-Squad Attrition Pivots & Staggered HQ Order Queue (`v0.8.6`)**:
+    * **Emergent Field Radio Inheritance & Enemy Radio Retuning (`GoapAndBlackboardModule.cs`)**: Fixes two root-cause engine bugs that left corpse `RadioLoot` at `0`—scanning all `VirtualClothing` slots (`clothItems[0..24]`) instead of stopping at index-0 uniforms, and explicitly calling **`Soldier.SetWerable(myRadio, true)`** after `TakeIntoInventory` (`0x1807E50E0`, which natively only equips `VirtualHelmet` and left looted `VirtualClothing` radio packs unworn in inventory with `IsRadioman() == false`!). Opens field-radio recovery to **all cut-off infantry squads** (`!sq.HasRadioman()`) from both **fallen friendly comrades (`<= 14m`)** and **captured enemy radioman corpses (`<= 10m`, `>= 20s` post-cutoff, `suppression < 8` — retuning the enemy set onto the squad's frequency)** (`RadioLoot:` telemetry).
+    * **Full-Army Staffing Awareness, Decisive Smoke-Screened Attrition Pivots & Staggered HQ Orders (`MacroAndVehiclesModule.cs`)**: Adds `CountAlliedGroundSquadsOnObjective` to count all friendly ground squads per point (connected AI squads, cut-off `Autonomous` squads, Human Player squads, coalition allies, and nearby ground armor) so HQ never mistakes an entrenched meatgrinder for an unstaffed `0`-attacker flag; upgrades `TryExecuteTeamNetAttritionPivot` with comparative loss-differential hysteresis (`AvoidUntil = 105s`, `135s` per-squad cooldown, `2.85x` weight) and smoke-screened multi-squad breakouts (`CanSquadDisengageForAttritionPivot` + `TryPopSquadRetreatSmoke`) instead of 1-squad-per-75s trickle pivots; and replaces frame-gated order drops with a 1-per-frame RPC-paced `_pendingMacroSquadOrders` queue (`DrainOnePendingMacroSquadOrderIfReady`) that clears stale covers cleanly (`OrderLeaveAllVehiclesAndCovers`).
 
 > *(Want the deep-dive engineering breakdown of what vanilla's `GameAssembly.dll` did under the hood and why each change was made? Read **[`docs/design-and-justifications.md`](docs/design-and-justifications.md)**!)*
 
@@ -175,7 +178,7 @@ Alongside shared tactical realism goals (some inspired by [`Easy-Red-2-Realism-O
 
 ### 1. Humanized Vision, Stance Stealth, Local Callouts & Last-Known Suppression ([`VisionAndMemoryModule.cs`](src/EasyRed2AI/Modules/VisionAndMemoryModule.cs))
 
-| Feature | Vanilla Behavior | Battle Hardened (`v0.8.5`) |
+| Feature | Vanilla Behavior | Battle Hardened (`v0.8.6`) |
 | :--- | :--- | :--- |
 | **Stance Sight Ranges** | `220m` Standing, `50m` Crouching, `37m` Prone when unspotted — but jumps **all stances to a flat `300m`** the instant `IsEnemyAwareOfThisSquad` is true. | **150m Standing**, **80m Crouching**, **40m Prone**. Squad combat awareness applies only a **1.20x multiplier** (`48m` prone, `96m` crouched) so taking cover in grass/craters actually conceals you during firefights. |
 | **Individual Firing Reveal** | One soldier firing alerts the enemy to the entire squad's crouched/prone members out to `300m`. | Only the **specific soldier who fired** gets a temporary **+85m visibility penalty for 4.0 seconds** (muzzle flash, smoke, and gunshot sound). Silent squadmates stay hidden. |
