@@ -4211,23 +4211,74 @@ namespace EasyRed2HumanAI
         }
 
         // =====================================================================
-        // PATCH 4: SoldierAI.UpdateMoveDirection (Wall & Fence Vaulting)
+        // PATCH 4: SoldierAI.UpdateMoveDirection (Wall, Trench-Exit & Stuck-Wire Vaulting)
         // =====================================================================
+        internal struct BarbedWireStuckState
+        {
+            public Vector3 AnchorPos;
+            public float FirstStuckTime;
+            public float LastSeenTime;
+        }
+
+        internal static readonly Dictionary<IntPtr, bool> _barbedWireColliderCache = new Dictionary<IntPtr, bool>(256);
+        internal static readonly Dictionary<IntPtr, BarbedWireStuckState> _botBarbedWireStuckCache = new Dictionary<IntPtr, BarbedWireStuckState>(128);
+
+        private static bool IsBarbedWireName(string name)
+        {
+            if (string.IsNullOrEmpty(name))
+                return false;
+
+            return name.IndexOf("wire", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                   name.IndexOf("barbed", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                   name.IndexOf("concertina", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                   name.IndexOf("chevaux", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                   name.IndexOf("razor", StringComparison.OrdinalIgnoreCase) >= 0;
+        }
+
+        private static bool IsBarbedWireCollider(Collider col)
+        {
+            if (col == null || col.Pointer == IntPtr.Zero)
+                return false;
+
+            IntPtr colPtr = col.Pointer;
+            if (_barbedWireColliderCache.TryGetValue(colPtr, out bool cached))
+                return cached;
+
+            bool isWire = IsBarbedWireName(col.name);
+            if (!isWire && col.transform != null)
+            {
+                Transform p1 = col.transform.parent;
+                if (p1 != null)
+                {
+                    isWire = IsBarbedWireName(p1.name);
+                    if (!isWire && p1.parent != null)
+                        isWire = IsBarbedWireName(p1.parent.name);
+                }
+            }
+
+            if (_barbedWireColliderCache.Count > 512)
+                _barbedWireColliderCache.Clear();
+            _barbedWireColliderCache[colPtr] = isWire;
+            return isWire;
+        }
+
         private static bool IsValidVaultObstacle(
             SoldierAI ai,
             Soldier soldier,
+            IntPtr botPtr,
             Transform tr,
             Vector3 vaultPos,
-            out string rejectReason)
+            float now,
+            out string vaultOrRejectReason)
         {
-            rejectReason = null;
+            vaultOrRejectReason = "wall_obstacle";
             Vector3 myPos = tr.position;
 
             Vector3 fwd = tr.forward;
             fwd.y = 0f;
             if (fwd.sqrMagnitude < 0.001f)
             {
-                rejectReason = "bad_forward";
+                vaultOrRejectReason = "bad_forward";
                 return false;
             }
             fwd.Normalize();
@@ -4237,14 +4288,14 @@ namespace EasyRed2HumanAI
             toDest.y = 0f;
             if (toDest.sqrMagnitude > 0.36f && Vector3.Dot(fwd, toDest.normalized) < 0.45f)
             {
-                rejectReason = "not_moving_across";
+                vaultOrRejectReason = "not_moving_across";
                 return false;
             }
 
-            // 2. Front-face steepness & TerrainCollider rejection:
+            // 2. Front-face probe:
             // Native Soldier.CanVault (0x180742C40) detects the obstacle at pos + fwd*0.50f + up*0.50f (r=0.30f),
             // while vaultPos is probed at pos + fwd*1.12f (0x180742FCC) — which lands on the FAR-SIDE floor (vaultPos.y ≈ myPos.y)
-            // for any wall, fence, sandbag, or window sill thinner than 1.12m!
+            // for thin walls/fences, or on the upper parapet lip (vaultPos.y ≈ myPos.y + 0.6m..1.5m) for trench exits!
             int envMask = AiCore.GetSolidEnvironmentMask();
             Vector3 rayOriginLow = myPos + Vector3.up * 0.50f - fwd * 0.15f;
             if (!Physics.Raycast(rayOriginLow, fwd, out RaycastHit frontHit, 1.30f, envMask, QueryTriggerInteraction.Ignore))
@@ -4252,69 +4303,124 @@ namespace EasyRed2HumanAI
                 Vector3 rayOriginMid = myPos + Vector3.up * 0.82f - fwd * 0.15f;
                 if (!Physics.Raycast(rayOriginMid, fwd, out frontHit, 1.30f, envMask, QueryTriggerInteraction.Ignore))
                 {
-                    rejectReason = "no_solid_face";
+                    vaultOrRejectReason = "no_solid_face";
                     return false;
                 }
             }
 
             Collider frontCol = frontHit.collider;
-            if (frontCol != null && frontCol.TryCast<TerrainCollider>() != null)
-            {
-                rejectReason = "terrain_slope";
-                return false;
-            }
-
-            if (Mathf.Abs(frontHit.normal.y) > 0.28f)
-            {
-                rejectReason = "sloped_surface";
-                return false;
-            }
-
-            // 3. Measure true obstacle crest height directly above the wall face (0.14m into the obstacle),
-            // falling back to vaultPos.y - myPos.y only if the obstacle is thicker than 1.12m.
+            bool frontIsTerrain = frontCol != null && frontCol.TryCast<TerrainCollider>() != null;
             float vaultLandingRise = vaultPos.y - myPos.y;
-            float crestHeight = vaultLandingRise;
-            Vector3 crestProbeOrigin = new Vector3(
-                frontHit.point.x + fwd.x * 0.14f,
-                myPos.y + 1.78f,
-                frontHit.point.z + fwd.z * 0.14f);
-            if (Physics.Raycast(crestProbeOrigin, Vector3.down, out RaycastHit crestHit, 1.52f, envMask, QueryTriggerInteraction.Ignore))
+
+            if (frontIsTerrain)
             {
-                if (crestHit.collider == null || crestHit.collider.TryCast<TerrainCollider>() == null)
+                // Carved terrain trench walls are steep unwalkable cuts (|normal.y| <= 0.62f, >= ~52 deg)
+                // with a genuine step-up onto the parapet lip; ordinary hills/bumps are rejected.
+                if (Mathf.Abs(frontHit.normal.y) > 0.62f || vaultLandingRise < 0.48f)
                 {
-                    float probedCrest = crestHit.point.y - myPos.y;
-                    if (probedCrest > crestHeight)
-                        crestHeight = probedCrest;
+                    vaultOrRejectReason = "terrain_slope";
+                    return false;
                 }
+            }
+            else if (Mathf.Abs(frontHit.normal.y) > 0.56f)
+            {
+                // Allow vertical walls AND battered wooden trench revetment planks / sandbags (|normal.y| <= 0.56f),
+                // while rejecting walkable <= 45 deg sloped ramps (|normal.y| >= 0.707f).
+                vaultOrRejectReason = "sloped_surface";
+                return false;
+            }
+
+            // 3. Measure true obstacle crest height directly above the wall face (0.16m into the obstacle),
+            // including TerrainCollider lips behind wooden trench revetments.
+            float crestHeight = vaultLandingRise;
+            Collider crestCol = null;
+            Vector3 crestProbeOrigin = new Vector3(
+                frontHit.point.x + fwd.x * 0.16f,
+                myPos.y + 1.80f,
+                frontHit.point.z + fwd.z * 0.16f);
+            if (Physics.Raycast(crestProbeOrigin, Vector3.down, out RaycastHit crestHit, 1.54f, envMask, QueryTriggerInteraction.Ignore))
+            {
+                crestCol = crestHit.collider;
+                float probedCrest = crestHit.point.y - myPos.y;
+                if (probedCrest > crestHeight)
+                    crestHeight = probedCrest;
+            }
+
+            // 3B. Barbed Wire Discipline:
+            // Keep barbed wire unvaultable during normal movement so wire lines act as real tactical obstacles,
+            // allowing wire clambering ONLY if a bot has been genuinely wedged against the wire for >= 3.5s!
+            if (IsBarbedWireCollider(frontCol) || IsBarbedWireCollider(crestCol))
+            {
+                if (!_botBarbedWireStuckCache.TryGetValue(botPtr, out BarbedWireStuckState wireSt) ||
+                    now - wireSt.LastSeenTime > 2.2f ||
+                    (myPos - wireSt.AnchorPos).sqrMagnitude > 1.35f)
+                {
+                    _botBarbedWireStuckCache[botPtr] = new BarbedWireStuckState
+                    {
+                        AnchorPos = myPos,
+                        FirstStuckTime = now,
+                        LastSeenTime = now
+                    };
+                    vaultOrRejectReason = "barbed_wire";
+                    return false;
+                }
+
+                wireSt.LastSeenTime = now;
+                _botBarbedWireStuckCache[botPtr] = wireSt;
+                if (now - wireSt.FirstStuckTime < 3.5f)
+                {
+                    vaultOrRejectReason = "barbed_wire";
+                    return false;
+                }
+
+                _botBarbedWireStuckCache.Remove(botPtr);
+                vaultOrRejectReason = "barbed_wire_unstuck";
             }
 
             if (crestHeight < 0.44f)
             {
-                rejectReason = "flat_or_low";
+                vaultOrRejectReason = "flat_or_low";
                 return false;
             }
             if (crestHeight > 1.68f || vaultLandingRise > 1.68f)
             {
-                rejectReason = "too_high";
+                vaultOrRejectReason = "too_high";
                 return false;
             }
 
-            // 4. Far-side grade check: reject staircases or rising ramps/embankments that continue uphill past the crest
-            Vector3 farOrigin = myPos + fwd * (frontHit.distance + 0.90f) + Vector3.up * (crestHeight + 0.65f);
+            // 4. Far-side grade & trench-lip level-off check:
+            // Reject staircases or continuous hills/bluffs that keep rising beyond the lip, while allowing
+            // genuine trench exits where the ground levels off onto the parapet / battlefield above!
+            Vector3 farOrigin = myPos + fwd * (frontHit.distance + 0.88f) + Vector3.up * (crestHeight + 0.65f);
             if (Physics.Raycast(farOrigin, Vector3.down, out RaycastHit farHit, crestHeight + 1.85f, envMask, QueryTriggerInteraction.Ignore))
             {
-                if (farHit.point.y > myPos.y + crestHeight + 0.16f)
+                if (farHit.point.y > myPos.y + crestHeight + 0.18f)
                 {
-                    rejectReason = "uphill_ramp";
+                    vaultOrRejectReason = "uphill_ramp";
                     return false;
                 }
-                if (farHit.collider != null &&
-                    farHit.collider.TryCast<TerrainCollider>() != null &&
-                    farHit.point.y > myPos.y + 0.35f &&
-                    farHit.normal.y < 0.92f)
+
+                bool farIsElevatedTerrain = farHit.collider != null &&
+                                            farHit.collider.TryCast<TerrainCollider>() != null &&
+                                            farHit.point.y > myPos.y + 0.35f;
+                if (frontIsTerrain || farIsElevatedTerrain)
                 {
-                    rejectReason = "embankment_lip";
-                    return false;
+                    if (farHit.normal.y < 0.80f)
+                    {
+                        vaultOrRejectReason = "terrain_hillside";
+                        return false;
+                    }
+
+                    Vector3 beyondOrigin = myPos + fwd * (frontHit.distance + 1.48f) + Vector3.up * (crestHeight + 0.85f);
+                    if (Physics.Raycast(beyondOrigin, Vector3.down, out RaycastHit beyondHit, crestHeight + 2.05f, envMask, QueryTriggerInteraction.Ignore) &&
+                        beyondHit.point.y > farHit.point.y + 0.24f)
+                    {
+                        vaultOrRejectReason = "terrain_hillside";
+                        return false;
+                    }
+
+                    if (vaultOrRejectReason == "wall_obstacle")
+                        vaultOrRejectReason = "trench_exit";
                 }
             }
 
@@ -4363,11 +4469,11 @@ namespace EasyRed2HumanAI
 
                     if (soldier.CanVault(out Vector3 vaultPos))
                     {
-                        if (!IsValidVaultObstacle(__instance, soldier, h.Tr, vaultPos, out string rejectReason))
+                        if (!IsValidVaultObstacle(__instance, soldier, ptr, h.Tr, vaultPos, now, out string vaultOrRejectReason))
                         {
                             SlopedVaultsRejectedCount++;
-                            _nextVaultCheckTime[ptr] = now + 0.85f;
-                            BotActionTrace.RecordEvent(soldier, BotTraceEventKind.VaultRejected, rejectReason);
+                            _nextVaultCheckTime[ptr] = now + (vaultOrRejectReason == "barbed_wire" ? 0.55f : 0.85f);
+                            BotActionTrace.RecordEvent(soldier, BotTraceEventKind.VaultRejected, vaultOrRejectReason);
                             return;
                         }
 
@@ -4376,7 +4482,7 @@ namespace EasyRed2HumanAI
                             soldier.Vault(vaultPos);
                             _nextVaultCheckTime[ptr] = now + 2.20f;
                             WallsVaulted++;
-                            BotActionTrace.RecordEvent(soldier, BotTraceEventKind.Vault, "wall_obstacle");
+                            BotActionTrace.RecordEvent(soldier, BotTraceEventKind.Vault, vaultOrRejectReason);
                         }
                     }
                 }

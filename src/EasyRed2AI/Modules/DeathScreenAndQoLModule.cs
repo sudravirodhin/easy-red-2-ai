@@ -378,12 +378,19 @@ namespace EasyRed2HumanAI
         [HarmonyPatch(typeof(Corvostudio.Weapons.Explosion), nameof(Corvostudio.Weapons.Explosion.CreateExplosion))]
         public static class Explosion_CreateExplosion_Patch
         {
-            public static void Prefix(Vector3 __0, float __1, float __2, float __3, Soldier __4, GameObject __5, HitType __6, bool __7)
+            public static void Prefix(Vector3 __0, float __1, float __2, float __3, Soldier __4, GameObject __5, ref HitType __6, bool __7)
             {
                 try
                 {
                     // __7 is canDamage; ignore non-damaging visual explosions
-                    if (!VisionConfig.EnableMod.Value || !VisionConfig.EnableDeathScreenAttribution.Value || !__7)
+                    if (!VisionConfig.EnableMod.Value || !__7)
+                        return;
+
+                    // Reclassify Molotov / phosphorus / incendiary grenade shatters from HitType.Explosion -> HitType.Fire
+                    // BEFORE native CreateExplosion runs so tank tracks (VehicleDamageableTrackPart) are 100% immune!
+                    TryReclassifyIncendiaryGrenadeExplosion(__0, __5, ref __6);
+
+                    if (!VisionConfig.EnableDeathScreenAttribution.Value)
                         return;
 
                     string expSource = "";
@@ -1188,10 +1195,13 @@ namespace EasyRed2HumanAI
         //  - Refresh EndBattleGUI's 6 casualty/prisoner/vehicle labels at 4 Hz on both Host and
         //    Clients whenever any synced stat changes while the end-of-battle table is open!
         // ============================================================================
+        // Native BattleManager.AddBattleStat (0x18058B9C6) & CountBattleStat (0x18058C58E) box
+        // (int)side (0=Invaders, 1=Defenders) and (int)stat (1=Deceased, 2=Prisoners, 3=LostVehicles)
+        // with Int32_TypeInfo into "BS.{0}.{1}" -> "BS.0.1" .. "BS.1.3".
         private static readonly string[,] _battleStatIds = new string[2, 4]
         {
-            { null, "BS.Invaders.Deceased",  "BS.Invaders.Prisoners",  "BS.Invaders.LostVehicles" },
-            { null, "BS.Defenders.Deceased", "BS.Defenders.Prisoners", "BS.Defenders.LostVehicles" }
+            { null, "BS.0.1", "BS.0.2", "BS.0.3" },
+            { null, "BS.1.1", "BS.1.2", "BS.1.3" }
         };
 
         private static readonly short[,] _authBattleStats = new short[2, 4];

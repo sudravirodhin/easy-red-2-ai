@@ -5722,8 +5722,11 @@ namespace EasyRed2HumanAI
                                     {
                                         if (outOfAmmo)
                                             RefillSoldierPrimaryAndStowedWeapons(soldier, 2);
-                                        if (scavCache.IsMedicSyringePickup && soldier.inventory.FindItemOfType<VirtualSyringe>() != null)
+                                        if (scavCache.IsMedicSyringePickup &&
+                                            CountUniqueSyringesInInventory(soldier.inventory, out _, out _, out _) >= 3)
+                                        {
                                             soldier.hasSyringe = true;
+                                        }
                                         looted = true;
                                         if (scavCache.IsAtWeaponPickup)
                                             lootedDesc = "floor AT grenade";
@@ -5872,19 +5875,15 @@ namespace EasyRed2HumanAI
                                         }
                                     }
 
-                                    if (scavCache.IsMedicSyringePickup && soldier.inventory != null)
+                                    if (scavCache.IsMedicSyringePickup &&
+                                        soldier.inventory != null &&
+                                        !IsFriendlyPlayerWithinDistance(soldier, scavCache.TargetPosition, 25.0f))
                                     {
-                                        VirtualItem syr = targetInv.FindItemOfType<VirtualSyringe>();
-                                        if (syr != null)
+                                        if (TryTransferFullMedicKitAtomically(soldier, targetInv))
                                         {
-                                            soldier.inventory.TakeIntoInventory(syr, targetInv);
-                                            if (!targetInv.Contains(syr))
-                                            {
-                                                soldier.hasSyringe = true;
-                                                looted = true;
-                                                if (lootedDesc == "supply")
-                                                    lootedDesc = "fallen medic syringe";
-                                            }
+                                            looted = true;
+                                            if (lootedDesc == "supply")
+                                                lootedDesc = "complete fallen medic kit (3/3)";
                                         }
                                     }
 
@@ -6997,7 +6996,12 @@ namespace EasyRed2HumanAI
                         break;
 
                     case FloorItemKind.Syringe:
-                        if (wantMedicSyringe)
+                        if (wantMedicSyringe &&
+                            !IsFriendlyPlayerWithinDistance(soldier, itemPos, 25.0f) &&
+                            (soldier.inventory == null ||
+                             soldier.inventory.inventory == null ||
+                             string.IsNullOrEmpty(item.item_id) ||
+                             soldier.inventory.inventory.FindItemWithID(item.item_id) == null))
                         {
                             bestDistSq = dSq;
                             result = new BotScavengeCache
@@ -7230,7 +7234,10 @@ namespace EasyRed2HumanAI
                         }
                     }
 
-                    if (wantMedicSyringe && isDeadBodyOrCrate && inv.FindItemOfType<VirtualSyringe>() != null)
+                    if (wantMedicSyringe &&
+                        isDeadBodyOrCrate &&
+                        !IsFriendlyPlayerWithinDistance(soldier, invPos, 25.0f) &&
+                        CanTransferFullMedicKit(soldier.inventory, inv, out _, out _, out _))
                     {
                         bestDistSq = dSq;
                         result = new BotScavengeCache
@@ -7292,16 +7299,176 @@ namespace EasyRed2HumanAI
             var wSoldiers = AiCore.WorldSoldiers;
             int wCount = AiCore.WorldSoldierCount;
             float maxSq = maxDist * maxDist;
-            string myFaction = self.faction;
+            string myFaction = AiCore.GetCachedFaction(self);
 
             for (int i = 0; i < wCount; i++)
             {
                 ref AiCore.SoldierSnapshot sSnap = ref wSoldiers[i];
-                if (!sSnap.IsPlayer || sSnap.Faction != myFaction)
+                if (!sSnap.IsPlayer || !AiCore.AreSameSideFactions(myFaction, sSnap.Faction))
                     continue;
                 if ((sSnap.Pos - myPos).sqrMagnitude <= maxSq)
                     return true;
             }
+            return false;
+        }
+
+        private static int CountUniqueSyringesInInventory(
+            InventoryManager invMgr,
+            out VirtualItem s0,
+            out VirtualItem s1,
+            out VirtualItem s2)
+        {
+            s0 = null;
+            s1 = null;
+            s2 = null;
+
+            Inventory inv = invMgr != null ? invMgr.inventory : null;
+            var items = inv != null ? inv.items : null;
+            if (items == null)
+                return 0;
+
+            int uniqueCount = 0;
+            string id0 = null;
+            string id1 = null;
+            int total = items.Count;
+            for (int i = 0; i < total; i++)
+            {
+                VirtualItem vi = items[i];
+                if (vi == null || vi.Pointer == IntPtr.Zero || vi.TryCast<VirtualSyringe>() == null)
+                    continue;
+
+                string id = vi.item_id;
+                if (string.IsNullOrEmpty(id))
+                    continue;
+
+                if (uniqueCount == 0)
+                {
+                    s0 = vi;
+                    id0 = id;
+                    uniqueCount = 1;
+                }
+                else if (uniqueCount == 1)
+                {
+                    if (string.Equals(id, id0, StringComparison.Ordinal))
+                        continue;
+                    s1 = vi;
+                    id1 = id;
+                    uniqueCount = 2;
+                }
+                else
+                {
+                    if (string.Equals(id, id0, StringComparison.Ordinal) ||
+                        string.Equals(id, id1, StringComparison.Ordinal))
+                    {
+                        continue;
+                    }
+                    s2 = vi;
+                    uniqueCount = 3;
+                    break;
+                }
+            }
+
+            return uniqueCount;
+        }
+
+        private static bool CanTransferFullMedicKit(
+            InventoryManager dstInv,
+            InventoryManager srcInv,
+            out VirtualItem s0,
+            out VirtualItem s1,
+            out VirtualItem s2)
+        {
+            s0 = null;
+            s1 = null;
+            s2 = null;
+
+            if (dstInv == null || srcInv == null || dstInv.inventory == null)
+                return false;
+
+            // Every Medic carries 3 distinct VirtualSyringe tools (InjureType 0, 1, 2).
+            // Never scavenge from an incomplete 1-of-3 or 2-of-3 corpse kit!
+            if (CountUniqueSyringesInInventory(srcInv, out s0, out s1, out s2) < 3)
+                return false;
+
+            float neededMass = 0f;
+            bool needAny = false;
+            if (dstInv.inventory.FindItemWithID(s0.item_id) == null)
+            {
+                neededMass += Mathf.Max(0f, s0.GetMass());
+                needAny = true;
+            }
+            if (dstInv.inventory.FindItemWithID(s1.item_id) == null)
+            {
+                neededMass += Mathf.Max(0f, s1.GetMass());
+                needAny = true;
+            }
+            if (dstInv.inventory.FindItemWithID(s2.item_id) == null)
+            {
+                neededMass += Mathf.Max(0f, s2.GetMass());
+                needAny = true;
+            }
+
+            if (!needAny)
+                return false;
+
+            dstInv.GetWeightAndMaxWeight(out float curW, out float maxW);
+            if (maxW > 0f && curW + neededMass > maxW - 0.01f)
+                return false;
+
+            return dstInv.HasSpaceFor(s0);
+        }
+
+        private static bool TryTransferFullMedicKitAtomically(Soldier soldier, InventoryManager srcInv)
+        {
+            InventoryManager dstInv = soldier != null ? soldier.inventory : null;
+            if (!CanTransferFullMedicKit(dstInv, srcInv, out VirtualItem s0, out VirtualItem s1, out VirtualItem s2))
+                return false;
+
+            if (Photon.Pun.PhotonNetwork.InRoom && !AiCore.TryConsumeBotRpcBudget(0.35f))
+                return false;
+
+            string pre0 = dstInv.inventory.FindItemWithID(s0.item_id) != null ? s0.item_id : null;
+            string pre1 = dstInv.inventory.FindItemWithID(s1.item_id) != null ? s1.item_id : null;
+            string pre2 = dstInv.inventory.FindItemWithID(s2.item_id) != null ? s2.item_id : null;
+
+            var batch = new Il2CppSystem.Collections.Generic.List<VirtualItem>();
+            if (pre0 == null) batch.Add(s0);
+            if (pre1 == null) batch.Add(s1);
+            if (pre2 == null) batch.Add(s2);
+
+            if (batch.Count == 0)
+                return false;
+
+            dstInv.TakeIntoInventoryBatch(batch.Cast<Il2CppSystem.Collections.Generic.IList<VirtualItem>>(), srcInv);
+
+            if (CountUniqueSyringesInInventory(dstInv, out _, out _, out _) >= 3)
+            {
+                soldier.hasSyringe = true;
+                return true;
+            }
+
+            // Safety rollback: never leave a dead Medic with a partial 1-of-3 or 2-of-3 tool kit!
+            var rollback = new Il2CppSystem.Collections.Generic.List<VirtualItem>();
+            if (pre0 == null)
+            {
+                VirtualItem moved0 = dstInv.inventory.FindItemWithID(s0.item_id);
+                if (moved0 != null) rollback.Add(moved0);
+            }
+            if (pre1 == null)
+            {
+                VirtualItem moved1 = dstInv.inventory.FindItemWithID(s1.item_id);
+                if (moved1 != null) rollback.Add(moved1);
+            }
+            if (pre2 == null)
+            {
+                VirtualItem moved2 = dstInv.inventory.FindItemWithID(s2.item_id);
+                if (moved2 != null) rollback.Add(moved2);
+            }
+            if (rollback.Count > 0)
+            {
+                srcInv.TakeIntoInventoryBatch(rollback.Cast<Il2CppSystem.Collections.Generic.IList<VirtualItem>>(), dstInv);
+            }
+            soldier.hasSyringe = CountUniqueSyringesInInventory(dstInv, out _, out _, out _) >= 3;
             return false;
         }
 

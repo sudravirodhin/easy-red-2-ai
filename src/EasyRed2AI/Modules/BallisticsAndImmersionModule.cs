@@ -84,9 +84,12 @@ namespace EasyRed2HumanAI
                 _inspectedBloodFxRoots.Clear();
                 _modifiedBloodRenderers.Clear();
             }
+            if (forceClear || _nextVehicleFireSeepageTime.Count > 64)
+                _nextVehicleFireSeepageTime.Clear();
             if (forceClear)
             {
-                _fpsHeadShadowProxies.Clear();
+                _activeIncendiaryGrenades.Clear();
+                ResetFirstPersonShadowRigOnSceneChange();
                 ResetObjectiveBarFactionState();
             }
         }
@@ -1031,6 +1034,241 @@ namespace EasyRed2HumanAI
         }
 
         // ============================================================================
+        // 2B. MOLOTOV / INCENDIARY TANK-TRACK IMMUNITY & ENGINE-DECK FIRE SEEPAGE
+        // Native x64 Root Cause in GameAssembly.dll:
+        //  - VehicleDamageableTrackPart.TryDamageWithExplosion (0x18081607C) checks
+        //    `if (hitType == HitType.Fire) return;`, blocking Flame.FixedUpdate (0x180866878).
+        //  - However, ItemGrenade+<ExplodeAfter>d__6.MoveNext (0x18051ED9C) hardcodes
+        //    HitType.Explosion (1) for ALL non-smoke grenades, including phosporusGrenade
+        //    / Molotovs! On shatter, explosionMaxPenetration beats the track collider's
+        //    low armorThickness and breaks steel tank tracks instantly.
+        // Fix (under EnableRealisticVehicleArmorAndTopAttack):
+        //  1) Reclassify incendiary / Molotov shatter blasts to HitType.Fire (2) and guard
+        //     VehicleDamageableTrackPart so Molotovs NEVER snap steel tank tracks.
+        //  2) Route HitType.Fire on armored MovableVehicles away from raw structural
+        //     DamageHull HP loss and into realistic engine-grille / fuel-tank fire seepage
+        //     when burning liquid sits on the upper hull / engine deck!
+        // ============================================================================
+        private static readonly List<ItemGrenade> _activeIncendiaryGrenades = new List<ItemGrenade>(16);
+        internal static readonly Dictionary<IntPtr, float> _nextVehicleFireSeepageTime = new Dictionary<IntPtr, float>(32);
+        private static int _lastFireExplosionFxFrame = -1;
+        private static Vector3 _lastFireExplosionFxPos;
+
+        private static bool IsIncendiaryString(string s)
+        {
+            if (string.IsNullOrEmpty(s))
+                return false;
+
+            return s.IndexOf("molotov", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                   s.IndexOf("phosphor", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                   s.IndexOf("incend", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                   s.IndexOf("napalm", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                   s.IndexOf("firebomb", StringComparison.OrdinalIgnoreCase) >= 0;
+        }
+
+        private static bool IsIncendiaryGrenadeObject(ItemGrenade gren)
+        {
+            if (gren == null || gren.Pointer == IntPtr.Zero)
+                return false;
+
+            if (gren.grenadeType == GrenadeType.phosporusGrenade)
+                return true;
+
+            return IsIncendiaryString(gren.item_id) ||
+                   IsIncendiaryString(gren.name) ||
+                   IsIncendiaryString(gren.explosion_fx);
+        }
+
+        internal static void TryReclassifyIncendiaryGrenadeExplosion(
+            Vector3 explosionPos,
+            GameObject ignoreHittable,
+            ref HitType hitType)
+        {
+            if (!VisionConfig.EnableRealisticVehicleArmorAndTopAttack.Value || hitType != HitType.Explosion)
+                return;
+
+            if (ignoreHittable != null && ignoreHittable.Pointer != IntPtr.Zero)
+            {
+                ItemGrenade ig = ignoreHittable.GetComponent<ItemGrenade>();
+                if (ig == null)
+                    ig = ignoreHittable.GetComponentInParent<ItemGrenade>();
+                if (ig != null && IsIncendiaryGrenadeObject(ig))
+                {
+                    hitType = HitType.Fire;
+                    return;
+                }
+            }
+
+            if (_lastFireExplosionFxFrame == Time.frameCount &&
+                (explosionPos - _lastFireExplosionFxPos).sqrMagnitude <= 1.25f)
+            {
+                hitType = HitType.Fire;
+                return;
+            }
+
+            for (int i = _activeIncendiaryGrenades.Count - 1; i >= 0; i--)
+            {
+                ItemGrenade g = _activeIncendiaryGrenades[i];
+                if (g == null || g.Pointer == IntPtr.Zero || g.transform == null)
+                {
+                    _activeIncendiaryGrenades.RemoveAt(i);
+                    continue;
+                }
+
+                if ((g.transform.position - explosionPos).sqrMagnitude <= 2.25f)
+                {
+                    hitType = HitType.Fire;
+                    _activeIncendiaryGrenades.RemoveAt(i);
+                    return;
+                }
+            }
+        }
+
+        [HarmonyPatch(typeof(ItemGrenade), nameof(ItemGrenade.ExplodeAfter))]
+        public static class ItemGrenade_ExplodeAfter_Patch
+        {
+            public static void Prefix(ItemGrenade __instance)
+            {
+                try
+                {
+                    if (!VisionConfig.EnableMod.Value ||
+                        !VisionConfig.EnableRealisticVehicleArmorAndTopAttack.Value ||
+                        !IsIncendiaryGrenadeObject(__instance))
+                    {
+                        return;
+                    }
+
+                    for (int i = _activeIncendiaryGrenades.Count - 1; i >= 0; i--)
+                    {
+                        ItemGrenade existing = _activeIncendiaryGrenades[i];
+                        if (existing == null || existing.Pointer == IntPtr.Zero || existing.Pointer == __instance.Pointer)
+                            _activeIncendiaryGrenades.RemoveAt(i);
+                    }
+
+                    if (_activeIncendiaryGrenades.Count >= 16)
+                        _activeIncendiaryGrenades.RemoveAt(0);
+                    _activeIncendiaryGrenades.Add(__instance);
+                }
+                catch { }
+            }
+        }
+
+        [HarmonyPatch(typeof(VehicleDamageableTrackPart), nameof(VehicleDamageableTrackPart.TryDamageWithExplosion))]
+        public static class VehicleDamageableTrackPart_TryDamageWithExplosion_Patch
+        {
+            public static bool Prefix(Vector3 __2, HitType __4)
+            {
+                try
+                {
+                    if (!VisionConfig.EnableMod.Value || !VisionConfig.EnableRealisticVehicleArmorAndTopAttack.Value)
+                        return true;
+
+                    if (__4 == HitType.Fire ||
+                        (_lastFireExplosionFxFrame == Time.frameCount && (__2 - _lastFireExplosionFxPos).sqrMagnitude <= 6.25f))
+                    {
+                        return false;
+                    }
+                }
+                catch { }
+                return true;
+            }
+        }
+
+        [HarmonyPatch(typeof(VehicleDamagablePart), nameof(VehicleDamagablePart.TryDamageWithExplosion))]
+        public static class VehicleDamagablePart_TryDamageWithExplosion_Patch
+        {
+            public static bool Prefix(
+                VehicleDamagablePart __instance,
+                float __1,
+                Vector3 __2,
+                Soldier __3,
+                HitType __4)
+            {
+                try
+                {
+                    if (!VisionConfig.EnableMod.Value ||
+                        !VisionConfig.EnableRealisticVehicleArmorAndTopAttack.Value ||
+                        __4 != HitType.Fire ||
+                        __instance == null ||
+                        __instance.Pointer == IntPtr.Zero)
+                    {
+                        return true;
+                    }
+
+                    // Steel tank tracks never take fire damage
+                    if (__instance.TryCast<VehicleDamageableTrackPart>() != null)
+                        return false;
+
+                    Vehicle rootVeh = __instance.GetRootVehicle();
+                    MovableVehicle movVeh = rootVeh != null ? rootVeh.TryCast<MovableVehicle>() : null;
+                    if (movVeh == null || rootVeh.IsAirVehicle())
+                        return true;
+
+                    // Unarmored soft-skinned trucks/jeeps (< 6mm hull -> effArmor <= 0.1f) burn normally
+                    float effArmor = GetEffectiveVehicleExplosionArmor(rootVeh);
+                    if (effArmor <= 0.1f)
+                        return true;
+
+                    // Armored vehicle hit by Fire: block raw structural HE hull damage, and on the owning peer
+                    // apply realistic engine-grille / fuel-tank fire seepage when burning liquid sits on the deck!
+                    if (!rootVeh.IsDisabled() && AiCore.IsLocallyOwnedVehicle(rootVeh))
+                    {
+                        if (__3 != null &&
+                            __3.Pointer != IntPtr.Zero &&
+                            !ResourcesManager.FactionCanDamageFaction(__3, __instance.GetFaction()))
+                        {
+                            return false;
+                        }
+
+                        IntPtr vehPtr = rootVeh.Pointer;
+                        float now = Time.time;
+                        if (!_nextVehicleFireSeepageTime.TryGetValue(vehPtr, out float nextTick) || now >= nextTick)
+                        {
+                            Transform vehTr = movVeh.transform;
+                            if (vehTr != null)
+                            {
+                                Vector3 localFire = vehTr.InverseTransformPoint(__2);
+                                Vector3 localCenter = vehTr.InverseTransformPoint(movVeh.GetCenterOfUnit());
+
+                                // Burning fuel must sit at or above mid-hull / upper deck (not beside lower roadwheels)
+                                if (localFire.y >= localCenter.y - 0.25f)
+                                {
+                                    bool overEngineDeck;
+                                    AudioSource engSrc = movVeh.engine_source;
+                                    if (engSrc != null && engSrc.transform != null)
+                                    {
+                                        Vector3 localEng = vehTr.InverseTransformPoint(engSrc.transform.position);
+                                        float dx = localFire.x - localEng.x;
+                                        float dz = localFire.z - localEng.z;
+                                        overEngineDeck = (dx * dx + dz * dz) <= (2.65f * 2.65f);
+                                    }
+                                    else
+                                    {
+                                        overEngineDeck = localFire.z <= localCenter.z + 1.15f;
+                                    }
+
+                                    if (overEngineDeck)
+                                    {
+                                        _nextVehicleFireSeepageTime[vehPtr] = now + 0.45f;
+                                        short engDam = (short)Mathf.Clamp(Mathf.RoundToInt(Mathf.Max(15f, __1 * 0.95f)), 12, 26);
+                                        short fuelDam = (short)Mathf.Clamp(Mathf.RoundToInt(Mathf.Max(9f, __1 * 0.60f)), 8, 18);
+                                        movVeh.DamageEngine(engDam);
+                                        movVeh.DamageFuelTank(fuelDam);
+                                        rootVeh.OnVehicleSuppressed();
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    return false;
+                }
+                catch { }
+                return true;
+            }
+        }
+
+        // ============================================================================
         // 3. PARACHUTE WIND DRIFT & SLOWER DESCENT
         // Softens paratrooper vertical descent speed by ~25% and adds smooth horizontal
         // canopy wind drift while high above ground (> 18m AGL), tapering off cleanly
@@ -1677,101 +1915,608 @@ namespace EasyRed2HumanAI
         }
 
         // ============================================================================
-        // 5. VANILLA VISUAL FIX: FIRST-PERSON SELF-SHADOW FIX
+        // 5. VANILLA VISUAL FIX: CONNECTED 3RD-PERSON SHADOW RIG IN FIRST PERSON
         // Native x64 Root Causes in GameAssembly.dll:
-        //  1) SoldierLodManager.AssignFaceLod (0x18079B730) calls SoldierLodManager.ApplyFace
-        //     (0x18079B4D0 -> SetBodyHeadVisibility @ 0x18079C040, bypassing dead method
-        //     ApplyBodyHeadVisibility @ 0x18079B430!) and swaps the local player's head
-        //     submesh materials to ResourcesManager.hideMaterial (ZERO shadow), while
-        //     ItemHelmet.SetHidden() uses ShadowCastingMode.ShadowsOnly—producing a
-        //     headless torso shadow with a floating helmet hovering over an empty neck!
-        //  2) FPSGunManager.UpdateItemInFPSHands (0x180796610) calls unit.ShowRealArms(false)
-        //     (scaling 3P leftArm & rightArm to Vector3.zero) and reparents the SOLE
-        //     HandheldItem onto WeaponJNT / WeaponJNT_generic—meaning FPSGunManager's
-        //     hands_mesh, uniform_mesh, and WeaponJNT ARE the player's only arms & weapon
-        //     in First Person and MUST keep ShadowCastingMode.On!
-        // Fix (Local Player Only — Zero Bot Overhead):
-        //  - Keep FPSGunManager arms, uniform sleeves, and held weapon ShadowCastingMode.On
-        //    so animated arms and held weapons cast natural shadows alongside the head.
-        //  - Hook SoldierLodManager.ApplyFace (and ApplyBodyHeadVisibility for safety): when
-        //    isFpsPlayer hides the head (and UniformHeadCoverType == 0), set bodyMesh to
-        //    ShadowCastingMode.Off (preserving camera-safe hideMaterial on the head) and drive
-        //    a cached ShadowsOnly child SkinnedMeshRenderer with full FaceData materials
-        //    (using fd.index_body_submesh) so head, neck, helmet, torso, arms, and weapon
-        //    form a complete first-person shadow!
+        //  1) SoldierLodManager.ApplyFace (0x18079B4D0) swaps 3P head submeshes on
+        //     bodyMesh to hideMaterial (zero shadow), leaving a floating helmet shadow.
+        //  2) FPSGunManager.UpdateItemInFPSHands (0x180796610) calls ShowRealArms(false)
+        //     (collapsing 3P leftArm & rightArm to Vector3.zero) and mounts severed
+        //     camera-pitched bicep tubes + held weapon on FPSGunManager—projecting
+        //     bizarre disembodied floating arm/sleeve shadows when looking down!
+        // Fix (Strictly Local FPS Player Only — Zero Bot Overhead):
+        //  - Suppress ShadowCastingMode.Off on FPSGunManager's camera-locked viewmodel
+        //    renderers (automatically restoring ShadowCastingMode.On whenever a weapon
+        //    is dropped, stowed on back, or leaving 1P).
+        //  - Clone lightweight Vector3.one-scaled shadow arm bone subtrees mirroring the
+        //    Animator-driven 3P leftArm & rightArm in LateUpdate, driving ShadowsOnly
+        //    body, uniform, and 3P held-weapon proxies while keeping vanilla's camera-safe
+        //    visible 3P legs/torso, zero-scale 3P arms, and hidden 3P head untouched!
         // ============================================================================
-        private static readonly Dictionary<IntPtr, SkinnedMeshRenderer> _fpsHeadShadowProxies = new Dictionary<IntPtr, SkinnedMeshRenderer>(4);
+        private struct ShadowBonePair
+        {
+            public Transform Source;
+            public Transform Shadow;
+        }
+
+        private struct ObservedLodFaceConfig
+        {
+            public Corvostudio.EasyRed2.Characters.FaceData Face;
+            public UniformSleeveCoverType SleeveCover;
+            public UniformHeadCoverType HeadCover;
+            public bool Valid;
+        }
+
+        private static readonly Dictionary<IntPtr, ObservedLodFaceConfig> _observedLodFaceConfigs = new Dictionary<IntPtr, ObservedLodFaceConfig>(8);
+        private static readonly Dictionary<int, Transform> _fpsShadowBoneMap = new Dictionary<int, Transform>(64);
+        private static readonly List<ShadowBonePair> _fpsShadowBonePairs = new List<ShadowBonePair>(64);
+        private static readonly List<Renderer> _suppressedFpsViewmodelRenderers = new List<Renderer>(24);
+
+        private static IntPtr _activeShadowRigSoldierPtr;
+        private static Soldier _activeShadowRigSoldier;
+        private static SoldierLodManager _activeShadowRigLodMgr;
+        private static GameObject _leftArmShadowRootGo;
+        private static GameObject _rightArmShadowRootGo;
+        private static SkinnedMeshRenderer _fpsBodyShadowProxy;
+        private static SkinnedMeshRenderer _fpsUniformShadowProxy;
+        private static GameObject _fpsWeaponShadowProxyRoot;
+
+        private static IntPtr _lastBoundBodyMeshPtr;
+        private static int _lastBoundBodyBoneCount;
+        private static IntPtr _lastBoundUniformMeshPtr;
+        private static int _lastBoundUniformBoneCount;
+        private static IntPtr _lastBoundHeldWeaponPtr;
+        private static int _lastBoundHeldWeaponRendererCount;
+        private static float _nextViewmodelShadowScanTime;
+        private static bool _fpsShadowMaterialsDirty = true;
+        private static bool _fpsPropertyBlockDirty = true;
 
         public static void RefreshLocalPlayerFirstPersonShadow()
         {
             try
             {
-                Soldier localPlayer = Soldier.CurrentControlledSoldierOrNull();
-                if (localPlayer != null && localPlayer.IsAlive)
-                {
-                    localPlayer.RefreshFace();
-                }
+                _fpsShadowMaterialsDirty = true;
+                _fpsPropertyBlockDirty = true;
+                _nextViewmodelShadowScanTime = 0f;
+                UpdateLocalPlayerFirstPersonShadowRig();
             }
             catch { }
         }
 
-        private static void SyncFpsHeadShadowProxy(
-            SoldierLodManager lodMgr,
-            Corvostudio.EasyRed2.Characters.FaceData fd,
-            bool showBody,
-            bool wantFpsShadowProxy)
+        internal static void ResetFirstPersonShadowRigOnSceneChange()
         {
-            if (lodMgr == null || lodMgr.Pointer == IntPtr.Zero)
-                return;
+            TeardownActiveFpsShadowRig(destroyObjects: true);
+            _observedLodFaceConfigs.Clear();
+        }
 
-            SkinnedMeshRenderer bodyMesh = lodMgr.bodyMesh;
-            if (bodyMesh == null || bodyMesh.Pointer == IntPtr.Zero || bodyMesh.transform == null)
-                return;
-
-            IntPtr lodPtr = lodMgr.Pointer;
-            if (!wantFpsShadowProxy || fd == null || fd.materials == null)
+        private static void RestoreSuppressedViewmodelRenderers(Transform activeFpsGunRoot)
+        {
+            for (int i = _suppressedFpsViewmodelRenderers.Count - 1; i >= 0; i--)
             {
-                bodyMesh.shadowCastingMode = UnityEngine.Rendering.ShadowCastingMode.On;
-                if (_fpsHeadShadowProxies.TryGetValue(lodPtr, out SkinnedMeshRenderer existingProxy) &&
-                    existingProxy != null &&
-                    existingProxy.Pointer != IntPtr.Zero)
+                Renderer r = _suppressedFpsViewmodelRenderers[i];
+                if (r == null || r.Pointer == IntPtr.Zero)
                 {
-                    existingProxy.enabled = false;
+                    _suppressedFpsViewmodelRenderers.RemoveAt(i);
+                    continue;
                 }
+
+                bool stillInFpsHands = activeFpsGunRoot != null &&
+                                       r.transform != null &&
+                                       r.transform.IsChildOf(activeFpsGunRoot);
+                if (!stillInFpsHands)
+                {
+                    if (r.shadowCastingMode == UnityEngine.Rendering.ShadowCastingMode.Off)
+                        r.shadowCastingMode = UnityEngine.Rendering.ShadowCastingMode.On;
+                    _suppressedFpsViewmodelRenderers.RemoveAt(i);
+                }
+            }
+        }
+
+        private static void SuppressActiveViewmodelShadows(FPSGunManager fpsGun)
+        {
+            if (fpsGun == null || fpsGun.Pointer == IntPtr.Zero || fpsGun.transform == null)
+            {
+                RestoreSuppressedViewmodelRenderers(null);
                 return;
             }
 
-            if (!_fpsHeadShadowProxies.TryGetValue(lodPtr, out SkinnedMeshRenderer proxy) ||
-                proxy == null ||
-                proxy.Pointer == IntPtr.Zero)
-            {
-                if (_fpsHeadShadowProxies.Count > 16)
-                    _fpsHeadShadowProxies.Clear();
+            Transform fpsRoot = fpsGun.transform;
+            RestoreSuppressedViewmodelRenderers(fpsRoot);
 
-                GameObject proxyGo = new GameObject("BH_FpsHeadShadowProxy");
-                proxyGo.transform.SetParent(bodyMesh.transform, false);
-                proxyGo.layer = bodyMesh.gameObject.layer;
-                proxy = proxyGo.AddComponent<SkinnedMeshRenderer>();
-                _fpsHeadShadowProxies[lodPtr] = proxy;
+            var renderers = fpsGun.GetComponentsInChildren<Renderer>(true);
+            if (renderers == null)
+                return;
+
+            for (int i = 0; i < renderers.Length; i++)
+            {
+                Renderer r = renderers[i];
+                if (r == null || r.Pointer == IntPtr.Zero)
+                    continue;
+
+                if (r.shadowCastingMode == UnityEngine.Rendering.ShadowCastingMode.On)
+                {
+                    r.shadowCastingMode = UnityEngine.Rendering.ShadowCastingMode.Off;
+                    if (!_suppressedFpsViewmodelRenderers.Contains(r))
+                        _suppressedFpsViewmodelRenderers.Add(r);
+                }
+            }
+        }
+
+        private static GameObject CloneShadowBoneSubtree(Transform src, Transform shadowParent, bool isRootArm)
+        {
+            if (src == null || shadowParent == null)
+                return null;
+
+            string srcName = src.name ?? "Bone";
+            if (srcName.EndsWith("_BHShadow", StringComparison.Ordinal) ||
+                srcName.StartsWith("BH_Fps", StringComparison.Ordinal))
+            {
+                return null;
             }
 
-            proxy.sharedMesh = bodyMesh.sharedMesh;
-            proxy.bones = bodyMesh.bones;
-            proxy.rootBone = bodyMesh.rootBone;
-            proxy.localBounds = bodyMesh.localBounds;
-            proxy.quality = bodyMesh.quality;
-            proxy.updateWhenOffscreen = bodyMesh.updateWhenOffscreen;
+            // Do not treat temporary 3P handheld ItemObject instances attached to hands as skeleton bones
+            if (!isRootArm && src.GetComponent<ItemObject>() != null)
+                return null;
+
+            GameObject shadowGo = new GameObject(srcName + "_BHShadow");
+            Transform st = shadowGo.transform;
+            st.SetParent(shadowParent, false);
+            st.localPosition = src.localPosition;
+            st.localRotation = src.localRotation;
+            st.localScale = isRootArm
+                ? Vector3.one
+                : (src.localScale.sqrMagnitude < 0.0001f ? Vector3.one : src.localScale);
+
+            _fpsShadowBoneMap[src.GetInstanceID()] = st;
+            _fpsShadowBonePairs.Add(new ShadowBonePair { Source = src, Shadow = st });
+
+            int childCount = src.childCount;
+            for (int i = 0; i < childCount; i++)
+            {
+                Transform child = src.GetChild(i);
+                if (child != null)
+                    CloneShadowBoneSubtree(child, st, isRootArm: false);
+            }
+
+            return shadowGo;
+        }
+
+        private static void TeardownActiveFpsShadowRig(bool destroyObjects)
+        {
+            try
+            {
+                RestoreSuppressedViewmodelRenderers(null);
+
+                if (_activeShadowRigLodMgr != null && _activeShadowRigLodMgr.Pointer != IntPtr.Zero)
+                {
+                    SkinnedMeshRenderer bodyMesh = _activeShadowRigLodMgr.bodyMesh;
+                    if (bodyMesh != null && bodyMesh.Pointer != IntPtr.Zero)
+                        bodyMesh.shadowCastingMode = UnityEngine.Rendering.ShadowCastingMode.On;
+
+                    SkinnedMeshRenderer uniMesh = _activeShadowRigLodMgr.uniformMesh;
+                    if (uniMesh != null && uniMesh.Pointer != IntPtr.Zero)
+                    {
+                        bool bipodHidingUniform = _activeShadowRigSoldier != null &&
+                                                  _activeShadowRigSoldier.Pointer != IntPtr.Zero &&
+                                                  _activeShadowRigSoldier.bipodShadowOnlyBodyRenderer == uniMesh;
+                        if (bipodHidingUniform)
+                            _activeShadowRigSoldier.bipodBodyShadowModeBeforeDeploy = UnityEngine.Rendering.ShadowCastingMode.On;
+                        else
+                            uniMesh.shadowCastingMode = UnityEngine.Rendering.ShadowCastingMode.On;
+                    }
+                }
+
+                if (_fpsBodyShadowProxy != null && _fpsBodyShadowProxy.Pointer != IntPtr.Zero)
+                {
+                    if (destroyObjects && _fpsBodyShadowProxy.gameObject != null)
+                        UnityEngine.Object.Destroy(_fpsBodyShadowProxy.gameObject);
+                    else
+                        _fpsBodyShadowProxy.enabled = false;
+                }
+
+                if (_fpsUniformShadowProxy != null && _fpsUniformShadowProxy.Pointer != IntPtr.Zero)
+                {
+                    if (destroyObjects && _fpsUniformShadowProxy.gameObject != null)
+                        UnityEngine.Object.Destroy(_fpsUniformShadowProxy.gameObject);
+                    else
+                        _fpsUniformShadowProxy.enabled = false;
+                }
+
+                if (_fpsWeaponShadowProxyRoot != null && _fpsWeaponShadowProxyRoot.Pointer != IntPtr.Zero)
+                {
+                    if (destroyObjects)
+                        UnityEngine.Object.Destroy(_fpsWeaponShadowProxyRoot);
+                    else
+                        _fpsWeaponShadowProxyRoot.SetActive(false);
+                }
+
+                if (destroyObjects)
+                {
+                    if (_leftArmShadowRootGo != null && _leftArmShadowRootGo.Pointer != IntPtr.Zero)
+                        UnityEngine.Object.Destroy(_leftArmShadowRootGo);
+                    if (_rightArmShadowRootGo != null && _rightArmShadowRootGo.Pointer != IntPtr.Zero)
+                        UnityEngine.Object.Destroy(_rightArmShadowRootGo);
+
+                    _leftArmShadowRootGo = null;
+                    _rightArmShadowRootGo = null;
+                    _fpsBodyShadowProxy = null;
+                    _fpsUniformShadowProxy = null;
+                    _fpsWeaponShadowProxyRoot = null;
+                    _fpsShadowBoneMap.Clear();
+                    _fpsShadowBonePairs.Clear();
+                    _activeShadowRigSoldierPtr = IntPtr.Zero;
+                    _activeShadowRigSoldier = null;
+                    _activeShadowRigLodMgr = null;
+                }
+                else
+                {
+                    _activeShadowRigSoldierPtr = IntPtr.Zero;
+                }
+
+                _lastBoundBodyMeshPtr = IntPtr.Zero;
+                _lastBoundBodyBoneCount = -1;
+                _lastBoundUniformMeshPtr = IntPtr.Zero;
+                _lastBoundUniformBoneCount = -1;
+                _lastBoundHeldWeaponPtr = IntPtr.Zero;
+                _lastBoundHeldWeaponRendererCount = -1;
+                _nextViewmodelShadowScanTime = 0f;
+            }
+            catch { }
+        }
+
+        private static bool EnsureSkinnedShadowProxyBound(
+            Transform parentTransform,
+            SkinnedMeshRenderer src,
+            ref SkinnedMeshRenderer proxy,
+            string proxyName,
+            ref IntPtr lastMeshPtr,
+            ref int lastBoneCount)
+        {
+            if (src == null || src.Pointer == IntPtr.Zero || src.sharedMesh == null || src.sharedMesh.Pointer == IntPtr.Zero)
+            {
+                if (proxy != null && proxy.Pointer != IntPtr.Zero)
+                    proxy.enabled = false;
+                return false;
+            }
+
+            if (proxy == null || proxy.Pointer == IntPtr.Zero)
+            {
+                GameObject proxyGo = new GameObject(proxyName);
+                proxyGo.transform.SetParent(parentTransform, false);
+                proxyGo.layer = src.gameObject.layer;
+                proxy = proxyGo.AddComponent<SkinnedMeshRenderer>();
+                lastMeshPtr = IntPtr.Zero;
+                lastBoneCount = -1;
+            }
+
+            var srcBones = src.bones;
+            int boneCount = srcBones != null ? srcBones.Length : 0;
+            IntPtr curMeshPtr = src.sharedMesh.Pointer;
+
+            if (curMeshPtr != lastMeshPtr || boneCount != lastBoneCount)
+            {
+                lastMeshPtr = curMeshPtr;
+                lastBoneCount = boneCount;
+                proxy.sharedMesh = src.sharedMesh;
+
+                if (srcBones != null && boneCount > 0)
+                {
+                    var mappedBones = new Il2CppInterop.Runtime.InteropTypes.Arrays.Il2CppReferenceArray<Transform>(boneCount);
+                    for (int i = 0; i < boneCount; i++)
+                    {
+                        Transform b = srcBones[i];
+                        if (b != null && _fpsShadowBoneMap.TryGetValue(b.GetInstanceID(), out Transform sb) && sb != null)
+                            mappedBones[i] = sb;
+                        else
+                            mappedBones[i] = b;
+                    }
+                    proxy.bones = mappedBones;
+                }
+
+                Transform rb = src.rootBone;
+                proxy.rootBone = (rb != null && _fpsShadowBoneMap.TryGetValue(rb.GetInstanceID(), out Transform srb) && srb != null)
+                    ? srb
+                    : rb;
+                proxy.localBounds = src.localBounds;
+                proxy.quality = src.quality;
+                _fpsShadowMaterialsDirty = true;
+                _fpsPropertyBlockDirty = true;
+            }
+
+            proxy.updateWhenOffscreen = true;
             proxy.shadowCastingMode = UnityEngine.Rendering.ShadowCastingMode.ShadowsOnly;
             proxy.receiveShadows = false;
-            SoldierLodManager.SetBodyHeadVisibility(proxy, fd.materials, fd.index_body_submesh, showBody, true);
-            if (lodMgr.ShaderPropertyBlock != null)
-            {
-                proxy.SetPropertyBlock(lodMgr.ShaderPropertyBlock);
-            }
             proxy.enabled = true;
+            return true;
+        }
 
-            // Prevent duplicate body shadow from bodyMesh while keeping its visible body submesh + hidden head submesh intact
-            bodyMesh.shadowCastingMode = UnityEngine.Rendering.ShadowCastingMode.Off;
+        private static bool ShouldSkipWeaponShadowPart(string name)
+        {
+            if (string.IsNullOrEmpty(name))
+                return false;
+
+            return name.IndexOf("muzzle", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                   name.IndexOf("flash", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                   name.IndexOf("reticle", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                   name.IndexOf("crosshair", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                   name.IndexOf("lens", StringComparison.OrdinalIgnoreCase) >= 0;
+        }
+
+        private static void SyncThirdPersonWeaponShadowProxy(Soldier player)
+        {
+            HandheldItem held = player.inventoryItemInHands != null ? player.inventoryItemInHands : player.GetHeldItem(0);
+            if (held == null ||
+                held.Pointer == IntPtr.Zero ||
+                held.transform == null ||
+                player.IsCarryingBody() ||
+                player.HasSurrended())
+            {
+                if (_fpsWeaponShadowProxyRoot != null && _fpsWeaponShadowProxyRoot.Pointer != IntPtr.Zero)
+                    _fpsWeaponShadowProxyRoot.SetActive(false);
+                _lastBoundHeldWeaponPtr = IntPtr.Zero;
+                _lastBoundHeldWeaponRendererCount = -1;
+                return;
+            }
+
+            Transform rawHolder = player.handHeldItemPos != null ? player.handHeldItemPos : player.rightHand;
+            if (rawHolder == null)
+                return;
+
+            Transform shadowHolder = (_fpsShadowBoneMap.TryGetValue(rawHolder.GetInstanceID(), out Transform mappedHolder) && mappedHolder != null)
+                ? mappedHolder
+                : rawHolder;
+
+            if (_fpsWeaponShadowProxyRoot == null || _fpsWeaponShadowProxyRoot.Pointer == IntPtr.Zero)
+            {
+                _fpsWeaponShadowProxyRoot = new GameObject("BH_FpsWeaponShadowProxy");
+                _lastBoundHeldWeaponPtr = IntPtr.Zero;
+            }
+
+            Transform rootTr = _fpsWeaponShadowProxyRoot.transform;
+            if (rootTr.parent != shadowHolder)
+                rootTr.SetParent(shadowHolder, false);
+
+            var tps = held.tpsAnims;
+            rootTr.localPosition = tps != null ? tps.localPosInHands : Vector3.zero;
+            rootTr.localRotation = Quaternion.identity;
+            float wScale = (tps != null && tps.localScaleInHands > 0.01f) ? tps.localScaleInHands : 1.0f;
+            rootTr.localScale = new Vector3(wScale, wScale, wScale);
+
+            var meshFilters = held.GetComponentsInChildren<MeshFilter>(false);
+            int mfCount = meshFilters != null ? meshFilters.Length : 0;
+
+            if (held.Pointer != _lastBoundHeldWeaponPtr || mfCount != _lastBoundHeldWeaponRendererCount)
+            {
+                _lastBoundHeldWeaponPtr = held.Pointer;
+                _lastBoundHeldWeaponRendererCount = mfCount;
+
+                for (int i = rootTr.childCount - 1; i >= 0; i--)
+                {
+                    Transform oldChild = rootTr.GetChild(i);
+                    if (oldChild != null && oldChild.gameObject != null)
+                        UnityEngine.Object.Destroy(oldChild.gameObject);
+                }
+
+                if (meshFilters != null)
+                {
+                    Matrix4x4 heldWorldToLocal = held.transform.worldToLocalMatrix;
+                    for (int i = 0; i < mfCount; i++)
+                    {
+                        MeshFilter mf = meshFilters[i];
+                        if (mf == null || mf.sharedMesh == null || mf.transform == null)
+                            continue;
+
+                        MeshRenderer mr = mf.GetComponent<MeshRenderer>();
+                        if (mr == null || !mr.enabled || ShouldSkipWeaponShadowPart(mf.name))
+                            continue;
+
+                        Matrix4x4 rel = heldWorldToLocal * mf.transform.localToWorldMatrix;
+                        Vector3 relScale = new Vector3(
+                            rel.GetColumn(0).magnitude,
+                            rel.GetColumn(1).magnitude,
+                            rel.GetColumn(2).magnitude);
+                        if (relScale.sqrMagnitude < 0.00001f)
+                            continue;
+
+                        GameObject partGo = new GameObject("BH_WepPartShadow");
+                        partGo.layer = player.gameObject.layer;
+                        Transform pt = partGo.transform;
+                        pt.SetParent(rootTr, false);
+                        pt.localPosition = new Vector3(rel.m03, rel.m13, rel.m23);
+                        pt.localRotation = rel.rotation;
+                        pt.localScale = relScale;
+
+                        MeshFilter pmf = partGo.AddComponent<MeshFilter>();
+                        pmf.sharedMesh = mf.sharedMesh;
+
+                        MeshRenderer pmr = partGo.AddComponent<MeshRenderer>();
+                        pmr.sharedMaterials = mr.sharedMaterials;
+                        pmr.shadowCastingMode = UnityEngine.Rendering.ShadowCastingMode.ShadowsOnly;
+                        pmr.receiveShadows = false;
+                    }
+                }
+            }
+
+            if (!_fpsWeaponShadowProxyRoot.activeSelf)
+                _fpsWeaponShadowProxyRoot.SetActive(true);
+        }
+
+        public static void UpdateLocalPlayerFirstPersonShadowRig()
+        {
+            try
+            {
+                Soldier player = Soldier.CurrentControlledSoldierOrNull();
+                bool wantRig = VisionConfig.EnableMod.Value &&
+                               VisionConfig.EnableFirstPersonShadowFix.Value &&
+                               player != null &&
+                               player.Pointer != IntPtr.Zero &&
+                               player.IsAlive &&
+                               player.IsFPSPlayer() &&
+                               !player.IsOnVehicle() &&
+                               player.lodManager != null &&
+                               player.leftArm != null &&
+                               player.rightArm != null;
+
+                if (!wantRig)
+                {
+                    if (_activeShadowRigSoldierPtr != IntPtr.Zero || _suppressedFpsViewmodelRenderers.Count > 0)
+                        TeardownActiveFpsShadowRig(destroyObjects: player == null || !player.IsAlive);
+                    return;
+                }
+
+                SoldierLodManager lodMgr = player.lodManager;
+                IntPtr playerPtr = player.Pointer;
+
+                // Build or rebuild shadow bone subtrees when controlled soldier changes
+                if (_activeShadowRigSoldierPtr != playerPtr ||
+                    _leftArmShadowRootGo == null ||
+                    _rightArmShadowRootGo == null)
+                {
+                    if (_activeShadowRigSoldier != null && _activeShadowRigSoldier.Pointer != playerPtr)
+                        TeardownActiveFpsShadowRig(destroyObjects: true);
+
+                    _fpsShadowBoneMap.Clear();
+                    _fpsShadowBonePairs.Clear();
+
+                    if (_leftArmShadowRootGo != null && _leftArmShadowRootGo.Pointer != IntPtr.Zero)
+                        UnityEngine.Object.Destroy(_leftArmShadowRootGo);
+                    if (_rightArmShadowRootGo != null && _rightArmShadowRootGo.Pointer != IntPtr.Zero)
+                        UnityEngine.Object.Destroy(_rightArmShadowRootGo);
+
+                    _leftArmShadowRootGo = CloneShadowBoneSubtree(player.leftArm, player.leftArm.parent, isRootArm: true);
+                    _rightArmShadowRootGo = CloneShadowBoneSubtree(player.rightArm, player.rightArm.parent, isRootArm: true);
+
+                    _activeShadowRigSoldierPtr = playerPtr;
+                    _activeShadowRigSoldier = player;
+                    _activeShadowRigLodMgr = lodMgr;
+                    _lastBoundBodyMeshPtr = IntPtr.Zero;
+                    _lastBoundUniformMeshPtr = IntPtr.Zero;
+                    _lastBoundHeldWeaponPtr = IntPtr.Zero;
+                    _fpsShadowMaterialsDirty = true;
+                    _fpsPropertyBlockDirty = true;
+                    _nextViewmodelShadowScanTime = 0f;
+                }
+
+                // 1. Copy Animator-driven 3P arm bone poses into the Vector3.one-scaled shadow arm bones
+                int pairCount = _fpsShadowBonePairs.Count;
+                for (int i = 0; i < pairCount; i++)
+                {
+                    ShadowBonePair pair = _fpsShadowBonePairs[i];
+                    if (pair.Source == null || pair.Shadow == null)
+                        continue;
+                    pair.Shadow.localPosition = pair.Source.localPosition;
+                    pair.Shadow.localRotation = pair.Source.localRotation;
+                }
+
+                // 2. Bind & sync 3P Body and Uniform ShadowsOnly proxies
+                Transform proxyParent = lodMgr.transform;
+                SkinnedMeshRenderer bodyMesh = lodMgr.bodyMesh;
+                bool hasBodyProxy = EnsureSkinnedShadowProxyBound(
+                    proxyParent,
+                    bodyMesh,
+                    ref _fpsBodyShadowProxy,
+                    "BH_FpsBodyShadowProxy",
+                    ref _lastBoundBodyMeshPtr,
+                    ref _lastBoundBodyBoneCount);
+                if (hasBodyProxy && bodyMesh.shadowCastingMode != UnityEngine.Rendering.ShadowCastingMode.Off)
+                {
+                    bodyMesh.shadowCastingMode = UnityEngine.Rendering.ShadowCastingMode.Off;
+                }
+
+                SkinnedMeshRenderer uniMesh = lodMgr.uniformMesh;
+                bool hasUniProxy = EnsureSkinnedShadowProxyBound(
+                    proxyParent,
+                    uniMesh,
+                    ref _fpsUniformShadowProxy,
+                    "BH_FpsUniformShadowProxy",
+                    ref _lastBoundUniformMeshPtr,
+                    ref _lastBoundUniformBoneCount);
+                if (hasUniProxy)
+                {
+                    // During bipod deploy, vanilla sets uniformMesh to ShadowsOnly to hide the 3P torso from the camera;
+                    // preserve ShadowsOnly while deployed so the torso stays invisible to camera, and record Off for undeploy!
+                    if (player.bipodShadowOnlyBodyRenderer == uniMesh)
+                    {
+                        player.bipodBodyShadowModeBeforeDeploy = UnityEngine.Rendering.ShadowCastingMode.Off;
+                    }
+                    else if (uniMesh.shadowCastingMode != UnityEngine.Rendering.ShadowCastingMode.Off)
+                    {
+                        uniMesh.shadowCastingMode = UnityEngine.Rendering.ShadowCastingMode.Off;
+                    }
+                }
+
+                if (_fpsShadowMaterialsDirty)
+                {
+                    _fpsShadowMaterialsDirty = false;
+                    if (hasBodyProxy)
+                    {
+                        Corvostudio.EasyRed2.Characters.FaceData fd = player.face;
+                        UniformSleeveCoverType usct = player.uniform_Obj != null
+                            ? player.uniform_Obj.forceHideHands
+                            : (UniformSleeveCoverType)0;
+                        UniformHeadCoverType uhct = player.uniform_Obj != null
+                            ? player.uniform_Obj.forceHideHead
+                            : (UniformHeadCoverType)0;
+
+                        if (_observedLodFaceConfigs.TryGetValue(lodMgr.Pointer, out ObservedLodFaceConfig obs) && obs.Valid)
+                        {
+                            if (obs.Face != null) fd = obs.Face;
+                            usct = obs.SleeveCover;
+                            uhct = obs.HeadCover;
+                        }
+
+                        if (fd != null && fd.materials != null)
+                        {
+                            bool showBody = (int)usct != 2;
+                            bool showHead3P = (int)uhct == 0;
+                            SoldierLodManager.SetBodyHeadVisibility(
+                                _fpsBodyShadowProxy,
+                                fd.materials,
+                                fd.index_body_submesh,
+                                showBody,
+                                showHead3P);
+                        }
+                    }
+
+                    if (hasUniProxy && uniMesh.sharedMaterials != null)
+                    {
+                        _fpsUniformShadowProxy.sharedMaterials = uniMesh.sharedMaterials;
+                    }
+                }
+
+                if (_fpsPropertyBlockDirty)
+                {
+                    _fpsPropertyBlockDirty = false;
+                    MaterialPropertyBlock mpb = lodMgr.ShaderPropertyBlock;
+                    if (mpb != null)
+                    {
+                        if (hasBodyProxy) _fpsBodyShadowProxy.SetPropertyBlock(mpb);
+                        if (hasUniProxy) _fpsUniformShadowProxy.SetPropertyBlock(mpb);
+                    }
+                }
+
+                // 3. Suppress disembodied floating shadows on FPSGunManager viewmodel & sync 3P weapon shadow proxy
+                FPSGunManager fpsGun = player.fpsGun != null ? player.fpsGun : player.GetFPSGunManager();
+                HandheldItem curHeld = player.inventoryItemInHands != null ? player.inventoryItemInHands : player.GetHeldItem(0);
+                IntPtr curHeldPtr = curHeld != null ? curHeld.Pointer : IntPtr.Zero;
+                float now = Time.unscaledTime;
+                if (curHeldPtr != _lastBoundHeldWeaponPtr || now >= _nextViewmodelShadowScanTime)
+                {
+                    _nextViewmodelShadowScanTime = now + 0.20f;
+                    SuppressActiveViewmodelShadows(fpsGun);
+                }
+
+                SyncThirdPersonWeaponShadowProxy(player);
+            }
+            catch { }
+        }
+
+        [HarmonyPatch(typeof(FPSGunManager), nameof(FPSGunManager.LateUpdate))]
+        public static class FPSGunManager_LateUpdate_Patch
+        {
+            public static void Postfix()
+            {
+                UpdateLocalPlayerFirstPersonShadowRig();
+            }
         }
 
         [HarmonyPatch(typeof(SoldierLodManager), nameof(SoldierLodManager.ApplyFace))]
@@ -1779,42 +2524,51 @@ namespace EasyRed2HumanAI
         {
             public static void Postfix(
                 SoldierLodManager __instance,
-                bool __0,
                 Corvostudio.EasyRed2.Characters.FaceData __1,
                 UniformSleeveCoverType __2,
                 UniformHeadCoverType __3)
             {
                 try
                 {
-                    // Match native SoldierLodManager.ApplyFace (0x18079B69A):
-                    // showBody = (usct != 2), and in 3rd-person showHead = (uhct == 0).
-                    bool showBody = (int)__2 != 2;
-                    bool headVisibleIn3P = (int)__3 == 0;
-                    bool wantProxy = VisionConfig.EnableMod.Value &&
-                                     VisionConfig.EnableFirstPersonShadowFix.Value &&
-                                     __0 &&
-                                     headVisibleIn3P;
-                    SyncFpsHeadShadowProxy(__instance, __1, showBody, wantProxy);
+                    if (__instance == null || __instance.Pointer == IntPtr.Zero)
+                        return;
+
+                    if (_observedLodFaceConfigs.Count > 24)
+                        _observedLodFaceConfigs.Clear();
+
+                    _observedLodFaceConfigs[__instance.Pointer] = new ObservedLodFaceConfig
+                    {
+                        Face = __1,
+                        SleeveCover = __2,
+                        HeadCover = __3,
+                        Valid = true
+                    };
+
+                    if (_activeShadowRigLodMgr != null && _activeShadowRigLodMgr.Pointer == __instance.Pointer)
+                    {
+                        _fpsShadowMaterialsDirty = true;
+                        _fpsPropertyBlockDirty = true;
+                    }
                 }
                 catch { }
             }
         }
 
-        [HarmonyPatch(typeof(SoldierLodManager), nameof(SoldierLodManager.ApplyBodyHeadVisibility))]
-        public static class SoldierLodManager_ApplyBodyHeadVisibility_Patch
+        [HarmonyPatch(typeof(SoldierLodManager), nameof(SoldierLodManager.PushPropertyBlock))]
+        public static class SoldierLodManager_PushPropertyBlock_Patch
         {
-            public static void Postfix(
-                SoldierLodManager __instance,
-                Corvostudio.EasyRed2.Characters.FaceData __0,
-                bool __1,
-                bool __2)
+            public static void Postfix(SoldierLodManager __instance)
             {
                 try
                 {
-                    bool wantProxy = VisionConfig.EnableMod.Value &&
-                                     VisionConfig.EnableFirstPersonShadowFix.Value &&
-                                     !__2;
-                    SyncFpsHeadShadowProxy(__instance, __0, __1, wantProxy);
+                    if (_activeShadowRigLodMgr != null &&
+                        __instance != null &&
+                        _activeShadowRigLodMgr.Pointer == __instance.Pointer)
+                    {
+                        _fpsShadowMaterialsDirty = true;
+                        _fpsPropertyBlockDirty = true;
+                        _nextViewmodelShadowScanTime = 0f;
+                    }
                 }
                 catch { }
             }
@@ -1948,6 +2702,7 @@ namespace EasyRed2HumanAI
             public static void Prefix(
                 Vector3 pos,
                 ref string impact_prefab_name,
+                bool isExplosion,
                 int maxSpawnDistance,
                 ref Il2CppSystem.Action<GameObject> gameObjectFx,
                 out long __state)
@@ -1957,6 +2712,15 @@ namespace EasyRed2HumanAI
                 {
                     if (!VisionConfig.EnableMod.Value)
                         return;
+
+                    if (isExplosion &&
+                        !string.IsNullOrEmpty(impact_prefab_name) &&
+                        (IsIncendiaryString(impact_prefab_name) ||
+                         impact_prefab_name.IndexOf("fire", StringComparison.OrdinalIgnoreCase) >= 0))
+                    {
+                        _lastFireExplosionFxFrame = Time.frameCount;
+                        _lastFireExplosionFxPos = pos;
+                    }
 
                     if (string.IsNullOrEmpty(impact_prefab_name) ||
                         !string.Equals(impact_prefab_name, "ImpactFX_flesh", StringComparison.OrdinalIgnoreCase))

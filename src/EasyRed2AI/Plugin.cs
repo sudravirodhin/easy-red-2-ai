@@ -11,7 +11,7 @@ namespace EasyRed2HumanAI
     {
         public const string PluginGuid = "com.antigravity.easyred2.humanai";
         public const string PluginName = "Easy Red 2 - Battle Hardened";
-        public const string PluginVersion = "0.8.3";
+        public const string PluginVersion = "0.8.4";
 
         internal static Plugin Instance;
         internal static new ManualLogSource Log;
@@ -141,12 +141,16 @@ namespace EasyRed2HumanAI
             SafePatch(typeof(VeteranAndTacticsPatches.Soldier_Damage_Patch));
             SafePatch(typeof(VeteranAndTacticsPatches.ResourcesManager_FactionCanDamageFaction_Patch));
             SafePatch(typeof(VeteranAndTacticsPatches.BodyPart_TryDamageWithExplosion_Patch));
+            SafePatch(typeof(VeteranAndTacticsPatches.ItemGrenade_ExplodeAfter_Patch));
+            SafePatch(typeof(VeteranAndTacticsPatches.VehicleDamageableTrackPart_TryDamageWithExplosion_Patch));
+            SafePatch(typeof(VeteranAndTacticsPatches.VehicleDamagablePart_TryDamageWithExplosion_Patch));
             SafePatch(typeof(VeteranAndTacticsPatches.VehicleParachute_MoveDown_Patch));
             SafePatch(typeof(VeteranAndTacticsPatches.CinematicCameraGUI_EnableCinematicCamera_Patch));
             SafePatch(typeof(VeteranAndTacticsPatches.MissionStatusGUI_LateUpdate_Patch));
             SafePatch(typeof(VeteranAndTacticsPatches.ObjectiveGUI_LateUpdate_Patch));
+            SafePatch(typeof(VeteranAndTacticsPatches.FPSGunManager_LateUpdate_Patch));
             SafePatch(typeof(VeteranAndTacticsPatches.SoldierLodManager_ApplyFace_Patch));
-            SafePatch(typeof(VeteranAndTacticsPatches.SoldierLodManager_ApplyBodyHeadVisibility_Patch));
+            SafePatch(typeof(VeteranAndTacticsPatches.SoldierLodManager_PushPropertyBlock_Patch));
             SafePatch(typeof(VeteranAndTacticsPatches.ResourcesManager_PlayImpactEffect_Patch));
 
             // HitchAutopsy Flight Recorder & Per-Bot JSONL Action Trace (both default OFF)
