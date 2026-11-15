@@ -914,29 +914,7 @@ namespace EasyRed2HumanAI
                         TrySteerAircraftOrbitTowardKnownThreat(__instance);
                     }
 
-                    if (!VisionConfig.EnableRolePersonalities.Value ||
-                        !VisionConfig.EnableVehicleAndPilotPersonalities.Value)
-                    {
-                        return;
-                    }
-
-                    SoldierPersonality pilotPers = GetVehicleCrewPersonality(__instance.veh);
-                    if (pilotPers == SoldierPersonality.Pilot_Ace)
-                    {
-                        float rem = __instance.nextUpdateCheck - Time.time;
-                        if (rem > 0.20f)
-                            __instance.nextUpdateCheck = Time.time + rem * 0.78f;
-                    }
-                    else if (pilotPers == SoldierPersonality.Pilot_Daredevil)
-                    {
-                        if (__instance.exitDiveEndTime > Time.time && __instance.exitDiveEndTime < Time.time + 1.2f)
-                            __instance.exitDiveEndTime += 0.15f;
-                    }
-                    else if (pilotPers == SoldierPersonality.Pilot_Disciplined)
-                    {
-                        if (__instance.exitDiveEndTime > Time.time + 0.5f)
-                            __instance.exitDiveEndTime -= 0.12f;
-                    }
+                    UpdateAircraftDiveTerrainSafetyAndPersonality(__instance);
                 }
                 catch { }
             }

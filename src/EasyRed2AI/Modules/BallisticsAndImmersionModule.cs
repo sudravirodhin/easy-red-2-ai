@@ -431,7 +431,7 @@ namespace EasyRed2HumanAI
                 try
                 {
                     // Never treat terrain, vehicles, or living creatures as thin static cover props
-                    if (col.GetComponent<TerrainCollider>() != null)
+                    if (AiCore.IsTerrainCollider(col))
                         return ImpactUnknownOrBlocked;
                     if (col.GetComponentInParent<Creature>() != null)
                         return ImpactUnknownOrBlocked;

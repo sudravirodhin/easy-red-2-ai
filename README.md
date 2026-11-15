@@ -1,4 +1,4 @@
-# Easy Red 2: Battle Hardened (`v0.8.7`)
+# Easy Red 2: Battle Hardened (`v0.8.8`)
 *F.E.A.R.-Style 3-Tier GOAP, Humanized Vision & Self-Preservation, Radioman Intel Nets, 15-Minute Veterancy, 30 Personalities & Combined-Arms Overhaul*
 
 **[Why Battle Hardened?](#why-vanilla-easy-red-2-needed-that-extra-push)** · **[What Is GOAP?](#background-what-is-goap-fear--ww2-combined-arms)** · **[What Changes In-Game](#what-changes-on-the-battlefield)** · **[Installation](#installation-two-release-options--linux--proton)** · **[Multiplayer Matrix](#multiplayer-compatibility-matrix--client-side-vs-hostsynced-features)** · **[Hotkeys & Build](#in-game-controls-menu-f6-map-picker-f5--hotkeys)** · **[Engineering Deep-Dive](docs/design-and-justifications.md)** · **[Changelog](CHANGELOG.md)**
@@ -140,24 +140,29 @@ Notice that **no two soldiers of the same nation fight identically**: zero-alloc
 
 ---
 
-## Installation (Two Release Options + Linux / Proton)
+## Installation (Two Release Options, 1-Click Updater & Linux / Proton)
 
 Download your preferred package from the **[Releases](https://github.com/sudravirodhin/easy-red-2-ai/releases)** page:
 
-### Option A: With BepInEx Included (`EasyRed2HumanAI-v0.8.7-with-BepInEx.zip`) — *Recommended for Fresh Installs*
+### 1-Click Auto-Updater (`Update-BattleHardened.bat`) — *Recommended for Updates*
+Download or copy **[`Update-BattleHardened.bat`](Update-BattleHardened.bat)** (run it from anywhere on Windows, or directly inside your `Easy Red 2` folder when the game is closed):
+* Auto-detects your Steam `Easy Red 2` install directory, confirms `Easy Red 2.exe` is closed, and updates `BepInEx\plugins\EasyRed2HumanAI.dll` directly from the latest GitHub Release (`PE` `MZ` verified).
+* On a clean vanilla install without BepInEx yet, automatically downloads and extracts the latest `*-with-BepInEx.zip` bundle.
+
+### Option A: With BepInEx Included (`EasyRed2HumanAI-v0.8.8-with-BepInEx.zip`) — *Recommended for Fresh Installs*
 Includes **[BepInEx 6.0.0-be.791 (Unity.IL2CPP-win-x64)](https://builds.bepinex.dev/projects/bepinex_be)**, the `.NET 6` runtime, Unity `2022.3.62` base libraries, pre-generated IL2CPP `interop` assemblies for Easy Red 2 Build `921`, and `EasyRed2HumanAI.dll` (with no other third-party mods).
 1. Open your **Easy Red 2** installation folder (e.g. `Steam\steamapps\common\Easy Red 2`, where `Easy Red 2.exe` is located).
-2. Extract all contents of `EasyRed2HumanAI-v0.8.7-with-BepInEx.zip` directly into the `Easy Red 2` folder.
+2. Extract all contents of `EasyRed2HumanAI-v0.8.8-with-BepInEx.zip` directly into the `Easy Red 2` folder.
 3. Launch the game!
 
-### Option B: Without BepInEx / Plugin Only (`EasyRed2HumanAI-v0.8.7-Plugin-Only.zip` or `EasyRed2HumanAI.dll`)
+### Option B: Without BepInEx / Plugin Only (`EasyRed2HumanAI-v0.8.8-Plugin-Only.zip` or `EasyRed2HumanAI.dll`)
 For users who already have **[BepInEx 6 Bleeding Edge (`BepInEx-Unity.IL2CPP-win-x64`)](https://builds.bepinex.dev/projects/bepinex_be)** installed:
-1. Download `EasyRed2HumanAI-v0.8.7-Plugin-Only.zip` (or `EasyRed2HumanAI.dll` directly).
+1. Download `EasyRed2HumanAI-v0.8.8-Plugin-Only.zip` (or `EasyRed2HumanAI.dll` directly).
 2. Place `EasyRed2HumanAI.dll` into:
    ```text
    Easy Red 2\BepInEx\plugins\EasyRed2HumanAI.dll
    ```
-   *(Using **[Quartermaster - ER2 Mod Manager](https://www.nexusmods.com/easyred2/mods/107)**? Import `EasyRed2HumanAI-v0.8.7-Plugin-Only.zip` directly in Quartermaster's Mods tab—do not import `with-BepInEx.zip`.)*
+   *(Using **[Quartermaster - ER2 Mod Manager](https://www.nexusmods.com/easyred2/mods/107)**? Import `EasyRed2HumanAI-v0.8.8-Plugin-Only.zip` directly in Quartermaster's Mods tab—do not import `with-BepInEx.zip`.)*
 
 ### Linux & Steam Deck Setup (via Steam Proton)
 `EasyRed2HumanAI` works out of the box on **Linux Desktop** and **SteamOS / Steam Deck** with 100% Windows Co-op cross-play compatibility by running the Windows IL2CPP build under **Proton**:
@@ -166,16 +171,16 @@ For users who already have **[BepInEx 6 Bleeding Edge (`BepInEx-Unity.IL2CPP-win
    * Check **"Force the use of a specific Steam Play compatibility tool"** and select **Proton Experimental** or **Proton 9.0+**. Let Steam finish downloading `Easy Red 2.exe`.
 2. **Extract the Mod**:
    * Right-click **Easy Red 2** → **Manage** → **Browse local files** (`~/.steam/steam/steamapps/common/Easy Red 2/`).
-   * Extract **`EasyRed2HumanAI-v0.8.7-with-BepInEx.zip`** directly into that folder (`winhttp.dll`, `doorstop_config.ini`, `dotnet/`, and `BepInEx/` next to `Easy Red 2.exe`).
+   * Extract **`EasyRed2HumanAI-v0.8.8-with-BepInEx.zip`** directly into that folder (`winhttp.dll`, `doorstop_config.ini`, `dotnet/`, and `BepInEx/` next to `Easy Red 2.exe`).
 3. **Add the Wine DLL Override Launch Option** *(Required on Linux/Proton so Wine loads BepInEx's `winhttp.dll` proxy)*:
    * In Steam → **Easy Red 2** → **Properties** → **General** → **Launch Options**, paste:
      ```bash
      WINEDLLOVERRIDES="winhttp=n,b" %command%
      ```
-4. Launch the game! Verify `BepInEx/LogOutput.log` shows `Easy Red 2 - Battle Hardened v0.8.7 loaded!`. Both Windows and Linux/Proton players can Host or Join each other's Co-op lobbies.
+4. Launch the game! Verify `BepInEx/LogOutput.log` shows `Easy Red 2 - Battle Hardened v0.8.8 loaded!`. Both Windows and Linux/Proton players can Host or Join each other's Co-op lobbies.
 
 ### Switching to Vanilla or Uninstalling (`Uninstall-BepInEx-Mod.bat`)
-Included in `EasyRed2HumanAI-v0.8.7-with-BepInEx.zip` (and in the root of this repository) is **[`Uninstall-BepInEx-Mod.bat`](Uninstall-BepInEx-Mod.bat)**. Run it inside your `Easy Red 2` folder when the game is closed to:
+Included in `EasyRed2HumanAI-v0.8.8-with-BepInEx.zip` (and in the root of this repository) is **[`Uninstall-BepInEx-Mod.bat`](Uninstall-BepInEx-Mod.bat)**. Run it inside your `Easy Red 2` folder when the game is closed to:
 * **`[1] Play Vanilla Temporarily`**: Backs up `BepInEx`, `dotnet`, and `winhttp.dll` into `_BepInEx_Disabled_Backup\` so the game runs 100% vanilla without losing configs or plugins.
 * **`[2] Restore Modded Game`**: Restores everything from `_BepInEx_Disabled_Backup\` in one click.
 * **`[3] Uninstall Completely`**: Permanently deletes BepInEx and installed files.

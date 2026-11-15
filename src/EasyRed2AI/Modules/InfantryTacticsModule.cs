@@ -4444,7 +4444,7 @@ namespace EasyRed2HumanAI
             }
 
             Collider frontCol = frontHit.collider;
-            bool frontIsTerrain = frontCol != null && frontCol.TryCast<TerrainCollider>() != null;
+            bool frontIsTerrain = AiCore.IsTerrainCollider(frontCol);
             float vaultLandingRise = vaultPos.y - myPos.y;
 
             if (frontIsTerrain)
@@ -4554,8 +4554,7 @@ namespace EasyRed2HumanAI
                     return false;
                 }
 
-                bool farIsElevatedTerrain = farHit.collider != null &&
-                                            farHit.collider.TryCast<TerrainCollider>() != null &&
+                bool farIsElevatedTerrain = AiCore.IsTerrainCollider(farHit.collider) &&
                                             farHit.point.y > myPos.y + 0.35f;
                 if (frontIsTerrain || farIsElevatedTerrain)
                 {
@@ -4684,52 +4683,27 @@ namespace EasyRed2HumanAI
 
                     if (bridgeEnabled && (__result - moveDest).sqrMagnitude > 1.0f)
                     {
-                        Vector3 midPos = Vector3.Lerp(myPos, moveDest, 0.5f);
-
-                        // Cancel vanilla's 5m-35m sideways waypoint scatter if the soldier is on/near an actual bridge
-                        // OR if the laterally-scattered waypoint lands on unwalkable cliff geometry (> ~54 deg) or deep water.
+                        // Cancel vanilla's 5m-35m sideways waypoint scatter ONLY when the soldier or destination
+                        // is actually on a bridge or narrow water causeway so hillside followers keep vanilla spacing.
                         bool isBridge =
                             AiCore.IsOnBridgeOrNarrowCrossing(myPos) ||
-                            AiCore.IsOnBridgeOrNarrowCrossing(moveDest) ||
-                            AiCore.IsOnBridgeOrNarrowCrossing(midPos) ||
-                            AiCore.IsOnBridgeOrNarrowCrossing(__result);
+                            AiCore.IsOnBridgeOrNarrowCrossing(moveDest);
 
-                        int envMask = AiCore.GetSolidEnvironmentMask();
-                        Vector3 probeTop = new Vector3(__result.x, Mathf.Max(myPos.y, moveDest.y) + 12.0f, __result.z);
-                        bool hasGround = Physics.Raycast(
-                            probeTop,
-                            Vector3.down,
-                            out RaycastHit gHit,
-                            28.0f,
-                            envMask,
-                            QueryTriggerInteraction.Ignore);
-                        bool inWater = hasGround &&
-                                       AiCore.TryGetActiveWaterLevel(out float waterLevel) &&
-                                       gHit.point.y <= waterLevel - 0.15f;
-                        bool invalidScatterTerrain = !hasGround || gHit.normal.y < 0.58f || inWater;
-
-                        if (isBridge || invalidScatterTerrain)
+                        if (isBridge)
                         {
                             __result = moveDest;
-                            onBridgeSpan = isBridge;
-                            if (isBridge)
+                            onBridgeSpan = true;
+                            IntPtr ptr = h.Ptr;
+                            if (ptr != IntPtr.Zero &&
+                                (!_nextBridgeAssistCountTime.TryGetValue(ptr, out float nextCount) || now >= nextCount))
                             {
-                                IntPtr ptr = h.Ptr;
-                                if (ptr != IntPtr.Zero &&
-                                    (!_nextBridgeAssistCountTime.TryGetValue(ptr, out float nextCount) || now >= nextCount))
+                                _nextBridgeAssistCountTime[ptr] = now + 8.0f;
+                                BridgeCrossingsAssistedCount++;
+                                if (VisionConfig.DebugLogging.Value)
                                 {
-                                    _nextBridgeAssistCountTime[ptr] = now + 8.0f;
-                                    BridgeCrossingsAssistedCount++;
-                                    if (VisionConfig.DebugLogging.Value)
-                                    {
-                                        AiCore.LogDebug("BridgeDiscipline", $"{soldier.faction} soldier kept on bridge/causeway centerline (cancelled 5-35m lateral squad scatter).");
-                                    }
+                                    AiCore.LogDebug("BridgeDiscipline", $"{soldier.faction} soldier kept on bridge/causeway centerline (cancelled 5-35m lateral squad scatter).");
                                 }
                             }
-                        }
-                        else
-                        {
-                            __result = gHit.point;
                         }
                     }
 

@@ -1852,7 +1852,6 @@ namespace EasyRed2HumanAI
             public float NextUnstickTime;
             public float UnstickOverrideUntil;
             public Vector3 UnstickDest;
-            public int StallStage;
             public int ConsecutiveUnsticks;
         }
 
@@ -2411,6 +2410,14 @@ namespace EasyRed2HumanAI
                     if (bestHammerSq != null)
                     {
                         IssueHammerFlankDirective(bestHammerSq, vehPos, threatPos, axisDir, perpRight, now, $"Tank/Vehicle Anvil ('{vehSq.squadName}')");
+                        if (vehLeader.IsPlayer() && !string.IsNullOrEmpty(bestHammerSq.squadName))
+                        {
+                            AiCore.TryShowLocalPlayerRadioHint(
+                                vehSq,
+                                $"Radio Net: {bestHammerSq.squadName} flanking enemy contact to support your squad",
+                                requireLeader: false,
+                                minInterval: 20.0f);
+                        }
                     }
                 }
 
@@ -4487,6 +4494,9 @@ namespace EasyRed2HumanAI
             }
         }
 
+        private static readonly float[] _playerUnstickCosTable = { 0.0f, 0.0f, 0.7071f, 0.7071f, -0.7071f, -0.7071f };
+        private static readonly float[] _playerUnstickSinTable = { 1.0f, -1.0f, 1.0f, -1.0f, 1.0f, -1.0f };
+
         private static bool TryRecoverChronicallyStuckFootBot(
             SoldierAI ai,
             Soldier soldier,
@@ -4503,24 +4513,39 @@ namespace EasyRed2HumanAI
 
             if (now < st.UnstickOverrideUntil)
             {
-                if ((st.UnstickDest - myPos).sqrMagnitude <= 1.5f * 1.5f)
+                if ((st.UnstickDest - myPos).sqrMagnitude <= 1.2f * 1.2f)
                 {
                     st.UnstickOverrideUntil = 0f;
                     st.AnchorPos = myPos;
                     st.AnchorTime = now;
                     _footStuckStates[ptr] = st;
+                    ai.UpdatePath();
                     return false;
                 }
 
                 SetBotPose(ai, soldier, suppression >= 35f ? SoldierPose.Crouch : SoldierPose.Idle, suppression < 35f);
-                AiCore.MoveBotTowardPosition(ai, soldier, st.UnstickDest, 0.8f, 2.0f);
+                ai.MoveDirectlyToward(st.UnstickDest, 0.85f);
                 return true;
             }
 
             Vector3 desiredEnd = GetActualMoveEndpoint(ai, soldier);
             Vector2 toEndFlat = new Vector2(desiredEnd.x - myPos.x, desiredEnd.z - myPos.z);
-            bool tryingToMoveFar = toEndFlat.sqrMagnitude > 3.2f * 3.2f;
+            Vector3 rawMoveDest = ai.MoveDestination;
+            Vector2 toMoveDestFlat = new Vector2(rawMoveDest.x - myPos.x, rawMoveDest.z - myPos.z);
+            Squad mySq = soldier.joinedSquad;
+            Soldier sqLeader = mySq != null ? mySq.Leader : null;
+            bool laggingBehindLeader = !soldier.IsSquadLeader() &&
+                                       !soldier.IsOnCover() &&
+                                       sqLeader != null &&
+                                       sqLeader.IsAlive &&
+                                       sqLeader.transform != null &&
+                                       (sqLeader.transform.position - myPos).sqrMagnitude > 28.0f * 28.0f;
+            bool tryingToMove = toEndFlat.sqrMagnitude > 2.5f * 2.5f ||
+                                (ai.IsMoving() && rawMoveDest.sqrMagnitude > 0.01f && toMoveDestFlat.sqrMagnitude > 3.5f * 3.5f) ||
+                                laggingBehindLeader;
+
             bool farFromSquadOrGoal = toEndFlat.sqrMagnitude > 28.0f * 28.0f ||
+                                      laggingBehindLeader ||
                                       (hasObjTask && (objPos - myPos).sqrMagnitude > 28.0f * 28.0f);
 
             bool firingHaltedOnSpot = ai.visibleTarget != null &&
@@ -4536,39 +4561,52 @@ namespace EasyRed2HumanAI
                 soldier.IsCarryingBody();
 
             float movedSq = (myPos - st.AnchorPos).sqrMagnitude;
-            if (intentionallyStationary || !tryingToMoveFar || st.AnchorTime <= 0f || movedSq > 0.85f * 0.85f)
+            if (intentionallyStationary || !tryingToMove || st.AnchorTime <= 0f || movedSq > 0.65f * 0.65f)
             {
                 st.AnchorPos = myPos;
                 st.AnchorTime = now;
-                st.StallStage = 0;
-                if (intentionallyStationary || !tryingToMoveFar || movedSq > 2.2f * 2.2f)
+                if (intentionallyStationary || !tryingToMove || movedSq > 2.0f * 2.0f)
                     st.ConsecutiveUnsticks = 0;
                 _footStuckStates[ptr] = st;
                 return false;
             }
 
-            float stalledSec = now - st.AnchorTime;
-
-            // Stage 1 (2.0s): Clear stale direct-move shortcut and force a fresh A* path calculation around the obstacle
-            if (stalledSec >= 2.0f && st.StallStage == 0)
-            {
-                st.StallStage = 1;
-                _footStuckStates[ptr] = st;
-                ai.moveDirectlyToward_end = 0f;
-                ai.UpdatePath();
-                return false;
-            }
-
-            if (stalledSec < 3.5f || now < st.NextUnstickTime)
+            if (now - st.AnchorTime < 1.8f || now < st.NextUnstickTime)
                 return false;
 
             st.ConsecutiveUnsticks++;
             st.AnchorPos = myPos;
             st.AnchorTime = now;
-            st.StallStage = 0;
-            st.NextUnstickTime = now + 3.5f;
+            st.NextUnstickTime = now + 2.2f;
 
-            Vector3 fwd = new Vector3(toEndFlat.x, 0f, toEndFlat.y);
+            // Player-style Step A ("Spacebar"): Try vaulting cleanly over an obstacle right in front
+            if (VisionConfig.EnableWallVaulting.Value &&
+                soldier.m_pose != SoldierPose.Prone &&
+                !soldier.IsJumping() &&
+                soldier.CanVault(out Vector3 vaultPos) &&
+                IsValidVaultObstacle(ai, soldier, ptr, soldier.transform, ref vaultPos, now, out string vaultReason) &&
+                AiCore.TryConsumeBotRpcBudget(0.35f))
+            {
+                _footStuckStates[ptr] = st;
+                soldier.Vault(vaultPos);
+                WallsVaulted++;
+                FootBotUnsticksCount++;
+                BotActionTrace.RecordEvent(soldier, BotTraceEventKind.Vault, vaultReason);
+                return true;
+            }
+
+            // Player-style Step B ("Go Around"): Drop unreachable cover, sidestep 2.2m clear, and refresh A* path
+            ai.moveDirectlyToward_end = 0f;
+            ClearStaleCoverForUnstick(soldier, ptr);
+
+            Vector3 fwd = rawMoveDest.sqrMagnitude > 0.01f && toMoveDestFlat.sqrMagnitude > 0.25f
+                ? new Vector3(toMoveDestFlat.x, 0f, toMoveDestFlat.y)
+                : new Vector3(toEndFlat.x, 0f, toEndFlat.y);
+            if (fwd.sqrMagnitude < 0.04f && sqLeader != null && sqLeader.transform != null)
+            {
+                Vector3 toLdr = sqLeader.transform.position - myPos;
+                fwd = new Vector3(toLdr.x, 0f, toLdr.z);
+            }
             if (fwd.sqrMagnitude < 0.04f && hasObjTask)
             {
                 Vector3 toObj = objPos - myPos;
@@ -4581,136 +4619,49 @@ namespace EasyRed2HumanAI
             Vector3 right = new Vector3(fwd.z, 0f, -fwd.x);
             int sideSign = ((AiCore.GetDeterministicHash(ptr, st.ConsecutiveUnsticks) & 1) == 0) ? 1 : -1;
             int envMask = AiCore.GetSolidEnvironmentMask();
-            int moveMask = AiCore.GetMovementObstacleMask();
             bool hasWater = AiCore.TryGetActiveWaterLevel(out float waterLevel);
-            Vector3 chestStart = myPos + new Vector3(0f, 0.90f, 0f);
+            Vector3 waistOrigin = myPos + Vector3.up * 0.55f;
+            const float stepDist = 2.2f;
 
-            // 8 radial angles: 0 deg, +/-45 deg, +/-90 deg, +/-135 deg, 180 deg
-            float[] cosTable = { 1.0f, 0.7071f, 0.7071f, 0.0f, 0.0f, -0.7071f, -0.7071f, -1.0f };
-            float[] sinTable = { 0.0f, 0.7071f, -0.7071f, 1.0f, -1.0f, 0.7071f, -0.7071f, 0.0f };
-
-            // Stage 3 (>= 3 failed attempts): off-camera walkable hillside snap when completely wedged
-            if (st.ConsecutiveUnsticks >= 3 && !isOnBridge && !AiCore.IsPositionVisibleOnLocalScreen(myPos, 20.0f))
+            for (int a = 0; a < _playerUnstickCosTable.Length; a++)
             {
-                float[] snapDistances = { 12.0f, 16.0f, 8.5f };
-                for (int dIdx = 0; dIdx < snapDistances.Length; dIdx++)
+                Vector3 dir = fwd * _playerUnstickCosTable[a] + right * (_playerUnstickSinTable[a] * sideSign);
+                if (AiCore.IsMovementBlockedByObstacle(waistOrigin, dir, stepDist))
+                    continue;
+
+                Vector3 probe = myPos + dir * stepDist;
+                if (!Physics.Raycast(probe + Vector3.up * 2.6f, Vector3.down, out RaycastHit gHit, 5.5f, envMask, QueryTriggerInteraction.Ignore))
+                    continue;
+
+                if (gHit.normal.y < 0.55f)
+                    continue;
+
+                if (hasWater && gHit.point.y <= waterLevel + 0.15f)
+                    continue;
+
+                Vector3 candPos = gHit.point;
+                if (isOnBridge)
                 {
-                    float snapDist = snapDistances[dIdx];
-                    for (int a = 0; a < 8; a++)
-                    {
-                        Vector3 dir = fwd * cosTable[a] + right * (sinTable[a] * sideSign);
-                        Vector3 probeBase = myPos + dir * snapDist;
-                        if (!Physics.Raycast(probeBase + Vector3.up * 10.0f, Vector3.down, out RaycastHit gHit, 24.0f, envMask, QueryTriggerInteraction.Ignore))
-                            continue;
-
-                        if (gHit.normal.y < 0.64f || Mathf.Abs(gHit.point.y - myPos.y) > 7.5f)
-                            continue;
-
-                        if (hasWater && gHit.point.y <= waterLevel + 0.15f)
-                            continue;
-
-                        if (Physics.CheckSphere(gHit.point + Vector3.up * 0.95f, 0.35f, moveMask, QueryTriggerInteraction.Ignore))
-                            continue;
-
-                        if (AiCore.TryGetNearbyKnownMine(gHit.point, 5.0f, false, out _))
-                            continue;
-
-                        if (AiCore.IsPositionVisibleOnLocalScreen(gHit.point, 20.0f))
-                            continue;
-
-                        ClearStaleCoverForUnstick(soldier, ptr);
-                        Vector3 snapPos = gHit.point + Vector3.up * 0.12f;
-                        try
-                        {
-                            soldier.transform.position = snapPos;
-                            Rigidbody rb = soldier.GetComponent<Rigidbody>();
-                            if (rb != null && !rb.isKinematic)
-                            {
-                                Vector3 v = rb.velocity;
-                                rb.velocity = new Vector3(0f, Mathf.Min(0f, v.y), 0f);
-                            }
-                            ai.UpdatePath();
-                        }
-                        catch { }
-
-                        st.ConsecutiveUnsticks = 0;
-                        st.UnstickOverrideUntil = 0f;
-                        _footStuckStates[ptr] = st;
-                        FootBotUnsticksCount++;
-                        return true;
-                    }
+                    if (!AiCore.IsSafeBridgeDeckStep(myPos, probe, out Vector3 deckPos))
+                        continue;
+                    candPos = deckPos;
                 }
-            }
+                if (AiCore.TryGetNearbyKnownMine(candPos, 4.0f, false, out _))
+                    continue;
 
-            // Stage 2: Radial hillside contour probe (prefers walkable side-slope contours when forward path is steep/blocked)
-            bool forwardSteepOrBlocked =
-                Physics.Raycast(chestStart, fwd, 3.6f, moveMask, QueryTriggerInteraction.Ignore) ||
-                !Physics.Raycast(myPos + fwd * 5.0f + Vector3.up * 8.0f, Vector3.down, out RaycastHit fwdHit, 18.0f, envMask, QueryTriggerInteraction.Ignore) ||
-                fwdHit.normal.y < 0.68f;
-
-            float[] stepDistances = { 6.0f, 11.0f };
-            float bestScore = -999f;
-            Vector3 bestCand = Vector3.zero;
-            bool foundCand = false;
-
-            for (int dIdx = 0; dIdx < stepDistances.Length; dIdx++)
-            {
-                float stepDist = stepDistances[dIdx];
-                for (int a = 0; a < 8; a++)
-                {
-                    if (a == 0 && forwardSteepOrBlocked)
-                        continue;
-
-                    Vector3 dir = fwd * cosTable[a] + right * (sinTable[a] * sideSign);
-                    if (Physics.Raycast(chestStart, dir, Mathf.Min(stepDist * 0.85f, 4.5f), moveMask, QueryTriggerInteraction.Ignore))
-                        continue;
-
-                    Vector3 probe = myPos + dir * stepDist;
-                    if (!Physics.Raycast(probe + Vector3.up * 8.0f, Vector3.down, out RaycastHit gHit, 18.0f, envMask, QueryTriggerInteraction.Ignore))
-                        continue;
-
-                    if (gHit.normal.y < 0.60f || Mathf.Abs(gHit.point.y - myPos.y) > 5.5f)
-                        continue;
-
-                    if (hasWater && gHit.point.y <= waterLevel + 0.15f)
-                        continue;
-
-                    Vector3 candPos = gHit.point;
-                    if (isOnBridge)
-                    {
-                        if (!AiCore.IsSafeBridgeDeckStep(myPos, probe, out Vector3 deckPos))
-                            continue;
-                        candPos = deckPos;
-                    }
-                    if (AiCore.TryGetNearbyKnownMine(candPos, 4.5f, false, out _))
-                        continue;
-
-                    float angleScore = cosTable[a] * 1.4f + (Mathf.Abs(sinTable[a]) > 0.5f && forwardSteepOrBlocked ? 1.1f : 0f);
-                    float flatnessScore = (gHit.normal.y - 0.60f) * 2.5f;
-                    float score = angleScore + flatnessScore + (dIdx == 0 ? 0.35f : 0f);
-                    if (score > bestScore)
-                    {
-                        bestScore = score;
-                        bestCand = candPos;
-                        foundCand = true;
-                    }
-                }
-            }
-
-            if (foundCand)
-            {
-                ClearStaleCoverForUnstick(soldier, ptr);
-                st.UnstickDest = bestCand;
-                st.UnstickOverrideUntil = now + 3.2f;
+                st.UnstickDest = candPos;
+                st.UnstickOverrideUntil = now + 1.35f;
                 _footStuckStates[ptr] = st;
 
                 SetBotPose(ai, soldier, suppression >= 35f ? SoldierPose.Crouch : SoldierPose.Idle, suppression < 35f);
-                AiCore.MoveBotTowardPosition(ai, soldier, bestCand, 1.0f, 3.0f);
+                ai.MoveDirectlyToward(candPos, 1.35f);
                 FootBotUnsticksCount++;
                 return true;
             }
 
             _footStuckStates[ptr] = st;
+            ai.UpdatePath();
+            FootBotUnsticksCount++;
             return false;
         }
 

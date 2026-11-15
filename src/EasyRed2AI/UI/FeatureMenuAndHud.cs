@@ -2461,7 +2461,6 @@ namespace EasyRed2HumanAI
                 _cachedVehiclePersonalities.Clear();
                 _stationaryWatchCache.Clear();
                 _coverEyeBlockCache.Clear();
-                _trenchCollisionGuardCache.Clear();
                 _barbedWireColliderCache.Clear();
                 _botBarbedWireStuckCache.Clear();
                 _rotateFireFrameCache.Clear();

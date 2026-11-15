@@ -5,6 +5,27 @@ For pre-compiled downloads, see **[GitHub Releases](https://github.com/sudraviro
 
 ---
 
+## `v0.8.8` — "Less is More" Hillside Locomotion Fix, Stuka Dive Pull-Out, Static Gun Dismount & 1-Click Auto-Updater (Kos Release Candidate)
+* **Safe Non-Generic `TerrainCollider` Detection (`AiCore.IsTerrainCollider`)**: Fixed a live `System.ArgumentException: UnityEngine.TerrainCollider is not an Il2Cpp reference type` exception thrown by generic `TryCast<TerrainCollider>()` / `GetComponent<TerrainCollider>()` across `IsOnBridgeOrNarrowCrossing`, parapet/trench vault classification (`InfantryTacticsModule`), and bullet penetration material checks (`BallisticsAndImmersionModule`), which previously aborted `SoldierAI.SequentialUpdate` ticks on `TerrainCollider` hillsides before GOAP or unstick ran.
+* **"Less is More" Player-Style Locomotion Trim (`AiCore.cs`, `VisionAndMemoryModule.cs`, `InfantryTacticsModule.cs`, `GoapAndBlackboardModule.cs`)**:
+  * Removed `_trenchCollisionGuardCache` / `soldier.ForceControllerEnabled()` so grounded AI bots keep vanilla's `Transform.Translate` ground-snapping controller and climb steep `> 45°` Kos hillsides cleanly without hitting Unity's `45°` `CharacterController.slopeLimit`.
+  * Removed the active `IsAsyncPathRefreshPending` `MoveOptimized` override and restricted `AiCore.MoveBotTowardPosition` direct-steering (`MoveDirectlyToward`) strictly to unobstructed level micro-steps (`<= 2.5m` / `|dy| <= 0.85m`), explicitly clearing `moveDirectlyToward_end` and invoking `ai.UpdatePath()` for longer routes.
+  * Simplified `SoldierAI_GetSpacingFromSquad_Patch` to cancel lateral scatter only on actual bridges/water causeways, and trimmed `TryRecoverChronicallyStuckFootBot` to a lean player-style two-step recovery (`Vault -> drop unreachable cover + 2.2m sidestep + UpdatePath()` with zero teleports).
+* **Stuka Hillside Dive Pull-Out & One-Shot Pilot Personalities (`MacroAndVehiclesModule.cs`, `VeterancyAndPersonalitiesModule.cs`)**:
+  * Fixed `Pilot_Ace`, `Pilot_Daredevil`, and `Pilot_Disciplined` `AIPlane.Update` hooks to adjust `nextUpdateCheck` and `exitDiveEndTime` **one-shot per state transition** instead of mutating `exitDiveEndTime` every frame at `60 Hz`.
+  * Added a throttled (`~8 Hz`) `doingDive` terrain/obstacle pull-up check (sampling `GetTerrainAltitude` along heading plus forward solid-environment raycasts, dropping bombs if within `240m` of target before calling `ExitDive()`) and lifted `exitDive` pull-out climb waypoints safely above steep mountain ridges while preventing pull-out waypoint overrun.
+* **Smart Static Emplacement Dismounting (`MacroAndVehiclesModule.cs`)**:
+  * Added `TryReleaseStaleStaticEmplacementCrew` to release locally-owned AI gunners (`veh.GetOffVehicle`) from static guns (`!dontLeaveVehicle` and `Params.canMove && !Params.neverLeaveVehicle`) when out of ammo, flanked within `22m` in a fixed gun's rear blind spot, or left stranded `> 68–105m` behind their squad/front with no live targets or enemy threats inside the gun's firing arc.
+* **1-Click Auto-Updater (`Update-BattleHardened.bat`)**:
+  * Added `Update-BattleHardened.bat` in the repository root so players can automatically locate their Steam `Easy Red 2` directory, check that the game is closed, and download/update to the latest `EasyRed2HumanAI.dll` (or full `with-BepInEx` bundle on fresh installs) directly from GitHub Releases.
+* **Human Squad Leader & Team-Net Radio Callouts (`AiCore.cs`, `MacroAndVehiclesModule.cs`, `GoapAndBlackboardModule.cs`)**:
+  * Added throttled `PlayerController.HintToPlayer` radio callouts (`AiCore.TryShowLocalPlayerRadioHint`) so human Squad Leaders (and AI-led squads containing the local player) see live tactical task assignments, objective suggestions, tank support confirmations, and Team-Net flank support updates directly in the HUD on both Host and Co-op Clients.
+* **Multi-Nation Coalition Combined-Arms & Radio Net Fixes (`AiCore.cs`, `MacroAndVehiclesModule.cs`)**:
+  * Replaced strict single-nation `.Faction ==` / `.Faction !=` checks across Combined Arms intel, Team-Net radio relays, armor dispatch, and air/artillery coordination with `AiCore.AreSameSideFactions` so multi-nation coalition squads share radio support seamlessly.
+  * Un-clamped `RadioRequest.tankSupport` armor dispatch outside a tank's own objective circle (with clean objective restoration upon completion), added rear-line static mortar/howitzer fallback scanning for confirmed same-side requests even when away from a radio backpack, and prevented `RadioRequest.artillerySmoke` from triggering offensive CAS/tank targeting or `30m–36m` HE danger-close aborts.
+* **Tank Rock-Crawl Delay Tuning (`MacroAndVehiclesModule.cs`)**:
+  * Raised the `VehicleTank.FixedUpdate` rock-crawl assist stuck-time threshold from `0.45s` to `1.40s` so normal uphill starts retain pure vanilla tank physics.
+
 ## `v0.8.7` — Kos Hillside Unstick, Sapper Special Munitions, Cohesion, Casualty Handoff & Campaign Picker (Release Candidate)
 * **Kos Hillside & Whole-Squad Stuck Recovery (`AiCore.cs`, `InfantryTacticsModule.cs`, `GoapAndBlackboardModule.cs`)**:
   * Fixed dry `TerrainCollider` steep-hillside false positives in `IsOnBridgeOrNarrowCrossing` (separating true river/water bridges from solid terrain ridges and clearing `+1.85m` horizontally before downward cliff/drop-off probes in `IsBridgeSideOpenDropOff`), stopping lateral waypoint scatter from collapsing paths straight down Kos slopes (`Bridges:` inflation fixed).

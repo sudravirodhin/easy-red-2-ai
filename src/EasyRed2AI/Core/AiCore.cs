@@ -37,6 +37,7 @@ namespace EasyRed2HumanAI
         private static readonly Dictionary<IntPtr, TurretFastTraits> _turretTraitsCache = new Dictionary<IntPtr, TurretFastTraits>(96);
         private static readonly Dictionary<long, bool> _ceilingCache = new Dictionary<long, bool>(512);
         private static readonly Dictionary<long, bool> _bridgeCellCache = new Dictionary<long, bool>(512);
+        private static readonly Dictionary<IntPtr, bool> _terrainColliderCache = new Dictionary<IntPtr, bool>(64);
         private static readonly Dictionary<string, float> _debugLogCooldowns = new Dictionary<string, float>(32);
         private static readonly Dictionary<int, (bool HasMod, float ExpireTime)> _playerModdedCache = new Dictionary<int, (bool HasMod, float ExpireTime)>(16);
         private static readonly List<Vector3> _cachedRemotePlayerPositions = new List<Vector3>(12);
@@ -190,6 +191,7 @@ namespace EasyRed2HumanAI
             new Dictionary<string, ThrowablePrefabInfo>(64, StringComparer.OrdinalIgnoreCase);
         private static readonly HashSet<IntPtr> _nonMineSpawnedItemPtrs = new HashSet<IntPtr>(512);
         private static float _nextActiveMineScanTime;
+        private static float _nextLocalPlayerRadioHintTime;
 
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         public static string InternFaction(string raw)
@@ -1494,6 +1496,52 @@ namespace EasyRed2HumanAI
             return _mpIsMasterCached;
         }
 
+        public static bool IsLocalPlayerInSquad(Squad sq, out bool isLeader)
+        {
+            isLeader = false;
+            if (sq == null || sq.Pointer == IntPtr.Zero)
+                return false;
+
+            Soldier localPlayer = Soldier.CurrentControlledSoldierOrNull();
+            if (ReferenceEquals(localPlayer, null) || localPlayer == null || !localPlayer.IsAlive)
+                return false;
+
+            Squad playerSq = localPlayer.joinedSquad;
+            if (playerSq == null || playerSq.Pointer != sq.Pointer)
+                return false;
+
+            Soldier leader = sq.Leader;
+            isLeader = leader != null && leader.Pointer == localPlayer.Pointer;
+            return true;
+        }
+
+        public static void TryShowLocalPlayerRadioHint(
+            Squad targetSquad,
+            string message,
+            bool requireLeader = false,
+            float minInterval = 14.0f)
+        {
+            if (string.IsNullOrEmpty(message))
+                return;
+
+            float now = Time.time;
+            if (now < _nextLocalPlayerRadioHintTime)
+                return;
+
+            if (!IsLocalPlayerInSquad(targetSquad, out bool isLeader))
+                return;
+
+            if (requireLeader && !isLeader)
+                return;
+
+            _nextLocalPlayerRadioHintTime = now + minInterval;
+            try
+            {
+                PlayerController.HintToPlayer(message, false);
+            }
+            catch { }
+        }
+
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         public static bool IsLocallyOwnedBot(SoldierFastHandles h)
         {
@@ -2514,6 +2562,39 @@ namespace EasyRed2HumanAI
             return false;
         }
 
+        /// <summary>
+        /// Safely checks whether <paramref name="col"/> is a Unity <c>TerrainCollider</c> without calling generic
+        /// <c>TryCast&lt;TerrainCollider&gt;()</c> or <c>GetComponent&lt;TerrainCollider&gt;()</c>, because
+        /// <c>UnityEngine.TerrainPhysicsModule</c> is stripped in ER2's IL2CPP build and generic casts throw
+        /// <see cref="ArgumentException"/> ("UnityEngine.TerrainCollider is not an Il2Cpp reference type").
+        /// </summary>
+        public static bool IsTerrainCollider(Collider col)
+        {
+            if (ReferenceEquals(col, null) || col == null)
+                return false;
+
+            IntPtr ptr = col.Pointer;
+            if (ptr == IntPtr.Zero)
+                return false;
+
+            if (_terrainColliderCache.TryGetValue(ptr, out bool cached))
+                return cached;
+
+            bool isTerrain = false;
+            try
+            {
+                var il2cppType = col.GetIl2CppType();
+                if (il2cppType != null)
+                    isTerrain = string.Equals(il2cppType.Name, "TerrainCollider", StringComparison.Ordinal);
+            }
+            catch { }
+
+            if (_terrainColliderCache.Count > 256)
+                _terrainColliderCache.Clear();
+            _terrainColliderCache[ptr] = isTerrain;
+            return isTerrain;
+        }
+
         public static bool IsOnBridgeOrNarrowCrossing(Vector3 feetPos)
         {
             // Quantize to 2m x 1m x 2m spatial grid cell so bridge/crossing checks are O(1) after first probe
@@ -2532,7 +2613,7 @@ namespace EasyRed2HumanAI
                 if (Physics.Raycast(feetPos + Vector3.up * 0.85f, Vector3.down, out RaycastHit centerHit, 2.0f, mask, QueryTriggerInteraction.Ignore) &&
                     centerHit.collider != null)
                 {
-                    bool isTerrain = centerHit.collider.TryCast<TerrainCollider>() != null;
+                    bool isTerrain = IsTerrainCollider(centerHit.collider);
                     bool hasActiveWater = TryGetActiveWaterLevel(out float waterLevel);
 
                     // Dry TerrainCollider hillsides (like Kos slopes) are NEVER bridges or narrow crossings.
@@ -2678,18 +2759,17 @@ namespace EasyRed2HumanAI
         /// <summary>
         /// Moves an AI bot smoothly toward <paramref name="targetPos"/> while stopping at
         /// <paramref name="standoffDist"/> meters so bots never body-hug squadmates/corpses.
-        /// Uses multi-node <c>CPathFinding</c> (<see cref="SoldierAI.MoveDestination"/>) for long
-        /// distances (&gt; 16m) or obstructed lines of walk, and uses an overlap-safe duration on
-        /// <see cref="SoldierAI.MoveDirectlyToward"/> for short unobstructed hops so
-        /// <c>moveDirectlyToward_end</c> never expires mid-stride into vanilla's 1-node
-        /// <c>MoveFPSOptimized(0.5f)</c> slow-walk fallback.
+        /// Uses vanilla async <c>CPathFinding</c> (<see cref="SoldierAI.MoveDestination"/> +
+        /// <see cref="SoldierAI.UpdatePath"/>) for longer, sloped, or obstructed routes, and
+        /// reserves <see cref="SoldierAI.MoveDirectlyToward"/> strictly for unobstructed level
+        /// micro-steps (&lt;= 2.5m).
         /// </summary>
         public static void MoveBotTowardPosition(
             SoldierAI ai,
             Soldier soldier,
             Vector3 targetPos,
             float standoffDist = 0f,
-            float minDirectDuration = 2.8f)
+            float minDirectDuration = 1.2f)
         {
             if (ai == null || soldier == null || soldier.transform == null)
                 return;
@@ -2708,24 +2788,25 @@ namespace EasyRed2HumanAI
             dest.y = targetPos.y;
             float moveDist = Mathf.Max(0.25f, flatDist - standoffDist);
 
-            // Long runs (> 16m) or wall/sandbag-obstructed paths must use multi-node CPathFinding (NodesCount >= 2)
-            // rather than a 1-node straight-line MoveDirectlyToward segment.
-            float probeDist = Mathf.Min(moveDist, 7.5f);
-            if (moveDist > 16.0f ||
-                IsMovementBlockedByObstacle(myPos + Vector3.up * 0.48f, dir, probeDist) ||
-                IsMovementBlockedByObstacle(myPos + Vector3.up * 0.85f, dir, probeDist))
+            // Player-style locomotion: use MoveDirectlyToward ONLY for unobstructed micro-steps (<= 2.5m on level ground).
+            // Anything farther, sloped, or obstructed uses vanilla async CPathFinding (MoveDestination + UpdatePath).
+            if (moveDist <= 2.5f &&
+                Mathf.Abs(dest.y - myPos.y) <= 0.85f &&
+                !IsMovementBlockedByObstacle(myPos + Vector3.up * 0.48f, dir, moveDist))
             {
-                if (ai.moveDirectlyToward_end > Time.time)
-                    ai.moveDirectlyToward_end = 0f;
-
-                if ((ai.MoveDestination - dest).sqrMagnitude > 0.64f)
-                    ai.MoveDestination = dest;
-
+                float duration = Mathf.Clamp(moveDist / 2.6f + 0.55f, Mathf.Min(minDirectDuration, 1.4f), 2.0f);
+                ai.MoveDirectlyToward(dest, duration);
                 return;
             }
 
-            float duration = Mathf.Clamp(moveDist / 2.6f + 1.45f, minDirectDuration, 5.5f);
-            ai.MoveDirectlyToward(dest, duration);
+            if (ai.moveDirectlyToward_end > Time.time)
+                ai.moveDirectlyToward_end = 0f;
+
+            if ((ai.MoveDestination - dest).sqrMagnitude > 1.44f || (!ai.HasPath && !ai.HasPathRequest))
+            {
+                ai.MoveDestination = dest;
+                ai.UpdatePath();
+            }
         }
 
         /// <summary>
@@ -3578,7 +3659,7 @@ namespace EasyRed2HumanAI
 
                             for (int j = 0; j < WorldSquadCount; j++)
                             {
-                                if (i == j || !WorldSquads[j].LeaderIsAlive || WorldSquads[j].Faction != myFaction)
+                                if (i == j || !WorldSquads[j].LeaderIsAlive || !AreSameSideFactions(myFaction, WorldSquads[j].Faction))
                                     continue;
 
                                 if (!WorldSquads[j].HasIntrinsicRadio && !WorldSquads[j].LeaderOnGroundVehicle)
@@ -3966,6 +4047,7 @@ namespace EasyRed2HumanAI
             _turretTraitsCache.Clear();
             _ceilingCache.Clear();
             _bridgeCellCache.Clear();
+            _terrainColliderCache.Clear();
             _sameSideFactionCache.Clear();
             _enemyFactionCache.Clear();
             _enemySpawnDirCache.Clear();
@@ -4008,6 +4090,7 @@ namespace EasyRed2HumanAI
             WorldInjuredSoldierCount = 0;
             _lastWorldSnapshotTime = -999f;
             _nextAllowedBotRpcTime = 0f;
+            _nextLocalPlayerRadioHintTime = 0f;
             TotalAdaptiveAiExtraTicks = 0;
             TotalPingGovernorSkippedCycles = 0;
             TotalHitchesOver28ms = 0;

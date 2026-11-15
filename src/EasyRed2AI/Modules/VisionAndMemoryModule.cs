@@ -852,18 +852,10 @@ namespace EasyRed2HumanAI
             public bool Blocked;
         }
 
-        internal struct TrenchCollisionGuardState
-        {
-            public float NextProbeTime;
-            public float ForceUntilTime;
-            public Vector3 LastProbePos;
-        }
-
         internal static readonly Dictionary<IntPtr, CornerPieState> _cornerPieCache = new Dictionary<IntPtr, CornerPieState>(256);
         internal static readonly Dictionary<IntPtr, float> _nextCornerPieCountTime = new Dictionary<IntPtr, float>(256);
         internal static readonly Dictionary<IntPtr, StationaryWatchState> _stationaryWatchCache = new Dictionary<IntPtr, StationaryWatchState>(256);
         internal static readonly Dictionary<IntPtr, CoverEyeBlockState> _coverEyeBlockCache = new Dictionary<IntPtr, CoverEyeBlockState>(256);
-        internal static readonly Dictionary<IntPtr, TrenchCollisionGuardState> _trenchCollisionGuardCache = new Dictionary<IntPtr, TrenchCollisionGuardState>(256);
         public static int CornerPiesExecutedCount;
 
         // =====================================================================
@@ -1982,24 +1974,6 @@ namespace EasyRed2HumanAI
 
                     if (!__instance.IsMoving())
                     {
-                        // Seamless Async Path-Refresh Continuation:
-                        // Every 3-6s (pathRefreshTime), vanilla SequentialUpdate (0x18055EFA9) calls Stop(true) + async UpdatePath(),
-                        // briefly dropping IsMoving() to false for 1-3 frames while HasPathRequest is true. Keep sprinting along
-                        // __instance.dir instead of decelerating into StopMove(Crouch) or snapping a 2-frame mid-sprint shot!
-                        if (h.Tr != null && IsAsyncPathRefreshPending(__instance, soldier, myPos, now))
-                        {
-                            __state.PieHandled = true;
-                            soldier.SetGunTriggerPressed(false);
-                            __instance.actualPose = soldier.m_pose;
-                            if (!soldier.isInBodyAnimation && __instance.dir.sqrMagnitude > 0.04f)
-                            {
-                                bool refreshSprint = soldier.m_pose != SoldierPose.Prone && !soldier.IsStealth;
-                                __instance.MoveOptimized(refreshSprint, __0);
-                                return false;
-                            }
-                            return true;
-                        }
-
                         // Native MovementRoutine (0x18055D4BD) skips RotateAndFireToward even when stationary if moveLookingTarget is false!
                         if (__instance.HasEnemyAndCanFireAtHim && !soldier.HasMovementsSlowed())
                         {
@@ -2029,45 +2003,6 @@ namespace EasyRed2HumanAI
 
                     Vector3 endpoint = GetCachedMoveEndpoint(h, __instance, soldier, out int nodesCount);
                     float remDistSq = h.Tr != null ? (endpoint - myPos).sqrMagnitude : 100f;
-
-                    // Prevent Trench-Wall Walk-Through (Zero Open-Field PhysX Spiral):
-                    // Native Soldier.RefreshControllerEnabled (0x18075E080) disables m_controller on grounded AI bots
-                    // so open-field movement uses O(1) Transform.Translate instead of 130x5 PhysX CharacterController.Move
-                    // capsule sweeps on FixedSteps catch-up frames. Enable ForceControllerEnabled() ONLY when the 0.24s
-                    // waist obstacle raycast actually detects a steep wall/trench/sandbag face ahead (and skip during >45ms catch-up frames).
-                    if (h.Tr != null)
-                    {
-                        _trenchCollisionGuardCache.TryGetValue(h.Ptr, out TrenchCollisionGuardState tcGuard);
-                        if (now >= tcGuard.NextProbeTime || (myPos - tcGuard.LastProbePos).sqrMagnitude > 0.56f)
-                        {
-                            tcGuard.NextProbeTime = now + 0.24f;
-                            tcGuard.LastProbePos = myPos;
-                            Vector3 moveDir = __instance.dir;
-                            moveDir.y = 0f;
-                            if (moveDir.sqrMagnitude > 0.01f)
-                            {
-                                moveDir.Normalize();
-                                Vector3 waistOrigin = new Vector3(myPos.x, myPos.y + 0.52f, myPos.z);
-                                if (Physics.Raycast(
-                                        waistOrigin,
-                                        moveDir,
-                                        out RaycastHit steepHit,
-                                        1.75f,
-                                        AiCore.GetMovementObstacleMask(),
-                                        QueryTriggerInteraction.Ignore) &&
-                                    Mathf.Abs(steepHit.normal.y) < 0.72f)
-                                {
-                                    tcGuard.ForceUntilTime = now + 0.90f;
-                                }
-                            }
-                            _trenchCollisionGuardCache[h.Ptr] = tcGuard;
-                        }
-
-                        if (now < tcGuard.ForceUntilTime && Time.unscaledDeltaTime < 0.045f)
-                        {
-                            soldier.ForceControllerEnabled();
-                        }
-                    }
 
                     // Frame-1 Rise to Upright Sprint when starting or resuming a bound (eliminates 0.8s crouch-waddle lag)
                     if (remDistSq > 5.5f * 5.5f &&

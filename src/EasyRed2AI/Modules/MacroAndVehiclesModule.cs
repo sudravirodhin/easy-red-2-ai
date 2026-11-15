@@ -23,6 +23,7 @@ namespace EasyRed2HumanAI
         private static readonly Dictionary<IntPtr, float> _unreachableEmplacementUntil = new Dictionary<IntPtr, float>(128);
         private static readonly List<RepairStation> _activeRepairStations = new List<RepairStation>(16);
         private static readonly Dictionary<IntPtr, RepairStation> _vehiclesSeekingRepairStation = new Dictionary<IntPtr, RepairStation>(32);
+        private static readonly HashSet<IntPtr> _vehiclesAnsweringTankSupport = new HashSet<IntPtr>();
         private static readonly Dictionary<IntPtr, IntPtr> _squadOrderedToVehicle = new Dictionary<IntPtr, IntPtr>(32);
         private static readonly Dictionary<IntPtr, float> _squadTaskCommittedUntil = new Dictionary<IntPtr, float>(64);
         private static readonly Dictionary<IntPtr, float> _nextTurretFFCheckTime = new Dictionary<IntPtr, float>(64);
@@ -220,7 +221,7 @@ namespace EasyRed2HumanAI
                         continue;
 
                     Soldier crew = seat.unitSet;
-                    if (crew == null || !crew.IsAlive || crew.faction == shooter.faction)
+                    if (crew == null || !crew.IsAlive || AiCore.AreSameSideFactions(crew.faction, shooter.faction))
                         continue;
 
                     Spottable crewSpottable = crew.Cast<Spottable>();
@@ -426,7 +427,7 @@ namespace EasyRed2HumanAI
             for (int i = 0; i < clusterCount; i++)
             {
                 KnownEnemyCluster cluster = _knownEnemyClusters[i];
-                if (cluster.Faction == myFaction)
+                if (AiCore.AreSameSideFactions(cluster.Faction, myFaction))
                     continue;
 
                 for (int pass = 0; pass < 2; pass++)
@@ -855,6 +856,7 @@ namespace EasyRed2HumanAI
             public string Faction;
             public Vector3 Position;
             public RadioRequest RequestType;
+            public Squad SourceSquad;
         }
 
         private struct KnownEnemyCluster
@@ -929,6 +931,7 @@ namespace EasyRed2HumanAI
             _reusableExpiredEmplacementBots.Clear();
             _activeRepairStations.Clear();
             _vehiclesSeekingRepairStation.Clear();
+            _vehiclesAnsweringTankSupport.Clear();
             _squadOrderedToVehicle.Clear();
             _unreachableEmplacementUntil.Clear();
             _cachedRepairStationsPhasePtr = IntPtr.Zero;
@@ -1004,6 +1007,10 @@ namespace EasyRed2HumanAI
         {
             public IntPtr LastTargetPtr;
             public float HoldFireUntil;
+            public AIPlane.PlaneAIState LastPlaneState;
+            public bool HasObservedState;
+            public float LastAdjustedNextUpdateCheck;
+            public float NextDiveGroundCheckTime;
         }
 
         private struct IgnoredFriendlyVehicleCollisionEntry
@@ -1266,13 +1273,16 @@ namespace EasyRed2HumanAI
                 if (sq != null && sq.RadioRequestActiveAndConfirmed())
                 {
                     RadioRequest reqType = sq.radioRequest;
-                    if (reqType == RadioRequest.tankSupport || sq.RadioRequestIsExplosiveArtillery)
+                    if (reqType == RadioRequest.tankSupport ||
+                        sq.RadioRequestIsExplosiveArtillery ||
+                        reqType == RadioRequest.artillerySmoke)
                     {
                         _activeRadioRequests.Add(new ActiveRadioSupportInfo
                         {
                             Faction = sqSnap.Faction,
                             Position = sq.radioRequestPosition,
-                            RequestType = reqType
+                            RequestType = reqType,
+                            SourceSquad = sq
                         });
                         if (_activeRadioRequests.Count >= 16)
                             break;
@@ -1311,7 +1321,7 @@ namespace EasyRed2HumanAI
                 for (int r = 0; r < _activeRadioRequests.Count; r++)
                 {
                     ActiveRadioSupportInfo req = _activeRadioRequests[r];
-                    if (req.Faction == sqFaction)
+                    if (req.RequestType == RadioRequest.artillerySmoke || AiCore.AreSameSideFactions(req.Faction, sqFaction))
                         continue;
 
                     if ((req.Position - sqPos).sqrMagnitude <= 85.0f * 85.0f)
@@ -1472,7 +1482,9 @@ namespace EasyRed2HumanAI
             for (int r = 0; r < _activeRadioRequests.Count; r++)
             {
                 ActiveRadioSupportInfo req = _activeRadioRequests[r];
-                if (req.Faction == myFaction && (req.Position - targetPos).sqrMagnitude <= 85.0f * 85.0f)
+                if (req.RequestType != RadioRequest.artillerySmoke &&
+                    AiCore.AreSameSideFactions(req.Faction, myFaction) &&
+                    (req.Position - targetPos).sqrMagnitude <= 85.0f * 85.0f)
                 {
                     score += 50.0f;
                     break;
@@ -1553,7 +1565,10 @@ namespace EasyRed2HumanAI
                     }
                 }
 
+                bool isSmokeReq = turretAi.supportedSquad != null &&
+                                  turretAi.supportedSquad.radioRequest == RadioRequest.artillerySmoke;
                 if (turretAi.HasRadioSupportRequest &&
+                    !isSmokeReq &&
                     AiCore.IsIndirectFireImpactDangerClose(myFaction, turretAi.RadioRequestTargetPosition, gunnerPtr, 30.0f, 36.0f))
                 {
                     turretAi.supportedSquad = null;
@@ -1752,7 +1767,7 @@ namespace EasyRed2HumanAI
             for (int i = 0; i < clusterCount; i++)
             {
                 KnownEnemyCluster cluster = _knownEnemyClusters[i];
-                if (cluster.Faction == myFaction)
+                if (AiCore.AreSameSideFactions(cluster.Faction, myFaction))
                     continue;
 
                 for (int pass = 0; pass < 3; pass++)
@@ -1915,16 +1930,64 @@ namespace EasyRed2HumanAI
                 return;
             }
 
-            // Fix vanilla RefreshTargets quirk (0x180832b3e): allow on-map HE artillery/howitzers/mortars and tanks
+            // Fix vanilla RefreshTargets quirk (0x180832b3e): allow on-map HE/Smoke artillery/howitzers/mortars and tanks
             // to answer friendly Team Net radio support requests both when idle (curTarget == null) and when only
-            // a low-priority unmarked lone infantryman was spotted far away.
-            if (hasHe && (curTarget == null || curScore < 26.0f) && !turretAi.HasRadioSupportRequest)
+            // a low-priority unmarked lone infantryman was spotted far away (including allied coalition factions & rear-line pits).
+            if ((hasHe || isIndirectOrArty) && (curTarget == null || curScore < 26.0f) && !turretAi.HasRadioSupportRequest)
             {
                 turretAi.FindBestArtilleryRequest();
+                if (!turretAi.HasRadioSupportRequest &&
+                    (isIndirectOrArty || (gunner != null && gunner.joinedSquad != null && IsSquadConnectedToRadioNet(gunner.joinedSquad))))
+                {
+                    RefreshCombinedArmsIntelIfNeeded();
+                    Squad bestReqSquad = null;
+                    float bestReqDist = float.MaxValue;
+                    for (int r = 0; r < _activeRadioRequests.Count; r++)
+                    {
+                        ActiveRadioSupportInfo req = _activeRadioRequests[r];
+                        if (req.RequestType == RadioRequest.tankSupport ||
+                            !AiCore.AreSameSideFactions(req.Faction, myFaction) ||
+                            req.SourceSquad == null ||
+                            req.SourceSquad.Pointer == IntPtr.Zero ||
+                            !req.SourceSquad.RadioRequestActiveAndConfirmed())
+                        {
+                            continue;
+                        }
+
+                        if (!isIndirectOrArty && req.RequestType == RadioRequest.artillerySmoke)
+                            continue;
+                        if (!hasHe && req.RequestType == RadioRequest.artilleryHE)
+                            continue;
+
+                        Vector3 toReq = req.Position - firePos;
+                        float reqDist = toReq.magnitude;
+                        if (reqDist < 20.0f || reqDist >= bestReqDist)
+                            continue;
+
+                        if (!turret.CanShootInDirection(toReq / reqDist, 1.0f))
+                            continue;
+
+                        Corvostudio.Weapons.BulletInstance.CalculateTrajectory(reqDist, bulletSpeed, bulletGrav, out bool reqCanReach);
+                        if (!reqCanReach)
+                            continue;
+
+                        bestReqDist = reqDist;
+                        bestReqSquad = req.SourceSquad;
+                    }
+
+                    if (bestReqSquad != null)
+                    {
+                        turretAi.supportedSquad = bestReqSquad;
+                        turretAi.supportStartFireTime = now + 2.5f;
+                    }
+                }
+
                 if (turretAi.HasRadioSupportRequest)
                 {
+                    bool isSmokeReq = turretAi.supportedSquad != null &&
+                                      turretAi.supportedSquad.radioRequest == RadioRequest.artillerySmoke;
                     Vector3 radioPos = turretAi.RadioRequestTargetPosition;
-                    bool dangerClose = checkFF && AiCore.IsIndirectFireImpactDangerClose(
+                    bool dangerClose = checkFF && !isSmokeReq && AiCore.IsIndirectFireImpactDangerClose(
                         myFaction,
                         radioPos,
                         gunnerPtr,
@@ -1941,13 +2004,19 @@ namespace EasyRed2HumanAI
                     float rAngle = Corvostudio.Weapons.BulletInstance.CalculateTrajectory(rDist, bulletSpeed, bulletGrav, out bool rCanReach);
                     if (rCanReach)
                     {
+                        bool ammoOk = true;
+                        if (turretAi.supportedSquad != null)
+                        {
+                            ammoOk = turret.SelectBestAmmo(turretAi.supportedSquad.radioRequest) || hasHe;
+                        }
+                        if (!ammoOk)
+                        {
+                            turretAi.supportedSquad = null;
+                            return;
+                        }
                         turretAi.CurrentVisibleTarget = null;
                         turretAi.targetAngleAdjust = rAngle;
                         turretAi.targetInWeaponRange = true;
-                        if (turretAi.supportedSquad != null)
-                        {
-                            turret.SelectBestAmmo(turretAi.supportedSquad.radioRequest);
-                        }
                         if (TryRecordCombinedArmsAssist(veh.Pointer, Time.time))
                         {
                             AiCore.LogDebug(
@@ -2352,7 +2421,7 @@ namespace EasyRed2HumanAI
                     {
                         for (int c = 0; c < _knownEnemyClusters.Count; c++)
                         {
-                            if (_knownEnemyClusters[c].Faction != myFaction &&
+                            if (!AiCore.AreSameSideFactions(_knownEnemyClusters[c].Faction, myFaction) &&
                                 (_knownEnemyClusters[c].Position - stPos).sqrMagnitude <= 40.0f * 40.0f)
                             {
                                 overrun = true;
@@ -2541,6 +2610,8 @@ namespace EasyRed2HumanAI
             Vector3 bestFocusPos = Vector3.zero;
             float bestFocusScore = -999f;
             bool hasFocus = false;
+            bool focusIsTankSupport = false;
+            Squad focusSupportSquad = null;
 
             if (VisionConfig.EnableCombinedArmsPrioritySupport.Value && mainTurret != null)
             {
@@ -2548,7 +2619,7 @@ namespace EasyRed2HumanAI
                 for (int r = 0; r < _activeRadioRequests.Count; r++)
                 {
                     ActiveRadioSupportInfo req = _activeRadioRequests[r];
-                    if (req.Faction != myFaction)
+                    if (!AiCore.AreSameSideFactions(req.Faction, myFaction) || req.RequestType == RadioRequest.artillerySmoke)
                         continue;
 
                     float distToDest = Vector3.Distance(squadDest, req.Position);
@@ -2561,6 +2632,8 @@ namespace EasyRed2HumanAI
                         bestFocusScore = score;
                         bestFocusPos = req.Position;
                         hasFocus = true;
+                        focusIsTankSupport = req.RequestType == RadioRequest.tankSupport;
+                        focusSupportSquad = focusIsTankSupport ? req.SourceSquad : null;
                     }
                 }
 
@@ -2569,7 +2642,7 @@ namespace EasyRed2HumanAI
                 for (int i = 0; i < clusterCount; i++)
                 {
                     KnownEnemyCluster cluster = _knownEnemyClusters[i];
-                    if (cluster.Faction == myFaction)
+                    if (AiCore.AreSameSideFactions(cluster.Faction, myFaction))
                         continue;
 
                     float distToDest = Vector3.Distance(squadDest, cluster.Position);
@@ -2582,6 +2655,8 @@ namespace EasyRed2HumanAI
                         bestFocusScore = score;
                         bestFocusPos = cluster.Position;
                         hasFocus = true;
+                        focusIsTankSupport = false;
+                        focusSupportSquad = null;
                     }
                 }
             }
@@ -2591,6 +2666,16 @@ namespace EasyRed2HumanAI
 
             if (!hasFocus)
             {
+                if (_vehiclesAnsweringTankSupport.Remove(vehPtr))
+                {
+                    if (crewSq != null && !crewSq.IsPlayerInSquad() && crewSq.Leader != null &&
+                        (!Photon.Pun.PhotonNetwork.InRoom || AiCore.TryConsumeBotRpcBudget(0.45f)))
+                    {
+                        crewSq.Leader_OrderAttackCurrentTask(crewSq.Leader);
+                    }
+                    aiVeh.rerollDestination = true;
+                }
+
                 if (totalFriendlyNearObj < 2)
                     return;
 
@@ -2621,6 +2706,17 @@ namespace EasyRed2HumanAI
             }
 
             float maxAllowedOffset = areaSize * 0.84f;
+            bool answeringFarTankSupport = hasFocus && focusIsTankSupport && Vector3.Distance(squadDest, bestFocusPos) > maxAllowedOffset;
+            if (!answeringFarTankSupport && _vehiclesAnsweringTankSupport.Remove(vehPtr))
+            {
+                if (crewSq != null && !crewSq.IsPlayerInSquad() && crewSq.Leader != null &&
+                    (!Photon.Pun.PhotonNetwork.InRoom || AiCore.TryConsumeBotRpcBudget(0.45f)))
+                {
+                    crewSq.Leader_OrderAttackCurrentTask(crewSq.Leader);
+                }
+                aiVeh.rerollDestination = true;
+            }
+
             Vector3 fwdAxis;
             Vector3 baseDest;
 
@@ -2633,7 +2729,29 @@ namespace EasyRed2HumanAI
                 fwdAxis.y = 0f;
                 fwdAxis = fwdAxis.sqrMagnitude > 0.001f ? fwdAxis.normalized : Vector3.forward;
 
-                if (focusDistFromDest <= maxAllowedOffset)
+                if (answeringFarTankSupport)
+                {
+                    Vector3 fromFocusToTank = vehPos - bestFocusPos;
+                    fromFocusToTank.y = 0f;
+                    Vector3 standoffDir = fromFocusToTank.sqrMagnitude > 0.25f ? fromFocusToTank.normalized : -fwdAxis;
+                    baseDest = bestFocusPos + standoffDir * 38.0f;
+                    if (Physics.Raycast(
+                            new Vector3(baseDest.x, bestFocusPos.y + 22.0f, baseDest.z),
+                            Vector3.down,
+                            out RaycastHit sHit,
+                            50.0f,
+                            AiCore.GetSolidEnvironmentMask(),
+                            QueryTriggerInteraction.Ignore) &&
+                        sHit.normal.y >= 0.70f)
+                    {
+                        baseDest = sHit.point;
+                    }
+                    else
+                    {
+                        baseDest.y = bestFocusPos.y;
+                    }
+                }
+                else if (focusDistFromDest <= maxAllowedOffset)
                 {
                     // Threat is inside the objective area: pull back ~35m toward the approaching tank for standoff
                     Vector3 fromFocusToTank = vehPos - bestFocusPos;
@@ -2665,7 +2783,12 @@ namespace EasyRed2HumanAI
             }
 
             Vector3 desiredDest = baseDest;
-            desiredDest.y = squadDest.y;
+            if (!answeringFarTankSupport)
+                desiredDest.y = squadDest.y;
+
+            Vector3 clampCenter = answeringFarTankSupport ? bestFocusPos : squadDest;
+            float clampRefY = answeringFarTankSupport ? baseDest.y : squadDest.y;
+            float clampMaxOffset = answeringFarTankSupport ? 60.0f : maxAllowedOffset;
 
             // Apply WW2 Armored Anti-Bombing Echelon / Breitkeil Wedge Dispersion when >= 2 friendly vehicles share the sector!
             if (totalFriendlyNearObj >= 2)
@@ -2702,17 +2825,17 @@ namespace EasyRed2HumanAI
                 Vector3 candOpposite = baseDest - rightAxis * latOffset + fwdAxis * depthOffset;
                 Vector3 candHalf = baseDest + rightAxis * (latOffset * 0.55f);
 
-                if (TryValidateVehicleGroundPoint(candPrimary, squadDest.y, squadDest, maxAllowedOffset, fwdAxis, vehRoot, out Vector3 valid1))
+                if (TryValidateVehicleGroundPoint(candPrimary, clampRefY, clampCenter, clampMaxOffset, fwdAxis, vehRoot, out Vector3 valid1))
                 {
                     desiredDest = valid1;
                 }
                 else if (Mathf.Abs(latOffset) > 1f &&
-                         TryValidateVehicleGroundPoint(candOpposite, squadDest.y, squadDest, maxAllowedOffset, fwdAxis, vehRoot, out Vector3 valid2))
+                         TryValidateVehicleGroundPoint(candOpposite, clampRefY, clampCenter, clampMaxOffset, fwdAxis, vehRoot, out Vector3 valid2))
                 {
                     desiredDest = valid2;
                 }
                 else if (Mathf.Abs(latOffset) > 1f &&
-                         TryValidateVehicleGroundPoint(candHalf, squadDest.y, squadDest, maxAllowedOffset, fwdAxis, vehRoot, out Vector3 valid3))
+                         TryValidateVehicleGroundPoint(candHalf, clampRefY, clampCenter, clampMaxOffset, fwdAxis, vehRoot, out Vector3 valid3))
                 {
                     desiredDest = valid3;
                 }
@@ -2733,7 +2856,7 @@ namespace EasyRed2HumanAI
                     {
                         Vector3 pushDir = dSq > 0.25f ? diff.normalized : (rightAxis * ((myRankAtObj & 1) == 0 ? -1f : 1f));
                         Vector3 pushed = other.TargetDest + pushDir * minPeerSpacing;
-                        if (TryValidateVehicleGroundPoint(pushed, squadDest.y, squadDest, maxAllowedOffset, fwdAxis, vehRoot, out Vector3 validPushed))
+                        if (TryValidateVehicleGroundPoint(pushed, clampRefY, clampCenter, clampMaxOffset, fwdAxis, vehRoot, out Vector3 validPushed))
                         {
                             desiredDest = validPushed;
                         }
@@ -2741,11 +2864,34 @@ namespace EasyRed2HumanAI
                 }
             }
 
-            if ((aiVeh.setVehicleDestination - desiredDest).sqrMagnitude > 10.0f * 10.0f)
+            bool destChanged = (aiVeh.setVehicleDestination - desiredDest).sqrMagnitude > 10.0f * 10.0f;
+            if (answeringFarTankSupport && (destChanged || !_vehiclesAnsweringTankSupport.Contains(vehPtr)))
+            {
+                _vehiclesAnsweringTankSupport.Add(vehPtr);
+                if (crewSq != null && !crewSq.IsPlayerInSquad())
+                {
+                    if (crewSq.order == Order.follow)
+                        crewSq.order = Order.defend;
+                    crewSq.moveOrderPosition = desiredDest;
+                    crewSq.moveOrderRadius = isTank ? 46.0f : 34.0f;
+                }
+            }
+
+            if (destChanged)
             {
                 aiVeh.setVehicleDestination = desiredDest;
                 aiVeh.rerollDestination = false;
                 _claimedVehicleDestinations[vehPtr] = desiredDest;
+
+                if (focusIsTankSupport && focusSupportSquad != null)
+                {
+                    string armorLabel = (crewSq != null && !string.IsNullOrEmpty(crewSq.squadName)) ? crewSq.squadName : "Allied armor";
+                    AiCore.TryShowLocalPlayerRadioHint(
+                        focusSupportSquad,
+                        $"Radio Net: {armorLabel} moving to support your position",
+                        requireLeader: false,
+                        minInterval: 22.0f);
+                }
 
                 if (totalFriendlyNearObj >= 2)
                 {
@@ -2782,7 +2928,7 @@ namespace EasyRed2HumanAI
             for (int i = 0; i < count; i++)
             {
                 AirborneAircraftInfo info = _airborneAircraft[i];
-                if (info.Faction == myFaction ||
+                if (AiCore.AreSameSideFactions(info.Faction, myFaction) ||
                     info.Plane == null ||
                     info.Plane.Pointer == IntPtr.Zero ||
                     info.Plane.Pointer == selfVehPtr ||
@@ -2892,7 +3038,7 @@ namespace EasyRed2HumanAI
             for (int r = 0; r < _activeRadioRequests.Count; r++)
             {
                 ActiveRadioSupportInfo req = _activeRadioRequests[r];
-                if (req.Faction != myFaction)
+                if (!AiCore.AreSameSideFactions(req.Faction, myFaction) || req.RequestType == RadioRequest.artillerySmoke)
                     continue;
 
                 float score = req.RequestType == RadioRequest.artilleryAPHE ? 115.0f : 95.0f;
@@ -2909,7 +3055,7 @@ namespace EasyRed2HumanAI
             for (int i = 0; i < clusterCount; i++)
             {
                 KnownEnemyCluster cluster = _knownEnemyClusters[i];
-                if (cluster.Faction == myFaction)
+                if (AiCore.AreSameSideFactions(cluster.Faction, myFaction))
                     continue;
 
                 if (!cluster.IsMarkedOrPinPoint &&
@@ -3011,7 +3157,7 @@ namespace EasyRed2HumanAI
             for (int i = 0; i < clusterCount; i++)
             {
                 KnownEnemyCluster cluster = _knownEnemyClusters[i];
-                if (cluster.Faction == myFaction)
+                if (AiCore.AreSameSideFactions(cluster.Faction, myFaction))
                     continue;
 
                 bool isMarkedOrRadio = cluster.IsMarkedOrPinPoint || cluster.IsHalfMarked || cluster.NearRadioRequest;
@@ -3589,6 +3735,150 @@ namespace EasyRed2HumanAI
             }
         }
 
+        private static void LiftPlaneExitDiveTargetAboveTerrain(AIPlane plane, Vector3 pos, Vector3 flatFwd, float minTerrainY)
+        {
+            float terrMid = ResourcesManager.GetTerrainAltitude(pos + flatFwd * 220f, 0f);
+            float terrFar = ResourcesManager.GetTerrainAltitude(pos + flatFwd * 480f, 0f);
+            float terrMax = Mathf.Max(minTerrainY, Mathf.Max(terrMid, terrFar));
+
+            Vector3 safeClimb = pos + flatFwd * 650f;
+            safeClimb.y = Mathf.Max(plane.flyTargetPosition.y, Mathf.Max(pos.y + 220f, terrMax + 260f));
+            plane.flyTargetPosition = safeClimb;
+        }
+
+        /// <summary>
+        /// Prevents AI aircraft from nosediving into steep mountain slopes during CAS runs
+        /// and ensures pilot personalities apply strictly once per state transition instead of 60 Hz drift.
+        /// </summary>
+        public static void UpdateAircraftDiveTerrainSafetyAndPersonality(AIPlane plane)
+        {
+            if (plane == null ||
+                plane.Pointer == IntPtr.Zero ||
+                plane.veh == null ||
+                plane.veh.Pointer == IntPtr.Zero ||
+                plane.transform == null ||
+                !AiCore.IsLocallyOwnedVehicle(plane.veh) ||
+                plane.veh.PlayerIsInside() ||
+                !plane.HasAIDriver ||
+                plane.veh.isGrounded ||
+                !plane.veh.CanFight() ||
+                IsJapaneseKamikazeActive(plane))
+            {
+                return;
+            }
+
+            IntPtr planePtr = plane.Pointer;
+            _planeAttackReaction.TryGetValue(planePtr, out PlaneAttackReactionState st);
+
+            float now = Time.time;
+            AIPlane.PlaneAIState curState = plane.planeState;
+            Vector3 pos = plane.transform.position;
+            Vector3 fwd = plane.transform.forward;
+            Vector3 flatFwd = new Vector3(fwd.x, 0f, fwd.z);
+            flatFwd = flatFwd.sqrMagnitude > 0.001f ? flatFwd.normalized : Vector3.forward;
+
+            bool persEnabled = VisionConfig.EnableRolePersonalities.Value &&
+                               VisionConfig.EnableVehicleAndPilotPersonalities.Value;
+            SoldierPersonality pilotPers = persEnabled
+                ? GetVehicleCrewPersonality(plane.veh)
+                : SoldierPersonality.None;
+
+            // One-shot Pilot_Ace decision cadence boost per vanilla nextUpdateCheck reset
+            if (persEnabled &&
+                pilotPers == SoldierPersonality.Pilot_Ace &&
+                plane.nextUpdateCheck > st.LastAdjustedNextUpdateCheck + 0.15f)
+            {
+                float rem = plane.nextUpdateCheck - now;
+                if (rem > 0.25f)
+                {
+                    plane.nextUpdateCheck = now + rem * 0.78f;
+                    st.LastAdjustedNextUpdateCheck = plane.nextUpdateCheck;
+                }
+            }
+
+            // One-shot entry into exitDive (personality tweak + lift climb target clear of mountain ridges)
+            if (st.HasObservedState &&
+                curState == AIPlane.PlaneAIState.exitDive &&
+                st.LastPlaneState != AIPlane.PlaneAIState.exitDive)
+            {
+                LiftPlaneExitDiveTargetAboveTerrain(plane, pos, flatFwd, ResourcesManager.GetTerrainAltitude(pos, 0f));
+
+                if (persEnabled)
+                {
+                    if (pilotPers == SoldierPersonality.Pilot_Daredevil)
+                        plane.exitDiveEndTime = Mathf.Max(now + 1.4f, plane.exitDiveEndTime - 0.45f);
+                    else if (pilotPers == SoldierPersonality.Pilot_Disciplined)
+                        plane.exitDiveEndTime += 0.65f;
+                }
+            }
+
+            // Prevent overrunning flyTargetPosition mid-pullout (which leaves target behind/below nose)
+            if (curState == AIPlane.PlaneAIState.exitDive)
+            {
+                Vector3 toFly = plane.flyTargetPosition - pos;
+                float flatFlySq = toFly.x * toFly.x + toFly.z * toFly.z;
+                float fwdDot = toFly.x * flatFwd.x + toFly.z * flatFwd.z;
+                if (flatFlySq < 75.0f * 75.0f || fwdDot < 25.0f)
+                {
+                    plane.flyTargetPosition = new Vector3(
+                        pos.x + flatFwd.x * 550.0f,
+                        Mathf.Max(plane.flyTargetPosition.y, pos.y + 200.0f),
+                        pos.z + flatFwd.z * 550.0f);
+                }
+            }
+
+            // Throttled (~8 Hz) ground-proximity pull-up guard during steep dive-bombing runs
+            if (curState == AIPlane.PlaneAIState.doingDive && now >= st.NextDiveGroundCheckTime)
+            {
+                st.NextDiveGroundCheckTime = now + 0.12f;
+                Rigidbody rb = plane.veh.GetRigidbody();
+                Vector3 vel = rb != null ? rb.velocity : fwd * 75.0f;
+                float speed = Mathf.Max(45.0f, vel.magnitude);
+                float sinkRate = Mathf.Max(0f, -vel.y);
+                Vector3 velDir = vel.sqrMagnitude > 1.0f ? vel / vel.magnitude : fwd;
+
+                float terrHere = ResourcesManager.GetTerrainAltitude(pos, 0f);
+                float terrNear = ResourcesManager.GetTerrainAltitude(pos + flatFwd * (speed * 1.35f), 0f);
+                float terrFar = ResourcesManager.GetTerrainAltitude(pos + flatFwd * (speed * 2.50f), 0f);
+                float maxGroundY = Mathf.Max(terrHere, Mathf.Max(terrNear, terrFar));
+                if (AiCore.TryGetActiveWaterLevel(out float waterY) && waterY > maxGroundY)
+                    maxGroundY = waterY;
+
+                plane.GetDiveData(out _, out float nativeLimitHeight);
+                float rayDist = Mathf.Clamp(speed * 1.35f, 65.0f, 135.0f);
+                bool rayHitObstacle = Physics.Raycast(
+                    pos,
+                    velDir,
+                    rayDist,
+                    AiCore.GetSolidEnvironmentMask(),
+                    QueryTriggerInteraction.Ignore);
+
+                float minSafeAlt = maxGroundY + Mathf.Max(nativeLimitHeight, 52.0f + sinkRate * 1.15f);
+                if (pos.y <= minSafeAlt || rayHitObstacle)
+                {
+                    Spottable atkTgt = plane.targetToAttack;
+                    if (plane.HasBombsToDeliver() &&
+                        atkTgt != null &&
+                        atkTgt.Pointer != IntPtr.Zero)
+                    {
+                        Vector3 dTgt = atkTgt.GetPosition() - pos;
+                        if (dTgt.x * dTgt.x + dTgt.z * dTgt.z <= 240.0f * 240.0f)
+                        {
+                            plane.veh.DropBombs();
+                        }
+                    }
+
+                    plane.ExitDive();
+                    LiftPlaneExitDiveTargetAboveTerrain(plane, pos, flatFwd, maxGroundY);
+                    curState = plane.planeState;
+                }
+            }
+
+            st.LastPlaneState = curState;
+            st.HasObservedState = true;
+            _planeAttackReaction[planePtr] = st;
+        }
+
         private static int _macroDirectorSubPhase;
         private static float _macroDirectorStarvedSince;
 
@@ -3615,8 +3905,17 @@ namespace EasyRed2HumanAI
             _macroDirectorStarvedSince = 0f;
             _nextMacroDirectorTime = now + 2.0f;
 
+            int step = _macroDirectorSubPhase;
+            _macroDirectorSubPhase = (step + 1) % 3;
+
             if (!AiCore.IsMasterClient())
+            {
+                if (step == 0 && VisionConfig.EnableMacroObjectiveDirector.Value)
+                {
+                    try { TryUpdateLocalClientSquadLeaderSuggestion(); } catch { }
+                }
                 return;
+            }
 
             BattleManager bm = BattleManager.instance;
             if (bm == null || bm.Pointer == IntPtr.Zero || BattleManager.isBattleEnded || bm.isPreview)
@@ -3632,8 +3931,6 @@ namespace EasyRed2HumanAI
 
             // Stagger the 3 heavy global passes across separate 2.0s steps (full cycle = 6.0s)
             // so Macro Objective assignment, Emplacement staffing, and TeamNet Anvil/Hammer never collide on one frame.
-            int step = _macroDirectorSubPhase;
-            _macroDirectorSubPhase = (step + 1) % 3;
             HitchProfiler.RecordMacroStep(step);
 
             if (step == 0)
@@ -3898,20 +4195,11 @@ namespace EasyRed2HumanAI
             _reusableSeenLossSquadPtrs.Clear();
         }
 
-        private static void RunMacroObjectiveDirector(BattlePhase phase)
+        private static void CollectActiveMacroObjectives(BattlePhase phase, List<MissionObjective> activeObjectives)
         {
-            var rawObjectives = phase != null ? phase.objectives : null;
-            var scriptedObjectives = MissionObjectiveScripted.scriptedMissionObjectives;
-            int rawLen = rawObjectives != null ? rawObjectives.Length : 0;
-            int scriptedLen = scriptedObjectives != null ? scriptedObjectives.Count : 0;
-            if (rawLen == 0 && scriptedLen == 0)
-            {
-                _garrisonAssignedObjectiveBySquad.Clear();
-                return;
-            }
-
-            var activeObjectives = _reusableActiveObjectives;
             activeObjectives.Clear();
+            var rawObjectives = phase != null ? phase.objectives : null;
+            int rawLen = rawObjectives != null ? rawObjectives.Length : 0;
             for (int i = 0; i < rawLen; i++)
             {
                 MissionObjective obj = rawObjectives[i];
@@ -3923,8 +4211,10 @@ namespace EasyRed2HumanAI
                 activeObjectives.Add(obj);
             }
 
+            var scriptedObjectives = MissionObjectiveScripted.scriptedMissionObjectives;
             if (scriptedObjectives != null)
             {
+                int scriptedLen = scriptedObjectives.Count;
                 for (int i = 0; i < scriptedLen; i++)
                 {
                     MissionObjectiveScripted sObj = scriptedObjectives[i];
@@ -3946,6 +4236,72 @@ namespace EasyRed2HumanAI
                         activeObjectives.Add(sObj);
                 }
             }
+        }
+
+        private static void TryUpdateLocalClientSquadLeaderSuggestion()
+        {
+            Soldier localPlayer = Soldier.CurrentControlledSoldierOrNull();
+            if (ReferenceEquals(localPlayer, null) || localPlayer == null || !localPlayer.IsAlive || string.IsNullOrEmpty(localPlayer.faction))
+                return;
+
+            Squad sq = localPlayer.joinedSquad;
+            if (sq == null || sq.Pointer == IntPtr.Zero || sq.Leader == null || sq.Leader.Pointer != localPlayer.Pointer)
+                return;
+
+            if (AiCore.IsTrueVehicleCrewSquad(sq) || !IsSquadConnectedToRadioNet(sq))
+                return;
+
+            BattleManager bm = BattleManager.instance;
+            if (bm == null || bm.Pointer == IntPtr.Zero || BattleManager.isBattleEnded || bm.isPreview)
+                return;
+
+            BattlePhase phase = AiCore.TryGetCurrentBattlePhase(bm);
+            var activeObjectives = _reusableActiveObjectives;
+            CollectActiveMacroObjectives(phase, activeObjectives);
+            if (activeObjectives.Count == 0)
+                return;
+
+            BattleData bd = null;
+            try { bd = BattleManager.GetCurrentBattleData(); } catch { }
+            _currentDirectorBattleData = bd;
+
+            string faction = localPlayer.faction;
+            var heldObjectives = _reusableHeldObjectives;
+            var unheldObjectives = _reusableUnheldObjectives;
+            heldObjectives.Clear();
+            unheldObjectives.Clear();
+
+            for (int i = 0; i < activeObjectives.Count; i++)
+            {
+                MissionObjective obj = activeObjectives[i];
+                if (AiCore.ClassifyMissionObjectiveForFaction(obj, faction, bd, out bool isHeld, out bool canAttract, out _))
+                {
+                    if (isHeld)
+                        heldObjectives.Add(obj);
+                    else if (canAttract)
+                        unheldObjectives.Add(obj);
+                }
+            }
+
+            var allEnemyLeaderPositions = _reusableAllEnemyLeaderPositions;
+            allEnemyLeaderPositions.Clear();
+            AiCore.EnsureWorldSnapshot();
+            int sqCount = AiCore.WorldSquadCount;
+            var worldSquads = AiCore.WorldSquads;
+            for (int s = 0; s < sqCount; s++)
+            {
+                ref AiCore.SquadSnapshot sqSnap = ref worldSquads[s];
+                if (sqSnap.LeaderIsAlive && sqSnap.UnitCount > 0 && !string.IsNullOrEmpty(sqSnap.Faction))
+                    allEnemyLeaderPositions.Add(new KeyValuePair<string, Vector3>(sqSnap.Faction, sqSnap.RefPos));
+            }
+
+            TrySuggestObjectiveForPlayerSquadLeader(sq, faction, heldObjectives, unheldObjectives, null, allEnemyLeaderPositions);
+        }
+
+        private static void RunMacroObjectiveDirector(BattlePhase phase)
+        {
+            var activeObjectives = _reusableActiveObjectives;
+            CollectActiveMacroObjectives(phase, activeObjectives);
 
             if (activeObjectives.Count == 0)
             {
@@ -3988,11 +4344,15 @@ namespace EasyRed2HumanAI
 
                 // When the Human Player is the Squad Leader, vanilla SoldierAI.SquadOrdersRoutine does not run,
                 // so if the player's squad has no active objective (or their previous objective was captured/lost)
-                // and is connected to the Team Radio Net, let the Team Net suggest the next priority objective!
+                // and is connected to the Team Radio Net, let the Team Net suggest the next priority objective
+                // (strictly on the local player's machine so Host never overwrites remote clients)!
                 if (leader.IsPlayer())
                 {
                     _garrisonAssignedObjectiveBySquad.Remove(sqSnap.Ptr);
-                    if (!sqSnap.IsVehicleCrew && IsSquadConnectedToRadioNet(sq))
+                    if (AiCore.IsLocalPlayerInSquad(sq, out bool isLocalLeader) &&
+                        isLocalLeader &&
+                        !sqSnap.IsVehicleCrew &&
+                        IsSquadConnectedToRadioNet(sq))
                     {
                         if (!playerSquadsByFaction.TryGetValue(sqSnap.Faction, out List<Squad> pList))
                         {
@@ -4850,6 +5210,17 @@ namespace EasyRed2HumanAI
             if (changed && sq.IsPlayerInSquad())
             {
                 NotifyPlayerSquadTaskUpdated(sq);
+                if (IsSquadConnectedToRadioNet(sq))
+                {
+                    string objName = obj.GetDisplayName();
+                    if (string.IsNullOrEmpty(objName))
+                        objName = GetObjectiveDebugLabel(obj);
+                    AiCore.TryShowLocalPlayerRadioHint(
+                        sq,
+                        $"Squad Radio: New squad objective — {objName}",
+                        requireLeader: false,
+                        minInterval: 12.0f);
+                }
             }
         }
 
@@ -4904,6 +5275,16 @@ namespace EasyRed2HumanAI
             playerSq.currentTask = suggestedObj.missionTask.Cast<SquadTask>();
             ConsumeInitialHqSpawnBriefingIfNoRadio(playerSq);
             NotifyPlayerSquadTaskUpdated(playerSq);
+
+            string suggestedName = suggestedObj.GetDisplayName();
+            if (string.IsNullOrEmpty(suggestedName))
+                suggestedName = GetObjectiveDebugLabel(suggestedObj);
+            bool isAttackObj = unheldObjectives != null && unheldObjectives.Contains(suggestedObj);
+            AiCore.TryShowLocalPlayerRadioHint(
+                playerSq,
+                $"HQ Radio: Suggested objective — {(isAttackObj ? "Attack" : "Defend")} {suggestedName}",
+                requireLeader: true,
+                minInterval: 10.0f);
 
             // Have the squad's AI Radioman (if alive) audibly relay the new HQ objective to the Player Squad Leader
             if (playerSq.units != null)
@@ -5271,14 +5652,24 @@ namespace EasyRed2HumanAI
                 bool isUnmannedCombatVehicle = !isStaticGun && !veh.HasDriver() && !veh.IsTransportVehicle();
 
                 Turret mainTurret = veh.GetMainTurret(false);
-                if (mainTurret == null || mainTurret.WeaponsCount() <= 0 || !HasAnyEmplacementTurretAmmo(veh, mainTurret))
+                if (mainTurret == null || mainTurret.WeaponsCount() <= 0)
+                    continue;
+
+                bool hasAmmo = HasAnyEmplacementTurretAmmo(veh, mainTurret);
+                Vector3 vehPos = veh.transform.position;
+
+                if (isStaticGun)
+                {
+                    TryReleaseStaleStaticEmplacementCrew(veh, mainTurret, vehPos, hasAmmo, now, squads, sqCount);
+                }
+
+                if (!hasAmmo)
                     continue;
 
                 if (!isStaticGun && mainTurret.GetSittedUnit(veh) != null)
                     continue;
 
                 IntPtr vehPtr = veh.Pointer;
-                Vector3 vehPos = veh.transform.position;
                 string occupantFaction = GetFirstAliveVehicleOccupantFaction(veh);
 
                 // 1. If this is an empty/abandoned movable combat vehicle (Tank, Armored Car)
@@ -5451,7 +5842,7 @@ namespace EasyRed2HumanAI
                     bool emplacementOverrun = false;
                     for (int c = 0; c < _knownEnemyClusters.Count; c++)
                     {
-                        if (_knownEnemyClusters[c].Faction != sqSnap.Faction &&
+                        if (!AiCore.AreSameSideFactions(_knownEnemyClusters[c].Faction, sqSnap.Faction) &&
                             (_knownEnemyClusters[c].Position - vehPos).sqrMagnitude <= 22.0f * 22.0f)
                         {
                             emplacementOverrun = true;
@@ -5618,6 +6009,158 @@ namespace EasyRed2HumanAI
             if (markUnreachable)
             {
                 _unreachableEmplacementUntil[soldierPtr] = Time.time + cooldownSeconds;
+            }
+        }
+
+        private static void TryReleaseStaleStaticEmplacementCrew(
+            Vehicle veh,
+            Turret mainTurret,
+            Vector3 vehPos,
+            bool hasAmmo,
+            float now,
+            AiCore.SquadSnapshot[] squads,
+            int sqCount)
+        {
+            if (veh == null || mainTurret == null || veh.seats == null)
+                return;
+
+            var seats = veh.seats;
+            int seatCount = seats.Length;
+            Soldier firstOcc = null;
+            for (int i = 0; i < seatCount; i++)
+            {
+                Seats s = seats[i];
+                Soldier occ = s != null ? s.unitSet : null;
+                if (occ != null && occ.IsAlive && AiCore.IsLocallyOwnedBot(occ))
+                {
+                    firstOcc = occ;
+                    break;
+                }
+            }
+
+            if (firstOcc == null)
+                return;
+
+            string occFaction = AiCore.GetCachedFaction(firstOcc);
+            if (string.IsNullOrEmpty(occFaction))
+                return;
+
+            RefreshCombinedArmsIntelIfNeeded();
+
+            bool outOfAmmo = !hasAmmo;
+            bool flankedBlindSpot = false;
+            bool enemyInFiringSector = false;
+            bool hasLiveTarget = veh.CurrentVisibleTarget != null && veh.CurrentVisibleTarget.Pointer != IntPtr.Zero;
+            bool canShoot360 = mainTurret.CanShoot360;
+
+            for (int c = 0; c < _knownEnemyClusters.Count; c++)
+            {
+                var cluster = _knownEnemyClusters[c];
+                if (!AiCore.AreEnemyFactions(occFaction, cluster.Faction))
+                    continue;
+
+                Vector3 toEnemy = cluster.Position - vehPos;
+                float dSq = toEnemy.sqrMagnitude;
+                bool inArc = canShoot360 || (dSq > 0.25f && mainTurret.IsPositionInDirection(toEnemy / Mathf.Sqrt(dSq)));
+
+                if (!canShoot360 && !inArc && dSq <= 22.0f * 22.0f)
+                    flankedBlindSpot = true;
+                if (inArc && dSq <= 155.0f * 155.0f)
+                    enemyInFiringSector = true;
+            }
+
+            bool anyFriendlySquadNear = false;
+            if (!hasLiveTarget && !enemyInFiringSector && !outOfAmmo && !flankedBlindSpot)
+            {
+                for (int s = 0; s < sqCount; s++)
+                {
+                    ref AiCore.SquadSnapshot sqSnap = ref squads[s];
+                    if (sqSnap.IsVehicleCrew ||
+                        !sqSnap.LeaderIsAlive ||
+                        AiCore.AreEnemyFactions(occFaction, sqSnap.Faction))
+                    {
+                        continue;
+                    }
+
+                    if ((sqSnap.RefPos - vehPos).sqrMagnitude <= 72.0f * 72.0f)
+                    {
+                        anyFriendlySquadNear = true;
+                        break;
+                    }
+                }
+            }
+
+            for (int i = 0; i < seatCount; i++)
+            {
+                Seats s = seats[i];
+                Soldier occ = s != null ? s.unitSet : null;
+                if (occ == null || !occ.IsAlive || !AiCore.IsLocallyOwnedBot(occ))
+                    continue;
+
+                var occParams = occ.Params;
+                if (occ.dontLeaveVehicle ||
+                    (occParams != null && (!occParams.canMove || occParams.neverLeaveVehicle)))
+                {
+                    continue;
+                }
+
+                bool soldierSquadMovedOn = false;
+                if (!hasLiveTarget && !enemyInFiringSector && !outOfAmmo && !flankedBlindSpot)
+                {
+                    Squad sq = occ.joinedSquad;
+                    Soldier leader = sq != null ? sq.Leader : null;
+                    if (leader != null &&
+                        leader.IsAlive &&
+                        leader.Pointer != occ.Pointer &&
+                        !leader.IsOnVehicle() &&
+                        leader.transform != null)
+                    {
+                        float leaderDistSq = (leader.transform.position - vehPos).sqrMagnitude;
+                        if (leaderDistSq > 68.0f * 68.0f)
+                        {
+                            soldierSquadMovedOn = true;
+                        }
+                        else if (sq.currentTask != null &&
+                                 leaderDistSq > 48.0f * 48.0f &&
+                                 (sq.currentTask.GetTaskDestination() - vehPos).sqrMagnitude > 95.0f * 95.0f)
+                        {
+                            soldierSquadMovedOn = true;
+                        }
+                    }
+                    else if (sq != null &&
+                             leader != null &&
+                             leader.Pointer == occ.Pointer &&
+                             sq.order != Order.defend &&
+                             sq.currentTask != null &&
+                             (sq.currentTask.GetTaskDestination() - vehPos).sqrMagnitude > 105.0f * 105.0f)
+                    {
+                        soldierSquadMovedOn = true;
+                    }
+                }
+
+                if (!outOfAmmo &&
+                    !flankedBlindSpot &&
+                    (hasLiveTarget || enemyInFiringSector || (anyFriendlySquadNear && !soldierSquadMovedOn)))
+                {
+                    continue;
+                }
+
+                try
+                {
+                    ClearEmplacementAssignment(occ.Pointer, markUnreachable: true, 90.0f);
+                    occ.CoverPosition(null);
+                    if (occ.IsOnVehicle())
+                        veh.GetOffVehicle(occ);
+
+                    if (VisionConfig.DebugLogging.Value)
+                    {
+                        string reason = outOfAmmo
+                            ? "out_of_ammo"
+                            : (flankedBlindSpot ? "flanked_blind_spot" : "front_moved_on");
+                        AiCore.LogDebug("Emplacement", $"{occFaction} soldier dismounted stale static gun ({reason}).", 4.0f);
+                    }
+                }
+                catch { }
             }
         }
 
@@ -7154,7 +7697,10 @@ namespace EasyRed2HumanAI
                 for (int s = 0; s < sqCount; s++)
                 {
                     ref AiCore.SquadSnapshot sqSnap = ref squads[s];
-                    if (sqSnap.UnitCount == 0 || sqSnap.RefOnPlane || sqSnap.Faction == faction)
+                    if (sqSnap.UnitCount == 0 ||
+                        sqSnap.RefOnPlane ||
+                        string.IsNullOrEmpty(sqSnap.Faction) ||
+                        AiCore.AreSameSideFactions(sqSnap.Faction, faction))
                         continue;
 
                     if ((sqSnap.RefPos - vehPos).sqrMagnitude <= threatRadiusSq)
@@ -9017,13 +9563,13 @@ namespace EasyRed2HumanAI
                         stuckTime += Mathf.Min(Time.deltaTime, 0.10f);
                         _tankHighCenteredDuration[ptr] = stuckTime;
                     }
-                    else if (stuckTime < 0.45f)
+                    else if (stuckTime < 1.40f)
                     {
                         _tankUnstickFrameCache[ptr] = new TankUnstickFrameState { Frame = curFrame, ApplyForce = false };
                         return;
                     }
 
-                    if (stuckTime < 0.45f)
+                    if (stuckTime < 1.40f)
                     {
                         _tankUnstickFrameCache[ptr] = new TankUnstickFrameState { Frame = curFrame, ApplyForce = false };
                         return;
