@@ -3,7 +3,7 @@ setlocal
 title Easy Red 2: Battle Hardened - Auto-Updater
 set "BH_BAT_DIR=%~dp0"
 set "BH_BAT_FILE=%~f0"
-powershell -NoProfile -ExecutionPolicy Bypass -Command "$c = [IO.File]::ReadAllText($env:BH_BAT_FILE, [Text.Encoding]::UTF8); $i = $c.IndexOf('#__PS_START__'); if ($i -lt 0) { throw 'Updater script block missing.' }; & ([scriptblock]::Create($c.Substring($i)))"
+powershell -NoProfile -ExecutionPolicy Bypass -Command "$c = [IO.File]::ReadAllText($env:BH_BAT_FILE, [Text.Encoding]::UTF8); $m = '#' + '__PS_START__'; $i = $c.IndexOf($m); if ($i -lt 0) { throw 'Updater script block missing.' }; & ([scriptblock]::Create($c.Substring($i)))"
 set "RC=%ERRORLEVEL%"
 echo.
 pause
@@ -11,6 +11,7 @@ exit /b %RC%
 
 #__PS_START__
 $ErrorActionPreference = 'Stop'
+$ProgressPreference = 'SilentlyContinue'
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 
 function Resolve-EasyRed2Dir {
@@ -165,7 +166,7 @@ if (-not $hasBepInEx) {
     $tmpZip = Join-Path $env:TEMP ("BattleHardened_Full_" + [Guid]::NewGuid().ToString('N') + '.zip')
     try {
         Write-Host ''
-        Write-Host "[2/3] BepInEx not found — downloading full package ($latestTag)..." -ForegroundColor Cyan
+        Write-Host "[2/3] BepInEx not found -- downloading full package ($latestTag)..." -ForegroundColor Cyan
         Invoke-DownloadFile -Url $fullZipUrl -DestPath $tmpZip
 
         $zipInfo = Get-Item $tmpZip
