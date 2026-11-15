@@ -398,12 +398,15 @@ namespace EasyRed2HumanAI
 
             if (!friendAi.IsMoving())
             {
-                friendAi.MoveDestination = friendPos + stepDir * 1.85f;
+                AiCore.MoveBotTowardPosition(friendAi, friend, friendPos + stepDir * 1.85f, 0f, 0.95f);
                 TrySayTacticalVoice(friend, friend.joinedSquad, VoiceManager.VoiceClip.watchYourFire, 0.05f);
             }
             else if ((friendAi.MoveDestination - friendPos).sqrMagnitude <= 9.0f * 9.0f)
             {
+                if (friendAi.moveDirectlyToward_end > Time.time)
+                    friendAi.moveDirectlyToward_end = 0f;
                 friendAi.MoveDestination += stepDir * 1.65f;
+                friendAi.UpdatePath();
             }
         }
 
@@ -433,7 +436,7 @@ namespace EasyRed2HumanAI
                 return false;
 
             Vector3 dir = delta / dist;
-            if (AiCore.RaycastEnvironment(originPos + Vector3.up * 0.65f, dir, Mathf.Min(dist + 0.25f, 3.8f), ignoreRoot, out _))
+            if (AiCore.IsMovementBlockedByObstacle(originPos + Vector3.up * 0.48f, dir, dist + 0.25f))
                 return false;
 
             if (isOnBridge)
@@ -639,7 +642,7 @@ namespace EasyRed2HumanAI
                                     if (!AiCore.RaycastEnvironment(lane.FeetPos + Vector3.up * 0.70f, -lane.AimDirFlat, 1.75f, lane.RootTr, out _) &&
                                         TryGetSafeYieldPoint(botPos, botH.RootTr, isOnBridge, behindTarget, out Vector3 safeBehind))
                                     {
-                                        botAi.MoveDirectlyToward(safeBehind, 1.15f);
+                                        AiCore.MoveBotTowardPosition(botAi, botAi.character, safeBehind, 0f, 1.15f);
                                         _nextFriendlyStepAsideTime[botPtr] = now + 1.85f;
                                         PlayerCrosshairYieldsCount++;
                                         FriendlyFirePrevented++;
@@ -664,8 +667,7 @@ namespace EasyRed2HumanAI
                                                 _localCoverProtectedUntil[botPtr] = now + 4.5f;
                                                 bot.CoverPosition(yieldDest.Cast<AiDestination>());
                                             }
-                                            botAi.MoveDestination = stepPos;
-                                            botAi.MoveDirectlyToward(stepPos, 0.95f);
+                                            AiCore.MoveBotTowardPosition(botAi, bot, stepPos, 0f, 0.95f);
                                             if (lane.IsAdsOrFiring && fwd <= 6.5f)
                                             {
                                                 TrySayTacticalVoice(bot, bot.joinedSquad, VoiceManager.VoiceClip.watchYourFire, 0.04f);
@@ -676,8 +678,12 @@ namespace EasyRed2HumanAI
                                     else
                                     {
                                         if ((botAi.MoveDestination - botPos).sqrMagnitude <= 10.0f * 10.0f)
+                                        {
+                                            if (botAi.moveDirectlyToward_end > now)
+                                                botAi.moveDirectlyToward_end = 0f;
                                             botAi.MoveDestination += (stepPos - botPos);
-                                        botAi.MoveDirectlyToward(stepPos, 0.75f);
+                                        }
+                                        AiCore.MoveBotTowardPosition(botAi, bot, stepPos, 0f, 0.75f);
                                         yielded = true;
                                     }
                                 }
@@ -739,7 +745,7 @@ namespace EasyRed2HumanAI
                                 if (!AiCore.RaycastEnvironment(lane.FeetPos + Vector3.up * 0.70f, -lane.AimDirFlat, 1.75f, lane.RootTr, out _) &&
                                     TryGetSafeYieldPoint(botPos, botH.RootTr, isOnBridge, passBehind, out Vector3 safeBehind))
                                 {
-                                    botAi.MoveDirectlyToward(safeBehind, 1.20f);
+                                    AiCore.MoveBotTowardPosition(botAi, botAi.character, safeBehind, 0f, 1.20f);
                                     _nextFriendlyStepAsideTime[botPtr] = now + 2.10f;
                                     PlayerCrosshairYieldsCount++;
                                     FriendlyFirePrevented++;
@@ -2194,7 +2200,7 @@ namespace EasyRed2HumanAI
                     {
                         _nextMeleeStepTime[ptr] = now + 0.18f;
                         Vector3 approachPos = GetMeleeApproachPosition(soldier, meleeEnemy, meleeSlot, standoffDist);
-                        ai.MoveDirectlyToward(approachPos, isPerFrameHook ? 0.55f : 0.85f);
+                        AiCore.MoveBotTowardPosition(ai, soldier, approachPos, 0f, isPerFrameHook ? 0.55f : 0.85f);
                         ai.moveLookingTarget = true;
                     }
                 }
@@ -2212,12 +2218,12 @@ namespace EasyRed2HumanAI
                     away = away.sqrMagnitude > 0.001f ? away.normalized : Vector3.back;
                     Transform myRoot = (h != null && h.RootTr != null) ? h.RootTr : soldier.transform.root;
 
-                    if (!AiCore.IsDirectionBlockedByEnvironment(myPos + Vector3.up * 0.75f, away, 0.85f, myRoot))
+                    if (!AiCore.IsMovementBlockedByObstacle(myPos + Vector3.up * 0.48f, away, standoffDist + 0.25f))
                     {
                         if (!isPerFrameHook || !_nextMeleeStepTime.TryGetValue(ptr, out float nextBack) || now >= nextBack)
                         {
                             _nextMeleeStepTime[ptr] = now + 0.18f;
-                            ai.MoveDirectlyToward(enemyPos + away * standoffDist, 0.45f);
+                            AiCore.MoveBotTowardPosition(ai, soldier, enemyPos + away * standoffDist, 0f, 0.45f);
                             ai.moveLookingTarget = true;
                         }
                     }
@@ -2742,6 +2748,8 @@ namespace EasyRed2HumanAI
                     if (!AiCore.IsLocallyOwnedBot(h) || soldier.IsOnVehicle() || soldier.HasSurrended())
                         return;
 
+                    TickBotInventoryWeightAndDelayedWeaponRefill(h, soldier, Time.time);
+
                     float vet01 = GetVeterancy01(soldier);
                     SoldierPersonality personality = GetPersonality(soldier);
                     float suppression = soldier.GetSuppressionValue();
@@ -3083,7 +3091,10 @@ namespace EasyRed2HumanAI
                             repairTask.pose = SoldierPose.Crouch;
                             if ((__instance.MoveDestination - shelterPos).sqrMagnitude > 0.64f)
                             {
+                                if (__instance.moveDirectlyToward_end > Time.time)
+                                    __instance.moveDirectlyToward_end = 0f;
                                 __instance.MoveDestination = shelterPos;
+                                __instance.UpdatePath();
                             }
                         }
                     }
@@ -3138,7 +3149,10 @@ namespace EasyRed2HumanAI
                                     noCoverDest.pose = SoldierPose.Crouch;
                                     if ((__instance.MoveDestination - shelteredDestPos).sqrMagnitude > 0.49f)
                                     {
+                                        if (__instance.moveDirectlyToward_end > Time.time)
+                                            __instance.moveDirectlyToward_end = 0f;
                                         __instance.MoveDestination = shelteredDestPos;
+                                        __instance.UpdatePath();
                                     }
                                     _nextWallSideCheckTime[ptr] = Time.time + 3.5f;
                                     WallSideRepositionsCount++;
@@ -3174,7 +3188,10 @@ namespace EasyRed2HumanAI
 
                                         if ((__instance.MoveDestination - shelteredPos).sqrMagnitude > 0.49f)
                                         {
+                                            if (__instance.moveDirectlyToward_end > Time.time)
+                                                __instance.moveDirectlyToward_end = 0f;
                                             __instance.MoveDestination = shelteredPos;
+                                            __instance.UpdatePath();
                                         }
                                         _nextWallSideCheckTime[ptr] = Time.time + 4.0f;
                                         WallSideRepositionsCount++;
@@ -4426,7 +4443,7 @@ namespace EasyRed2HumanAI
                                 landingHoriz.sqrMagnitude >= 0.16f &&
                                 landingHoriz.sqrMagnitude <= 2.50f * 2.50f &&
                                 Mathf.Abs(vaultPos.y - myPos.y) <= 1.68f &&
-                                !Physics.CheckSphere(vaultPos + Vector3.up * 0.95f, 0.20f, vaultMask, QueryTriggerInteraction.Ignore);
+                                !Physics.CheckSphere(vaultPos + Vector3.up * 0.95f, 0.20f, vaultMask | AiCore.GetSolidEnvironmentMask(), QueryTriggerInteraction.Ignore);
             if (!landingValid)
             {
                 Vector3 landProbeStart = myPos + fwd * Mathf.Clamp(frontHit.distance + 0.68f, 0.95f, 1.55f) + Vector3.up * 1.68f;
@@ -4470,10 +4487,16 @@ namespace EasyRed2HumanAI
             Vector3 intoWall = new Vector3(-frontHit.normal.x, 0f, -frontHit.normal.z);
             intoWall = intoWall.sqrMagnitude > 0.01f ? intoWall.normalized : fwd;
 
+            int wallProbeMask = vaultMask | AiCore.GetSolidEnvironmentMask();
             if (Physics.CheckSphere(
                     new Vector3(frontHit.point.x + intoWall.x * 0.06f, myPos.y + 1.76f, frontHit.point.z + intoWall.z * 0.06f),
-                    0.07f,
-                    vaultMask,
+                    0.12f,
+                    wallProbeMask,
+                    QueryTriggerInteraction.Ignore) ||
+                Physics.CheckSphere(
+                    new Vector3(frontHit.point.x + intoWall.x * 0.24f, myPos.y + 1.76f, frontHit.point.z + intoWall.z * 0.24f),
+                    0.12f,
+                    wallProbeMask,
                     QueryTriggerInteraction.Ignore))
             {
                 vaultOrRejectReason = "too_high";
@@ -4541,6 +4564,9 @@ namespace EasyRed2HumanAI
                 vaultOrRejectReason = "too_high";
                 return false;
             }
+
+            if (!HasClearVaultArcAndLanding(myPos, vaultPos, vaultMask, crestHeight, out vaultOrRejectReason))
+                return false;
 
             // 4. Far-side grade & trench-lip level-off check:
             // Reject staircases or continuous hills/bluffs that keep rising beyond the lip, while allowing
@@ -5198,9 +5224,11 @@ namespace EasyRed2HumanAI
                             _nextAntiStackTime[ptr] = now + 2.5f;
                             if (TryGetAntiStackPush(soldier, out Vector3 pushDir))
                             {
-                                if (!AiCore.IsDirectionBlockedByEnvironment(myPos + Vector3.up * 0.75f, pushDir, 1.50f, h.RootTr))
+                                Vector3 pushTarget = myPos + pushDir * 1.40f;
+                                if (!AiCore.IsMovementBlockedByObstacle(myPos + Vector3.up * 0.48f, pushDir, 1.65f) &&
+                                    Physics.Raycast(pushTarget + Vector3.up * 0.85f, Vector3.down, 2.2f, AiCore.GetSolidEnvironmentMask(), QueryTriggerInteraction.Ignore))
                                 {
-                                    __instance.MoveDirectlyToward(myPos + pushDir * 1.40f, 0.80f);
+                                    __instance.MoveDirectlyToward(pushTarget, 0.80f);
                                     _nextAntiStackTime[ptr] = now + 6.0f;
                                     AntiStackNudges++;
                                 }
@@ -6207,6 +6235,191 @@ namespace EasyRed2HumanAI
                 }
                 catch { }
                 return true;
+            }
+        }
+
+        private static bool HasClearVaultArcAndLanding(
+            Vector3 myPos,
+            Vector3 vaultPos,
+            int vaultMask,
+            float crestHeight,
+            out string rejectReason)
+        {
+            rejectReason = string.Empty;
+            int solidMask = AiCore.GetSolidEnvironmentMask();
+            int blockMask = vaultMask | solidMask;
+
+            // Never trust vanilla's pre-filled (myPos + fwd * 1.12m) if there is no solid walkable landing surface beneath it.
+            if (!Physics.Raycast(vaultPos + Vector3.up * 1.15f, Vector3.down, out RaycastHit landFloorHit, 3.0f, solidMask, QueryTriggerInteraction.Ignore) ||
+                landFloorHit.normal.y < 0.55f ||
+                Mathf.Abs(landFloorHit.point.y - myPos.y) > 1.68f)
+            {
+                rejectReason = "no_landing_floor";
+                return false;
+            }
+
+            Vector3 landPt = landFloorHit.point;
+            Vector3 horizDelta = new Vector3(landPt.x - myPos.x, 0f, landPt.z - myPos.z);
+            float horizDist = horizDelta.magnitude;
+            if (horizDist < 0.20f)
+            {
+                rejectReason = "bad_landing_dist";
+                return false;
+            }
+
+            Vector3 horizDir = horizDelta / horizDist;
+            float baseHeight = Mathf.Clamp(crestHeight, 0.55f, 1.55f);
+            float arcLowY = Mathf.Max(myPos.y, landPt.y) + baseHeight + 0.24f;
+            float arcHighY = arcLowY + 0.28f;
+
+            if (Physics.SphereCast(new Vector3(myPos.x, arcLowY, myPos.z), 0.19f, horizDir, out RaycastHit lowArcHit, horizDist, blockMask, QueryTriggerInteraction.Ignore) &&
+                Mathf.Abs(lowArcHit.normal.y) < 0.72f)
+            {
+                rejectReason = "blocked_behind_wall";
+                return false;
+            }
+
+            if (Physics.SphereCast(new Vector3(myPos.x, arcHighY, myPos.z), 0.19f, horizDir, out RaycastHit highArcHit, horizDist, blockMask, QueryTriggerInteraction.Ignore) &&
+                Mathf.Abs(highArcHit.normal.y) < 0.72f)
+            {
+                rejectReason = "blocked_behind_wall";
+                return false;
+            }
+
+            float dropDist = arcLowY - (landPt.y + 0.34f);
+            if (dropDist > 0.10f &&
+                Physics.SphereCast(new Vector3(landPt.x, arcLowY, landPt.z), 0.18f, Vector3.down, out RaycastHit dropHit, dropDist, blockMask, QueryTriggerInteraction.Ignore) &&
+                Mathf.Abs(dropHit.normal.y) < 0.72f)
+            {
+                rejectReason = "landing_occupied";
+                return false;
+            }
+
+            if (Physics.CheckCapsule(landPt + Vector3.up * 0.34f, landPt + Vector3.up * 1.48f, 0.19f, blockMask, QueryTriggerInteraction.Ignore))
+            {
+                rejectReason = "landing_occupied";
+                return false;
+            }
+
+            return true;
+        }
+
+        /// <summary>
+        /// Guards <see cref="SoldierAI.MoveDirectlyToward"/> for locally owned grounded dry foot bots:
+        /// allows unobstructed micro-steps (&lt;= 3.2m), and redirects longer or wall-blocked direct moves
+        /// into vanilla <c>CPathFinding</c> so neither vanilla panic steps nor micro-nudge callers march
+        /// bots through solid walls with CharacterController disabled.
+        /// </summary>
+        [HarmonyPatch(typeof(SoldierAI), nameof(SoldierAI.MoveDirectlyToward))]
+        public static class SoldierAI_MoveDirectlyToward_Patch
+        {
+            public static bool Prefix(SoldierAI __instance, Vector3 __0)
+            {
+                try
+                {
+                    if (!VisionConfig.EnableMod.Value || __instance == null || __instance.Pointer == IntPtr.Zero)
+                        return true;
+
+                    Soldier s = __instance.character;
+                    if (s == null || !s.IsAlive || s.IsPlayer() || s.IsOnVehicle() || s.FallingWithParachute())
+                        return true;
+
+                    if (!AiCore.IsLocallyOwnedBot(s) || s.transform == null)
+                        return true;
+
+                    Vector3 myPos = s.transform.position;
+                    if (AiCore.TryGetActiveWaterLevel(out float waterY) && myPos.y <= waterY + 0.10f)
+                        return true;
+                    bool wallBlocked = AiCore.IsDirectSegmentBlockedByWall(myPos, __0, out float flatDist);
+                    if (flatDist <= 3.2f && !wallBlocked)
+                        return true;
+
+                    float now = Time.time;
+                    if (__instance.moveDirectlyToward_end > now)
+                        __instance.moveDirectlyToward_end = 0f;
+
+                    __instance.MoveDestination = __0;
+                    AiCore.SoldierFastHandles h = AiCore.GetOrCreateSoldierHandles(s);
+                    if (h == null || now >= h.NextMoveDirectRedirectPathTime || (h.LastRedirectedMoveDest - __0).sqrMagnitude > 2.25f)
+                    {
+                        if (h != null)
+                        {
+                            h.NextMoveDirectRedirectPathTime = now + 0.35f;
+                            h.LastRedirectedMoveDest = __0;
+                        }
+                        __instance.UpdatePath();
+                    }
+
+                    return false;
+                }
+                catch { }
+                return true;
+            }
+        }
+
+        private static readonly Vector3[] AntiClipProbeDirs =
+        {
+            new Vector3(1f, 0f, 0f),
+            new Vector3(0.7071f, 0f, 0.7071f),
+            new Vector3(0f, 0f, 1f),
+            new Vector3(-0.7071f, 0f, 0.7071f),
+            new Vector3(-1f, 0f, 0f),
+            new Vector3(-0.7071f, 0f, -0.7071f),
+            new Vector3(0f, 0f, -1f),
+            new Vector3(0.7071f, 0f, -0.7071f)
+        };
+
+        /// <summary>
+        /// Intercepts vanilla <see cref="SoldierAI.MakeSureAiIsNotClippedInsideCollider"/>'s blind 6-second
+        /// random-direction <c>10m</c> <c>MoveDirectlyToward</c> panic branch (0x18055C322), replacing it
+        /// with a radial wall-checked <c>1.8m</c> sidestep or an A* <c>UpdatePath()</c>.
+        /// </summary>
+        [HarmonyPatch(typeof(SoldierAI), nameof(SoldierAI.MakeSureAiIsNotClippedInsideCollider))]
+        public static class SoldierAI_MakeSureAiIsNotClippedInsideCollider_Patch
+        {
+            public static void Prefix(SoldierAI __instance, out float __state)
+            {
+                __state = __instance != null ? __instance.moveDirectlyToward_end : 0f;
+            }
+
+            public static void Postfix(SoldierAI __instance, float __state)
+            {
+                try
+                {
+                    if (!VisionConfig.EnableMod.Value || __instance == null || __instance.Pointer == IntPtr.Zero)
+                        return;
+
+                    // Detect vanilla's +6.0s blind MoveDirectlyToward escape without disrupting shorter normal steps.
+                    if (__instance.moveDirectlyToward_end <= __state + 4.5f)
+                        return;
+
+                    __instance.moveDirectlyToward_end = 0f;
+
+                    Soldier s = __instance.character;
+                    if (s == null || !s.IsAlive || s.IsPlayer() || s.IsOnVehicle() || s.FallingWithParachute() || s.transform == null)
+                        return;
+
+                    if (!AiCore.IsLocallyOwnedBot(s))
+                        return;
+
+                    Vector3 myPos = s.transform.position;
+                    if (AiCore.TryGetActiveWaterLevel(out float waterY) && myPos.y <= waterY + 0.10f)
+                        return;
+                    int solidMask = AiCore.GetSolidEnvironmentMask();
+                    for (int i = 0; i < AntiClipProbeDirs.Length; i++)
+                    {
+                        Vector3 d = AntiClipProbeDirs[i];
+                        if (!AiCore.IsMovementBlockedByObstacle(myPos + Vector3.up * 0.48f, d, 2.2f) &&
+                            Physics.Raycast(myPos + d * 1.8f + Vector3.up * 0.9f, Vector3.down, 2.4f, solidMask, QueryTriggerInteraction.Ignore))
+                        {
+                            __instance.MoveDirectlyToward(myPos + d * 1.8f, 0.85f);
+                            return;
+                        }
+                    }
+
+                    __instance.UpdatePath();
+                }
+                catch { }
             }
         }
     }

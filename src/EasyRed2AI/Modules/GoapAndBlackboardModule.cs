@@ -301,6 +301,7 @@ namespace EasyRed2HumanAI
             public ItemObject Item;
             public DroppableAmmoBox Box;
             public GenericGun Gun;
+            public Magazine Mag;
             public Vector3 Pos;
             public FloorItemKind Kind;
         }
@@ -324,6 +325,7 @@ namespace EasyRed2HumanAI
             public Transform Tr;
             public DroppableAmmoBox Box;
             public GenericGun Gun;
+            public Magazine Mag;
             public ItemGrenade Grenade;
         }
 
@@ -345,6 +347,7 @@ namespace EasyRed2HumanAI
         private static List<ScavengeInventoryEntry> _stagingScavengeInventories = new List<ScavengeInventoryEntry>(64);
         private static readonly List<AmmoRefillCrate> _activeAmmoRefillCrates = new List<AmmoRefillCrate>(32);
         private static readonly Dictionary<IntPtr, CachedBoxOverrideInfo> _cachedBoxOverrides = new Dictionary<IntPtr, CachedBoxOverrideInfo>(64);
+        private static readonly Dictionary<string, string> _cachedMagazineSocketsByItemId = new Dictionary<string, string>(256, StringComparer.Ordinal);
         private static float _nextFreeFloorItemsSnapshotTime;
         private static int _floorScanCursor;
         private static int _lastFloorScanFrame;
@@ -487,6 +490,7 @@ namespace EasyRed2HumanAI
 
             DroppableAmmoBox box = item.TryCast<DroppableAmmoBox>();
             GenericGun gun = null;
+            Magazine mag = null;
             ItemGrenade ig = null;
             FloorItemKind kind = FloorItemKind.Ignore;
 
@@ -519,6 +523,16 @@ namespace EasyRed2HumanAI
                                 kind = FloorItemKind.SmokeGrenade;
                             else
                                 kind = FloorItemKind.FragGrenade;
+                        }
+                    }
+                    else if ((mag = item.TryCast<Magazine>()) != null)
+                    {
+                        kind = FloorItemKind.Magazine;
+                        if (!string.IsNullOrEmpty(item.item_id) && !string.IsNullOrEmpty(mag.socket))
+                        {
+                            if (_cachedMagazineSocketsByItemId.Count > 1024)
+                                _cachedMagazineSocketsByItemId.Clear();
+                            _cachedMagazineSocketsByItemId[item.item_id] = mag.socket;
                         }
                     }
                     else if (item.TryCast<AmmoItem>() != null)
@@ -564,6 +578,7 @@ namespace EasyRed2HumanAI
                 Tr = tr,
                 Box = box,
                 Gun = gun,
+                Mag = mag,
                 Grenade = ig
             };
 
@@ -644,6 +659,7 @@ namespace EasyRed2HumanAI
                         Item = item,
                         Box = meta.Box,
                         Gun = meta.Gun,
+                        Mag = meta.Mag,
                         Pos = meta.Tr.position,
                         Kind = meta.Kind
                     });
@@ -995,29 +1011,479 @@ namespace EasyRed2HumanAI
             return false;
         }
 
-        private static void RefillSoldierPrimaryAndStowedWeapons(Soldier soldier, int minRefillQnt)
+        private static bool CanSoldierAcceptExtraMass(Soldier soldier, float extraMass, float bufferKg = 0.20f)
         {
-            if (soldier == null)
+            if (soldier == null || soldier.Pointer == IntPtr.Zero || soldier.inventory == null)
+                return false;
+
+            soldier.inventory.GetWeightAndMaxWeight(out float curW, out float maxW);
+            if (maxW <= 0f)
+                return true;
+
+            return (curW + Mathf.Max(0f, extraMass)) <= (maxW - bufferKg);
+        }
+
+        private static bool TryResolveMagazineSocketCached(string itemId, out string socket)
+        {
+            socket = null;
+            if (string.IsNullOrEmpty(itemId))
+                return false;
+
+            if (_cachedMagazineSocketsByItemId.TryGetValue(itemId, out socket))
+                return !string.IsNullOrEmpty(socket);
+
+            GameObject prefabGo = ItemsDatabase.GetPropPrefabCached(itemId);
+            if (prefabGo != null)
+            {
+                Magazine magComp = prefabGo.GetComponent<Magazine>();
+                if (magComp != null && !string.IsNullOrEmpty(magComp.socket))
+                {
+                    if (_cachedMagazineSocketsByItemId.Count > 1024)
+                        _cachedMagazineSocketsByItemId.Clear();
+                    socket = magComp.socket;
+                    _cachedMagazineSocketsByItemId[itemId] = socket;
+                    return true;
+                }
+            }
+
+            return false;
+        }
+
+        private static bool DoesGunSupportAmmoOrMag(
+            GenericGun gun,
+            string itemId,
+            bool isMagazine,
+            string knownMagSocket,
+            out bool compatibilityKnown)
+        {
+            compatibilityKnown = true;
+            if (gun == null || gun.Pointer == IntPtr.Zero || string.IsNullOrEmpty(itemId))
+                return false;
+
+            if (!string.IsNullOrEmpty(gun.compatibleAmmo) &&
+                string.Equals(gun.compatibleAmmo, itemId, StringComparison.Ordinal))
+            {
+                return true;
+            }
+
+            if (!isMagazine)
+                return false;
+
+            if (string.IsNullOrEmpty(gun.magazineSocket))
+                return false;
+
+            string sock = !string.IsNullOrEmpty(knownMagSocket) ? knownMagSocket : null;
+            if (sock == null && !TryResolveMagazineSocketCached(itemId, out sock))
+            {
+                var compatMap = WeaponSocketCompatibilityChecker.socketCompatibilityMap;
+                if (compatMap != null && compatMap.ContainsKey(gun.magazineSocket))
+                {
+                    var magIds = compatMap[gun.magazineSocket];
+                    if (magIds != null && magIds.Contains(itemId))
+                        return true;
+                }
+
+                compatibilityKnown = false;
+                return false;
+            }
+
+            return string.Equals(gun.magazineSocket, sock, StringComparison.Ordinal);
+        }
+
+        private static bool IsAmmoOrMagCompatibleWithAnyHeldGun(
+            Soldier soldier,
+            string itemId,
+            bool isMagazine,
+            string knownMagSocket = null)
+        {
+            if (soldier == null || soldier.Pointer == IntPtr.Zero || string.IsNullOrEmpty(itemId))
+                return false;
+
+            for (int slot = 0; slot < 3; slot++)
+            {
+                GenericGun g = soldier.GetHeldGun(slot);
+                if (g != null && DoesGunSupportAmmoOrMag(g, itemId, isMagazine, knownMagSocket, out _))
+                    return true;
+            }
+
+            return false;
+        }
+
+        private static void ScheduleBotInventoryWeightAudit(Soldier soldier, float delaySeconds = 0.70f)
+        {
+            AiCore.SoldierFastHandles h = AiCore.GetOrCreateSoldierHandles(soldier);
+            if (h == null)
                 return;
 
-            soldier.RefillAmmoForWearedWeapon(0, true, null, false, minRefillQnt);
+            float target = Time.time + delaySeconds;
+            if (h.NextInventoryWeightAuditTime <= 0f || target < h.NextInventoryWeightAuditTime)
+                h.NextInventoryWeightAuditTime = target;
+        }
+
+        private static void ScheduleDelayedPickedWeaponRefill(Soldier soldier, int slot, float now)
+        {
+            AiCore.SoldierFastHandles h = AiCore.GetOrCreateSoldierHandles(soldier);
+            if (h == null)
+                return;
+
+            h.PendingPickedWeaponSlot = slot;
+            h.PendingPickedWeaponRefillTime = now + 0.60f;
+            h.NextInventoryWeightAuditTime = now + 1.25f;
+        }
+
+        private static void PruneSurplusReserveAmmoPass(
+            Inventory rawInv,
+            Il2CppSystem.Collections.Generic.List<VirtualItem> items,
+            GenericGun primaryGun,
+            float targetMaxWeight,
+            int minPrimaryKeepCount,
+            int minStackRoundKeep,
+            bool allowShedAllIfLoaded,
+            bool primaryLoaded,
+            ref int primaryReserves,
+            ref float curW)
+        {
+            for (int i = items.Count - 1; i >= 0 && curW > targetMaxWeight; i--)
+            {
+                VirtualItem vi = items[i];
+                if (vi == null || vi.Pointer == IntPtr.Zero || vi.IsWearedItem() || vi.IsInstance())
+                    continue;
+
+                VirtualMagazineItem vm = vi.TryCast<VirtualMagazineItem>();
+                VirtualAmmo va = vm == null ? vi.TryCast<VirtualAmmo>() : null;
+                if (vm == null && va == null)
+                    continue;
+
+                bool isMag = vm != null;
+                bool matchesG0 = primaryGun != null && DoesGunSupportAmmoOrMag(primaryGun, vi.item_id, isMag, null, out _);
+                float mass = Mathf.Max(0f, vi.GetMass());
+
+                bool canRemoveWhole = !matchesG0 ||
+                                      primaryReserves > minPrimaryKeepCount ||
+                                      (allowShedAllIfLoaded && primaryLoaded);
+                if (canRemoveWhole)
+                {
+                    rawInv.RemoveVirtualItem(vi);
+                    curW -= mass;
+                    if (matchesG0)
+                        primaryReserves--;
+                    continue;
+                }
+
+                if (va != null && minStackRoundKeep > 0)
+                {
+                    int cnt = va.GetAmmoCount();
+                    int minKeep = primaryReserves <= 1 ? Mathf.Min(cnt, minStackRoundKeep) : 1;
+                    if (cnt > minKeep && mass > 0.001f)
+                    {
+                        float unitMass = mass / cnt;
+                        float excess = curW - targetMaxWeight + 0.05f;
+                        int dropCnt = Mathf.Clamp(Mathf.CeilToInt(excess / unitMass), 1, cnt - minKeep);
+                        va.SetAmmoCount(cnt - dropCnt);
+                        curW -= dropCnt * unitMass;
+                    }
+                }
+            }
+        }
+
+        private static void PruneBotInventoryForSprintWeight(Soldier soldier, bool purgeOrphanedCalibers)
+        {
+            if (!AiCore.IsLocallyOwnedBot(soldier) ||
+                soldier.inventory == null ||
+                soldier.inventory.inventory == null)
+            {
+                return;
+            }
+
+            Inventory rawInv = soldier.inventory.inventory;
+            var items = rawInv.items;
+            if (items == null)
+                return;
+
+            soldier.inventory.RemoveEmptyAmmoAndMagazines();
+            soldier.inventory.GetWeightAndMaxWeight(out float curW, out float maxW);
+            if (!purgeOrphanedCalibers && (maxW <= 0f || curW <= maxW - 0.05f))
+                return;
+
+            GenericGun g0 = soldier.GetHeldGun(0);
+            GenericGun g1 = soldier.GetHeldGun(1);
+            GenericGun g2 = soldier.GetHeldGun(2);
+
+            bool anyRemoved = false;
+            for (int i = items.Count - 1; i >= 0; i--)
+            {
+                VirtualItem vi = items[i];
+                if (vi == null || vi.Pointer == IntPtr.Zero || vi.IsWearedItem() || vi.IsInstance())
+                    continue;
+
+                VirtualMagazineItem vMag = vi.TryCast<VirtualMagazineItem>();
+                VirtualAmmo vAmmo = vMag == null ? vi.TryCast<VirtualAmmo>() : null;
+                if (vMag == null && vAmmo == null)
+                    continue;
+
+                bool isMag = vMag != null;
+                int cnt = isMag ? vMag.GetAmmoCount() : vAmmo.GetAmmoCount();
+                if (cnt <= 0)
+                {
+                    rawInv.RemoveVirtualItem(vi);
+                    anyRemoved = true;
+                    continue;
+                }
+
+                if (!purgeOrphanedCalibers && curW <= maxW - 0.05f)
+                    continue;
+
+                string itemId = vi.item_id;
+                bool compat = false;
+                bool allKnown = true;
+                GenericGun[] held = { g0, g1, g2 };
+                for (int s = 0; s < 3; s++)
+                {
+                    GenericGun g = held[s];
+                    if (g == null)
+                        continue;
+                    if (DoesGunSupportAmmoOrMag(g, itemId, isMag, null, out bool known))
+                    {
+                        compat = true;
+                        break;
+                    }
+                    if (!known)
+                        allKnown = false;
+                }
+
+                if (!compat && allKnown && (g0 != null || g1 != null || g2 != null))
+                {
+                    rawInv.RemoveVirtualItem(vi);
+                    anyRemoved = true;
+                }
+            }
+
+            if (anyRemoved)
+                soldier.inventory.GetWeightAndMaxWeight(out curW, out maxW);
+            if (maxW <= 0f || curW <= maxW - 0.05f)
+                return;
+
+            int primaryReserves = 0;
+            int bandageStacks = 0;
+            int throwableCount = 0;
+            for (int i = 0; i < items.Count; i++)
+            {
+                VirtualItem vi = items[i];
+                if (vi == null || vi.Pointer == IntPtr.Zero || vi.IsWearedItem() || vi.IsInstance())
+                    continue;
+
+                VirtualMagazineItem vm = vi.TryCast<VirtualMagazineItem>();
+                VirtualAmmo va = vm == null ? vi.TryCast<VirtualAmmo>() : null;
+                if (vm != null || va != null)
+                {
+                    if (g0 != null && DoesGunSupportAmmoOrMag(g0, vi.item_id, vm != null, null, out _))
+                        primaryReserves++;
+                    continue;
+                }
+
+                if (vi.TryCast<VirtualBandages>() != null)
+                    bandageStacks++;
+                else if (vi.TryCast<VirtualThrowable>() != null && !AiCore.IsPressureMineItem(vi, out _))
+                    throwableCount++;
+            }
+
+            float targetSafeW = maxW - 0.05f;
+            bool g0Loaded = g0 == null || g0.GetCurrentAmmoCount() > 0;
+
+            // Pass C1: shed secondary/unknown reserve mags/ammo first, trim VirtualAmmo stacks, and trim >2 primary reserves
+            PruneSurplusReserveAmmoPass(rawInv, items, g0, targetSafeW, 2, 5, false, g0Loaded, ref primaryReserves, ref curW);
+            if (curW > targetSafeW)
+                soldier.inventory.GetWeightAndMaxWeight(out curW, out maxW);
+
+            // Pass C2: trim primary reserves down to 1 and shed duplicate (>1) bandages/throwables
+            if (curW > targetSafeW)
+            {
+                PruneSurplusReserveAmmoPass(rawInv, items, g0, targetSafeW, 1, 0, false, g0Loaded, ref primaryReserves, ref curW);
+
+                for (int i = items.Count - 1; i >= 0 && curW > targetSafeW; i--)
+                {
+                    VirtualItem vi = items[i];
+                    if (vi == null || vi.Pointer == IntPtr.Zero || vi.IsWearedItem() || vi.IsInstance())
+                        continue;
+
+                    VirtualBandages vb = vi.TryCast<VirtualBandages>();
+                    if (vb != null)
+                    {
+                        int bCnt = vb.GetStackCount();
+                        float bMass = Mathf.Max(0f, vb.GetMass());
+                        if (bandageStacks > 1)
+                        {
+                            rawInv.RemoveVirtualItem(vi);
+                            curW -= bMass;
+                            bandageStacks--;
+                        }
+                        else if (bCnt > 1 && bMass > 0.001f)
+                        {
+                            vb.SetStackCount(1);
+                            curW -= (bCnt - 1) * (bMass / bCnt);
+                        }
+                        continue;
+                    }
+
+                    if (throwableCount > 1 && vi.TryCast<VirtualThrowable>() != null && !AiCore.IsPressureMineItem(vi, out _))
+                    {
+                        float tMass = Mathf.Max(0f, vi.GetMass());
+                        rawInv.RemoveVirtualItem(vi);
+                        curW -= tMass;
+                        throwableCount--;
+                    }
+                }
+            }
+
+            if (curW > targetSafeW)
+                soldier.inventory.GetWeightAndMaxWeight(out curW, out maxW);
+
+            // Pass C3: final guarantee so curW <= maxW never locks player/bot sprinting
+            if (curW > maxW)
+            {
+                PruneSurplusReserveAmmoPass(rawInv, items, g0, maxW - 0.02f, 1, 1, true, g0Loaded, ref primaryReserves, ref curW);
+                for (int i = items.Count - 1; i >= 0 && curW > maxW - 0.02f && throwableCount > 0; i--)
+                {
+                    VirtualItem vi = items[i];
+                    if (vi == null || vi.Pointer == IntPtr.Zero || vi.IsWearedItem() || vi.IsInstance())
+                        continue;
+                    if (vi.TryCast<VirtualThrowable>() != null && !AiCore.IsPressureMineItem(vi, out _))
+                    {
+                        float tMass = Mathf.Max(0f, vi.GetMass());
+                        rawInv.RemoveVirtualItem(vi);
+                        curW -= tMass;
+                        throwableCount--;
+                    }
+                }
+            }
+        }
+
+        internal static void TickBotInventoryWeightAndDelayedWeaponRefill(
+            AiCore.SoldierFastHandles h,
+            Soldier soldier,
+            float now)
+        {
+            if (h == null || soldier == null || soldier.Pointer == IntPtr.Zero)
+                return;
+
+            if (h.NextInventoryWeightAuditTime <= 0f)
+            {
+                h.NextInventoryWeightAuditTime = now + 1.5f + (AiCore.GetDeterministicHash(h.Ptr, 937) & 31) * 0.20f;
+            }
+
+            if (h.PendingPickedWeaponSlot < 0 && now < h.NextInventoryWeightAuditTime)
+                return;
+
+            if (h.PendingPickedWeaponSlot >= 0 && now >= h.PendingPickedWeaponRefillTime)
+            {
+                if ((soldier.isInHandsAnimation || soldier.isInBodyAnimation) &&
+                    now < h.PendingPickedWeaponRefillTime + 1.6f)
+                {
+                    h.NextInventoryWeightAuditTime = Mathf.Min(h.NextInventoryWeightAuditTime, now + 0.20f);
+                    return;
+                }
+
+                int slot = h.PendingPickedWeaponSlot;
+                h.PendingPickedWeaponSlot = -1;
+                h.PendingPickedWeaponRefillTime = 0f;
+
+                PruneBotInventoryForSprintWeight(soldier, purgeOrphanedCalibers: true);
+
+                GenericGun pickedGun = soldier.GetHeldGun(slot);
+                if (pickedGun != null &&
+                    soldier.IsOutOfAmmosFor(pickedGun) &&
+                    CanSoldierAcceptExtraMass(soldier, 0.35f, 0.15f))
+                {
+                    int qnt = pickedGun.IsAtWeapon() ? 1 : 2;
+                    soldier.RefillAmmoForWearedWeapon(slot, true, null, true, qnt);
+                }
+
+                h.NextInventoryWeightAuditTime = now + 0.75f;
+                return;
+            }
+
+            if (now >= h.NextInventoryWeightAuditTime)
+            {
+                if (soldier.IsAmmoRefillPending())
+                {
+                    h.NextInventoryWeightAuditTime = now + 0.45f;
+                    return;
+                }
+
+                h.NextInventoryWeightAuditTime = now + 9.5f + (AiCore.GetDeterministicHash(h.Ptr, 941) & 15) * 0.25f;
+
+                if (soldier.inventory != null)
+                {
+                    soldier.inventory.GetWeightAndMaxWeight(out float curW, out float maxW);
+                    if (maxW > 0f && curW > maxW - 0.02f)
+                    {
+                        PruneBotInventoryForSprintWeight(soldier, purgeOrphanedCalibers: true);
+                    }
+                }
+            }
+        }
+
+        private static void RefillSoldierPrimaryAndStowedWeapons(Soldier soldier, int minRefillQnt)
+        {
+            if (soldier == null || soldier.Pointer == IntPtr.Zero || soldier.inventory == null)
+                return;
+
+            soldier.inventory.RemoveEmptyAmmoAndMagazines();
+            soldier.inventory.GetWeightAndMaxWeight(out float curW, out float maxW);
+            if (maxW > 0f && curW >= maxW - 0.30f)
+            {
+                ScheduleBotInventoryWeightAudit(soldier, 0.25f);
+                return;
+            }
+
+            float headroomKg = maxW > 0f ? (maxW - curW) : 99.0f;
+            bool startedAny = false;
+
+            GenericGun g0 = soldier.GetHeldGun(0);
+            if (g0 != null && soldier.IsOutOfAmmosFor(g0))
+            {
+                int q0 = (g0.IsAtWeapon() || headroomKg < 2.2f)
+                    ? 1
+                    : Mathf.Min(minRefillQnt, (g0.integratedBipod != null || g0.IsHeavyMg()) ? 2 : minRefillQnt);
+                soldier.RefillAmmoForWearedWeapon(0, true, null, true, q0);
+                startedAny = true;
+            }
 
             // In ER2 (Soldier.SwitchTo @ 0x18076AD20), when a soldier switches to their sidearm (Slot 2),
-            // their primary weapon is swapped into Slot 2 (or Slot 1). Refill any stowed non-pistol weapon too!
+            // their primary weapon is swapped into Slot 2 (or Slot 1). Only refill stowed slots that are genuinely dry!
             GenericGun g1 = soldier.GetHeldGun(1);
-            if (g1 != null && !g1.IsPistol())
-                soldier.RefillAmmoForWearedWeapon(1, true, null, false, minRefillQnt);
+            if (g1 != null && !g1.IsPistol() && soldier.IsOutOfAmmosFor(g1) && headroomKg >= 1.0f)
+            {
+                int q1 = g1.IsAtWeapon() ? 1 : Mathf.Min(minRefillQnt, headroomKg < 2.5f ? 1 : 2);
+                soldier.RefillAmmoForWearedWeapon(1, true, null, true, q1);
+                startedAny = true;
+            }
 
             GenericGun g2 = soldier.GetHeldGun(2);
             if (g2 != null && !g2.IsPistol())
             {
-                soldier.RefillAmmoForWearedWeapon(2, true, null, false, minRefillQnt);
+                if (soldier.IsOutOfAmmosFor(g2) && headroomKg >= 0.8f)
+                {
+                    int q2 = g2.IsAtWeapon() ? 1 : Mathf.Min(minRefillQnt, headroomKg < 2.2f ? 1 : 2);
+                    soldier.RefillAmmoForWearedWeapon(2, true, null, true, q2);
+                    startedAny = true;
+                }
+
                 // If currently holding a pistol in Slot 0 because the primary in Slot 2 was dry, switch back to primary!
-                GenericGun g0 = soldier.GetHeldGun(0);
-                if (g0 != null && g0.IsPistol() && !soldier.isInHandsAnimation && !soldier.isInBodyAnimation && soldier.CanSwitchHeldItem)
+                if (g0 != null &&
+                    g0.IsPistol() &&
+                    (!soldier.IsOutOfAmmosFor(g2) || g2.GetCurrentAmmoCount() > 0) &&
+                    !soldier.isInHandsAnimation &&
+                    !soldier.isInBodyAnimation &&
+                    soldier.CanSwitchHeldItem)
                 {
                     soldier.SwitchTo(2);
                 }
+            }
+
+            if (startedAny)
+            {
+                ScheduleBotInventoryWeightAudit(soldier, 0.70f);
             }
         }
 
@@ -1077,6 +1543,7 @@ namespace EasyRed2HumanAI
                         canSwitchWeaponNow &&
                         gunPrefab.IsAtWeapon() &&
                         gunPrefab.gameObject != null &&
+                        (soldier.GetHeldGun(1) != null || CanSoldierAcceptExtraMass(soldier, Mathf.Max(0f, gunPrefab.mass) * 0.65f, 0.0f)) &&
                         (!Photon.Pun.PhotonNetwork.InRoom || AiCore.TryConsumeBotRpcBudget(0.35f)))
                     {
                         GameObject instGo = UnityEngine.Object.Instantiate(gunPrefab.gameObject);
@@ -1084,7 +1551,7 @@ namespace EasyRed2HumanAI
                         {
                             soldier.SetGunTriggerPressed(false);
                             soldier.PickUpItem(instGo, 1);
-                            soldier.RefillAmmoForWearedWeapon(1, true, null, false, 2);
+                            ScheduleDelayedPickedWeaponRefill(soldier, 1, now);
                             _nextGlobalBotWeaponPickupTime = now + 2.20f;
                             _nextWeaponUpgradeAllowedTime[ptr] = now + 20.0f;
                             plan.NextReplanTime = Mathf.Max(plan.NextReplanTime, now + 2.50f);
@@ -1106,7 +1573,8 @@ namespace EasyRed2HumanAI
 
                 if (needAtWeapon &&
                     vi.TryCast<VirtualATGrenade>() != null &&
-                    soldier.inventory.FindItemOfType<VirtualATGrenade>() == null)
+                    soldier.inventory.FindItemOfType<VirtualATGrenade>() == null &&
+                    CanSoldierAcceptExtraMass(soldier, vi.GetMass(), 0.25f))
                 {
                     if (rawInv.AddVirtualItem(vi))
                     {
@@ -1117,7 +1585,8 @@ namespace EasyRed2HumanAI
                 }
                 else if (needFrag &&
                          vi.TryCast<VirtualGrenade>() != null &&
-                         soldier.inventory.FindItemOfType<VirtualGrenade>() == null)
+                         soldier.inventory.FindItemOfType<VirtualGrenade>() == null &&
+                         CanSoldierAcceptExtraMass(soldier, vi.GetMass(), 0.25f))
                 {
                     if (rawInv.AddVirtualItem(vi))
                     {
@@ -1129,7 +1598,8 @@ namespace EasyRed2HumanAI
                 }
                 else if (needSmoke &&
                          vi.TryCast<VirtualSmokeGrenade>() != null &&
-                         soldier.inventory.FindItemOfType<VirtualSmokeGrenade>() == null)
+                         soldier.inventory.FindItemOfType<VirtualSmokeGrenade>() == null &&
+                         CanSoldierAcceptExtraMass(soldier, vi.GetMass(), 0.25f))
                 {
                     if (rawInv.AddVirtualItem(vi))
                     {
@@ -1141,7 +1611,8 @@ namespace EasyRed2HumanAI
                 }
                 else if (needBandage &&
                          vi.TryCast<VirtualBandages>() != null &&
-                         soldier.inventory.FindItemOfType<VirtualBandages>() == null)
+                         soldier.inventory.FindItemOfType<VirtualBandages>() == null &&
+                         CanSoldierAcceptExtraMass(soldier, vi.GetMass(), soldier.isBleeding ? 0.0f : 0.25f))
                 {
                     if (rawInv.AddVirtualItem(vi))
                     {
@@ -2419,6 +2890,10 @@ namespace EasyRed2HumanAI
                                 minInterval: 20.0f);
                         }
                     }
+                    else
+                    {
+                        TryOfferPlayerHammerFlankOrder(vehLeader.faction, vehSq.Pointer, vehTaskPtr, vehPos, threatPos, axisDir, perpRight, now);
+                    }
                 }
 
                 // =================================================================
@@ -2468,18 +2943,22 @@ namespace EasyRed2HumanAI
                         // Post HAMMER advisory suggestion on Squad B (evaluated by Squad B's Leader)
                         IssueHammerFlankDirective(bestHammerSq, anvilPos, threatPos, axisDir, perpRight, now, $"Infantry Anvil ('{anvilSq.squadName}')");
                     }
-                    else if (anvilBoard.AliveMemberCount >= 4 &&
-                             anvilBoard.IsThreatBeingPinned(now) &&
-                             (anvilBoard.FlankLeftCover != null || anvilBoard.FlankRightCover != null) &&
-                             anvilLeader.Params != null && anvilLeader.Params.canGiveOrders && anvilLeader.Params.canMove)
+                    else
                     {
-                        // Single-Squad Self-Pin & Flank suggestion: MG gunner has the enemy pinned and lateral cover exists.
-                        anvilBoard.SuggestedNetDirective = SquadNetDirective.Hammer_WideFlankEnvelopment;
-                        anvilBoard.SuggestedDirectiveExpireTime = now + 22.0f;
-                        anvilBoard.SuggestedDirectiveTargetPos = threatPos;
-                        anvilBoard.SuggestedPincerTaskPtr = IntPtr.Zero;
-                        _squadBlackboards[anvilSq.Pointer] = anvilBoard;
-                        ConsumeInitialHqSpawnBriefingIfNoRadio(anvilSq);
+                        TryOfferPlayerHammerFlankOrder(anvilLeader.faction, anvilSq.Pointer, anvilTaskPtr, anvilPos, threatPos, axisDir, perpRight, now);
+                        if (anvilBoard.AliveMemberCount >= 4 &&
+                            anvilBoard.IsThreatBeingPinned(now) &&
+                            (anvilBoard.FlankLeftCover != null || anvilBoard.FlankRightCover != null) &&
+                            anvilLeader.Params != null && anvilLeader.Params.canGiveOrders && anvilLeader.Params.canMove)
+                        {
+                            // Single-Squad Self-Pin & Flank suggestion: MG gunner has the enemy pinned and lateral cover exists.
+                            anvilBoard.SuggestedNetDirective = SquadNetDirective.Hammer_WideFlankEnvelopment;
+                            anvilBoard.SuggestedDirectiveExpireTime = now + 22.0f;
+                            anvilBoard.SuggestedDirectiveTargetPos = threatPos;
+                            anvilBoard.SuggestedPincerTaskPtr = IntPtr.Zero;
+                            _squadBlackboards[anvilSq.Pointer] = anvilBoard;
+                            ConsumeInitialHqSpawnBriefingIfNoRadio(anvilSq);
+                        }
                     }
                 }
 
@@ -2573,6 +3052,76 @@ namespace EasyRed2HumanAI
                 EvaluateSquadLeaderExecutionOrders(footSq, footLeader, ref footBoard, now, ref issuedSquadCoverOrderThisTick);
             }
             aiFootSquads.Clear();
+        }
+
+        private static void TryOfferPlayerHammerFlankOrder(
+            string anvilFaction,
+            IntPtr anvilSqPtr,
+            IntPtr anvilTaskPtr,
+            Vector3 anvilPos,
+            Vector3 threatPos,
+            Vector3 axisDir,
+            Vector3 perpRight,
+            float now)
+        {
+            Soldier localPlayer = Soldier.CurrentControlledSoldierOrNull();
+            if (localPlayer == null || !localPlayer.IsAlive || localPlayer.IsOnVehicle() || localPlayer.transform == null)
+                return;
+
+            if (!AiCore.AreSameSideFactions(anvilFaction, localPlayer.faction))
+                return;
+
+            Squad playerSq = localPlayer.joinedSquad;
+            if (playerSq == null || playerSq.Pointer == IntPtr.Zero || playerSq.Pointer == anvilSqPtr)
+                return;
+
+            if (playerSq.Leader == null || playerSq.Leader.Pointer != localPlayer.Pointer)
+                return;
+
+            if (!IsSquadConnectedToRadioNet(playerSq) ||
+                IsSquadActivelyRetreating(playerSq.Pointer, now) ||
+                IsFlankBalkedByPlayer(threatPos, now))
+            {
+                return;
+            }
+
+            if (TryGetActivePendingPlayerHqOrder(out PlayerPendingHqOrderState existing) &&
+                existing.Kind == PendingHqOrderKind.ObjectiveTask)
+            {
+                return;
+            }
+
+            Vector3 playerPos = localPlayer.transform.position;
+            float dx = threatPos.x - playerPos.x;
+            float dz = threatPos.z - playerPos.z;
+            float dSq = dx * dx + dz * dz;
+            if (dSq < 18.0f * 18.0f || dSq > 125.0f * 125.0f)
+                return;
+
+            if (playerSq.currentTask != null &&
+                playerSq.currentTask.Pointer != IntPtr.Zero &&
+                playerSq.currentTask.Pointer != anvilTaskPtr &&
+                dSq > 75.0f * 75.0f)
+            {
+                return;
+            }
+
+            float side = Vector3.Dot(playerPos - anvilPos, perpRight) >= 0f ? 1f : -1f;
+            Vector3 flankDir = (axisDir * 0.68f + perpRight * (side * 0.73f)).normalized;
+            string bearing = AiCore.FormatRelativeBearingAndDistance(playerPos, threatPos);
+
+            PostPendingPlayerHqOrder(
+                playerSq,
+                PendingHqOrderKind.TacticalFlank,
+                targetObj: null,
+                targetTask: null,
+                worldPos: threatPos,
+                flankDir: flankDir,
+                isAttackObjective: true,
+                shortActionLabel: $"Flank ({bearing})",
+                toastLabel: $"Flank Contact ({bearing})",
+                mapBadgeText: "[HQ]",
+                durationSeconds: 35.0f);
         }
 
         private static void EvaluateSquadLeaderExecutionOrders(
@@ -4513,12 +5062,15 @@ namespace EasyRed2HumanAI
 
             if (now < st.UnstickOverrideUntil)
             {
-                if ((st.UnstickDest - myPos).sqrMagnitude <= 1.2f * 1.2f)
+                if ((st.UnstickDest - myPos).sqrMagnitude <= 1.2f * 1.2f ||
+                    AiCore.IsDirectSegmentBlockedByWall(myPos, st.UnstickDest, out _))
                 {
                     st.UnstickOverrideUntil = 0f;
                     st.AnchorPos = myPos;
                     st.AnchorTime = now;
                     _footStuckStates[ptr] = st;
+                    if (ai.moveDirectlyToward_end > now)
+                        ai.moveDirectlyToward_end = 0f;
                     ai.UpdatePath();
                     return false;
                 }
@@ -6281,12 +6833,20 @@ namespace EasyRed2HumanAI
                                 {
                                     if (!Photon.Pun.PhotonNetwork.InRoom || AiCore.TryConsumeBotRpcBudget(0.30f))
                                     {
+                                        soldier.inventory?.RemoveEmptyAmmoAndMagazines();
                                         Soldier donor = scavCache.TargetBuddyDonor;
                                         donor.BorrowAmmos(soldier);
-                                        // Creature.BorrowAmmos (0x180A51A60) only transfers ammo if donor.inventory contains a magazine/clip
-                                        // matching soldier.GetHeldGun(0). Always refill primary/stowed weapons when resupplying from an
-                                        // Ammo Box Carrier or if caliber mismatch left the weapon dry, and enforce a 35s cooldown!
-                                        RefillSoldierPrimaryAndStowedWeapons(soldier, 2);
+                                        // Creature.BorrowAmmos (0x180A51A60) already calls RefillAmmoForWearedWeapon(0, true, ...)
+                                        // when donor has matching ammo. Only fall back to RefillSoldierPrimaryAndStowedWeapons if
+                                        // no async refill is pending, preventing duplicate Slot-0 refills (4 mags instead of 2).
+                                        if (!soldier.IsAmmoRefillPending())
+                                        {
+                                            RefillSoldierPrimaryAndStowedWeapons(soldier, 2);
+                                        }
+                                        else
+                                        {
+                                            ScheduleBotInventoryWeightAudit(soldier, 0.70f);
+                                        }
                                         _nextBuddyAmmoResupplyTime[ptr] = now + 35.0f;
                                         BuddyResuppliesCount++;
                                         looted = true;
@@ -6304,10 +6864,18 @@ namespace EasyRed2HumanAI
                                     if (!Photon.Pun.PhotonNetwork.InRoom || AiCore.TryConsumeBotRpcBudget(0.30f))
                                     {
                                         Soldier ally = scavCache.TargetNeedyAllyToFeed;
+                                        ally.inventory?.RemoveEmptyAmmoAndMagazines();
                                         soldier.BorrowAmmos(ally);
                                         if (AiCore.IsLocallyOwnedBot(ally))
                                         {
-                                            RefillSoldierPrimaryAndStowedWeapons(ally, 2);
+                                            if (!ally.IsAmmoRefillPending())
+                                            {
+                                                RefillSoldierPrimaryAndStowedWeapons(ally, 2);
+                                            }
+                                            else
+                                            {
+                                                ScheduleBotInventoryWeightAudit(ally, 0.70f);
+                                            }
                                         }
                                         _nextBuddyAmmoResupplyTime[ptr] = now + 35.0f;
                                         _nextBuddyAmmoResupplyTime[ally.Pointer] = now + 35.0f;
@@ -6380,7 +6948,7 @@ namespace EasyRed2HumanAI
                                             int slot = floorGun.IsAtWeapon() ? 1 : 0;
                                             soldier.SetGunTriggerPressed(false);
                                             soldier.PickUpItem(scavCache.TargetFloorItem.gameObject, slot);
-                                            soldier.RefillAmmoForWearedWeapon(slot, true, null, false, 3);
+                                            ScheduleDelayedPickedWeaponRefill(soldier, slot, now);
                                             _nextGlobalBotWeaponPickupTime = now + 2.20f;
                                             _nextWeaponUpgradeAllowedTime[ptr] = now + (scavCache.IsRoleWeaponUpgrade ? 90.0f : 20.0f);
                                             plan.NextReplanTime = Mathf.Max(plan.NextReplanTime, now + 2.50f);
@@ -6429,26 +6997,36 @@ namespace EasyRed2HumanAI
                                             }
                                         }
                                     }
-                                    else if (soldier.inventory != null && soldier.inventory.AddItemToInventoryAndDestroyInstance(scavCache.TargetFloorItem))
+                                    else if (soldier.inventory != null &&
+                                             (scavCache.IsMedicSyringePickup ||
+                                              (outOfBandage && soldier.isBleeding) ||
+                                              CanSoldierAcceptExtraMass(soldier, scavCache.TargetFloorItem.mass, 0.15f)))
                                     {
-                                        if (outOfAmmo)
-                                            RefillSoldierPrimaryAndStowedWeapons(soldier, 2);
-                                        if (scavCache.IsMedicSyringePickup &&
-                                            CountUniqueSyringesInInventory(soldier.inventory, out _, out _, out _) >= 3)
+                                        bool pickedFloorAmmoOrMag = scavCache.TargetFloorItem.TryCast<AmmoItem>() != null ||
+                                                                    scavCache.TargetFloorItem.TryCast<Magazine>() != null;
+                                        if (soldier.inventory.AddItemToInventoryAndDestroyInstance(scavCache.TargetFloorItem))
                                         {
-                                            soldier.hasSyringe = true;
+                                            GenericGun g0Now = soldier.GetHeldGun(0);
+                                            if (outOfAmmo && !pickedFloorAmmoOrMag && g0Now != null && soldier.IsOutOfAmmosFor(g0Now))
+                                                RefillSoldierPrimaryAndStowedWeapons(soldier, 1);
+                                            ScheduleBotInventoryWeightAudit(soldier, 0.50f);
+                                            if (scavCache.IsMedicSyringePickup &&
+                                                CountUniqueSyringesInInventory(soldier.inventory, out _, out _, out _) >= 3)
+                                            {
+                                                soldier.hasSyringe = true;
+                                            }
+                                            looted = true;
+                                            if (scavCache.IsAtWeaponPickup)
+                                                lootedDesc = "floor AT grenade";
+                                            else if (scavCache.NeedFragGrenade)
+                                                lootedDesc = "floor frag grenade";
+                                            else if (scavCache.NeedSmokeGrenade)
+                                                lootedDesc = "floor smoke grenade";
+                                            else if (scavCache.IsMedicSyringePickup)
+                                                lootedDesc = "fallen medic syringe";
+                                            else
+                                                lootedDesc = "floor ammo/bandage";
                                         }
-                                        looted = true;
-                                        if (scavCache.IsAtWeaponPickup)
-                                            lootedDesc = "floor AT grenade";
-                                        else if (scavCache.NeedFragGrenade)
-                                            lootedDesc = "floor frag grenade";
-                                        else if (scavCache.NeedSmokeGrenade)
-                                            lootedDesc = "floor smoke grenade";
-                                        else if (scavCache.IsMedicSyringePickup)
-                                            lootedDesc = "fallen medic syringe";
-                                        else
-                                            lootedDesc = "floor ammo/bandage";
                                     }
                                 }
                                 // 2. Scavenge from verified dead corpse inventory or supply crate
@@ -6525,7 +7103,7 @@ namespace EasyRed2HumanAI
                                             {
                                                 soldier.SetGunTriggerPressed(false);
                                                 soldier.PickUpItemFromInventory(scavCache.TargetInventoryAtWeapon, targetInv, 1);
-                                                soldier.RefillAmmoForWearedWeapon(1, true, null, false, 2);
+                                                ScheduleDelayedPickedWeaponRefill(soldier, 1, now);
                                                 _nextGlobalBotWeaponPickupTime = now + 2.20f;
                                                 _nextWeaponUpgradeAllowedTime[ptr] = now + 20.0f;
                                                 plan.NextReplanTime = Mathf.Max(plan.NextReplanTime, now + 2.50f);
@@ -6540,7 +7118,9 @@ namespace EasyRed2HumanAI
                                         else if (soldier.inventory != null)
                                         {
                                             VirtualItem atGren = targetInv.FindItemOfType<VirtualATGrenade>();
-                                            if (atGren != null && !AiCore.IsPressureMineItem(atGren, out _))
+                                            if (atGren != null &&
+                                                !AiCore.IsPressureMineItem(atGren, out _) &&
+                                                CanSoldierAcceptExtraMass(soldier, atGren.GetMass(), 0.20f))
                                             {
                                                 soldier.inventory.TakeIntoInventory(atGren, targetInv);
                                                 if (!targetInv.Contains(atGren))
@@ -6559,7 +7139,7 @@ namespace EasyRed2HumanAI
                                         {
                                             soldier.SetGunTriggerPressed(false);
                                             soldier.PickUpItemFromInventory(scavCache.TargetInventoryPrimaryWeapon, targetInv, 0);
-                                            soldier.RefillAmmoForWearedWeapon(0, true, null, false, 3);
+                                            ScheduleDelayedPickedWeaponRefill(soldier, 0, now);
                                             _nextGlobalBotWeaponPickupTime = now + 2.20f;
                                             _nextWeaponUpgradeAllowedTime[ptr] = now + 90.0f;
                                             plan.NextReplanTime = Mathf.Max(plan.NextReplanTime, now + 2.50f);
@@ -6578,7 +7158,9 @@ namespace EasyRed2HumanAI
                                         AiCore.FindThrowableGrenadeInInventory(soldier, findAtGrenade: false, findFragGrenade: true) == null)
                                     {
                                         VirtualItem fg = targetInv.FindItemOfType<VirtualGrenade>();
-                                        if (fg != null && !AiCore.IsPressureMineItem(fg, out _))
+                                        if (fg != null &&
+                                            !AiCore.IsPressureMineItem(fg, out _) &&
+                                            CanSoldierAcceptExtraMass(soldier, fg.GetMass(), 0.20f))
                                         {
                                             soldier.inventory.TakeIntoInventory(fg, targetInv);
                                             if (!targetInv.Contains(fg))
@@ -6595,7 +7177,7 @@ namespace EasyRed2HumanAI
                                         soldier.inventory.FindItemOfType<VirtualSmokeGrenade>() == null)
                                     {
                                         VirtualItem sg = targetInv.FindItemOfType<VirtualSmokeGrenade>();
-                                        if (sg != null)
+                                        if (sg != null && CanSoldierAcceptExtraMass(soldier, sg.GetMass(), 0.20f))
                                         {
                                             soldier.inventory.TakeIntoInventory(sg, targetInv);
                                             if (!targetInv.Contains(sg))
@@ -6622,7 +7204,8 @@ namespace EasyRed2HumanAI
                                     if (outOfBandage && soldier.inventory != null)
                                     {
                                         VirtualItem bnd = targetInv.FindItemOfType<VirtualBandages>();
-                                        if (bnd != null)
+                                        if (bnd != null &&
+                                            CanSoldierAcceptExtraMass(soldier, bnd.GetMass(), soldier.isBleeding ? 0.0f : 0.20f))
                                         {
                                             soldier.inventory.TakeIntoInventory(bnd, targetInv);
                                             if (soldier.inventory.FindItemOfType<VirtualBandages>() != null)
@@ -6634,7 +7217,7 @@ namespace EasyRed2HumanAI
                                         }
                                     }
 
-                                    if (outOfAmmo)
+                                    if (outOfAmmo && !scavCache.IsRoleWeaponUpgrade)
                                     {
                                         RefillSoldierPrimaryAndStowedWeapons(soldier, 2);
                                         looted = true;
@@ -7252,7 +7835,7 @@ namespace EasyRed2HumanAI
                 (!isOnBridge || AiCore.IsSafeBridgeDeckStep(myPos, tankSpot, out tankSpot)))
             {
                 SetBotPose(ai, soldier, SoldierPose.Crouch);
-                ai.MoveDirectlyToward(tankSpot, 2.8f);
+                AiCore.MoveBotTowardPosition(ai, soldier, tankSpot, 0f, 1.2f);
                 plan.LockUnitCoverChange = true;
                 plan.PlanExpireTime = now + 3.8f;
                 plan.NextReplanTime = Mathf.Max(plan.NextReplanTime, now + 2.4f);
@@ -7615,7 +8198,10 @@ namespace EasyRed2HumanAI
                     case FloorItemKind.Gun:
                         if (canPickUpNewWeapon && fEntry.Gun != null)
                         {
-                            if (needAtWeapon && fEntry.Gun.IsAtWeapon() && fEntry.Gun.GetCurrentAmmoCount() > 0)
+                            if (needAtWeapon &&
+                                fEntry.Gun.IsAtWeapon() &&
+                                fEntry.Gun.GetCurrentAmmoCount() > 0 &&
+                                (soldier.GetHeldGun(1) != null || CanSoldierAcceptExtraMass(soldier, Mathf.Max(0f, item.mass) * 0.5f, 0.0f)))
                             {
                                 bestDistSq = dSq;
                                 result = new BotScavengeCache
@@ -7678,8 +8264,28 @@ namespace EasyRed2HumanAI
                         break;
 
                     case FloorItemKind.Ammo:
+                        if (needAmmo &&
+                            CanSoldierAcceptExtraMass(soldier, item.mass, 0.20f) &&
+                            IsAmmoOrMagCompatibleWithAnyHeldGun(soldier, item.item_id, isMagazine: false))
+                        {
+                            bestDistSq = dSq;
+                            result = new BotScavengeCache
+                            {
+                                NextScanTime = now + 2.8f,
+                                NeedAmmo = needAmmo,
+                                NeedBandage = needBandage,
+                                TargetFloorItem = item,
+                                TargetPosition = itemPos
+                            };
+                        }
+                        break;
+
                     case FloorItemKind.Magazine:
-                        if (needAmmo)
+                        if (needAmmo &&
+                            CanSoldierAcceptExtraMass(soldier, item.mass, 0.20f) &&
+                            fEntry.Mag != null &&
+                            fEntry.Mag.GetCurrentAmmoCount() > 0 &&
+                            IsAmmoOrMagCompatibleWithAnyHeldGun(soldier, item.item_id, isMagazine: true, fEntry.Mag.socket))
                         {
                             bestDistSq = dSq;
                             result = new BotScavengeCache
@@ -7694,7 +8300,7 @@ namespace EasyRed2HumanAI
                         break;
 
                     case FloorItemKind.Bandage:
-                        if (needBandage)
+                        if (needBandage && (soldier.isBleeding || CanSoldierAcceptExtraMass(soldier, item.mass, 0.20f)))
                         {
                             bestDistSq = dSq;
                             result = new BotScavengeCache
@@ -7709,7 +8315,7 @@ namespace EasyRed2HumanAI
                         break;
 
                     case FloorItemKind.AtGrenade:
-                        if (needAtWeapon)
+                        if (needAtWeapon && CanSoldierAcceptExtraMass(soldier, item.mass, 0.20f))
                         {
                             bestDistSq = dSq;
                             result = new BotScavengeCache
@@ -7725,7 +8331,7 @@ namespace EasyRed2HumanAI
                         break;
 
                     case FloorItemKind.FragGrenade:
-                        if (wantFragGrenade)
+                        if (wantFragGrenade && CanSoldierAcceptExtraMass(soldier, item.mass, 0.20f))
                         {
                             bestDistSq = dSq;
                             result = new BotScavengeCache
@@ -7741,7 +8347,7 @@ namespace EasyRed2HumanAI
                         break;
 
                     case FloorItemKind.SmokeGrenade:
-                        if (wantSmokeGrenade)
+                        if (wantSmokeGrenade && CanSoldierAcceptExtraMass(soldier, item.mass, 0.20f))
                         {
                             bestDistSq = dSq;
                             result = new BotScavengeCache

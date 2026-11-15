@@ -101,6 +101,12 @@ namespace EasyRed2HumanAI
             public float NextEndpointCheckTime;
             public Vector3 CachedEndpoint;
             public int CachedNodesCount;
+            public float NextMoveDirectRedirectPathTime;
+            public Vector3 LastRedirectedMoveDest;
+
+            public float NextInventoryWeightAuditTime;
+            public float PendingPickedWeaponRefillTime;
+            public int PendingPickedWeaponSlot = -1;
         }
 
         public sealed class VehicleFastHandles
@@ -1542,6 +1548,127 @@ namespace EasyRed2HumanAI
             catch { }
         }
 
+        private static readonly string[] CompassPoints8 = { "N", "NE", "E", "SE", "S", "SW", "W", "NW" };
+
+        /// <summary>
+        /// Formats a relative tactical distance (rounded to 5m) and 8-wind compass bearing
+        /// so player-facing radio messages never display raw <c>(x, z)</c> world coordinates.
+        /// </summary>
+        public static string FormatRelativeBearingAndDistance(Vector3 fromPos, Vector3 targetPos)
+        {
+            float dx = targetPos.x - fromPos.x;
+            float dz = targetPos.z - fromPos.z;
+            float dist = Mathf.Sqrt(dx * dx + dz * dz);
+            int roundedDist = dist < 5f ? 5 : Mathf.RoundToInt(dist / 5f) * 5;
+            if (dist <= 0.1f)
+                return $"{roundedDist}m";
+
+            float deg = Mathf.Atan2(dx, dz) * Mathf.Rad2Deg;
+            if (deg < 0f)
+                deg += 360f;
+            int idx = Mathf.RoundToInt(deg / 45f) & 7;
+            return $"{roundedDist}m {CompassPoints8[idx]}";
+        }
+
+        /// <summary>
+        /// Resolves a vanilla-style objective label matching <c>ObjectiveGUI.RefreshLetterOrIcon</c>
+        /// (<c>Point A</c>, <c>Point B</c>, etc. over <c>BattleManager.ActiveObjectives(true)</c> order)
+        /// combined with <see cref="MissionObjective.GetDisplayName"/> when set.
+        /// </summary>
+        public static string GetVanillaObjectiveDisplayName(MissionObjective obj, Vector3? listenerPos, out string shortLetter)
+        {
+            shortLetter = string.Empty;
+            if (obj == null || obj.Pointer == IntPtr.Zero)
+                return "Objective";
+
+            IntPtr targetPtr = obj.Pointer;
+            int objIndex = -1;
+            try
+            {
+                int runningIdx = 0;
+                BattlePhase phase = TryGetCurrentBattlePhase(BattleManager.instance);
+                MissionObjective[] phaseObjs = phase != null ? phase.objectives : null;
+                if (phaseObjs != null)
+                {
+                    for (int i = 0; i < phaseObjs.Length; i++)
+                    {
+                        MissionObjective cand = phaseObjs[i];
+                        if (cand == null || cand.Pointer == IntPtr.Zero)
+                            continue;
+                        if (cand.Pointer == targetPtr)
+                        {
+                            objIndex = runningIdx;
+                            break;
+                        }
+                        runningIdx++;
+                    }
+                }
+
+                if (objIndex < 0)
+                {
+                    var scriptedList = MissionObjectiveScripted.scriptedMissionObjectives;
+                    if (scriptedList != null)
+                    {
+                        int sCount = scriptedList.Count;
+                        for (int i = 0; i < sCount; i++)
+                        {
+                            MissionObjectiveScripted cand = scriptedList[i];
+                            if (cand == null || cand.Pointer == IntPtr.Zero)
+                                continue;
+                            if (cand.Pointer == targetPtr)
+                            {
+                                objIndex = runningIdx;
+                                break;
+                            }
+                            runningIdx++;
+                        }
+                    }
+                }
+            }
+            catch { }
+
+            if (objIndex >= 0 && objIndex < 26)
+                shortLetter = $"Point {(char)('A' + objIndex)}";
+            else if (objIndex >= 26)
+                shortLetter = $"Point #{objIndex + 1}";
+
+            string displayName = string.Empty;
+            try { displayName = obj.GetDisplayName(); } catch { }
+            if (!string.IsNullOrEmpty(displayName))
+                displayName = displayName.Trim();
+
+            if (!string.IsNullOrEmpty(shortLetter))
+            {
+                if (string.IsNullOrEmpty(displayName))
+                    return shortLetter;
+
+                string letterOnly = objIndex < 26 ? ((char)('A' + objIndex)).ToString() : string.Empty;
+                if (string.Equals(displayName, shortLetter, StringComparison.OrdinalIgnoreCase) ||
+                    (!string.IsNullOrEmpty(letterOnly) && string.Equals(displayName, letterOnly, StringComparison.OrdinalIgnoreCase)))
+                {
+                    return shortLetter;
+                }
+
+                return $"{shortLetter} ({displayName})";
+            }
+
+            if (!string.IsNullOrEmpty(displayName))
+                return displayName;
+
+            if (listenerPos.HasValue)
+            {
+                try { return FormatRelativeBearingAndDistance(listenerPos.Value, obj.GetTaskPosition()); }
+                catch { }
+            }
+
+            return "Assigned Objective";
+        }
+
+        public static string GetVanillaObjectiveDisplayName(MissionObjective obj, Vector3? listenerPos = null)
+        {
+            return GetVanillaObjectiveDisplayName(obj, listenerPos, out _);
+        }
+
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         public static bool IsLocallyOwnedBot(SoldierFastHandles h)
         {
@@ -2393,7 +2520,50 @@ namespace EasyRed2HumanAI
 
         public static bool IsMovementBlockedByObstacle(Vector3 origin, Vector3 dir, float dist)
         {
-            return Physics.Raycast(origin, dir, dist, GetMovementObstacleMask(), QueryTriggerInteraction.Ignore);
+            if (dist <= 0.05f)
+                return false;
+
+            float dirSq = dir.sqrMagnitude;
+            if (dirSq < 1e-6f)
+                return false;
+
+            Vector3 normDir = Mathf.Abs(dirSq - 1.0f) > 0.01f ? (dir / Mathf.Sqrt(dirSq)) : dir;
+            int mask = GetMovementObstacleMask();
+
+            if (Physics.Raycast(origin, normDir, out RaycastHit rayHit, dist, mask, QueryTriggerInteraction.Ignore) &&
+                Mathf.Abs(rayHit.normal.y) < 0.68f)
+            {
+                return true;
+            }
+
+            // Catch wall corners, thin pillars, and doorframes within body radius without false-blocking walkable slopes/ramps.
+            float sphereDist = Mathf.Max(0.10f, dist - 0.05f);
+            if (Physics.SphereCast(origin + Vector3.up * 0.34f, 0.20f, normDir, out RaycastHit sphereHit, sphereDist, mask, QueryTriggerInteraction.Ignore) &&
+                Mathf.Abs(sphereHit.normal.y) < 0.68f)
+            {
+                return true;
+            }
+
+            return false;
+        }
+
+        public static bool IsDirectSegmentBlockedByWall(Vector3 fromFeetPos, Vector3 toFeetPos, out float flatDist)
+        {
+            Vector3 flatDelta = toFeetPos - fromFeetPos;
+            flatDelta.y = 0f;
+            float flatSq = flatDelta.sqrMagnitude;
+            if (flatSq <= 0.15f * 0.15f)
+            {
+                flatDist = Mathf.Sqrt(flatSq);
+                return false;
+            }
+
+            flatDist = Mathf.Sqrt(flatSq);
+            if (Mathf.Abs(toFeetPos.y - fromFeetPos.y) > 1.35f && flatDist < 2.6f)
+                return true;
+
+            Vector3 dir = flatDelta / flatDist;
+            return IsMovementBlockedByObstacle(fromFeetPos + Vector3.up * 0.48f, dir, flatDist);
         }
 
         public static int GetSmokeOcclusionMask()
@@ -4084,7 +4254,6 @@ namespace EasyRed2HumanAI
                 Array.Clear(ActiveLandMines, 0, ActiveLandMineCount);
             ActiveLandMineCount = 0;
             _nextActiveMineScanTime = 0f;
-            SpecialMunitionsUsedCount = 0;
             WorldSquadCount = 0;
             WorldSoldierCount = 0;
             WorldInjuredSoldierCount = 0;

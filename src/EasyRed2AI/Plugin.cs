@@ -11,7 +11,7 @@ namespace EasyRed2HumanAI
     {
         public const string PluginGuid = "com.antigravity.easyred2.humanai";
         public const string PluginName = "Easy Red 2 - Battle Hardened";
-        public const string PluginVersion = "0.8.8";
+        public const string PluginVersion = "0.8.9";
 
         internal static Plugin Instance;
         internal static new ManualLogSource Log;
@@ -62,6 +62,8 @@ namespace EasyRed2HumanAI
             SafePatch(typeof(VeteranAndTacticsPatches.SoldierAI_CalculateMoveOrderDestination_Patch));
             SafePatch(typeof(VeteranAndTacticsPatches.SoldierAI_RotateAndFireToward_Patch));
             SafePatch(typeof(VeteranAndTacticsPatches.SoldierAI_MovementRoutine_Patch));
+            SafePatch(typeof(VeteranAndTacticsPatches.SoldierAI_MoveDirectlyToward_Patch));
+            SafePatch(typeof(VeteranAndTacticsPatches.SoldierAI_MakeSureAiIsNotClippedInsideCollider_Patch));
             SafePatch(typeof(VeteranAndTacticsPatches.SquadSoldierLabel_RefreshVisual_Patch));
             SafePatch(typeof(VeteranAndTacticsPatches.VehicleRepairTask_GetCoverPosition_Patch));
             SafePatch(typeof(VeteranAndTacticsPatches.VehicleRepairTask_IsReached_Patch));
@@ -118,8 +120,12 @@ namespace EasyRed2HumanAI
             SafePatch(typeof(VeteranAndTacticsPatches.VehicleTank_FixedUpdate_Patch));
             SafePatch(typeof(VeteranAndTacticsPatches.TurretGun_SelectBestAmmo_Patch));
             SafePatch(typeof(VeteranAndTacticsPatches.Squad_MedicRoutine_Patch));
+            SafePatch(typeof(VeteranAndTacticsPatches.ResourcesManager_TrySpotSquad_Patch));
             SafePatch(typeof(VeteranAndTacticsPatches.SpawnManager_CanSpawn_Patch));
             SafePatch(typeof(VeteranAndTacticsPatches.SpawnManager_SpawnAISquadMoveNext_Patch));
+            SafePatch(typeof(VeteranAndTacticsPatches.SpawnManager_SpawnUnitMoveNext_Patch));
+            SafePatch(typeof(VeteranAndTacticsPatches.MiniMapGUI_DisableRemainingUnitMarkers_Patch));
+            SafePatch(typeof(VeteranAndTacticsPatches.CircularMenu2_ShowCircle_Patch));
 
             // 64-Character Multiplayer Room Name Limit & Battle-Stat Sync Fix patches
             SafePatch(typeof(VeteranAndTacticsPatches.ServerListMenu_Awake_Patch));
@@ -133,6 +139,8 @@ namespace EasyRed2HumanAI
 
             // Bundle 6: Ballistics, Plane Audio De-Throbber, First-Person Shadow Fix & Battlefield Immersion
             SafePatch(typeof(VeteranAndTacticsPatches.VehiclePlane_UpdateMotorSound_Patch));
+            SafePatch(typeof(VeteranAndTacticsPatches.Soldier_Say_Patch));
+            SafePatch(typeof(VeteranAndTacticsPatches.Soldier_SyncSay_Patch));
             SafePatch(typeof(VeteranAndTacticsPatches.BulletInstance_OnHit_Patch));
             SafePatch(typeof(VeteranAndTacticsPatches.BulletInstance_OnTracerPopped_Patch));
             SafePatch(typeof(VeteranAndTacticsPatches.BulletInstance_DestroyFX_Patch));
@@ -152,6 +160,15 @@ namespace EasyRed2HumanAI
             SafePatch(typeof(VeteranAndTacticsPatches.SoldierLodManager_ApplyFace_Patch));
             SafePatch(typeof(VeteranAndTacticsPatches.SoldierLodManager_PushPropertyBlock_Patch));
             SafePatch(typeof(VeteranAndTacticsPatches.ResourcesManager_PlayImpactEffect_Patch));
+            SafePatch(typeof(VeteranAndTacticsPatches.GenericGun_ReloadCR_Patch));
+            SafePatch(typeof(VeteranAndTacticsPatches.GenericGun_ReloadCRMoveNext_Patch));
+            SafePatch(typeof(VeteranAndTacticsPatches.Soldier_SwitchTo_ReloadCancel_Patch));
+            SafePatch(typeof(VeteranAndTacticsPatches.Soldier_Melee_ReloadCancel_Patch));
+            SafePatch(typeof(VeteranAndTacticsPatches.Soldier_ToggleInventoryKnife_ReloadCancel_Patch));
+            SafePatch(typeof(VeteranAndTacticsPatches.Soldier_CycleInventoryKnife_ReloadCancel_Patch));
+            SafePatch(typeof(VeteranAndTacticsPatches.Soldier_Throw_ReloadCancel_Patch));
+            SafePatch(typeof(VeteranAndTacticsPatches.Soldier_Vault_ReloadCancel_Patch));
+            SafePatch(typeof(VeteranAndTacticsPatches.PlayerController_Update_ReloadAndBipodCancel_Patch));
 
             // HitchAutopsy Flight Recorder & Per-Bot JSONL Action Trace (both default OFF)
             HitchProfiler.RefreshConfigState();

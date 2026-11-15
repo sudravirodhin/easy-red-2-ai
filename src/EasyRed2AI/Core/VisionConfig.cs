@@ -121,6 +121,7 @@ namespace EasyRed2HumanAI
         public static ConfigEntry<bool> EnableObjectiveBarFactionNames;
         public static ConfigEntry<bool> EnableFirstPersonShadowFix;
         public static ConfigEntry<bool> EnableBloodSmokeWaterOcclusion;
+        public static ConfigEntry<bool> EnableTacticalReloadAndBipodCancel;
 
         public static void Init(ConfigFile config)
         {
@@ -733,6 +734,12 @@ namespace EasyRed2HumanAI
                 "EnableBloodSmokeWaterOcclusion",
                 true,
                 "Vanilla Visual Fix: suppresses disembodied 'ghost' blood sprays when flesh impacts occur underwater, across a water surface, or behind/inside tactical smoke clouds (swapping to ImpactFX_flesh_noBlood so impact audio still plays), and normalizes pooled blood particle depth-sorting so ambient map smoke and water transparencies never sort behind blood mist.");
+
+            EnableTacticalReloadAndBipodCancel = config.Bind(
+                "8. Ballistics & Immersion",
+                "EnableTacticalReloadAndBipodCancel",
+                true,
+                "Player QoL: allows emergency animation canceling during reloads and mounted bipod states (weapon switch, knife/melee, grenade throw, vault, single-bullet fire interrupt, brief sprint hold, or dismounting bipod) without enabling fast-reload timing or ammo exploits.");
         }
 
         public static void SetBundleEntries(bool state, params ConfigEntry<bool>[] entries)

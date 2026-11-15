@@ -81,6 +81,7 @@ namespace EasyRed2HumanAI
                 _activeIncendiaryGrenades.Clear();
                 ResetFirstPersonShadowRigOnSceneChange();
                 ResetObjectiveBarFactionState();
+                ResetTacticalReloadCancelState();
             }
         }
 
@@ -191,6 +192,44 @@ namespace EasyRed2HumanAI
         // and heavy high-caliber rounds (12.7mm+) to penetrate thin wood/generic/light
         // metal obstacles (<= 0.48m) using a fast single-collider back-face raycast.
         // ============================================================================
+        [HarmonyPatch(typeof(Soldier), nameof(Soldier.Say))]
+        public static class Soldier_Say_Patch
+        {
+            private const int DeathVoiceClipId = 4; // Soldier.Kill (0x180751D35) / <KillDelayed> (0x18077DB41)
+
+            public static bool Prefix(Soldier __instance, VoiceManager.VoiceClip __0)
+            {
+                if (ReferenceEquals(__instance, null) || __instance == null || __instance.Pointer == IntPtr.Zero)
+                    return false;
+
+                if (__instance.IsDead && (int)__0 != DeathVoiceClipId)
+                    return false;
+
+                return true;
+            }
+        }
+
+        [HarmonyPatch(typeof(Soldier), nameof(Soldier.SyncSay))]
+        public static class Soldier_SyncSay_Patch
+        {
+            private const int DeathVoiceClipId = 4;
+
+            public static bool Prefix(Soldier __instance, VoiceManager.VoiceClip __0)
+            {
+                if (ReferenceEquals(__instance, null) || __instance == null || __instance.Pointer == IntPtr.Zero)
+                    return false;
+
+                if (__instance.IsDead && (int)__0 != DeathVoiceClipId)
+                    return false;
+
+                SyncSoldier syncher = __instance.GetSyncher();
+                if (ReferenceEquals(syncher, null) || syncher == null || syncher.Pointer == IntPtr.Zero)
+                    return false;
+
+                return true;
+            }
+        }
+
         [HarmonyPatch(typeof(BulletInstance), nameof(BulletInstance.OnHit))]
         public static class BulletInstance_OnHit_Patch
         {
@@ -216,22 +255,15 @@ namespace EasyRed2HumanAI
                     if (hitCol == null || hitCol.Pointer == IntPtr.Zero || hitCol.transform == null || hitCol.gameObject == null)
                         return false;
 
-                    VeteranAndTacticsPatches.BeginProjectileImpactContext(__instance, bulletData, hitDirection);
-
-                    // Guard against vanilla BulletInstance.OnHit -> Soldier.SyncSay -> Creature.GetSyncher NRE (0x1809DFBA2)
-                    // when a long-flight artillery/mortar/aircraft shooter died, despawned, or lost its syncher mid-flight.
                     Soldier rawShooter = __instance.shooter;
-                    if (!ReferenceEquals(rawShooter, null))
-                    {
-                        if (rawShooter == null ||
-                            rawShooter.Pointer == IntPtr.Zero ||
-                            rawShooter.gameObject == null ||
-                            rawShooter.IsDead ||
-                            (Photon.Pun.PhotonNetwork.InRoom && rawShooter.GetSyncher() == null))
-                        {
-                            __instance.shooter = null;
-                        }
-                    }
+                    if (ReferenceEquals(rawShooter, null) || rawShooter.Pointer == IntPtr.Zero)
+                        return false;
+
+                    // BulletInstance.OnHit (0x1809DEC0C) dereferences shooter.gameObject only for incendiary/fire ammo.
+                    if (bulletData.IsFire() && (rawShooter == null || rawShooter.gameObject == null))
+                        return false;
+
+                    VeteranAndTacticsPatches.BeginProjectileImpactContext(__instance, bulletData, hitDirection);
 
                     if (!VisionConfig.EnableMod.Value)
                         return true;
@@ -332,8 +364,14 @@ namespace EasyRed2HumanAI
 
                     // Penetrated continuation bullets are spawned with canRicochet = false,
                     // which guarantees each projectile can penetrate thin cover at most once.
-                    if (__instance == null || !__instance.canRicochet || bulletData == null)
+                    if (__instance == null ||
+                        !__instance.canRicochet ||
+                        bulletData == null ||
+                        ReferenceEquals(__instance.shooter, null) ||
+                        __instance.shooter.Pointer == IntPtr.Zero)
+                    {
                         return;
+                    }
 
                     if (impactSpeed < 220f || bulletData.mmPenetration < 6)
                         return;
@@ -424,6 +462,15 @@ namespace EasyRed2HumanAI
                 {
                     HitchProfiler.End(HitchBucket.BallisticsExpl, profStart);
                 }
+            }
+
+            public static void Finalizer(BulletInstance __instance, bool __state)
+            {
+                if (__state && !ReferenceEquals(__instance, null) && __instance.Pointer != IntPtr.Zero)
+                {
+                    try { __instance.canDamage = false; } catch { }
+                }
+                VeteranAndTacticsPatches.EndProjectileImpactContext();
             }
 
             private static int ClassifyColliderImpactType(Collider col)
@@ -752,7 +799,7 @@ namespace EasyRed2HumanAI
                 catch { }
             }
 
-            public static void Postfix(VehicleDamagablePart __instance, ArmorPenetrationPatchState __state)
+            public static void Finalizer(VehicleDamagablePart __instance, ArmorPenetrationPatchState __state)
             {
                 if (__state.ModifiedCrewSpall)
                 {
@@ -761,7 +808,7 @@ namespace EasyRed2HumanAI
                     ActiveCrewSpallMaxDamage = 9999f;
                 }
 
-                if (__state.ModifiedArmorThickness && __instance != null && __instance.Pointer != IntPtr.Zero)
+                if (__state.ModifiedArmorThickness && !ReferenceEquals(__instance, null) && __instance.Pointer != IntPtr.Zero)
                 {
                     try
                     {
@@ -1935,17 +1982,28 @@ namespace EasyRed2HumanAI
         private static SoldierLodManager _activeShadowRigLodMgr;
         private static GameObject _leftArmShadowRootGo;
         private static GameObject _rightArmShadowRootGo;
+        private static Transform _leftShadowUpperArm;
+        private static Transform _leftShadowForeArm;
+        private static Transform _leftShadowHand;
         private static SkinnedMeshRenderer _fpsBodyShadowProxy;
         private static SkinnedMeshRenderer _fpsUniformShadowProxy;
+        private static SkinnedMeshRenderer _fpsVestShadowProxy;
         private static GameObject _fpsWeaponShadowProxyRoot;
 
         private static IntPtr _lastBoundBodyMeshPtr;
         private static int _lastBoundBodyBoneCount;
         private static IntPtr _lastBoundUniformMeshPtr;
         private static int _lastBoundUniformBoneCount;
+        private static IntPtr _lastBoundVestMeshPtr;
+        private static int _lastBoundVestBoneCount;
         private static IntPtr _lastBoundHeldWeaponPtr;
         private static int _lastBoundHeldWeaponRendererCount;
         private static int _lastBoundHeldWeaponChildCount = -1;
+        private static bool _hasCachedWeaponGrip;
+        private static Vector3 _cachedWeaponGripLocalPos;
+        private static Quaternion _cachedWeaponGripLocalRot;
+        private static bool _cachedWeaponAllowSprintIK;
+        private static bool _cachedWeaponDoubleHanded;
         private static float _nextHeldWeaponAttachmentCheckTime;
         private static float _nextViewmodelShadowScanTime;
         private static bool _fpsShadowMaterialsDirty = true;
@@ -2084,6 +2142,18 @@ namespace EasyRed2HumanAI
                         else
                             uniMesh.shadowCastingMode = UnityEngine.Rendering.ShadowCastingMode.On;
                     }
+
+                    SkinnedMeshRenderer vestMesh = _activeShadowRigLodMgr.vestMesh;
+                    if (vestMesh != null && vestMesh.Pointer != IntPtr.Zero)
+                    {
+                        bool bipodHidingVest = _activeShadowRigSoldier != null &&
+                                               _activeShadowRigSoldier.Pointer != IntPtr.Zero &&
+                                               _activeShadowRigSoldier.bipodShadowOnlyVestRenderer == vestMesh;
+                        if (bipodHidingVest)
+                            _activeShadowRigSoldier.bipodVestShadowModeBeforeDeploy = UnityEngine.Rendering.ShadowCastingMode.On;
+                        else
+                            vestMesh.shadowCastingMode = UnityEngine.Rendering.ShadowCastingMode.On;
+                    }
                 }
 
                 if (_fpsBodyShadowProxy != null && _fpsBodyShadowProxy.Pointer != IntPtr.Zero)
@@ -2100,6 +2170,14 @@ namespace EasyRed2HumanAI
                         UnityEngine.Object.Destroy(_fpsUniformShadowProxy.gameObject);
                     else
                         _fpsUniformShadowProxy.enabled = false;
+                }
+
+                if (_fpsVestShadowProxy != null && _fpsVestShadowProxy.Pointer != IntPtr.Zero)
+                {
+                    if (destroyObjects && _fpsVestShadowProxy.gameObject != null)
+                        UnityEngine.Object.Destroy(_fpsVestShadowProxy.gameObject);
+                    else
+                        _fpsVestShadowProxy.enabled = false;
                 }
 
                 if (_fpsWeaponShadowProxyRoot != null && _fpsWeaponShadowProxyRoot.Pointer != IntPtr.Zero)
@@ -2119,8 +2197,12 @@ namespace EasyRed2HumanAI
 
                     _leftArmShadowRootGo = null;
                     _rightArmShadowRootGo = null;
+                    _leftShadowUpperArm = null;
+                    _leftShadowForeArm = null;
+                    _leftShadowHand = null;
                     _fpsBodyShadowProxy = null;
                     _fpsUniformShadowProxy = null;
+                    _fpsVestShadowProxy = null;
                     _fpsWeaponShadowProxyRoot = null;
                     _fpsShadowBoneMap.Clear();
                     _fpsShadowBonePairs.Clear();
@@ -2137,9 +2219,12 @@ namespace EasyRed2HumanAI
                 _lastBoundBodyBoneCount = -1;
                 _lastBoundUniformMeshPtr = IntPtr.Zero;
                 _lastBoundUniformBoneCount = -1;
+                _lastBoundVestMeshPtr = IntPtr.Zero;
+                _lastBoundVestBoneCount = -1;
                 _lastBoundHeldWeaponPtr = IntPtr.Zero;
                 _lastBoundHeldWeaponRendererCount = -1;
                 _lastBoundHeldWeaponChildCount = -1;
+                _hasCachedWeaponGrip = false;
                 _nextHeldWeaponAttachmentCheckTime = 0f;
                 _nextViewmodelShadowScanTime = 0f;
             }
@@ -2199,7 +2284,9 @@ namespace EasyRed2HumanAI
                 proxy.rootBone = (rb != null && _fpsShadowBoneMap.TryGetValue(rb.GetInstanceID(), out Transform srb) && srb != null)
                     ? srb
                     : rb;
-                proxy.localBounds = src.localBounds;
+                Bounds expandedBounds = src.localBounds;
+                expandedBounds.Expand(1.25f);
+                proxy.localBounds = expandedBounds;
                 proxy.quality = src.quality;
                 _fpsShadowMaterialsDirty = true;
                 _fpsPropertyBlockDirty = true;
@@ -2237,6 +2324,7 @@ namespace EasyRed2HumanAI
                     _fpsWeaponShadowProxyRoot.SetActive(false);
                 _lastBoundHeldWeaponPtr = IntPtr.Zero;
                 _lastBoundHeldWeaponRendererCount = -1;
+                _hasCachedWeaponGrip = false;
                 return;
             }
 
@@ -2296,6 +2384,22 @@ namespace EasyRed2HumanAI
                 if (meshFilters != null)
                 {
                     Matrix4x4 heldWorldToLocal = held.transform.worldToLocalMatrix;
+                    Transform grip = held.leftHandHoldPosition;
+                    GenericGun heldGun = held.TryCast<GenericGun>();
+                    _cachedWeaponDoubleHanded = heldGun == null || heldGun.DoubleHandedIK();
+                    _cachedWeaponAllowSprintIK = tps != null && tps.IKWhenSprinting;
+                    if (grip != null && _cachedWeaponDoubleHanded)
+                    {
+                        Matrix4x4 gripRel = heldWorldToLocal * grip.localToWorldMatrix;
+                        _cachedWeaponGripLocalPos = new Vector3(gripRel.m03, gripRel.m13, gripRel.m23);
+                        _cachedWeaponGripLocalRot = gripRel.rotation;
+                        _hasCachedWeaponGrip = true;
+                    }
+                    else
+                    {
+                        _hasCachedWeaponGrip = false;
+                    }
+
                     for (int i = 0; i < mfCount; i++)
                     {
                         MeshFilter mf = meshFilters[i];
@@ -2335,6 +2439,74 @@ namespace EasyRed2HumanAI
 
             if (!_fpsWeaponShadowProxyRoot.activeSelf)
                 _fpsWeaponShadowProxyRoot.SetActive(true);
+        }
+
+        private static void SolveTwoBoneShadowArmIK(
+            Transform upperArm,
+            Transform foreArm,
+            Transform hand,
+            Vector3 targetPos,
+            Quaternion targetRot,
+            Transform playerRoot)
+        {
+            Vector3 p0 = upperArm.position;
+            Vector3 p1 = foreArm.position;
+            Vector3 p2 = hand.position;
+
+            float l1 = Vector3.Distance(p0, p1);
+            float l2 = Vector3.Distance(p1, p2);
+            if (l1 < 0.05f || l2 < 0.05f)
+                return;
+
+            Vector3 toTarget = targetPos - p0;
+            float rawDist = toTarget.magnitude;
+            if (rawDist < 0.05f)
+                return;
+
+            Vector3 targetDir = toTarget / rawDist;
+            float minDist = Mathf.Abs(l1 - l2) + 0.02f;
+            float maxDist = (l1 + l2) * 0.995f;
+            float d = Mathf.Clamp(rawDist, minDist, maxDist);
+
+            Vector3 curReach = p2 - p0;
+            Vector3 elbowHint = p1 - p0;
+            if (curReach.sqrMagnitude > 0.0001f)
+                elbowHint -= curReach * (Vector3.Dot(elbowHint, curReach) / curReach.sqrMagnitude);
+
+            Vector3 bendNormal = elbowHint - targetDir * Vector3.Dot(elbowHint, targetDir);
+            if (bendNormal.sqrMagnitude < 0.0004f && playerRoot != null)
+            {
+                elbowHint = -playerRoot.right * 0.45f - playerRoot.up * 0.85f - playerRoot.forward * 0.25f;
+                bendNormal = elbowHint - targetDir * Vector3.Dot(elbowHint, targetDir);
+            }
+            if (bendNormal.sqrMagnitude < 0.0001f)
+                return;
+            bendNormal.Normalize();
+
+            float cosAlpha = Mathf.Clamp((l1 * l1 + d * d - l2 * l2) / (2f * l1 * d), -0.999f, 0.999f);
+            float sinAlpha = Mathf.Sqrt(Mathf.Max(0f, 1f - cosAlpha * cosAlpha));
+            Vector3 desiredUpperDir = (targetDir * cosAlpha + bendNormal * sinAlpha).normalized;
+
+            Vector3 curUpperDir = (p1 - p0).normalized;
+            if (curUpperDir.sqrMagnitude > 0.5f)
+            {
+                Quaternion upperSwing = Quaternion.FromToRotation(curUpperDir, desiredUpperDir);
+                upperArm.rotation = upperSwing * upperArm.rotation;
+            }
+
+            Vector3 newP1 = foreArm.position;
+            Vector3 curLowerDir = (hand.position - newP1).normalized;
+            Vector3 desiredLowerDir = (p0 + targetDir * d - newP1).normalized;
+            if (curLowerDir.sqrMagnitude > 0.5f && desiredLowerDir.sqrMagnitude > 0.5f)
+            {
+                Quaternion lowerSwing = Quaternion.FromToRotation(curLowerDir, desiredLowerDir);
+                foreArm.rotation = lowerSwing * foreArm.rotation;
+            }
+
+            if (Quaternion.Angle(hand.rotation, targetRot) < 55f)
+            {
+                hand.rotation = Quaternion.Slerp(hand.rotation, targetRot, 0.45f);
+            }
         }
 
         public static void UpdateLocalPlayerFirstPersonShadowRig()
@@ -2382,11 +2554,20 @@ namespace EasyRed2HumanAI
                     _leftArmShadowRootGo = CloneShadowBoneSubtree(player.leftArm, player.leftArm.parent, isRootArm: true);
                     _rightArmShadowRootGo = CloneShadowBoneSubtree(player.rightArm, player.rightArm.parent, isRootArm: true);
 
+                    _leftShadowUpperArm = _leftArmShadowRootGo != null ? _leftArmShadowRootGo.transform : null;
+                    _leftShadowHand = (player.leftHand != null && _fpsShadowBoneMap.TryGetValue(player.leftHand.GetInstanceID(), out Transform shHand))
+                        ? shHand
+                        : null;
+                    _leftShadowForeArm = _leftShadowHand != null ? _leftShadowHand.parent : null;
+                    if (_leftShadowForeArm == _leftShadowUpperArm)
+                        _leftShadowForeArm = null;
+
                     _activeShadowRigSoldierPtr = playerPtr;
                     _activeShadowRigSoldier = player;
                     _activeShadowRigLodMgr = lodMgr;
                     _lastBoundBodyMeshPtr = IntPtr.Zero;
                     _lastBoundUniformMeshPtr = IntPtr.Zero;
+                    _lastBoundVestMeshPtr = IntPtr.Zero;
                     _lastBoundHeldWeaponPtr = IntPtr.Zero;
                     _fpsShadowMaterialsDirty = true;
                     _fpsPropertyBlockDirty = true;
@@ -2402,6 +2583,32 @@ namespace EasyRed2HumanAI
                         continue;
                     pair.Shadow.localPosition = pair.Source.localPosition;
                     pair.Shadow.localRotation = pair.Source.localRotation;
+                }
+
+                // 1b. Residual shoulder aim-pitch alignment so shadow arms follow camera vertical pitch
+                if (!player.IsCrawling &&
+                    !player.usingBipod &&
+                    !player.IsReloading &&
+                    !player.isInHandsAnimation &&
+                    !player.DoingMelee() &&
+                    (!player.IsRunning() || player.IsAiming) &&
+                    _rightArmShadowRootGo != null &&
+                    _leftArmShadowRootGo != null)
+                {
+                    Transform rightRootTr = _rightArmShadowRootGo.transform;
+                    Transform leftRootTr = _leftArmShadowRootGo.transform;
+                    Transform spineTr = rightRootTr.parent;
+                    Vector3 lookFwd = player.LookRotation() * Vector3.forward;
+                    Vector3 spineFwd = spineTr != null ? spineTr.forward : player.transform.forward;
+                    float lookPitchDeg = Mathf.Asin(Mathf.Clamp(lookFwd.y, -1f, 1f)) * Mathf.Rad2Deg;
+                    float spinePitchDeg = Mathf.Asin(Mathf.Clamp(spineFwd.y, -1f, 1f)) * Mathf.Rad2Deg;
+                    float downwardDeltaDeg = Mathf.Clamp((spinePitchDeg - lookPitchDeg) * 0.55f, -26f, 26f);
+                    if (Mathf.Abs(downwardDeltaDeg) > 0.75f)
+                    {
+                        Quaternion pitchRot = Quaternion.AngleAxis(downwardDeltaDeg, player.transform.right);
+                        rightRootTr.rotation = pitchRot * rightRootTr.rotation;
+                        leftRootTr.rotation = pitchRot * leftRootTr.rotation;
+                    }
                 }
 
                 // 2. Bind & sync 3P Body and Uniform ShadowsOnly proxies
@@ -2438,6 +2645,26 @@ namespace EasyRed2HumanAI
                     else if (uniMesh.shadowCastingMode != UnityEngine.Rendering.ShadowCastingMode.Off)
                     {
                         uniMesh.shadowCastingMode = UnityEngine.Rendering.ShadowCastingMode.Off;
+                    }
+                }
+
+                SkinnedMeshRenderer vestMesh = lodMgr.vestMesh;
+                bool hasVestProxy = EnsureSkinnedShadowProxyBound(
+                    proxyParent,
+                    vestMesh,
+                    ref _fpsVestShadowProxy,
+                    "BH_FpsVestShadowProxy",
+                    ref _lastBoundVestMeshPtr,
+                    ref _lastBoundVestBoneCount);
+                if (hasVestProxy)
+                {
+                    if (player.bipodShadowOnlyVestRenderer == vestMesh)
+                    {
+                        player.bipodVestShadowModeBeforeDeploy = UnityEngine.Rendering.ShadowCastingMode.Off;
+                    }
+                    else if (vestMesh.shadowCastingMode != UnityEngine.Rendering.ShadowCastingMode.Off)
+                    {
+                        vestMesh.shadowCastingMode = UnityEngine.Rendering.ShadowCastingMode.Off;
                     }
                 }
 
@@ -2478,6 +2705,11 @@ namespace EasyRed2HumanAI
                     {
                         _fpsUniformShadowProxy.sharedMaterials = uniMesh.sharedMaterials;
                     }
+
+                    if (hasVestProxy && vestMesh.sharedMaterials != null)
+                    {
+                        _fpsVestShadowProxy.sharedMaterials = vestMesh.sharedMaterials;
+                    }
                 }
 
                 if (_fpsPropertyBlockDirty)
@@ -2488,6 +2720,7 @@ namespace EasyRed2HumanAI
                     {
                         if (hasBodyProxy) _fpsBodyShadowProxy.SetPropertyBlock(mpb);
                         if (hasUniProxy) _fpsUniformShadowProxy.SetPropertyBlock(mpb);
+                        if (hasVestProxy) _fpsVestShadowProxy.SetPropertyBlock(mpb);
                     }
                 }
 
@@ -2503,6 +2736,25 @@ namespace EasyRed2HumanAI
                 }
 
                 SyncThirdPersonWeaponShadowProxy(player);
+
+                // 4. Two-bone left-hand foregrip IK for shadow rig (vanilla skips OnAnimatorIK for FPS players)
+                if (_hasCachedWeaponGrip &&
+                    _fpsWeaponShadowProxyRoot != null &&
+                    _fpsWeaponShadowProxyRoot.activeSelf &&
+                    _leftShadowUpperArm != null &&
+                    _leftShadowForeArm != null &&
+                    _leftShadowHand != null &&
+                    !player.IsReloading &&
+                    !player.isInHandsAnimation &&
+                    !player.IsThrowing &&
+                    !player.DoingMelee() &&
+                    (!player.IsRunning() || _cachedWeaponAllowSprintIK))
+                {
+                    Transform wRoot = _fpsWeaponShadowProxyRoot.transform;
+                    Vector3 targetPos = wRoot.TransformPoint(_cachedWeaponGripLocalPos);
+                    Quaternion targetRot = wRoot.rotation * _cachedWeaponGripLocalRot;
+                    SolveTwoBoneShadowArmIK(_leftShadowUpperArm, _leftShadowForeArm, _leftShadowHand, targetPos, targetRot, player.transform);
+                }
             }
             catch { }
         }
@@ -2781,6 +3033,402 @@ namespace EasyRed2HumanAI
             public static void Postfix(long __state)
             {
                 HitchProfiler.End(HitchBucket.BloodImpactFx, __state);
+            }
+        }
+
+        // ============================================================================
+        // 7. TACTICAL RELOAD & BIPOD ANIMATION CANCEL (LOCAL HUMAN PLAYER ONLY)
+        // Allows emergency interrupting reloads or mounted bipod states via weapon switch,
+        // melee, knife pullout, grenade throw, vault, single-bullet fire interrupt, or a brief
+        // held sprint, while preserving ammo/magazine state with zero fast-reload exploits.
+        // ============================================================================
+        public static int TacticalReloadCancelsCount;
+
+        private static GenericGun._ReloadCR_d__159 _activeLocalReloadEnum;
+        private static IntPtr _activeLocalReloadSoldierPtr;
+        private static IntPtr _canceledReloadEnumPtr;
+        private static float _localSprintCancelHoldSeconds;
+
+        private static void ResetTacticalReloadCancelState()
+        {
+            _activeLocalReloadEnum = null;
+            _activeLocalReloadSoldierPtr = IntPtr.Zero;
+            _canceledReloadEnumPtr = IntPtr.Zero;
+            _localSprintCancelHoldSeconds = 0f;
+        }
+
+        private static bool IsLocalControlledHumanSoldier(Soldier s)
+        {
+            if (s == null || s.Pointer == IntPtr.Zero || !s.IsAlive)
+                return false;
+
+            Soldier current = Soldier.CurrentControlledSoldierOrNull();
+            return current != null &&
+                   current.Pointer == s.Pointer &&
+                   AiCore.IsLocallyOwnedSoldier(s);
+        }
+
+        private static bool IsSoldierCurrentlyReloading(Soldier s, out GenericGun heldGun)
+        {
+            heldGun = s.GetHeldGun(0);
+            return s.IsReloading || (heldGun != null && heldGun.IsReloading);
+        }
+
+        private static bool TryCancelLocalPlayerReload(Soldier player, bool undeployBipodIfMounted, bool restoreHoldPose)
+        {
+            if (!VisionConfig.EnableMod.Value || !VisionConfig.EnableTacticalReloadAndBipodCancel.Value)
+                return false;
+
+            if (!IsLocalControlledHumanSoldier(player))
+                return false;
+
+            if (!IsSoldierCurrentlyReloading(player, out GenericGun heldGun))
+                return false;
+
+            GenericGun targetGun = heldGun;
+            GenericGun._ReloadCR_d__159 activeEnum = _activeLocalReloadEnum;
+            if (activeEnum != null &&
+                activeEnum.Pointer != IntPtr.Zero &&
+                _activeLocalReloadSoldierPtr == player.Pointer)
+            {
+                GenericGun enumGun = activeEnum.__4__this;
+                if (enumGun != null && (targetGun == null || enumGun.Pointer == targetGun.Pointer))
+                {
+                    if (targetGun == null)
+                        targetGun = enumGun;
+
+                    int st = activeEnum.__1__state;
+                    // States 7 & 8 occur after ReplaceWithMagazineOrAmmo already swapped the magazine in inventory.
+                    // Finish moving magazine rounds into the gun and apply remaining tail cooldown to nextAvailableShot
+                    // so neither the swapped magazine is lost nor LMB can fast-reload exploit.
+                    if (st == 7 || st == 8)
+                    {
+                        try
+                        {
+                            targetGun.MoveAmmosFromMagazineToWeapon();
+                            float remTail = Mathf.Clamp(activeEnum._len_5__13 - activeEnum._firstHalfLenght_5__15, 0.25f, 1.75f);
+                            targetGun.nextAvailableShot = Mathf.Max(targetGun.nextAvailableShot, Time.time + remTail);
+                            if (activeEnum._is_completly_empty_5__7 && targetGun.isManualBoltOperated && targetGun.boltActionBeforeFiring)
+                                targetGun.bolt_required = true;
+                        }
+                        catch { }
+                    }
+
+                    _canceledReloadEnumPtr = activeEnum.Pointer;
+                    activeEnum.__1__state = -1;
+                }
+            }
+
+            _activeLocalReloadEnum = null;
+            _activeLocalReloadSoldierPtr = IntPtr.Zero;
+            _localSprintCancelHoldSeconds = 0f;
+
+            try { if (targetGun != null) targetGun.TryInterruptReload(); } catch { }
+            try { player.TryInterruptReload(); } catch { }
+
+            if (targetGun != null)
+            {
+                try
+                {
+                    targetGun.IsReloading = false;
+                    targetGun.usingBolt = false;
+                    targetGun.OnBipodUndeployed();
+                    if (targetGun.audioSource != null && targetGun.audioSource.isPlaying)
+                        targetGun.audioSource.Stop();
+                }
+                catch { }
+            }
+
+            try
+            {
+                player.IsReloading = false;
+                player.stopHandsAnim_end = 0f;
+                player.RemovePreviouslyAttached();
+                player.FixMagazinePosition();
+            }
+            catch { }
+
+            if (undeployBipodIfMounted && player.usingBipod)
+            {
+                try { player.PutAwayBipod(0.25f, false, false, false); } catch { }
+            }
+
+            if (restoreHoldPose && targetGun != null)
+            {
+                try
+                {
+                    FPSGunManager fg = player.fpsGun != null ? player.fpsGun : player.GetFPSGunManager();
+                    if (fg != null)
+                        fg.FixOnGunHoldPose(targetGun, player.usingBipod);
+                }
+                catch { }
+            }
+
+            try { PlayerGUI.OnPlayerUiStatsChanged(); } catch { }
+            TacticalReloadCancelsCount++;
+            return true;
+        }
+
+        [HarmonyPatch(typeof(GenericGun), nameof(GenericGun.ReloadCR))]
+        public static class GenericGun_ReloadCR_Patch
+        {
+            public static void Postfix(Soldier soldier, Il2CppSystem.Collections.IEnumerator __result)
+            {
+                try
+                {
+                    if (__result == null || !IsLocalControlledHumanSoldier(soldier))
+                        return;
+
+                    var cr = __result.TryCast<GenericGun._ReloadCR_d__159>();
+                    if (cr != null && cr.Pointer != IntPtr.Zero)
+                    {
+                        _activeLocalReloadEnum = cr;
+                        _activeLocalReloadSoldierPtr = soldier.Pointer;
+                        _canceledReloadEnumPtr = IntPtr.Zero;
+                        _localSprintCancelHoldSeconds = 0f;
+                    }
+                }
+                catch { }
+            }
+        }
+
+        [HarmonyPatch(typeof(GenericGun._ReloadCR_d__159), nameof(GenericGun._ReloadCR_d__159.MoveNext))]
+        public static class GenericGun_ReloadCRMoveNext_Patch
+        {
+            public static bool Prefix(GenericGun._ReloadCR_d__159 __instance, ref bool __result)
+            {
+                try
+                {
+                    if (__instance != null && __instance.Pointer == _canceledReloadEnumPtr)
+                    {
+                        __instance.__1__state = -1;
+                        __result = false;
+                        return false;
+                    }
+                }
+                catch { }
+                return true;
+            }
+        }
+
+        [HarmonyPatch(typeof(Soldier), nameof(Soldier.SwitchTo))]
+        public static class Soldier_SwitchTo_ReloadCancel_Patch
+        {
+            public static void Prefix(Soldier __instance, int wearedItemIndex)
+            {
+                try
+                {
+                    if (__instance == null || wearedItemIndex == 0 || !__instance.HasHeldItem(wearedItemIndex))
+                        return;
+                    if (IsSoldierCurrentlyReloading(__instance, out _))
+                        TryCancelLocalPlayerReload(__instance, undeployBipodIfMounted: true, restoreHoldPose: false);
+                }
+                catch { }
+            }
+        }
+
+        [HarmonyPatch(typeof(Soldier), nameof(Soldier.Melee))]
+        public static class Soldier_Melee_ReloadCancel_Patch
+        {
+            public static void Prefix(Soldier __instance)
+            {
+                try
+                {
+                    if (__instance != null && IsSoldierCurrentlyReloading(__instance, out _))
+                        TryCancelLocalPlayerReload(__instance, undeployBipodIfMounted: true, restoreHoldPose: true);
+                }
+                catch { }
+            }
+        }
+
+        [HarmonyPatch(typeof(Soldier), nameof(Soldier.ToggleInventoryKnife))]
+        public static class Soldier_ToggleInventoryKnife_ReloadCancel_Patch
+        {
+            public static void Prefix(Soldier __instance)
+            {
+                try
+                {
+                    if (__instance != null &&
+                        (__instance.HoldsInventoryItem || __instance.InventoryKnife != null) &&
+                        IsSoldierCurrentlyReloading(__instance, out _))
+                    {
+                        TryCancelLocalPlayerReload(__instance, undeployBipodIfMounted: true, restoreHoldPose: false);
+                    }
+                }
+                catch { }
+            }
+        }
+
+        [HarmonyPatch(typeof(Soldier), nameof(Soldier.CycleInventoryKnife))]
+        public static class Soldier_CycleInventoryKnife_ReloadCancel_Patch
+        {
+            public static void Prefix(Soldier __instance)
+            {
+                try
+                {
+                    if (__instance != null &&
+                        __instance.InventoryKnife != null &&
+                        IsSoldierCurrentlyReloading(__instance, out _))
+                    {
+                        TryCancelLocalPlayerReload(__instance, undeployBipodIfMounted: true, restoreHoldPose: false);
+                    }
+                }
+                catch { }
+            }
+        }
+
+        [HarmonyPatch(typeof(Soldier), nameof(Soldier.Throw))]
+        public static class Soldier_Throw_ReloadCancel_Patch
+        {
+            public static void Prefix(Soldier __instance, VirtualItem item)
+            {
+                try
+                {
+                    if (__instance != null && item != null && IsSoldierCurrentlyReloading(__instance, out _))
+                        TryCancelLocalPlayerReload(__instance, undeployBipodIfMounted: true, restoreHoldPose: false);
+                }
+                catch { }
+            }
+        }
+
+        [HarmonyPatch(typeof(Soldier), nameof(Soldier.Vault))]
+        public static class Soldier_Vault_ReloadCancel_Patch
+        {
+            public static void Prefix(Soldier __instance)
+            {
+                try
+                {
+                    if (__instance != null && IsSoldierCurrentlyReloading(__instance, out _))
+                        TryCancelLocalPlayerReload(__instance, undeployBipodIfMounted: true, restoreHoldPose: true);
+                }
+                catch { }
+            }
+        }
+
+        [HarmonyPatch(typeof(PlayerController), nameof(PlayerController.Update))]
+        public static class PlayerController_Update_ReloadAndBipodCancel_Patch
+        {
+            private static Func<VirtualGamepad, GameInput, StickPressCondition, bool> _vgpGetButton;
+            private static Func<VirtualGamepad, GameInput, StickPressCondition, bool> _vgpGetButtonDown;
+            private static bool _vgpDelegatesInitialized;
+
+            private static void EnsureGamepadDelegates()
+            {
+                if (_vgpDelegatesInitialized)
+                    return;
+                _vgpDelegatesInitialized = true;
+                try
+                {
+                    Type vgpType = typeof(VirtualGamepad);
+                    Type[] args = { typeof(GameInput), typeof(StickPressCondition) };
+                    var mGet = vgpType.GetMethod(
+                        "GetButton",
+                        System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance,
+                        null, args, null);
+                    if (mGet != null)
+                        _vgpGetButton = (Func<VirtualGamepad, GameInput, StickPressCondition, bool>)Delegate.CreateDelegate(
+                            typeof(Func<VirtualGamepad, GameInput, StickPressCondition, bool>), mGet);
+
+                    var mDown = vgpType.GetMethod(
+                        "GetButtonDown",
+                        System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance,
+                        null, args, null);
+                    if (mDown != null)
+                        _vgpGetButtonDown = (Func<VirtualGamepad, GameInput, StickPressCondition, bool>)Delegate.CreateDelegate(
+                            typeof(Func<VirtualGamepad, GameInput, StickPressCondition, bool>), mDown);
+                }
+                catch { }
+            }
+
+            public static void Prefix(PlayerController __instance)
+            {
+                try
+                {
+                    if (!VisionConfig.EnableMod.Value || !VisionConfig.EnableTacticalReloadAndBipodCancel.Value)
+                    {
+                        _localSprintCancelHoldSeconds = 0f;
+                        return;
+                    }
+
+                    if (__instance == null || Time.timeScale <= 0.01f || __instance.lockRotationAndFiring)
+                    {
+                        _localSprintCancelHoldSeconds = 0f;
+                        return;
+                    }
+
+                    Soldier player = __instance.ControlledCharacter;
+                    if (player == null || player.Pointer == IntPtr.Zero || !player.IsAlive || player.IsOnVehicle() || !AiCore.IsLocallyOwnedSoldier(player))
+                    {
+                        _localSprintCancelHoldSeconds = 0f;
+                        return;
+                    }
+
+                    if (!IsSoldierCurrentlyReloading(player, out GenericGun heldGun))
+                    {
+                        _localSprintCancelHoldSeconds = 0f;
+                        return;
+                    }
+
+                    VirtualGamepad gpad = GamepadsAPI.GetGamepad(0);
+                    if (gpad == null)
+                    {
+                        _localSprintCancelHoldSeconds = 0f;
+                        return;
+                    }
+
+                    EnsureGamepadDelegates();
+                    if (_vgpGetButton == null || _vgpGetButtonDown == null)
+                    {
+                        _localSprintCancelHoldSeconds = 0f;
+                        return;
+                    }
+
+                    // 1) Mounted bipod escape while reloading (never pin player onto bipod until reload ends)
+                    if (player.usingBipod)
+                    {
+                        bool wantsDismount =
+                            _vgpGetButtonDown(gpad, GameInput.Crouch, StickPressCondition.All) ||
+                            _vgpGetButtonDown(gpad, GameInput.Prone, StickPressCondition.All) ||
+                            _vgpGetButtonDown(gpad, GameInput.Jump, StickPressCondition.All) ||
+                            (_vgpGetButton(gpad, GameInput.MoveBack, StickPressCondition.All) &&
+                             _vgpGetButton(gpad, GameInput.Sprint, StickPressCondition.All));
+                        if (wantsDismount)
+                        {
+                            TryCancelLocalPlayerReload(player, undeployBipodIfMounted: true, restoreHoldPose: true);
+                            return;
+                        }
+                    }
+
+                    // 2) Fire-key interrupt strictly for single-bullet / clip top-off reloads once >= 1 round is chambered/loaded
+                    if (_vgpGetButtonDown(gpad, GameInput.Fire, StickPressCondition.All) &&
+                        _activeLocalReloadEnum == null &&
+                        heldGun != null &&
+                        heldGun.GetCurrentAmmoCount() > 0)
+                    {
+                        try { heldGun.TryInterruptReload(); } catch { }
+                        try { player.TryInterruptReload(); } catch { }
+                        _localSprintCancelHoldSeconds = 0f;
+                        return;
+                    }
+
+                    // 3) Deliberate held-sprint reload breakout (0.18s forward + sprint hold prevents accidental tap-cancels)
+                    if (!player.IsCrawling &&
+                        _vgpGetButton(gpad, GameInput.Sprint, StickPressCondition.All) &&
+                        _vgpGetButton(gpad, GameInput.MoveForward, StickPressCondition.All))
+                    {
+                        _localSprintCancelHoldSeconds += Time.unscaledDeltaTime;
+                        if (_localSprintCancelHoldSeconds >= 0.18f)
+                        {
+                            _localSprintCancelHoldSeconds = 0f;
+                            TryCancelLocalPlayerReload(player, undeployBipodIfMounted: true, restoreHoldPose: true);
+                        }
+                    }
+                    else
+                    {
+                        _localSprintCancelHoldSeconds = 0f;
+                    }
+                }
+                catch { }
             }
         }
     }

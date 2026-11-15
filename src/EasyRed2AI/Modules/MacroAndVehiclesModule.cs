@@ -628,18 +628,30 @@ namespace EasyRed2HumanAI
                 Vector3 fleeDir2 = (away * 0.78f - right * (0.62f * sideSign)).normalized;
 
                 Vector3 chosenDir = Vector3.zero;
-                if (!AiCore.IsDirectionBlockedByEnvironment(myPos + Vector3.up * 0.85f, fleeDir1, 5.5f, ignoreRoot))
+                float fleeDist = 8.5f;
+                Vector3 rayOrigin = myPos + Vector3.up * 0.48f;
+                if (!AiCore.IsMovementBlockedByObstacle(rayOrigin, fleeDir1, 8.5f))
                     chosenDir = fleeDir1;
-                else if (!AiCore.IsDirectionBlockedByEnvironment(myPos + Vector3.up * 0.85f, fleeDir2, 5.5f, ignoreRoot))
+                else if (!AiCore.IsMovementBlockedByObstacle(rayOrigin, fleeDir2, 8.5f))
                     chosenDir = fleeDir2;
-                else if (!AiCore.IsDirectionBlockedByEnvironment(myPos + Vector3.up * 0.85f, away, 5.5f, ignoreRoot))
+                else if (!AiCore.IsMovementBlockedByObstacle(rayOrigin, away, 8.5f))
                     chosenDir = away;
+                else
+                {
+                    fleeDist = 3.5f;
+                    if (!AiCore.IsMovementBlockedByObstacle(rayOrigin, fleeDir1, 3.5f))
+                        chosenDir = fleeDir1;
+                    else if (!AiCore.IsMovementBlockedByObstacle(rayOrigin, fleeDir2, 3.5f))
+                        chosenDir = fleeDir2;
+                    else if (!AiCore.IsMovementBlockedByObstacle(rayOrigin, away, 3.5f))
+                        chosenDir = away;
+                }
 
                 if (chosenDir.sqrMagnitude > 0.01f)
                 {
-                    Vector3 retreatPos = myPos + chosenDir * 8.5f;
+                    Vector3 retreatPos = myPos + chosenDir * fleeDist;
                     SetBotPose(ai, soldier, SoldierPose.Idle, true);
-                    ai.MoveDirectlyToward(retreatPos, 2.8f);
+                    AiCore.MoveBotTowardPosition(ai, soldier, retreatPos, 0f, 1.4f);
                     AiCore.LogDebug("AntiArmor", $"{soldier.faction} infantryman fleeing open ground from {targetVeh.name} ({dist:F0}m).", 6.0f);
                     return true;
                 }
@@ -794,7 +806,7 @@ namespace EasyRed2HumanAI
         internal static readonly Dictionary<IntPtr, float> _nextApcCheckTime = new Dictionary<IntPtr, float>(64);
         internal static readonly Dictionary<IntPtr, float> _nextApcDismountCooldown = new Dictionary<IntPtr, float>(64);
         internal static readonly Dictionary<IntPtr, float> _nextTankStandoffCountTime = new Dictionary<IntPtr, float>(64);
-        internal static readonly Dictionary<IntPtr, Vector2> _cachedVehicleExtents = new Dictionary<IntPtr, Vector2>(64);
+        internal static readonly Dictionary<IntPtr, Vector4> _cachedVehicleExtents = new Dictionary<IntPtr, Vector4>(64);
         internal static readonly Dictionary<IntPtr, float> _nextVehiclePedestrianScanTime = new Dictionary<IntPtr, float>(64);
         internal static readonly Dictionary<IntPtr, float> _vehicleYieldUntilTime = new Dictionary<IntPtr, float>(64);
         internal static readonly Dictionary<IntPtr, float> _vehicleContinuousYieldStart = new Dictionary<IntPtr, float>(64);
@@ -815,7 +827,7 @@ namespace EasyRed2HumanAI
         public static int TankRockUnsticksCount;
         public static int SmartAmmoSwitchesCount;
 
-        private struct RemoteVehicleMotionState
+        internal struct RemoteVehicleMotionState
         {
             public Vector3 LastSamplePos;
             public float LastSampleTime;
@@ -825,6 +837,9 @@ namespace EasyRed2HumanAI
             public float LastPacketTime;
             public float NextRoadkillScanTime;
             public float NextGroundCheckTime;
+            public Vector3 LastSweptVehPos;
+            public float LastSweptTime;
+            public bool HasSweptPos;
             public bool HasSample;
         }
 
@@ -836,7 +851,7 @@ namespace EasyRed2HumanAI
             public float NextCheckTime;
         }
 
-        private static readonly Dictionary<IntPtr, RemoteVehicleMotionState> _remoteVehicleMotion = new Dictionary<IntPtr, RemoteVehicleMotionState>(32);
+        internal static readonly Dictionary<IntPtr, RemoteVehicleMotionState> _remoteVehicleMotion = new Dictionary<IntPtr, RemoteVehicleMotionState>(32);
         private static readonly Dictionary<IntPtr, float> _tankHighCenteredDuration = new Dictionary<IntPtr, float>(32);
         private static readonly Dictionary<IntPtr, float> _nextTankUnstickCountTime = new Dictionary<IntPtr, float>(32);
         private static readonly HashSet<IntPtr> _hotStartedPlayerPlanes = new HashSet<IntPtr>();
@@ -988,6 +1003,11 @@ namespace EasyRed2HumanAI
             _ignoredFriendlyVehicleCollisions.Clear();
             _ignoredFriendlyCollisionPairs.Clear();
             _nextIgnoredVehicleCollisionSweepTime = 0f;
+            _pendingPlayerHqOrder = default;
+            _playerBalkedTaskUntil.Clear();
+            _playerBalkedFlankUntil = 0f;
+            _playerBalkedFlankPos = Vector3.zero;
+            _spawnRescueScatterCounter = 0;
         }
 
         private struct PendingTurretIntercomHandoff
@@ -5212,9 +5232,10 @@ namespace EasyRed2HumanAI
                 NotifyPlayerSquadTaskUpdated(sq);
                 if (IsSquadConnectedToRadioNet(sq))
                 {
-                    string objName = obj.GetDisplayName();
-                    if (string.IsNullOrEmpty(objName))
-                        objName = GetObjectiveDebugLabel(obj);
+                    Vector3? listenerPos = sq.Leader != null && sq.Leader.transform != null
+                        ? sq.Leader.transform.position
+                        : (Vector3?)null;
+                    string objName = AiCore.GetVanillaObjectiveDisplayName(obj, listenerPos);
                     AiCore.TryShowLocalPlayerRadioHint(
                         sq,
                         $"Squad Radio: New squad objective — {objName}",
@@ -5224,69 +5245,202 @@ namespace EasyRed2HumanAI
             }
         }
 
-        private static void TrySuggestObjectiveForPlayerSquadLeader(
-            Squad playerSq,
-            string faction,
-            List<MissionObjective> heldObjectives,
-            List<MissionObjective> unheldObjectives,
-            List<Squad> facAiSquads,
-            List<KeyValuePair<string, Vector3>> allEnemyLeaderPositions)
+        internal enum PendingHqOrderKind
         {
-            if (playerSq == null || playerSq.Leader == null || playerSq.Leader.transform == null)
-                return;
+            None = 0,
+            ObjectiveTask = 1,
+            TacticalFlank = 2
+        }
 
-            // If the Player Squad Leader already has an active, valid objective (in either unheldObjectives or heldObjectives),
-            // never overwrite the player's current objective!
-            if (IsSquadTaskInObjectiveList(playerSq, unheldObjectives) ||
-                IsSquadTaskInObjectiveList(playerSq, heldObjectives))
+        internal struct PlayerPendingHqOrderState
+        {
+            public bool IsActive;
+            public PendingHqOrderKind Kind;
+            public IntPtr SquadPtr;
+            public IntPtr TargetTaskPtr;
+            public MissionObjective TargetObj;
+            public SquadTask TargetTask;
+            public Vector3 WorldPos;
+            public Vector3 FlankDirection;
+            public bool IsAttackObjective;
+            public string ShortActionLabel;
+            public string MapBadgeText;
+            public float CreatedTime;
+            public float ExpiresTime;
+        }
+
+        private static PlayerPendingHqOrderState _pendingPlayerHqOrder;
+        private static readonly Dictionary<IntPtr, float> _playerBalkedTaskUntil = new Dictionary<IntPtr, float>(8);
+        private static float _playerBalkedFlankUntil;
+        private static Vector3 _playerBalkedFlankPos;
+
+        internal static void RequestImmediateMacroReevaluation(bool preferTeamNet = false)
+        {
+            _nextMacroDirectorTime = 0f;
+            _macroDirectorSubPhase = preferTeamNet ? 2 : 0;
+        }
+
+        internal static bool IsTaskBalkedByPlayer(IntPtr taskPtr, float now)
+        {
+            if (taskPtr == IntPtr.Zero)
+                return false;
+
+            if (_playerBalkedTaskUntil.TryGetValue(taskPtr, out float until))
             {
-                ConsumeInitialHqSpawnBriefingIfNoRadio(playerSq);
-                return;
+                if (now < until)
+                    return true;
+                _playerBalkedTaskUntil.Remove(taskPtr);
+            }
+            return false;
+        }
+
+        internal static bool IsFlankBalkedByPlayer(Vector3 threatPos, float now)
+        {
+            if (now >= _playerBalkedFlankUntil)
+                return false;
+
+            Vector3 delta = threatPos - _playerBalkedFlankPos;
+            delta.y = 0f;
+            return delta.sqrMagnitude <= 45.0f * 45.0f;
+        }
+
+        internal static bool TryGetActivePendingPlayerHqOrder(out PlayerPendingHqOrderState state)
+        {
+            state = default;
+            if (!_pendingPlayerHqOrder.IsActive)
+                return false;
+
+            float now = Time.time;
+            if (now >= _pendingPlayerHqOrder.ExpiresTime)
+            {
+                _pendingPlayerHqOrder = default;
+                return false;
             }
 
-            MissionObjective suggestedObj = null;
-            Vector3 leaderPos = playerSq.Leader.transform.position;
-
-            if (unheldObjectives != null && unheldObjectives.Count > 0)
+            Soldier localPlayer = Soldier.CurrentControlledSoldierOrNull();
+            if (localPlayer == null || !localPlayer.IsAlive)
             {
-                suggestedObj = PickBestAttackObjectiveForSquad(leaderPos, faction, unheldObjectives, facAiSquads);
+                _pendingPlayerHqOrder = default;
+                return false;
             }
-            else if (heldObjectives != null && heldObjectives.Count > 0)
+
+            Squad sq = localPlayer.joinedSquad;
+            if (sq == null || sq.Pointer != _pendingPlayerHqOrder.SquadPtr ||
+                sq.Leader == null || sq.Leader.Pointer != localPlayer.Pointer)
             {
-                // Suggest the most threatened held objective if enemies are within 165m, otherwise the closest held objective
-                MissionObjective bestThreatened = null;
-                float bestThreatScore = 165f * 165f;
-                for (int i = 0; i < heldObjectives.Count; i++)
+                _pendingPlayerHqOrder = default;
+                return false;
+            }
+
+            if (_pendingPlayerHqOrder.Kind == PendingHqOrderKind.ObjectiveTask)
+            {
+                MissionObjective obj = _pendingPlayerHqOrder.TargetObj;
+                SquadTask targetTask = _pendingPlayerHqOrder.TargetTask;
+                if (obj == null || obj.Pointer == IntPtr.Zero ||
+                    targetTask == null || targetTask.Pointer == IntPtr.Zero ||
+                    targetTask.Pointer != _pendingPlayerHqOrder.TargetTaskPtr)
                 {
-                    MissionObjective cand = heldObjectives[i];
-                    float score = GetObjectiveThreatPriorityScore(cand, faction, allEnemyLeaderPositions);
-                    if (score <= bestThreatScore)
-                    {
-                        bestThreatScore = score;
-                        bestThreatened = cand;
-                    }
+                    _pendingPlayerHqOrder = default;
+                    return false;
                 }
-                suggestedObj = bestThreatened ?? GetClosestObjectiveToPosition(leaderPos, faction, heldObjectives);
+
+                // Clear automatically if player already switched to this task manually.
+                if (sq.currentTask != null && sq.currentTask.Pointer == _pendingPlayerHqOrder.TargetTaskPtr)
+                {
+                    _pendingPlayerHqOrder = default;
+                    return false;
+                }
+
+                BattleData bd = BattleManager.instance != null ? BattleManager.instance.battleData : null;
+                if (!AiCore.ClassifyMissionObjectiveForFaction(obj, localPlayer.faction, bd, out bool isHeld, out bool canAttract, out _))
+                {
+                    _pendingPlayerHqOrder = default;
+                    return false;
+                }
+
+                if (_pendingPlayerHqOrder.IsAttackObjective && (isHeld || !canAttract))
+                {
+                    _pendingPlayerHqOrder = default;
+                    return false;
+                }
+
+                if (!_pendingPlayerHqOrder.IsAttackObjective && !isHeld)
+                {
+                    _pendingPlayerHqOrder = default;
+                    return false;
+                }
             }
 
-            if (suggestedObj == null || suggestedObj.missionTask == null)
+            state = _pendingPlayerHqOrder;
+            return true;
+        }
+
+        internal static void PostPendingPlayerHqOrder(
+            Squad playerSq,
+            PendingHqOrderKind kind,
+            MissionObjective targetObj,
+            SquadTask targetTask,
+            Vector3 worldPos,
+            Vector3 flankDir,
+            bool isAttackObjective,
+            string shortActionLabel,
+            string toastLabel,
+            string mapBadgeText,
+            float durationSeconds)
+        {
+            if (playerSq == null || playerSq.Pointer == IntPtr.Zero ||
+                !AiCore.IsLocalPlayerInSquad(playerSq, out bool isLocalLeader) ||
+                !isLocalLeader)
+            {
                 return;
+            }
 
-            playerSq.currentTask = suggestedObj.missionTask.Cast<SquadTask>();
-            ConsumeInitialHqSpawnBriefingIfNoRadio(playerSq);
-            NotifyPlayerSquadTaskUpdated(playerSq);
+            float now = Time.time;
+            IntPtr taskPtr = targetTask != null ? targetTask.Pointer : IntPtr.Zero;
 
-            string suggestedName = suggestedObj.GetDisplayName();
-            if (string.IsNullOrEmpty(suggestedName))
-                suggestedName = GetObjectiveDebugLabel(suggestedObj);
-            bool isAttackObj = unheldObjectives != null && unheldObjectives.Contains(suggestedObj);
+            if (TryGetActivePendingPlayerHqOrder(out PlayerPendingHqOrderState existing) &&
+                existing.Kind == kind &&
+                existing.SquadPtr == playerSq.Pointer)
+            {
+                bool sameTarget = kind == PendingHqOrderKind.ObjectiveTask
+                    ? (existing.TargetTaskPtr == taskPtr && existing.IsAttackObjective == isAttackObjective)
+                    : ((existing.WorldPos - worldPos).sqrMagnitude <= 22.0f * 22.0f);
+
+                if (sameTarget)
+                {
+                    _pendingPlayerHqOrder.WorldPos = worldPos;
+                    _pendingPlayerHqOrder.FlankDirection = flankDir;
+                    _pendingPlayerHqOrder.ShortActionLabel = shortActionLabel;
+                    _pendingPlayerHqOrder.ExpiresTime = Mathf.Max(_pendingPlayerHqOrder.ExpiresTime, now + durationSeconds);
+                    return;
+                }
+            }
+
+            _pendingPlayerHqOrder = new PlayerPendingHqOrderState
+            {
+                IsActive = true,
+                Kind = kind,
+                SquadPtr = playerSq.Pointer,
+                TargetTaskPtr = taskPtr,
+                TargetObj = targetObj,
+                TargetTask = targetTask,
+                WorldPos = worldPos,
+                FlankDirection = flankDir,
+                IsAttackObjective = isAttackObjective,
+                ShortActionLabel = shortActionLabel,
+                MapBadgeText = mapBadgeText,
+                CreatedTime = now,
+                ExpiresTime = now + durationSeconds
+            };
+
+            string hintSubject = string.IsNullOrEmpty(toastLabel) ? shortActionLabel : toastLabel;
             AiCore.TryShowLocalPlayerRadioHint(
                 playerSq,
-                $"HQ Radio: Suggested objective — {(isAttackObj ? "Attack" : "Defend")} {suggestedName}",
+                $"HQ Radio: Order available — {hintSubject} [Hold Q / Map]",
                 requireLeader: true,
-                minInterval: 10.0f);
+                minInterval: 8.0f);
 
-            // Have the squad's AI Radioman (if alive) audibly relay the new HQ objective to the Player Squad Leader
+            // Play Radioman / NCO radio voice cue when available.
             if (playerSq.units != null)
             {
                 var units = playerSq.units;
@@ -5306,8 +5460,296 @@ namespace EasyRed2HumanAI
             {
                 AiCore.LogDebug(
                     "MacroDirector",
-                    $"Team Radio Net suggested objective '{suggestedObj.GetDisplayName()}' to Player Squad Leader ('{playerSq.squadName}').");
+                    $"Posted pending HQ order ({kind}: '{shortActionLabel}') for Player Squad Leader ('{playerSq.squadName}').");
             }
+        }
+
+        internal static void AcceptPendingPlayerHqOrder()
+        {
+            if (!TryGetActivePendingPlayerHqOrder(out PlayerPendingHqOrderState state))
+                return;
+
+            Soldier localPlayer = Soldier.CurrentControlledSoldierOrNull();
+            Squad playerSq = localPlayer != null ? localPlayer.joinedSquad : null;
+            if (localPlayer == null || playerSq == null || playerSq.Pointer != state.SquadPtr)
+                return;
+
+            _pendingPlayerHqOrder = default;
+
+            try
+            {
+                if (state.Kind == PendingHqOrderKind.ObjectiveTask &&
+                    state.TargetTask != null &&
+                    state.TargetTask.Pointer != IntPtr.Zero)
+                {
+                    playerSq.currentTask = state.TargetTask;
+                    ConsumeInitialHqSpawnBriefingIfNoRadio(playerSq);
+                    NotifyPlayerSquadTaskUpdated(playerSq);
+                    localPlayer.Say(VoiceManager.VoiceClip.yesSir, 0.05f);
+                }
+                else if (state.Kind == PendingHqOrderKind.TacticalFlank)
+                {
+                    Vector3 flankDir = state.FlankDirection.sqrMagnitude > 0.01f
+                        ? state.FlankDirection.normalized
+                        : Vector3.forward;
+                    playerSq.AttackFromSide(flankDir, state.WorldPos, 24.0f);
+                    localPlayer.Say(VoiceManager.VoiceClip.attackThere, 0.05f);
+                }
+
+                PlayerController.HintToPlayer($"HQ Radio: Copy — {state.ShortActionLabel}", false);
+            }
+            catch { }
+        }
+
+        internal static void BalkPendingPlayerHqOrder()
+        {
+            if (!TryGetActivePendingPlayerHqOrder(out PlayerPendingHqOrderState state))
+                return;
+
+            float now = Time.time;
+            if (state.Kind == PendingHqOrderKind.ObjectiveTask && state.TargetTaskPtr != IntPtr.Zero)
+            {
+                _playerBalkedTaskUntil[state.TargetTaskPtr] = now + 75.0f;
+            }
+            else if (state.Kind == PendingHqOrderKind.TacticalFlank)
+            {
+                _playerBalkedFlankUntil = now + 75.0f;
+                _playerBalkedFlankPos = state.WorldPos;
+            }
+
+            _pendingPlayerHqOrder = default;
+            RequestImmediateMacroReevaluation(preferTeamNet: state.Kind == PendingHqOrderKind.TacticalFlank);
+
+            try
+            {
+                PlayerController.HintToPlayer("HQ Radio: Balked HQ order — holding current initiative (reassigning net)", false);
+            }
+            catch { }
+        }
+
+        private static MissionObjective FindObjectiveWithTaskPtr(List<MissionObjective> objectives, IntPtr taskPtr)
+        {
+            if (objectives == null || taskPtr == IntPtr.Zero)
+                return null;
+
+            for (int i = 0; i < objectives.Count; i++)
+            {
+                MissionObjective cand = objectives[i];
+                if (cand != null && cand.missionTask != null && cand.missionTask.Pointer == taskPtr)
+                    return cand;
+            }
+            return null;
+        }
+
+        private static readonly List<MissionObjective> _reusablePlayerCandidateObjs = new List<MissionObjective>(12);
+
+        private static void TrySuggestObjectiveForPlayerSquadLeader(
+            Squad playerSq,
+            string faction,
+            List<MissionObjective> heldObjectives,
+            List<MissionObjective> unheldObjectives,
+            List<Squad> facAiSquads,
+            List<KeyValuePair<string, Vector3>> allEnemyLeaderPositions)
+        {
+            if (playerSq == null || playerSq.Leader == null || playerSq.Leader.transform == null)
+                return;
+
+            if (!AiCore.IsLocalPlayerInSquad(playerSq, out bool isLocalLeader) ||
+                !isLocalLeader ||
+                !IsSquadConnectedToRadioNet(playerSq))
+            {
+                return;
+            }
+
+            // Re-validate any currently held pending order first so stale/completed entries clear automatically.
+            TryGetActivePendingPlayerHqOrder(out _);
+
+            float now = Time.time;
+            Vector3 leaderPos = playerSq.Leader.transform.position;
+            IntPtr curTaskPtr = playerSq.currentTask != null ? playerSq.currentTask.Pointer : IntPtr.Zero;
+
+            bool hasActiveObjective = IsSquadTaskInObjectiveList(playerSq, unheldObjectives) ||
+                                      IsSquadTaskInObjectiveList(playerSq, heldObjectives);
+
+            if (hasActiveObjective)
+            {
+                ConsumeInitialHqSpawnBriefingIfNoRadio(playerSq);
+
+                // 1. Check for Urgent Undefended Defense: nearby held objective under active threat with no defenders.
+                if (heldObjectives != null && heldObjectives.Count > 0)
+                {
+                    MissionObjective urgentDefend = null;
+                    float bestScore = 155f * 155f;
+                    for (int i = 0; i < heldObjectives.Count; i++)
+                    {
+                        MissionObjective cand = heldObjectives[i];
+                        if (cand == null || cand.missionTask == null || cand.missionTask.Pointer == IntPtr.Zero)
+                            continue;
+                        if (cand.missionTask.Pointer == curTaskPtr || IsTaskBalkedByPlayer(cand.missionTask.Pointer, now))
+                            continue;
+                        if ((cand.GetTaskPosition() - leaderPos).sqrMagnitude > 260f * 260f)
+                            continue;
+                        if (CountAlliedGroundSquadsOnObjective(faction, cand.missionTask.Pointer, cand.GetTaskPosition(), true) > 0)
+                            continue;
+
+                        float score = GetObjectiveThreatPriorityScore(cand, faction, allEnemyLeaderPositions);
+                        if (score <= bestScore)
+                        {
+                            bestScore = score;
+                            urgentDefend = cand;
+                        }
+                    }
+
+                    if (urgentDefend != null)
+                    {
+                        string fullLabel = AiCore.GetVanillaObjectiveDisplayName(urgentDefend, leaderPos, out string shortLetter);
+                        string shortPoint = !string.IsNullOrEmpty(shortLetter) ? shortLetter : fullLabel;
+                        PostPendingPlayerHqOrder(
+                            playerSq,
+                            PendingHqOrderKind.ObjectiveTask,
+                            urgentDefend,
+                            urgentDefend.missionTask.Cast<SquadTask>(),
+                            urgentDefend.GetTaskPosition(),
+                            Vector3.zero,
+                            isAttackObjective: false,
+                            shortActionLabel: $"Defend {shortPoint}",
+                            toastLabel: $"Urgent: Defend {fullLabel}",
+                            mapBadgeText: "[HQ]",
+                            durationSeconds: 55.0f);
+                        return;
+                    }
+                }
+
+                // 2. Check for HQ Attrition Pivot if player squad is grinding on a heavily stalled meatgrinder objective.
+                if (curTaskPtr != IntPtr.Zero && unheldObjectives != null && unheldObjectives.Count >= 2)
+                {
+                    MissionObjective currentAttackObj = FindObjectiveWithTaskPtr(unheldObjectives, curTaskPtr);
+                    if (currentAttackObj != null)
+                    {
+                        var key = new ObjectiveAttritionKey { Faction = faction, TaskPtr = curTaskPtr };
+                        if (_objectiveAttrition.TryGetValue(key, out ObjectiveAttritionState attState))
+                        {
+                            float threshold = GetFactionCommandProfile(faction).AttritionPivotThreshold;
+                            if ((now < attState.AvoidUntil || attState.DecayedLosses >= threshold) &&
+                                CanSquadDisengageForAttritionPivot(playerSq, currentAttackObj.GetTaskPosition(), out _))
+                            {
+                                var candidates = _reusablePlayerCandidateObjs;
+                                candidates.Clear();
+                                for (int i = 0; i < unheldObjectives.Count; i++)
+                                {
+                                    MissionObjective cand = unheldObjectives[i];
+                                    if (cand == null || cand.missionTask == null || cand.missionTask.Pointer == IntPtr.Zero)
+                                        continue;
+                                    if (cand.missionTask.Pointer == curTaskPtr || IsTaskBalkedByPlayer(cand.missionTask.Pointer, now))
+                                        continue;
+                                    candidates.Add(cand);
+                                }
+
+                                if (candidates.Count > 0)
+                                {
+                                    MissionObjective pivotObj = PickBestAttackObjectiveForSquad(leaderPos, faction, candidates, facAiSquads) ?? candidates[0];
+                                    string fullLabel = AiCore.GetVanillaObjectiveDisplayName(pivotObj, leaderPos, out string shortLetter);
+                                    string shortPoint = !string.IsNullOrEmpty(shortLetter) ? shortLetter : fullLabel;
+                                    PostPendingPlayerHqOrder(
+                                        playerSq,
+                                        PendingHqOrderKind.ObjectiveTask,
+                                        pivotObj,
+                                        pivotObj.missionTask.Cast<SquadTask>(),
+                                        pivotObj.GetTaskPosition(),
+                                        Vector3.zero,
+                                        isAttackObjective: true,
+                                        shortActionLabel: $"Pivot {shortPoint}",
+                                        toastLabel: $"Pivot — Attack {fullLabel}",
+                                        mapBadgeText: "[HQ]",
+                                        durationSeconds: 60.0f);
+                                }
+                                candidates.Clear();
+                            }
+                        }
+                    }
+                }
+
+                return;
+            }
+
+            // 3. Player Squad Leader currently has NO valid phase objective: propose best non-balked objective via HQ Radio (never overwrite currentTask).
+            MissionObjective suggestedObj = null;
+            bool isAttackObj = false;
+
+            if (unheldObjectives != null && unheldObjectives.Count > 0)
+            {
+                var candidates = _reusablePlayerCandidateObjs;
+                candidates.Clear();
+                for (int i = 0; i < unheldObjectives.Count; i++)
+                {
+                    MissionObjective cand = unheldObjectives[i];
+                    if (cand != null && cand.missionTask != null && cand.missionTask.Pointer != IntPtr.Zero &&
+                        !IsTaskBalkedByPlayer(cand.missionTask.Pointer, now))
+                    {
+                        candidates.Add(cand);
+                    }
+                }
+
+                if (candidates.Count > 0)
+                {
+                    suggestedObj = PickBestAttackObjectiveForSquad(leaderPos, faction, candidates, facAiSquads);
+                    isAttackObj = true;
+                }
+                candidates.Clear();
+            }
+            else if (heldObjectives != null && heldObjectives.Count > 0)
+            {
+                var candidates = _reusablePlayerCandidateObjs;
+                candidates.Clear();
+                for (int i = 0; i < heldObjectives.Count; i++)
+                {
+                    MissionObjective cand = heldObjectives[i];
+                    if (cand != null && cand.missionTask != null && cand.missionTask.Pointer != IntPtr.Zero &&
+                        !IsTaskBalkedByPlayer(cand.missionTask.Pointer, now))
+                    {
+                        candidates.Add(cand);
+                    }
+                }
+
+                if (candidates.Count > 0)
+                {
+                    MissionObjective bestThreatened = null;
+                    float bestThreatScore = 165f * 165f;
+                    for (int i = 0; i < candidates.Count; i++)
+                    {
+                        MissionObjective cand = candidates[i];
+                        float score = GetObjectiveThreatPriorityScore(cand, faction, allEnemyLeaderPositions);
+                        if (score <= bestThreatScore)
+                        {
+                            bestThreatScore = score;
+                            bestThreatened = cand;
+                        }
+                    }
+                    suggestedObj = bestThreatened ?? GetClosestObjectiveToPosition(leaderPos, faction, candidates);
+                }
+                candidates.Clear();
+            }
+
+            if (suggestedObj == null || suggestedObj.missionTask == null)
+                return;
+
+            ConsumeInitialHqSpawnBriefingIfNoRadio(playerSq);
+
+            string objFull = AiCore.GetVanillaObjectiveDisplayName(suggestedObj, leaderPos, out string objShortLetter);
+            string objShort = !string.IsNullOrEmpty(objShortLetter) ? objShortLetter : objFull;
+            string verb = isAttackObj ? "Attack" : "Defend";
+            PostPendingPlayerHqOrder(
+                playerSq,
+                PendingHqOrderKind.ObjectiveTask,
+                suggestedObj,
+                suggestedObj.missionTask.Cast<SquadTask>(),
+                suggestedObj.GetTaskPosition(),
+                Vector3.zero,
+                isAttackObjective: isAttackObj,
+                shortActionLabel: $"{verb} {objShort}",
+                toastLabel: $"{verb} {objFull}",
+                mapBadgeText: "[HQ]",
+                durationSeconds: 65.0f);
         }
 
         private static void NotifyPlayerSquadTaskUpdated(Squad sq)
@@ -5339,6 +5781,7 @@ namespace EasyRed2HumanAI
             int sqCount = AiCore.WorldSquadCount;
             var worldSquads = AiCore.WorldSquads;
             int count = 0;
+            float now = Time.time;
 
             for (int i = 0; i < sqCount; i++)
             {
@@ -5359,6 +5802,12 @@ namespace EasyRed2HumanAI
                     (snap.IsPlayerInSquad || snap.LeaderOnGroundVehicle) &&
                     (snap.RefPos - objPos).sqrMagnitude <= 85.0f * 85.0f)
                 {
+                    if (snap.IsPlayerInSquad &&
+                        (IsTaskBalkedByPlayer(taskPtr, now) ||
+                         (_pendingPlayerHqOrder.IsActive && _pendingPlayerHqOrder.SquadPtr == snap.Ptr && _pendingPlayerHqOrder.TargetTaskPtr == taskPtr)))
+                    {
+                        continue;
+                    }
                     count++;
                 }
             }
@@ -7566,9 +8015,74 @@ namespace EasyRed2HumanAI
                 __state = HitchProfiler.BeginTopLevel();
             }
 
-            public static void Postfix(long __state)
+            public static void Finalizer(long __state)
             {
                 HitchProfiler.End(HitchBucket.VanSquadLeaderRtn, __state);
+            }
+        }
+
+        [HarmonyPatch(typeof(ResourcesManager), nameof(ResourcesManager.TrySpotSquad))]
+        public static class ResourcesManager_TrySpotSquad_Patch
+        {
+            public static bool Prefix(Spottable __0, Soldier __1, ref bool __result)
+            {
+                if (ReferenceEquals(__0, null) || __0.Pointer == IntPtr.Zero ||
+                    ReferenceEquals(__1, null) || __1 == null || __1.Pointer == IntPtr.Zero ||
+                    __1.joinedSquad == null)
+                {
+                    __result = false;
+                    return false;
+                }
+
+                if (!Photon.Pun.PhotonNetwork.InRoom)
+                    return true;
+
+                SyncSoldier spotterSyncher = __1.GetSyncher();
+                bool validSpotterSyncher = !ReferenceEquals(spotterSyncher, null) && spotterSyncher != null && spotterSyncher.Pointer != IntPtr.Zero;
+
+                Soldier enemySoldier = __0.TryCast<Soldier>();
+                if (!ReferenceEquals(enemySoldier, null) && enemySoldier != null && enemySoldier.Pointer != IntPtr.Zero)
+                {
+                    Squad enemySq = enemySoldier.joinedSquad;
+                    if (ReferenceEquals(enemySq, null) || enemySq == null || enemySq.Pointer == IntPtr.Zero)
+                    {
+                        __result = false;
+                        return false;
+                    }
+
+                    SyncSoldier enemySyncher = enemySoldier.GetSyncher();
+                    if (!validSpotterSyncher || ReferenceEquals(enemySyncher, null) || enemySyncher == null || enemySyncher.Pointer == IntPtr.Zero)
+                    {
+                        __result = enemySq.MarkSquad(__1);
+                        return false;
+                    }
+                    return true;
+                }
+
+                Vehicle enemyVeh = __0.TryCast<Vehicle>();
+                if (!ReferenceEquals(enemyVeh, null) && enemyVeh != null && enemyVeh.Pointer != IntPtr.Zero)
+                {
+                    Squad vehSq = enemyVeh.GetSquadInside();
+                    if (ReferenceEquals(vehSq, null) || vehSq == null || vehSq.Pointer == IntPtr.Zero)
+                    {
+                        __result = false;
+                        return false;
+                    }
+
+                    Soldier vehLeader = vehSq.Leader;
+                    SyncSoldier leaderSyncher = (!ReferenceEquals(vehLeader, null) && vehLeader != null && vehLeader.Pointer != IntPtr.Zero)
+                        ? vehLeader.GetSyncher()
+                        : null;
+
+                    if (!validSpotterSyncher || ReferenceEquals(leaderSyncher, null) || leaderSyncher == null || leaderSyncher.Pointer == IntPtr.Zero)
+                    {
+                        __result = vehSq.MarkSquad(__1);
+                        return false;
+                    }
+                    return true;
+                }
+
+                return true;
             }
         }
 
@@ -7738,30 +8252,174 @@ namespace EasyRed2HumanAI
         // =====================================================================
         // Friendly Infantry Right-of-Way & Anti-Roadkill
         // =====================================================================
-        private static Vector2 GetCachedVehicleHalfExtents(Vehicle veh)
+        private static bool TryGetColliderLocalBox(Collider c, out Vector3 center, out Vector3 ext)
         {
+            BoxCollider box = c.TryCast<BoxCollider>();
+            if (box != null)
+            {
+                center = box.center;
+                ext = box.size * 0.5f;
+                return true;
+            }
+
+            MeshCollider meshCol = c.TryCast<MeshCollider>();
+            if (meshCol != null)
+            {
+                Mesh sm = meshCol.sharedMesh;
+                if (sm != null && sm.Pointer != IntPtr.Zero)
+                {
+                    Bounds mb = sm.bounds;
+                    center = mb.center;
+                    ext = mb.extents;
+                    return true;
+                }
+                center = Vector3.zero;
+                ext = Vector3.zero;
+                return false;
+            }
+
+            CapsuleCollider cap = c.TryCast<CapsuleCollider>();
+            if (cap != null)
+            {
+                float r = cap.radius;
+                float hh = Mathf.Max(r, cap.height * 0.5f);
+                center = cap.center;
+                if (cap.direction == 0)
+                    ext = new Vector3(hh, r, r);
+                else if (cap.direction == 2)
+                    ext = new Vector3(r, r, hh);
+                else
+                    ext = new Vector3(r, hh, r);
+                return true;
+            }
+
+            SphereCollider sph = c.TryCast<SphereCollider>();
+            if (sph != null)
+            {
+                float r = sph.radius;
+                center = sph.center;
+                ext = new Vector3(r, r, r);
+                return true;
+            }
+
+            center = Vector3.zero;
+            ext = Vector3.zero;
+            return false;
+        }
+
+        /// <summary>
+        /// Computes and caches rotation-invariant vehicle-local hull OBB
+        /// (halfWidth, halfLength, localCenterX, localCenterZ), combining wheel bounds
+        /// with non-turret low-hull solid colliders so truck hoods, bumpers, and cargo beds
+        /// (plus off-center vehicle pivots) are accurately covered without including elevated gun barrels.
+        /// </summary>
+        private static Vector4 GetCachedVehicleLocalHullObb(Vehicle veh)
+        {
+            Vector4 fallback = new Vector4(1.65f, 3.10f, 0f, 0f);
             if (veh == null || veh.Pointer == IntPtr.Zero)
-                return new Vector2(1.65f, 3.10f);
+                return fallback;
 
             IntPtr vehPtr = veh.Pointer;
-            if (_cachedVehicleExtents.TryGetValue(vehPtr, out Vector2 extents))
-                return extents;
+            if (_cachedVehicleExtents.TryGetValue(vehPtr, out Vector4 cachedObb))
+                return cachedObb;
 
-            extents = new Vector2(1.65f, 3.10f);
+            bool hasBounds = false;
+            float minX = 0f, maxX = 0f, minZ = 0f, maxZ = 0f;
             try
             {
                 VehicleWithWheels wheeled = veh.TryCast<VehicleWithWheels>();
                 if (wheeled != null)
                 {
-                    Bounds b = wheeled.CalculateVehicleLocalBounds();
-                    extents.x = Mathf.Clamp(b.extents.x, 1.15f, 2.50f);
-                    extents.y = Mathf.Clamp(b.extents.z, 2.00f, 5.00f);
+                    Bounds wb = wheeled.CalculateVehicleLocalBounds();
+                    if (wb.extents.x > 0.05f || wb.extents.z > 0.05f)
+                    {
+                        minX = wb.center.x - wb.extents.x;
+                        maxX = wb.center.x + wb.extents.x;
+                        minZ = wb.center.z - wb.extents.z;
+                        maxZ = wb.center.z + wb.extents.z;
+                        hasBounds = true;
+                    }
+                }
+
+                Transform vehTr = veh.transform;
+                Collider[] solidCols = vehTr != null ? GetCachedVehicleSolidColliders(veh) : null;
+                if (solidCols != null)
+                {
+                    for (int i = 0; i < solidCols.Length; i++)
+                    {
+                        Collider c = solidCols[i];
+                        if (c == null || c.Pointer == IntPtr.Zero || !c.enabled)
+                            continue;
+
+                        // Exclude turrets/cannon barrels so elevated tank barrels do not protrude into ground roadkill OBB
+                        if (c.GetComponentInParent<Turret>() != null)
+                            continue;
+
+                        if (!TryGetColliderLocalBox(c, out Vector3 cCenter, out Vector3 cExt))
+                            continue;
+
+                        Transform ct = c.transform;
+                        if (ct == null)
+                            continue;
+
+                        float cMinX = float.MaxValue, cMaxX = float.MinValue;
+                        float cMinY = float.MaxValue, cMaxY = float.MinValue;
+                        float cMinZ = float.MaxValue, cMaxZ = float.MinValue;
+
+                        for (int cornerIdx = 0; cornerIdx < 8; cornerIdx++)
+                        {
+                            float sx = (cornerIdx & 1) == 0 ? -cExt.x : cExt.x;
+                            float sy = (cornerIdx & 2) == 0 ? -cExt.y : cExt.y;
+                            float sz = (cornerIdx & 4) == 0 ? -cExt.z : cExt.z;
+                            Vector3 vLocal = vehTr.InverseTransformPoint(
+                                ct.TransformPoint(new Vector3(cCenter.x + sx, cCenter.y + sy, cCenter.z + sz)));
+
+                            if (vLocal.x < cMinX) cMinX = vLocal.x;
+                            if (vLocal.x > cMaxX) cMaxX = vLocal.x;
+                            if (vLocal.y < cMinY) cMinY = vLocal.y;
+                            if (vLocal.y > cMaxY) cMaxY = vLocal.y;
+                            if (vLocal.z < cMinZ) cMinZ = vLocal.z;
+                            if (vLocal.z > cMaxZ) cMaxZ = vLocal.z;
+                        }
+
+                        if (cMinY <= 1.55f && cMaxY >= -0.50f &&
+                            (cMaxX - cMinX) <= 6.0f && (cMaxZ - cMinZ) <= 13.0f)
+                        {
+                            if (!hasBounds)
+                            {
+                                minX = cMinX; maxX = cMaxX;
+                                minZ = cMinZ; maxZ = cMaxZ;
+                                hasBounds = true;
+                            }
+                            else
+                            {
+                                if (cMinX < minX) minX = cMinX;
+                                if (cMaxX > maxX) maxX = cMaxX;
+                                if (cMinZ < minZ) minZ = cMinZ;
+                                if (cMaxZ > maxZ) maxZ = cMaxZ;
+                            }
+                        }
+                    }
                 }
             }
             catch { }
 
-            _cachedVehicleExtents[vehPtr] = extents;
-            return extents;
+            Vector4 obb = hasBounds
+                ? new Vector4(
+                    Mathf.Clamp((maxX - minX) * 0.5f, 1.15f, 2.55f),
+                    Mathf.Clamp((maxZ - minZ) * 0.5f, 2.05f, 5.60f),
+                    Mathf.Clamp((minX + maxX) * 0.5f, -0.60f, 0.60f),
+                    Mathf.Clamp((minZ + maxZ) * 0.5f, -2.20f, 2.20f))
+                : fallback;
+
+            _cachedVehicleExtents[vehPtr] = obb;
+            return obb;
+        }
+
+        private static Vector2 GetCachedVehicleHalfExtents(Vehicle veh)
+        {
+            Vector4 obb = GetCachedVehicleLocalHullObb(veh);
+            return new Vector2(obb.x, obb.y);
         }
 
         private static bool TryRecordFriendlyYieldOrSave(IntPtr vehPtr, float now)
@@ -7965,7 +8623,9 @@ namespace EasyRed2HumanAI
                 }
             }
 
-            if (!ReferenceEquals(sAi, null) && sAi != null)
+            if (!ReferenceEquals(sAi, null) && sAi != null &&
+                s.transform != null &&
+                !AiCore.IsDirectSegmentBlockedByWall(s.transform.position, candidatePos, out _))
             {
                 sAi.MoveDirectlyToward(candidatePos, 1.45f);
             }
@@ -8412,7 +9072,34 @@ namespace EasyRed2HumanAI
         [HarmonyPatch(typeof(SyncVehicle), nameof(SyncVehicle.SyncVehiclePosition))]
         public static class SyncVehicle_SyncVehiclePosition_Patch
         {
-            public static void Postfix(SyncVehicle __instance, float __2)
+            public struct PreSyncPosState
+            {
+                public Vector3 Pos;
+                public bool HasPos;
+            }
+
+            public static void Prefix(SyncVehicle __instance, out PreSyncPosState __state)
+            {
+                __state = default;
+                try
+                {
+                    if (!VisionConfig.EnableMod.Value || __instance == null)
+                        return;
+
+                    Vehicle veh = __instance.vehicle;
+                    if (veh == null || veh.Pointer == IntPtr.Zero || veh.transform == null)
+                        return;
+
+                    if (!veh.OwnDriverOrVehicle() && !veh.IsAirVehicle())
+                    {
+                        __state.Pos = veh.transform.position;
+                        __state.HasPos = true;
+                    }
+                }
+                catch { }
+            }
+
+            public static void Postfix(SyncVehicle __instance, float __2, PreSyncPosState __state)
             {
                 try
                 {
@@ -8423,18 +9110,95 @@ namespace EasyRed2HumanAI
                     if (veh == null || veh.Pointer == IntPtr.Zero)
                         return;
 
+                    float now = Time.time;
                     IntPtr ptr = veh.Pointer;
                     _remoteVehicleMotion.TryGetValue(ptr, out RemoteVehicleMotionState state);
                     state.LastSignedSpeed = __2;
-                    state.LastPacketTime = Time.time;
+                    state.LastPacketTime = now;
+
+                    // When SyncVehiclePosition snaps a lagging fast truck >6.0m in one frame, sweep the skipped
+                    // hull corridor immediately so enemies aren't jumped straight over on the Host.
+                    if (__state.HasPos && !veh.OwnDriverOrVehicle() && !veh.IsAirVehicle() && veh.transform != null)
+                    {
+                        Vector3 postPos = veh.transform.position;
+                        Vector3 snapDelta = postPos - __state.Pos;
+                        float snapDistSq = snapDelta.sqrMagnitude;
+                        if (snapDistSq > 1.0f * 1.0f && snapDistSq <= 16.0f * 16.0f)
+                        {
+                            Vector3 sweepFrom = (state.HasSweptPos &&
+                                                 now - state.LastSweptTime <= 0.55f &&
+                                                 (postPos - state.LastSweptVehPos).sqrMagnitude <= 16.0f * 16.0f)
+                                ? state.LastSweptVehPos
+                                : __state.Pos;
+                            Vector3 snapFlat = new Vector3(snapDelta.x, 0f, snapDelta.z);
+                            if (snapFlat.sqrMagnitude > 0.25f)
+                            {
+                                Vector3 snapVelFlat = snapFlat.normalized * Mathf.Max(Mathf.Abs(__2), 3.5f);
+                                RunVehicleRoadkillAndRightOfWayObbScan(veh, true, sweepFrom, postPos, false, Vector3.zero, snapVelFlat, now, true);
+                            }
+
+                            state.LastSweptVehPos = postPos;
+                            state.LastSweptTime = now;
+                            state.HasSweptPos = true;
+                            state.LastSamplePos = postPos;
+                            state.LastSampleTime = now;
+                            state.HasSample = true;
+                        }
+                        else if (snapDistSq > 16.0f * 16.0f)
+                        {
+                            // Reset sweep anchor across respawn / cross-map teleports
+                            state.LastSweptVehPos = postPos;
+                            state.LastSweptTime = now;
+                            state.HasSweptPos = true;
+                            state.LastSamplePos = postPos;
+                            state.LastSampleTime = now;
+                            state.HasSample = true;
+                        }
+                    }
+
                     _remoteVehicleMotion[ptr] = state;
                 }
                 catch { }
             }
         }
 
+        private static bool ClipSweptAxis(float coord, float delta, float halfExt, ref float tMin, ref float tMax)
+        {
+            if (Mathf.Abs(delta) <= 1e-5f)
+                return Mathf.Abs(coord) <= halfExt;
+
+            float inv = 1f / delta;
+            float t0 = (coord - halfExt) * inv;
+            float t1 = (coord + halfExt) * inv;
+            if (t0 > t1)
+            {
+                float tmp = t0;
+                t0 = t1;
+                t1 = tmp;
+            }
+            if (t0 > tMin)
+                tMin = t0;
+            if (t1 < tMax)
+                tMax = t1;
+            return tMin <= tMax;
+        }
+
+        private static bool IsPointInSweptLocalBox(
+            float solF, float solR, float solY,
+            float dF, float dR, float dY,
+            float halfL, float halfW, float halfY)
+        {
+            float tMin = 0f;
+            float tMax = 1f;
+            return ClipSweptAxis(solF, dF, halfL, ref tMin, ref tMax) &&
+                   ClipSweptAxis(solR, dR, halfW, ref tMin, ref tMax) &&
+                   ClipSweptAxis(solY, dY, halfY, ref tMin, ref tMax);
+        }
+
         private static void RunVehicleRoadkillAndRightOfWayObbScan(
             Vehicle veh,
+            bool hasSweepStart,
+            Vector3 sweepStartVehPos,
             Vector3 curPos,
             bool hasLeadPos,
             Vector3 leadPos,
@@ -8446,6 +9210,10 @@ namespace EasyRed2HumanAI
             if (horizSpeed <= 0.85f || veh == null || veh.transform == null)
                 return;
 
+            string vehFaction = GetVehicleCrewFaction(veh);
+            if (string.IsNullOrEmpty(vehFaction))
+                return;
+
             Vector3 fwdFlat = veh.transform.forward;
             fwdFlat.y = 0f;
             fwdFlat = fwdFlat.sqrMagnitude > 0.001f ? fwdFlat.normalized : Vector3.forward;
@@ -8454,24 +9222,44 @@ namespace EasyRed2HumanAI
             rightFlat.y = 0f;
             rightFlat = rightFlat.sqrMagnitude > 0.001f ? rightFlat.normalized : Vector3.right;
 
-            Vector2 extents = GetCachedVehicleHalfExtents(veh);
-            float halfW = extents.x + 0.52f;
-            float halfL = extents.y + 0.62f;
+            Vector4 obb = GetCachedVehicleLocalHullObb(veh);
+            float halfW = obb.x + 0.50f;
+            float halfL = obb.y + 0.60f;
+            Vector3 localCenterOffset = rightFlat * obb.z + fwdFlat * obb.w;
+            Vector3 curCenter = curPos + localCenterOffset;
+
+            float startDist = hasSweepStart ? Vector3.Distance(sweepStartVehPos, curPos) : 0f;
+            if (startDist <= 0.05f || startDist > 16.0f)
+            {
+                hasSweepStart = false;
+                startDist = 0f;
+            }
+            Vector3 startCenter = hasSweepStart ? (sweepStartVehPos + localCenterOffset) : curCenter;
+            Vector3 startSeg = startCenter - curCenter;
+            float startF = startSeg.x * fwdFlat.x + startSeg.z * fwdFlat.z;
+            float startR = startSeg.x * rightFlat.x + startSeg.z * rightFlat.z;
+            float startY = startSeg.y;
+
             float leadDist = hasLeadPos ? Vector3.Distance(curPos, leadPos) : 0f;
-            if (leadDist > 6.5f)
+            if (leadDist <= 0.05f || leadDist > 12.0f)
             {
                 hasLeadPos = false;
                 leadDist = 0f;
             }
+            Vector3 leadCenter = hasLeadPos ? (leadPos + localCenterOffset) : curCenter;
+            Vector3 leadSeg = leadCenter - curCenter;
+            float leadF = leadSeg.x * fwdFlat.x + leadSeg.z * fwdFlat.z;
+            float leadR = leadSeg.x * rightFlat.x + leadSeg.z * rightFlat.z;
+            float leadY = leadSeg.y;
 
-            float broadRadius = halfL + leadDist + 2.75f;
+            float broadRadius = halfL + halfW + Mathf.Max(startDist, leadDist) + 2.75f;
             float broadRadiusSq = broadRadius * broadRadius;
-            string vehFaction = GetVehicleCrewFaction(veh);
 
             AiCore.EnsureWorldSnapshot();
             int solCount = AiCore.WorldSoldierCount;
             var soldiers = AiCore.WorldSoldiers;
             Vector3 travelDir = velFlat / horizSpeed;
+            Vector3 anchorCenter = hasSweepStart ? startCenter : curCenter;
 
             for (int i = 0; i < solCount; i++)
             {
@@ -8479,7 +9267,7 @@ namespace EasyRed2HumanAI
                 if (sSnap.IsOnVehicle || sSnap.Ref == null)
                     continue;
 
-                Vector3 snapDelta = sSnap.Pos - curPos;
+                Vector3 snapDelta = sSnap.Pos - curCenter;
                 if ((snapDelta.x * snapDelta.x + snapDelta.z * snapDelta.z) > broadRadiusSq)
                     continue;
 
@@ -8491,30 +9279,21 @@ namespace EasyRed2HumanAI
                 if (sHandles == null || sHandles.Tr == null)
                     continue;
 
-                // Use live transform position once inside the broadphase circle so fast-moving soldiers/tanks never miss due to snapshot age
+                // Use live transform position once inside the broadphase circle so fast-moving soldiers/vehicles never miss due to snapshot age
                 Vector3 livePos = sHandles.Tr.position;
-                Vector3 delta = livePos - curPos;
-                bool insideCur = Mathf.Abs(delta.y) <= 2.85f &&
-                                 Mathf.Abs(delta.x * fwdFlat.x + delta.z * fwdFlat.z) <= halfL &&
-                                 Mathf.Abs(delta.x * rightFlat.x + delta.z * rightFlat.z) <= halfW;
+                Vector3 rel = livePos - curCenter;
+                float solF = rel.x * fwdFlat.x + rel.z * fwdFlat.z;
+                float solR = rel.x * rightFlat.x + rel.z * rightFlat.z;
+                float solY = rel.y;
 
-                bool insideLead = false;
-                if (!insideCur && hasLeadPos)
-                {
-                    Vector3 deltaLead = livePos - leadPos;
-                    insideLead = Mathf.Abs(deltaLead.y) <= 2.85f &&
-                                 Mathf.Abs(deltaLead.x * fwdFlat.x + deltaLead.z * fwdFlat.z) <= halfL &&
-                                 Mathf.Abs(deltaLead.x * rightFlat.x + deltaLead.z * rightFlat.z) <= halfW;
-                    if (insideLead)
-                        delta = deltaLead;
-                }
-
-                if (!insideCur && !insideLead)
+                bool hitHull = (Mathf.Abs(solY) <= 2.85f && Mathf.Abs(solF) <= halfL && Mathf.Abs(solR) <= halfW) ||
+                               (hasSweepStart && IsPointInSweptLocalBox(solF, solR, solY, startF, startR, startY, halfL, halfW, 2.85f)) ||
+                               (hasLeadPos && IsPointInSweptLocalBox(solF, solR, solY, leadF, leadR, leadY, halfL, halfW, 2.85f));
+                if (!hitHull)
                     continue;
 
                 string sFac = !string.IsNullOrEmpty(sSnap.Faction) ? sSnap.Faction : AiCore.GetCachedFaction(sHandles, now);
-                bool sameFaction = !string.IsNullOrEmpty(vehFaction) &&
-                                   !string.IsNullOrEmpty(sFac) &&
+                bool sameFaction = !string.IsNullOrEmpty(sFac) &&
                                    AiCore.AreSameSideFactions(vehFaction, sFac);
 
                 if (sameFaction)
@@ -8524,19 +9303,20 @@ namespace EasyRed2HumanAI
                         s.DisableHitByVehicleFor(1.6f);
                         if (!sSnap.IsPlayer && AiCore.IsLocallyOwnedBot(s))
                         {
-                            TryNudgeFriendlySoldierAside(s, veh, curPos, travelDir, rightFlat, extents.x, now, true);
+                            TryNudgeFriendlySoldierAside(s, veh, curCenter, travelDir, rightFlat, obb.x, now, true);
                         }
                     }
                 }
                 else if (s.AllowHitByVehicle)
                 {
-                    // On remote-driver scan (Host watching client tank), only the soldier's owner applies authoritative damage;
+                    // On remote-driver scan (Host watching client vehicle), only the soldier's owner applies authoritative damage;
                     // on local-driver scan (driver's own machine), allow immediate roadkill damage synced via SyncDamageWithOthers.
                     if (isRemoteDriverScan && !AiCore.IsLocallyOwnedSoldier(s))
                         continue;
 
-                    Vector3 toSolFlat = new Vector3(delta.x, 0f, delta.z);
-                    if (toSolFlat.sqrMagnitude < 0.36f || Vector3.Dot(travelDir, toSolFlat.normalized) > -0.15f)
+                    Vector3 fromAnchor = livePos - anchorCenter;
+                    float alongTravel = fromAnchor.x * travelDir.x + fromAnchor.z * travelDir.z;
+                    if (alongTravel >= -obb.y * 0.45f)
                     {
                         s.DisableHitByVehicleFor(1.0f);
                         s.Damage(1000f);
@@ -8545,7 +9325,7 @@ namespace EasyRed2HumanAI
                             RemoteClientRoadkillsAssistedCount++;
                             if (VisionConfig.DebugLogging.Value)
                             {
-                                AiCore.LogDebug("RoadkillAssist", $"Host OBB roadkill applied for remote client driver ({horizSpeed:F1}m/s).");
+                                AiCore.LogDebug("RoadkillAssist", $"Host swept OBB roadkill applied for remote client driver ({horizSpeed:F1}m/s).");
                             }
                         }
                     }
@@ -8564,12 +9344,14 @@ namespace EasyRed2HumanAI
                         return;
 
                     Vehicle veh = __instance.vehicle;
-                    if (veh == null || veh.Pointer == IntPtr.Zero || veh.OwnDriverOrVehicle() || !veh.HasDriverAlive || veh.transform == null)
+                    if (veh == null || veh.Pointer == IntPtr.Zero || veh.OwnDriverOrVehicle() || veh.transform == null)
                         return;
 
                     IntPtr ptr = veh.Pointer;
                     float now = Time.time;
                     _remoteVehicleMotion.TryGetValue(ptr, out RemoteVehicleMotionState state);
+                    if (!veh.HasDriverAlive && !(state.LastPacketTime > 0f && now - state.LastPacketTime <= 0.45f))
+                        return;
 
                     Vector3 curPos = veh.transform.position;
                     float dt = now - state.LastSampleTime;
@@ -8601,7 +9383,7 @@ namespace EasyRed2HumanAI
                     }
 
                     // Host-Authoritative Remote Client Roadkill & Friendly Right-of-Way OBB Scan:
-                    // Do NOT gate on IsLocallyOwnedVehicle(veh) because when a remote client drives a tank,
+                    // Do NOT gate on IsLocallyOwnedVehicle(veh) because when a remote client drives a truck/tank,
                     // veh.OwnDriverOrVehicle() is false on the Host while the Host owns all AI soldiers!
                     if (now >= state.NextRoadkillScanTime)
                     {
@@ -8633,8 +9415,13 @@ namespace EasyRed2HumanAI
 
                         if (velFlat.sqrMagnitude > 0.85f * 0.85f)
                         {
-                            RunVehicleRoadkillAndRightOfWayObbScan(veh, curPos, hasDestPos, destPos, velFlat, now, true);
+                            bool hasSweepStart = state.HasSweptPos && (now - state.LastSweptTime <= 0.55f);
+                            RunVehicleRoadkillAndRightOfWayObbScan(veh, hasSweepStart, state.LastSweptVehPos, curPos, hasDestPos, destPos, velFlat, now, true);
                         }
+
+                        state.LastSweptVehPos = curPos;
+                        state.LastSweptTime = now;
+                        state.HasSweptPos = true;
                     }
 
                     _remoteVehicleMotion[ptr] = state;
@@ -8644,10 +9431,10 @@ namespace EasyRed2HumanAI
         }
 
         /// <summary>
-        /// Local Player Driver OBB Roadkill Scan (VehicleWithWheels.FixedUpdate):
-        /// In Unity 2022 PhysX, rolling tank WheelColliders/BoxTriggers frequently fail to fire OnTriggerEnter against
-        /// stationary or prone Soldier CharacterControllers, and vanilla's 3D 70-degree center-to-feet angle check rejects
-        /// close-in sprocket hits. Run the same throttled 0.06s OBB scan for local human drivers in forward AND reverse!
+        /// Local Driver (Human & AI) Swept OBB Roadkill Scan (VehicleWithWheels.FixedUpdate):
+        /// In Unity 2022 PhysX, grounded AI bots have m_controller disabled and fast trucks can step cleanly
+        /// through triggers, while vanilla's 3D 70-degree center-to-feet angle check rejects close bumper/sprocket
+        /// hits. Run a throttled swept OBB scan for moving locally owned vehicles in forward AND reverse.
         /// </summary>
         [HarmonyPatch(typeof(VehicleWithWheels), nameof(VehicleWithWheels.FixedUpdate))]
         public static class VehicleWithWheels_FixedUpdate_Patch
@@ -8674,17 +9461,18 @@ namespace EasyRed2HumanAI
 
                     if (__instance == null ||
                         !__instance.OwnDriverOrVehicle() ||
-                        !__instance.PlayerIsDriving() ||
                         !__instance.HasDriverAlive ||
                         __instance.IsDisabled() ||
                         __instance.transform == null)
                     {
-                        // Throttle AI/unoccupied vehicles for 0.25s in pure C# so 5x FixedUpdate catch-up steps skip all IL2CPP calls!
+                        // Throttle unoccupied/remote vehicles for 0.25s in pure C# so FixedUpdate catch-up steps skip IL2CPP calls
                         _nextLocalDriverRoadkillScanTime[ptr] = now + 0.25f;
                         return;
                     }
 
-                    _nextLocalDriverRoadkillScanTime[ptr] = now + 0.06f;
+                    bool isPlayerDriving = __instance.PlayerIsDriving();
+                    float scanDt = isPlayerDriving ? 0.05f : 0.10f;
+                    _nextLocalDriverRoadkillScanTime[ptr] = now + scanDt;
 
                     Rigidbody rb = __instance.rb;
                     if (rb == null || rb.isKinematic)
@@ -8692,9 +9480,12 @@ namespace EasyRed2HumanAI
 
                     Vector3 rbVel = rb.velocity;
                     Vector3 velFlat = new Vector3(rbVel.x, 0f, rbVel.z);
-                    if (velFlat.sqrMagnitude > 1.0f * 1.0f)
+                    float minSpeed = isPlayerDriving ? 1.0f : 1.35f;
+                    if (velFlat.sqrMagnitude > minSpeed * minSpeed)
                     {
-                        RunVehicleRoadkillAndRightOfWayObbScan(__instance, __instance.transform.position, false, Vector3.zero, velFlat, now, false);
+                        Vector3 curPos = __instance.transform.position;
+                        Vector3 sweepStartPos = curPos - velFlat * (scanDt + 0.01f);
+                        RunVehicleRoadkillAndRightOfWayObbScan(__instance, true, sweepStartPos, curPos, false, Vector3.zero, velFlat, now, false);
                     }
                 }
                 catch { }
@@ -8703,6 +9494,43 @@ namespace EasyRed2HumanAI
                     HitchProfiler.End(HitchBucket.VehFixedUpdate, __state);
                 }
             }
+        }
+
+        private static bool TryApplyTriggerRoadkillHit(Vehicle veh, Soldier soldier, Vector3 velFlat, bool isRemoteDriver)
+        {
+            float horizSpeed = velFlat.magnitude;
+            if (horizSpeed <= 0.85f || veh.transform == null || soldier.transform == null)
+                return false;
+
+            Vector3 fwdFlat = veh.transform.forward;
+            fwdFlat.y = 0f;
+            fwdFlat = fwdFlat.sqrMagnitude > 0.001f ? fwdFlat.normalized : Vector3.forward;
+
+            Vector3 rightFlat = veh.transform.right;
+            rightFlat.y = 0f;
+            rightFlat = rightFlat.sqrMagnitude > 0.001f ? rightFlat.normalized : Vector3.right;
+
+            Vector4 obb = GetCachedVehicleLocalHullObb(veh);
+            Vector3 hullCenter = veh.transform.position + rightFlat * obb.z + fwdFlat * obb.w;
+            Vector3 toSoldierFlat = soldier.transform.position - hullCenter;
+            toSoldierFlat.y = 0f;
+
+            if (toSoldierFlat.sqrMagnitude < 0.64f ||
+                Vector3.Dot(velFlat / horizSpeed, toSoldierFlat.normalized) > -0.25f)
+            {
+                soldier.DisableHitByVehicleFor(1.0f);
+                soldier.Damage(1000f);
+                if (isRemoteDriver)
+                {
+                    RemoteClientRoadkillsAssistedCount++;
+                    if (VisionConfig.DebugLogging.Value)
+                    {
+                        AiCore.LogDebug("RoadkillAssist", $"Host trigger roadkill applied for remote client driver ({horizSpeed:F1}m/s).");
+                    }
+                }
+                return true;
+            }
+            return false;
         }
 
         [HarmonyPatch(typeof(VehicleWithWheels), nameof(VehicleWithWheels.OnTriggerEnter))]
@@ -8741,15 +9569,16 @@ namespace EasyRed2HumanAI
                         float now = Time.time;
                         if (soldier.IsAI() && __instance.transform != null)
                         {
-                            Vector2 extents = GetCachedVehicleHalfExtents(__instance);
+                            Vector4 obb = GetCachedVehicleLocalHullObb(__instance);
                             Vector3 vehFwd = __instance.transform.forward;
                             vehFwd.y = 0f;
                             vehFwd = vehFwd.sqrMagnitude > 0.001f ? vehFwd.normalized : Vector3.forward;
                             Vector3 vehRight = __instance.transform.right;
                             vehRight.y = 0f;
                             vehRight = vehRight.sqrMagnitude > 0.001f ? vehRight.normalized : Vector3.right;
+                            Vector3 hullCenter = __instance.transform.position + vehRight * obb.z + vehFwd * obb.w;
 
-                            TryNudgeFriendlySoldierAside(soldier, __instance, __instance.transform.position, vehFwd, vehRight, extents.x, now, true);
+                            TryNudgeFriendlySoldierAside(soldier, __instance, hullCenter, vehFwd, vehRight, obb.x, now, true);
                         }
 
                         // In vanilla VehicleWithWheels.OnTriggerEnter (0x18087C92B-0x18087C940), same-faction collisions
@@ -8764,7 +9593,8 @@ namespace EasyRed2HumanAI
                         return false;
                     }
 
-                    bool canApplyHit = __instance.OwnDriverOrVehicle() || AiCore.IsLocallyOwnedSoldier(soldier);
+                    bool ownVeh = __instance.OwnDriverOrVehicle();
+                    bool canApplyHit = ownVeh || AiCore.IsLocallyOwnedSoldier(soldier);
                     if (!canApplyHit ||
                         !soldier.AllowHitByVehicle ||
                         soldier.IsOnVehicle() ||
@@ -8774,23 +9604,31 @@ namespace EasyRed2HumanAI
                         return true;
                     }
 
-                    // Fix 1: Remote multiplayer client driving a vehicle/tank (evaluated on soldier's owner, e.g. Host).
-                    if (!__instance.OwnDriverOrVehicle() && __instance.HasDriverAlive)
+                    float triggerNow = Time.time;
+
+                    // Fix 1: Remote multiplayer client driving a vehicle/truck/tank (evaluated on soldier's owner, e.g. Host).
+                    if (!ownVeh)
                     {
-                        float now = Time.time;
+                        bool hasMotionState = _remoteVehicleMotion.TryGetValue(__instance.Pointer, out RemoteVehicleMotionState mState);
+                        bool hasRemotePacketDriver = hasMotionState &&
+                                                     mState.LastPacketTime > 0f &&
+                                                     triggerNow - mState.LastPacketTime <= 0.45f;
+                        if (!__instance.HasDriverAlive && !hasRemotePacketDriver)
+                            return true;
+
                         Vector3 velFlat = Vector3.zero;
                         Vector3 fwdFlat = __instance.transform.forward;
                         fwdFlat.y = 0f;
                         fwdFlat = fwdFlat.sqrMagnitude > 0.001f ? fwdFlat.normalized : Vector3.forward;
 
-                        if (_remoteVehicleMotion.TryGetValue(__instance.Pointer, out RemoteVehicleMotionState mState))
+                        if (hasMotionState)
                         {
-                            if (now - mState.LastMoveTime <= 0.45f)
+                            if (triggerNow - mState.LastMoveTime <= 0.45f)
                             {
                                 velFlat = new Vector3(mState.SmoothedVelocity.x, 0f, mState.SmoothedVelocity.z);
                             }
 
-                            if (now - mState.LastPacketTime <= 0.75f)
+                            if (triggerNow - mState.LastPacketTime <= 0.75f)
                             {
                                 Vector3 packetVel = fwdFlat * mState.LastSignedSpeed;
                                 if (packetVel.sqrMagnitude > velFlat.sqrMagnitude)
@@ -8806,46 +9644,19 @@ namespace EasyRed2HumanAI
                                 velFlat = fallbackVel;
                         }
 
-                        float horizSpeed = velFlat.magnitude;
-                        if (horizSpeed > 0.85f)
-                        {
-                            Vector3 toSoldierFlat = soldier.transform.position - __instance.transform.position;
-                            toSoldierFlat.y = 0f;
-                            if (toSoldierFlat.sqrMagnitude < 0.25f ||
-                                Vector3.Dot(velFlat / horizSpeed, toSoldierFlat.normalized) > 0.10f)
-                            {
-                                soldier.DisableHitByVehicleFor(1.0f);
-                                soldier.Damage(1000f);
-                                RemoteClientRoadkillsAssistedCount++;
-                                AiCore.LogDebug("RoadkillAssist", $"Host applied roadkill for remote client driver ({horizSpeed:F1}m/s).");
-                                return false;
-                            }
-                        }
-                        return true;
+                        return !TryApplyTriggerRoadkillHit(__instance, soldier, velFlat, true);
                     }
 
                     // Fix 2: Local driver (Client or Host) running over an enemy in forward OR reverse:
                     // Bypass vanilla's broken 3D 70-degree center-to-feet angle check & forward-only speed check using 2D XZ velocity!
-                    if (__instance.OwnDriverOrVehicle() && __instance.HasDriverAlive)
+                    if (__instance.HasDriverAlive)
                     {
                         Rigidbody rb = __instance.rb;
                         if (rb != null && !rb.isKinematic)
                         {
                             Vector3 rbVel = rb.velocity;
                             Vector3 rbVelFlat = new Vector3(rbVel.x, 0f, rbVel.z);
-                            float horizSpeed = rbVelFlat.magnitude;
-                            if (horizSpeed > 0.85f)
-                            {
-                                Vector3 toSoldierFlat = soldier.transform.position - __instance.transform.position;
-                                toSoldierFlat.y = 0f;
-                                if (toSoldierFlat.sqrMagnitude < 0.25f ||
-                                    Vector3.Dot(rbVelFlat / horizSpeed, toSoldierFlat.normalized) > 0.10f)
-                                {
-                                    soldier.DisableHitByVehicleFor(1.0f);
-                                    soldier.Damage(1000f);
-                                    return false;
-                                }
-                            }
+                            return !TryApplyTriggerRoadkillHit(__instance, soldier, rbVelFlat, false);
                         }
                     }
 
@@ -9834,6 +10645,8 @@ namespace EasyRed2HumanAI
         private static int _armedConquestSpawnFrame = -999;
 
         public static int ConquestPurchasesCount { get; internal set; }
+        public static int UnderwaterSpawnsRescuedCount { get; internal set; }
+        private static int _spawnRescueScatterCounter;
 
         public static void ClearConquestQuartermasterState()
         {
@@ -10408,6 +11221,687 @@ namespace EasyRed2HumanAI
                 {
                     HitchProfiler.End(HitchBucket.VanSpawnSquad, __state.StartStamp);
                 }
+            }
+        }
+
+        // ============================================================================
+        // VANILLA COASTAL, AMPHIBIOUS, UNDERGROUND & UNPARACHUTED SPAWN-DEATH FIX
+        // Vanilla Soldier.FixedUpdate (y < -1.7f when injured) and Creature.UpdateGenericValues
+        // (y < -2.5f on ALL maps, even with zero water!) call KillSynched() directly when
+        // !IsOnVehicle() && OwnSyncher, bypassing SetInvincible(2f..10f). Meanwhile,
+        // SpawnManager.GetSpawnPosition casts a short 6.7m downward ray (misses steep/mountain
+        // slopes, underwater seabeds, or underground spawners), Steps 0..3 yields drop
+        // pre-seated passengers, full-boat overflows dump unseated bots offshore, and unseated
+        // airborne/CargoPlane-overflow spawns lack openParachuteHeight and fall to death.
+        // ============================================================================
+        private const float DryMapVoidFloorThresholdY = -2.35f;
+        private const float DryMapAcceptMinY = -1.60f;
+        private const float ShoreAcceptMinNormalY = 0.60f;
+        private const float UnparachutedDropSnapMinAgl = 6.5f;
+        private const float AirborneParachuteMinAgl = 45.0f;
+        private static readonly float[] _shoreSearchRadii = { 8f, 18f, 32f, 50f, 75f, 105f, 145f, 195f };
+        private static readonly int[] _shoreSearchAngleSteps = { 0, 1, -1, 2, -2, 3, -3, 4, -4, 5, -5, 6 };
+
+        private static void GetSpawnFloorThresholds(out float floorMinY, out float acceptMinY)
+        {
+            if (AiCore.TryGetActiveWaterLevel(out float waterY))
+            {
+                // Preserve shallow surf down to ~1.30m (e.g. Omaha Beach dismounts & beachhead spawns)
+                // while scaling with custom water levels and guarding Creature's global y < -2.5f kill plane.
+                floorMinY = Mathf.Max(-2.30f, waterY - 1.30f);
+                acceptMinY = Mathf.Max(-2.00f, waterY - 1.05f);
+            }
+            else
+            {
+                // Waterless map: never relocate dry trenches/craters above -2.35m; only catch
+                // underground/void spawns approaching Creature.UpdateGenericValues (y < -2.5f).
+                floorMinY = DryMapVoidFloorThresholdY;
+                acceptMinY = DryMapAcceptMinY;
+            }
+        }
+
+        private static float GetTerrainProbeTopY(float x, float z, float refY)
+        {
+            float terrY = ResourcesManager.GetTerrainAltitude(new Vector3(x, refY, z), 0f);
+            return Mathf.Max(Mathf.Max(refY + 45f, terrY + 35f), 65f);
+        }
+
+        private static bool RaycastStaticEnvironmentDown(
+            Vector3 origin,
+            float maxDistance,
+            int mask,
+            out RaycastHit envHit)
+        {
+            Vector3 probe = origin;
+            float remaining = maxDistance;
+            for (int hop = 0; hop < 3 && remaining > 0.25f; hop++)
+            {
+                if (!Physics.Raycast(probe, Vector3.down, out envHit, remaining, mask, QueryTriggerInteraction.Ignore))
+                {
+                    envHit = default;
+                    return false;
+                }
+
+                Transform tr = envHit.transform;
+                if (tr == null || (tr.GetComponentInParent<Vehicle>() == null && tr.GetComponentInParent<Creature>() == null))
+                    return true;
+
+                float consumed = (probe.y - envHit.point.y) + 0.08f;
+                remaining -= consumed;
+                probe = new Vector3(origin.x, envHit.point.y - 0.08f, origin.z);
+            }
+
+            envHit = default;
+            return false;
+        }
+
+        private static bool IsUnseatedSpawnGroundSafe(
+            Vector3 pos,
+            float floorMinY,
+            out Vector3 safePos,
+            out bool isHighAltitudeDrop)
+        {
+            safePos = pos;
+            isHighAltitudeDrop = false;
+
+            int mask = AiCore.GetSolidEnvironmentMask();
+            Vector3 probeStart = new Vector3(pos.x, pos.y + 1.6f, pos.z);
+            if (!RaycastStaticEnvironmentDown(probeStart, 600f, mask, out RaycastHit hit) ||
+                hit.point.y < floorMinY)
+            {
+                return false;
+            }
+
+            float agl = pos.y - hit.point.y;
+            if (agl >= AirborneParachuteMinAgl)
+            {
+                float terrAlt = ResourcesManager.GetTerrainAltitude(pos, 5f);
+                if ((pos.y - terrAlt) > 24.0f)
+                {
+                    isHighAltitudeDrop = true;
+                    return true;
+                }
+            }
+
+            if (pos.y < floorMinY || agl >= UnparachutedDropSnapMinAgl)
+            {
+                Vector3 snapped = hit.point + Vector3.up * 0.14f;
+                if (hit.normal.y >= ShoreAcceptMinNormalY &&
+                    !Physics.CheckSphere(snapped + Vector3.up * 0.95f, 0.26f, mask, QueryTriggerInteraction.Ignore))
+                {
+                    safePos = snapped;
+                    return true;
+                }
+
+                return false;
+            }
+
+            return true;
+        }
+
+        private static bool TrySampleWalkableDryGround(
+            float x,
+            float z,
+            float probeTopY,
+            float probeDist,
+            float acceptMinY,
+            int mask,
+            out Vector3 groundPos)
+        {
+            if (RaycastStaticEnvironmentDown(new Vector3(x, probeTopY, z), probeDist, mask, out RaycastHit hit) &&
+                hit.point.y >= acceptMinY &&
+                hit.normal.y >= ShoreAcceptMinNormalY &&
+                !Physics.CheckSphere(hit.point + Vector3.up * 1.0f, 0.28f, mask, QueryTriggerInteraction.Ignore))
+            {
+                groundPos = hit.point + Vector3.up * 0.14f;
+                return true;
+            }
+
+            groundPos = default;
+            return false;
+        }
+
+        private static Vector3 ApplySquadmateShoreScatter(Vector3 baseDryPos, float acceptMinY, int mask)
+        {
+            int idx = ++_spawnRescueScatterCounter;
+            float angle = idx * 2.399963f;
+            float radius = 1.35f + (idx % 4) * 0.85f;
+            float sx = baseDryPos.x + Mathf.Cos(angle) * radius;
+            float sz = baseDryPos.z + Mathf.Sin(angle) * radius;
+
+            if (TrySampleWalkableDryGround(sx, sz, baseDryPos.y + 8.0f, 18.0f, acceptMinY, mask, out Vector3 scattered))
+                return scattered;
+
+            return baseDryPos;
+        }
+
+        private static float ComputePreferredLandwardAngleRad(Vector3 origin, string faction)
+        {
+            var spawns = SpawnManager.activeSpawns;
+            if (spawns == null || spawns.Count == 0)
+                return 0f;
+
+            float bestFriendlyDistSq = float.MaxValue;
+            Vector3 bestFriendlyPos = Vector3.zero;
+            bool hasFriendly = false;
+
+            float bestAnyDistSq = float.MaxValue;
+            Vector3 bestAnyPos = Vector3.zero;
+            bool hasAny = false;
+
+            int count = spawns.Count;
+            for (int i = 0; i < count; i++)
+            {
+                SpawnManager sm = spawns[i];
+                if (sm == null || sm.Pointer == IntPtr.Zero || !sm.isActiveAndEnabled || sm.spawnType == SpawnType.None)
+                    continue;
+
+                Vector3 smPos = sm.transform.position;
+                float dx = smPos.x - origin.x;
+                float dz = smPos.z - origin.z;
+                float dSq = dx * dx + dz * dz;
+                if (dSq <= 36f)
+                    continue;
+
+                bool sameSide = string.IsNullOrEmpty(faction) || AiCore.AreSameSideFactions(faction, sm.GetFaction());
+                if (sameSide && smPos.y >= -0.5f && dSq < bestFriendlyDistSq)
+                {
+                    bestFriendlyDistSq = dSq;
+                    bestFriendlyPos = smPos;
+                    hasFriendly = true;
+                }
+                else if (smPos.y >= 1.0f && dSq < bestAnyDistSq)
+                {
+                    bestAnyDistSq = dSq;
+                    bestAnyPos = smPos;
+                    hasAny = true;
+                }
+            }
+
+            if (hasFriendly)
+                return Mathf.Atan2(bestFriendlyPos.z - origin.z, bestFriendlyPos.x - origin.x);
+            if (hasAny)
+                return Mathf.Atan2(bestAnyPos.z - origin.z, bestAnyPos.x - origin.x);
+
+            return 0f;
+        }
+
+        private static bool TryResolveSafeShoreOrLandSpawnPosition(
+            Vector3 origin,
+            string faction,
+            bool isPlayer,
+            float floorMinY,
+            float acceptMinY,
+            out Vector3 resolvedPos)
+        {
+            int mask = AiCore.GetSolidEnvironmentMask();
+            Vector3 foundDryPos = default;
+            bool found = false;
+
+            // 1. Mountain-proof vertical re-probe at (origin.x, origin.z) to clear sunken coastal bunkers or steep hillsides
+            float topY = GetTerrainProbeTopY(origin.x, origin.z, origin.y);
+            float downDist = Mathf.Max(160f, (topY - floorMinY) + 35f);
+            if (TrySampleWalkableDryGround(origin.x, origin.z, topY, downDist, acceptMinY, mask, out Vector3 verticalDry))
+            {
+                foundDryPos = verticalDry;
+                found = true;
+            }
+
+            // 2. Landward-biased expanding radial shoreline/hillside search (8m..195m x 12 angles)
+            if (!found)
+            {
+                float baseAngle = ComputePreferredLandwardAngleRad(origin, faction);
+                const float angleStepRad = Mathf.PI / 6f;
+
+                for (int rIdx = 0; rIdx < _shoreSearchRadii.Length && !found; rIdx++)
+                {
+                    float r = _shoreSearchRadii[rIdx];
+                    for (int sIdx = 0; sIdx < _shoreSearchAngleSteps.Length; sIdx++)
+                    {
+                        float ang = baseAngle + _shoreSearchAngleSteps[sIdx] * angleStepRad;
+                        float cx = origin.x + Mathf.Cos(ang) * r;
+                        float cz = origin.z + Mathf.Sin(ang) * r;
+                        float ringTopY = GetTerrainProbeTopY(cx, cz, origin.y);
+                        float ringDownDist = Mathf.Max(160f, (ringTopY - floorMinY) + 35f);
+
+                        if (TrySampleWalkableDryGround(cx, cz, ringTopY, ringDownDist, acceptMinY, mask, out Vector3 shoreHit))
+                        {
+                            foundDryPos = shoreHit;
+                            found = true;
+                            break;
+                        }
+                    }
+                }
+            }
+
+            // 3. Fallback to nearest enabled dry friendly SpawnManager if far offshore (> 195m) or in sheer cliff void
+            if (!found)
+            {
+                var spawns = SpawnManager.activeSpawns;
+                if (spawns != null && spawns.Count > 0)
+                {
+                    float bestSmDistSq = float.MaxValue;
+                    Vector3 bestSmPos = default;
+                    int smCount = spawns.Count;
+
+                    for (int i = 0; i < smCount; i++)
+                    {
+                        SpawnManager sm = spawns[i];
+                        if (sm == null ||
+                            sm.Pointer == IntPtr.Zero ||
+                            !sm.isActiveAndEnabled ||
+                            sm.spawnType == SpawnType.None ||
+                            !sm.UserCanUseSpawner(isPlayer))
+                        {
+                            continue;
+                        }
+
+                        if (!string.IsNullOrEmpty(faction) && !AiCore.AreSameSideFactions(faction, sm.GetFaction()))
+                            continue;
+
+                        Vector3 smPos = sm.transform.position;
+                        float dSq = (smPos - origin).sqrMagnitude;
+                        if (dSq >= bestSmDistSq)
+                            continue;
+
+                        float smTopY = GetTerrainProbeTopY(smPos.x, smPos.z, smPos.y);
+                        float smDownDist = Mathf.Max(160f, (smTopY - floorMinY) + 35f);
+                        if (TrySampleWalkableDryGround(smPos.x, smPos.z, smTopY, smDownDist, acceptMinY, mask, out Vector3 smDry))
+                        {
+                            bestSmDistSq = dSq;
+                            bestSmPos = smDry;
+                            found = true;
+                        }
+                    }
+
+                    if (found)
+                        foundDryPos = bestSmPos;
+                }
+            }
+
+            // 4. Last-resort fallback to nearest alive same-side ground squad on dry terrain
+            if (!found)
+            {
+                AiCore.EnsureWorldSnapshot();
+                var squads = AiCore.WorldSquads;
+                int sqCount = AiCore.WorldSquadCount;
+                float bestSqDistSq = float.MaxValue;
+                Vector3 bestSqDry = default;
+
+                for (int s = 0; s < sqCount; s++)
+                {
+                    ref AiCore.SquadSnapshot sqSnap = ref squads[s];
+                    if (sqSnap.UnitCount <= 0 || sqSnap.RefOnPlane)
+                        continue;
+
+                    if (!string.IsNullOrEmpty(faction) && !AiCore.AreSameSideFactions(faction, sqSnap.Faction))
+                        continue;
+
+                    Vector3 sqPos = sqSnap.RefPos;
+                    float dSq = (sqPos - origin).sqrMagnitude;
+                    if (dSq >= bestSqDistSq)
+                        continue;
+
+                    float sqTopY = GetTerrainProbeTopY(sqPos.x, sqPos.z, sqPos.y);
+                    float sqDownDist = Mathf.Max(160f, (sqTopY - floorMinY) + 35f);
+                    if (TrySampleWalkableDryGround(sqPos.x, sqPos.z, sqTopY, sqDownDist, acceptMinY, mask, out Vector3 sqDry))
+                    {
+                        bestSqDistSq = dSq;
+                        bestSqDry = sqDry;
+                        found = true;
+                    }
+                }
+
+                if (found)
+                    foundDryPos = bestSqDry;
+            }
+
+            if (!found)
+            {
+                resolvedPos = origin;
+                return false;
+            }
+
+            resolvedPos = ApplySquadmateShoreScatter(foundDryPos, acceptMinY, mask);
+            return true;
+        }
+
+        private static void TeleportSpawnedSoldierSafely(Soldier soldier, Vector3 safePos)
+        {
+            soldier.TeleportTo(safePos);
+            soldier.ResetGroundLeavePos();
+            soldier.currentVelocity = Vector3.zero;
+        }
+
+        /// <summary>
+        /// Prevents vanilla coastal/amphibious spawn-drowning, dry-map underground/void spawns below
+        /// <c>y = -2.5f</c>, steep cliff-ray misses, and unparachuted high-altitude / <see cref="CargoPlane"/>
+        /// overflow falls across all <see cref="SpawnManager._SpawnUnit_d__37"/> execution stages.
+        /// </summary>
+        [HarmonyPatch(typeof(SpawnManager._SpawnUnit_d__37), nameof(SpawnManager._SpawnUnit_d__37.MoveNext))]
+        public static class SpawnManager_SpawnUnitMoveNext_Patch
+        {
+            public struct SpawnUnitGuardState
+            {
+                public int PrevState;
+                public bool RescuedPreInstantiate;
+            }
+
+            public static void Prefix(SpawnManager._SpawnUnit_d__37 __instance, out SpawnUnitGuardState __state)
+            {
+                __state = default;
+                try
+                {
+                    if (!VisionConfig.EnableMod.Value || __instance == null || __instance.Pointer == IntPtr.Zero)
+                        return;
+
+                    if (__instance.init_as_ai && Photon.Pun.PhotonNetwork.InRoom && !Photon.Pun.PhotonNetwork.IsMasterClient)
+                        return;
+
+                    int st = __instance.__1__state;
+                    __state.PrevState = st;
+
+                    Vehicle spawnVeh = __instance.spawnVehicle;
+                    bool hasSpawnVeh = spawnVeh != null && spawnVeh.Pointer != IntPtr.Zero;
+                    GetSpawnFloorThresholds(out float floorMinY, out float acceptMinY);
+
+                    if (st == 0)
+                    {
+                        if (hasSpawnVeh)
+                        {
+                            Vector3 vPos = spawnVeh.transform.position;
+                            if (__instance.position.y < floorMinY + 0.5f)
+                                __instance.position = new Vector3(vPos.x, Mathf.Max(vPos.y + 2.2f, floorMinY + 2.8f), vPos.z);
+                        }
+                        else
+                        {
+                            Vector3 origPos = __instance.position;
+                            if (IsUnseatedSpawnGroundSafe(origPos, floorMinY, out Vector3 snappedPos, out _))
+                            {
+                                if ((snappedPos - origPos).sqrMagnitude > 0.01f)
+                                {
+                                    __instance.position = snappedPos;
+                                    if (origPos.y < floorMinY || (origPos.y - snappedPos.y) >= 18.0f)
+                                    {
+                                        __state.RescuedPreInstantiate = true;
+                                        UnderwaterSpawnsRescuedCount++;
+
+                                        if (VisionConfig.DebugLogging.Value)
+                                        {
+                                            AiCore.LogDebug(
+                                                "SpawnRescue",
+                                                $"Snapped unsafe spawn ({__instance.faction}) from {origPos} to {snappedPos}.",
+                                                2.0f);
+                                        }
+                                    }
+                                }
+                            }
+                            else
+                            {
+                                if (TryResolveSafeShoreOrLandSpawnPosition(
+                                        origPos,
+                                        __instance.faction,
+                                        !__instance.init_as_ai,
+                                        floorMinY,
+                                        acceptMinY,
+                                        out Vector3 rescuedPos))
+                                {
+                                    __instance.position = rescuedPos;
+                                    __state.RescuedPreInstantiate = true;
+                                    UnderwaterSpawnsRescuedCount++;
+
+                                    if (VisionConfig.DebugLogging.Value)
+                                    {
+                                        AiCore.LogDebug(
+                                            "SpawnRescue",
+                                            $"Relocated underwater/underground spawn ({__instance.faction}) from {origPos} to {rescuedPos}.",
+                                            2.0f);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    else if (st >= 1 && st <= 4 && hasSpawnVeh)
+                    {
+                        Soldier stagingSol = __instance._s_5__3;
+                        if (stagingSol != null &&
+                            stagingSol.Pointer != IntPtr.Zero &&
+                            AiCore.IsLocallyOwnedSoldier(stagingSol) &&
+                            !stagingSol.IsOnVehicle() &&
+                            stagingSol.transform.position.y < floorMinY + 0.65f)
+                        {
+                            Vector3 vPos = spawnVeh.transform.position;
+                            Vector3 holdPos = new Vector3(vPos.x, Mathf.Max(vPos.y + 2.2f, floorMinY + 2.8f), vPos.z);
+                            TeleportSpawnedSoldierSafely(stagingSol, holdPos);
+                        }
+                    }
+                }
+                catch { }
+            }
+
+            public static void Postfix(SpawnManager._SpawnUnit_d__37 __instance, bool __result, SpawnUnitGuardState __state)
+            {
+                if (__result || (__state.PrevState != 3 && __state.PrevState != 4))
+                    return;
+
+                try
+                {
+                    if (!VisionConfig.EnableMod.Value || __instance == null || __instance.Pointer == IntPtr.Zero)
+                        return;
+
+                    if (__instance.init_as_ai && Photon.Pun.PhotonNetwork.InRoom && !Photon.Pun.PhotonNetwork.IsMasterClient)
+                        return;
+
+                    Soldier s = __instance._s_5__3;
+                    if (s == null || s.Pointer == IntPtr.Zero || !AiCore.IsLocallyOwnedSoldier(s) || s.IsOnVehicle())
+                        return;
+
+                    GetSpawnFloorThresholds(out float floorMinY, out float acceptMinY);
+                    Vector3 postPos = s.transform.position;
+                    if (!IsUnseatedSpawnGroundSafe(postPos, floorMinY, out Vector3 postSnapped, out bool isHighAltDrop))
+                    {
+                        if (TryResolveSafeShoreOrLandSpawnPosition(
+                                postPos,
+                                __instance.faction,
+                                !__instance.init_as_ai,
+                                floorMinY,
+                                acceptMinY,
+                                out Vector3 rescuedPostPos))
+                        {
+                            TeleportSpawnedSoldierSafely(s, rescuedPostPos);
+                            if (__instance.spawnVehicle != null)
+                                s.dontLeaveVehicle = false;
+
+                            SoldierAI ai = s.aiController;
+                            if (ai != null)
+                                ai.moveDirectlyToward_end = 0f;
+
+                            if (!__state.RescuedPreInstantiate)
+                                UnderwaterSpawnsRescuedCount++;
+
+                            if (VisionConfig.DebugLogging.Value)
+                            {
+                                AiCore.LogDebug(
+                                    "SpawnRescue",
+                                    $"Rescued unseated post-spawn unit ({__instance.faction}) from {postPos} to {rescuedPostPos}.",
+                                    2.0f);
+                            }
+                        }
+                    }
+                    else if (isHighAltDrop)
+                    {
+                        if (__instance.spawnVehicle != null)
+                            s.dontLeaveVehicle = false;
+
+                        if (!s.FallingWithParachute() && s.useParachuteHeight <= 0.01f)
+                        {
+                            float terrAlt = ResourcesManager.GetTerrainAltitude(postPos, 5f);
+                            s.UseParachute(terrAlt + 450.0f);
+
+                            if (!__state.RescuedPreInstantiate)
+                                UnderwaterSpawnsRescuedCount++;
+
+                            if (VisionConfig.DebugLogging.Value)
+                            {
+                                AiCore.LogDebug(
+                                    "SpawnRescue",
+                                    $"Armed parachute on high-altitude unseated spawn ({__instance.faction}) at {postPos} (openHeight={terrAlt + 450.0f:F1}).",
+                                    2.0f);
+                            }
+                        }
+                    }
+                    else if ((postSnapped - postPos).sqrMagnitude > 0.01f)
+                    {
+                        TeleportSpawnedSoldierSafely(s, postSnapped);
+                        if (__instance.spawnVehicle != null)
+                            s.dontLeaveVehicle = false;
+
+                        if ((postPos.y < floorMinY || (postPos.y - postSnapped.y) >= 18.0f) && !__state.RescuedPreInstantiate)
+                            UnderwaterSpawnsRescuedCount++;
+                    }
+                }
+                catch { }
+            }
+        }
+
+        private const string HqAcceptRadialSentinel = "__BH_HQ_ACCEPT__";
+        private const string HqBalkRadialSentinel = "__BH_HQ_BALK__";
+
+        /// <summary>
+        /// Renders a pooled native <c>[HQ]</c> preview marker on the <c>M</c> tactical map whenever the local
+        /// Player Squad Leader has an active unaccepted HQ / Radio Net order.
+        /// </summary>
+        [HarmonyPatch(typeof(MiniMapGUI), nameof(MiniMapGUI.DisableRemainingUnitMarkers))]
+        public static class MiniMapGUI_DisableRemainingUnitMarkers_Patch
+        {
+            public static void Prefix(MiniMapGUI __instance)
+            {
+                try
+                {
+                    if (!VisionConfig.EnableMod.Value || __instance == null || !MiniMapGUI.MiniMapOpened)
+                        return;
+
+                    if (!TryGetActivePendingPlayerHqOrder(out PlayerPendingHqOrderState pending))
+                        return;
+
+                    string badge = string.IsNullOrEmpty(pending.MapBadgeText) ? "[HQ]" : pending.MapBadgeText;
+                    UnityEngine.UI.Image img = __instance.GetNextUnitMarker(badge, true);
+                    if (img == null || img.rectTransform == null)
+                        return;
+
+                    RectTransform rt = img.rectTransform;
+                    rt.anchoredPosition = __instance.GetPositionInContainer(pending.WorldPos, true);
+                    img.color = new Color(1.0f, 0.82f, 0.18f, 0.96f);
+                    rt.localEulerAngles = new Vector3(0f, 0f, -__instance.northShift);
+
+                    Vector3 baseScale = __instance.unis_marker != null
+                        ? __instance.unis_marker.transform.localScale
+                        : Vector3.one;
+                    if (baseScale.sqrMagnitude < 0.001f)
+                        baseScale = Vector3.one;
+
+                    float invZoom = 1.15f / Mathf.Max(0.25f, MiniMapGUI.zoomValue);
+                    rt.localScale = baseScale * invZoom;
+                }
+                catch { }
+            }
+        }
+
+        /// <summary>
+        /// Injects <c>Accept HQ: ...</c> and <c>Balk HQ Order</c> wedges into the root <c>Q</c> Orders radial
+        /// (<see cref="PlayerController"/> <c>OpenOrdersMenu</c>) while leaving sub-menus untouched.
+        /// </summary>
+        [HarmonyPatch(typeof(CircularMenuSelection.CircularMenu2), nameof(CircularMenuSelection.CircularMenu2.ShowCircle))]
+        public static class CircularMenu2_ShowCircle_Patch
+        {
+            public static void Prefix(
+                ref Il2CppInterop.Runtime.InteropTypes.Arrays.Il2CppReferenceArray<CircularMenuSelection.CircularMenuData> __0,
+                GameInput __1,
+                ref Il2CppSystem.Action<CircularMenuSelection.CircularMenuData> __2,
+                string __3)
+            {
+                try
+                {
+                    if (!VisionConfig.EnableMod.Value ||
+                        __1 != GameInput.OrdersMenu ||
+                        !string.IsNullOrEmpty(__3) ||
+                        __0 == null ||
+                        __0.Length == 0)
+                    {
+                        return;
+                    }
+
+                    CircularMenuSelection.CircularMenuData firstItem = __0[0];
+                    if (firstItem == null || firstItem.returnData == null || firstItem.returnData.TryCast<Soldier>() != null)
+                        return;
+
+                    CircularMenuSelection.CircularMenuData lastItem = __0[__0.Length - 1];
+                    if (lastItem != null &&
+                        (string.Equals(lastItem.text, "Balk HQ Order", StringComparison.Ordinal) ||
+                         (lastItem.returnData != null && string.Equals(lastItem.returnData.ToString(), HqBalkRadialSentinel, StringComparison.Ordinal))))
+                    {
+                        return;
+                    }
+
+                    if (!TryGetActivePendingPlayerHqOrder(out PlayerPendingHqOrderState pending))
+                        return;
+
+                    Sprite acceptSprite = null;
+                    if (pending.TargetTask != null)
+                    {
+                        try { acceptSprite = pending.TargetTask.GetTaskIcon(); } catch { }
+                    }
+                    if (acceptSprite == null)
+                        acceptSprite = firstItem.image;
+
+                    int origLen = __0.Length;
+                    var expanded = new Il2CppInterop.Runtime.InteropTypes.Arrays.Il2CppReferenceArray<CircularMenuSelection.CircularMenuData>(origLen + 2);
+                    for (int i = 0; i < origLen; i++)
+                        expanded[i] = __0[i];
+
+                    expanded[origLen] = new CircularMenuSelection.CircularMenuData(
+                        acceptSprite,
+                        $"Accept HQ: {pending.ShortActionLabel}",
+                        new Color(0.55f, 0.95f, 0.55f, 1.0f),
+                        (Il2CppSystem.String)HqAcceptRadialSentinel);
+
+                    expanded[origLen + 1] = new CircularMenuSelection.CircularMenuData(
+                        firstItem.image,
+                        "Balk HQ Order",
+                        new Color(0.95f, 0.55f, 0.45f, 1.0f),
+                        (Il2CppSystem.String)HqBalkRadialSentinel);
+
+                    Il2CppSystem.Action<CircularMenuSelection.CircularMenuData> origCallback = __2;
+                    __2 = Il2CppInterop.Runtime.DelegateSupport.ConvertDelegate<Il2CppSystem.Action<CircularMenuSelection.CircularMenuData>>(
+                        (Action<CircularMenuSelection.CircularMenuData>)(selected =>
+                        {
+                            try
+                            {
+                                string marker = selected != null && selected.returnData != null
+                                    ? selected.returnData.ToString()
+                                    : null;
+                                string itemText = selected != null ? selected.text : null;
+                                if (string.Equals(marker, HqAcceptRadialSentinel, StringComparison.Ordinal) ||
+                                    (!string.IsNullOrEmpty(itemText) && itemText.StartsWith("Accept HQ:", StringComparison.Ordinal)))
+                                {
+                                    AcceptPendingPlayerHqOrder();
+                                    return;
+                                }
+                                if (string.Equals(marker, HqBalkRadialSentinel, StringComparison.Ordinal) ||
+                                    string.Equals(itemText, "Balk HQ Order", StringComparison.Ordinal))
+                                {
+                                    BalkPendingPlayerHqOrder();
+                                    return;
+                                }
+                            }
+                            catch { }
+
+                            origCallback?.Invoke(selected);
+                        }));
+
+                    __0 = expanded;
+                }
+                catch { }
             }
         }
     }
