@@ -366,10 +366,10 @@ namespace EasyRed2HumanAI
             if (dist <= 7.5f || dist > 32f || soldier.isInBodyAnimation || soldier.isInHandsAnimation)
                 return;
 
-            // Prefer dedicated AT / sapper grenades first, then check standard grenades (Molotov / HE / frag)
-            VirtualItem grenadeItem = soldier.inventory.FindItemOfType<VirtualATGrenade>();
+            // Prefer dedicated throwable AT / sapper grenades first, then non-mine grenades (Molotov / HE / frag)
+            VirtualItem grenadeItem = AiCore.FindThrowableGrenadeInInventory(soldier, findAtGrenade: true, findFragGrenade: false);
             if (grenadeItem == null)
-                grenadeItem = soldier.inventory.FindItemOfType<VirtualGrenade>();
+                grenadeItem = AiCore.FindThrowableGrenadeInInventory(soldier, findAtGrenade: false, findFragGrenade: true);
 
             if (grenadeItem != null)
             {
@@ -6738,6 +6738,86 @@ namespace EasyRed2HumanAI
             }
         }
 
+        private static void EvaluateGroundedAiTankCrewSquad(Squad sq)
+        {
+            if (sq == null ||
+                sq.units == null ||
+                sq.units.Count == 0 ||
+                AiCore.IsConfirmedPlaneCrewSquad(sq) ||
+                !AiCore.IsTrueVehicleCrewSquad(sq) ||
+                IsSquadOnRetreatTask(sq) ||
+                sq.SomeoneIsRepairing())
+            {
+                return;
+            }
+
+            Soldier sampleCrew = null;
+            int uCount = sq.units.Count;
+            for (int i = 0; i < uCount; i++)
+            {
+                Soldier u = sq.units[i];
+                if (u == null || u.Pointer == IntPtr.Zero || u.IsDead || u.HasSurrended() || u.transform == null)
+                    continue;
+
+                if (u.IsOnVehicle() || u.IsReachingVehicleToMount() || u.IsEnteringVehicle || u.VehicleToOperate() != null)
+                    return;
+
+                if (sampleCrew == null && !u.IsInjured)
+                    sampleCrew = u;
+            }
+
+            if (sampleCrew == null)
+                return;
+
+            Vector3 crewPos = sampleCrew.transform.position;
+            Soldier mech = sq.GetMechanic();
+            bool squadHasMechanic = mech != null && mech.IsAlive && mech.GetRepairTools() != null;
+            string myFaction = AiCore.GetCachedFaction(sampleCrew);
+
+            var allVehicles = Vehicle.allVehicles;
+            if (allVehicles != null)
+            {
+                int vCount = allVehicles.Count;
+                for (int i = 0; i < vCount; i++)
+                {
+                    Vehicle veh = allVehicles[i];
+                    if (veh == null || veh.Pointer == IntPtr.Zero || veh.transform == null || veh.IsAirVehicle() || veh.IsTransportVehicle())
+                        continue;
+
+                    if (_vehiclesCrewRetreatedFrom.Contains(veh.Pointer) || veh.IsLocked() || veh.IsCoverDestroyed())
+                        continue;
+
+                    if (veh.IsDisabled() && (!veh.CanBeRepaired() || !squadHasMechanic))
+                        continue;
+
+                    if ((veh.transform.position - crewPos).sqrMagnitude > 48.0f * 48.0f)
+                        continue;
+
+                    string vf = GetVehicleCrewFaction(veh);
+                    if (string.IsNullOrEmpty(vf) || vf == "Civilian" || AiCore.AreSameSideFactions(myFaction, vf))
+                        return;
+                }
+            }
+
+            // Allow local self-defense if enemy soldiers are already within close-quarters 24m
+            AiCore.EnsureWorldSnapshot();
+            var soldiers = AiCore.WorldSoldiers;
+            int sCount = AiCore.WorldSoldierCount;
+            for (int i = 0; i < sCount; i++)
+            {
+                ref AiCore.SoldierSnapshot sSnap = ref soldiers[i];
+                if (!sSnap.HasSurrendered &&
+                    !sSnap.IsInjured &&
+                    AiCore.AreEnemyFactions(myFaction, sSnap.Faction) &&
+                    (sSnap.Pos - crewPos).sqrMagnitude <= 24.0f * 24.0f)
+                {
+                    return;
+                }
+            }
+
+            AssignCrewSquadRetreatTask(sq, myFaction, crewPos, allowWaterSurface: false, replaceExistingIfFar: false);
+        }
+
         public static void UpdateGroundedCrewRetreatTasks()
         {
             if (!VisionConfig.EnableMod.Value)
@@ -6783,6 +6863,10 @@ namespace EasyRed2HumanAI
                     {
                         EvaluateGroundedAircrewSquad(sq);
                     }
+                    else if (AiCore.IsTrueVehicleCrewSquad(sq))
+                    {
+                        EvaluateGroundedAiTankCrewSquad(sq);
+                    }
                 }
             }
             catch { }
@@ -6802,12 +6886,9 @@ namespace EasyRed2HumanAI
 
                 try
                 {
-                    // Replace vanilla AIVehicle.RetreatCrew (0x18057B980), which:
-                    //   1) Crashes with NullReferenceException on all sp_ME_ / V2 maps where BattleManager.instance.currentPhase == null,
-                    //   2) Crashes if BattlePhase.GetNearestSpawn returns null, and
-                    //   3) Silently drops MissionTaskRetreat whenever a single 100m ray sample lands on a river/pond (< 0m),
-                    // leaving bailed-out tank crews stranded on their old frontline tank objective!
-                    _vehiclesCrewRetreatedFrom.Add(veh.Pointer);
+                    // Replace vanilla AIVehicle.RetreatCrew (0x18057B980), which crashes/fails on V2 & water spawns.
+                    // Short-circuit once all crew have already exited an empty burning hulk so destroyed tanks stop thrashing!
+                    bool alreadyRetreated = !_vehiclesCrewRetreatedFrom.Add(veh.Pointer);
 
                     Soldier sampleCrew = null;
                     var seats = veh.seats;
@@ -6846,6 +6927,9 @@ namespace EasyRed2HumanAI
                             }
                         }
                     }
+
+                    if (alreadyRetreated && sampleCrew == null)
+                        return false;
 
                     VehicleWithWheels wheeled = veh.TryCast<VehicleWithWheels>();
                     if (wheeled != null && !wheeled.RetreatCrewOnDestroy())
@@ -7672,6 +7756,37 @@ namespace EasyRed2HumanAI
                         float pauseUntil = Time.time + 0.24f;
                         if (__instance.resumeDriveTime < pauseUntil)
                             __instance.resumeDriveTime = pauseUntil;
+                        return;
+                    }
+
+                    // Friendly/observed AT mine avoidance: brake if an armed AT mine sits dead-ahead at close range on a bridge or corridor
+                    if (AiCore.ActiveLandMineCount > 0 &&
+                        veh.transform != null &&
+                        AiCore.IsLocallyOwnedVehicle(veh) &&
+                        !veh.IsAirVehicle())
+                    {
+                        Vector3 travelDir = isReversing ? -veh.transform.forward : veh.transform.forward;
+                        travelDir.y = 0f;
+                        if (travelDir.sqrMagnitude > 0.01f)
+                        {
+                            travelDir.Normalize();
+                            Vector3 vehPos = veh.transform.position;
+                            if (AiCore.TryGetNearbyKnownMine(vehPos + travelDir * 6.5f, 9.0f, vehiclesOnly: true, out Vector3 minePos))
+                            {
+                                Vector3 delta = minePos - vehPos;
+                                delta.y = 0f;
+                                float fwdProj = Vector3.Dot(delta, travelDir);
+                                Vector3 right = new Vector3(travelDir.z, 0f, -travelDir.x);
+                                float latProj = Vector3.Dot(delta, right);
+                                if (fwdProj > 0.5f && fwdProj < 9.5f && Mathf.Abs(latProj) < 3.4f &&
+                                    AiCore.IsOnBridgeOrNarrowCrossing(vehPos))
+                                {
+                                    float pauseUntil = Time.time + 0.50f;
+                                    if (__instance.resumeDriveTime < pauseUntil)
+                                        __instance.resumeDriveTime = pauseUntil;
+                                }
+                            }
+                        }
                     }
                 }
                 catch { }
@@ -7691,6 +7806,36 @@ namespace EasyRed2HumanAI
                     IntPtr vehPtr = veh.Pointer;
                     float now = Time.time;
                     _claimedVehicleDestinations[vehPtr] = __instance.setVehicleDestination;
+
+                    if (AiCore.ActiveLandMineCount > 0 &&
+                        !__instance.going_in_retro &&
+                        !__instance.stopToShoot &&
+                        now >= __instance.resumeDriveTime &&
+                        veh.transform != null &&
+                        AiCore.IsLocallyOwnedVehicle(veh) &&
+                        !veh.IsAirVehicle())
+                    {
+                        Vector3 fwd = veh.transform.forward;
+                        fwd.y = 0f;
+                        if (fwd.sqrMagnitude > 0.01f)
+                        {
+                            fwd.Normalize();
+                            Vector3 vehPos = veh.transform.position;
+                            if (AiCore.TryGetNearbyKnownMine(vehPos + fwd * 8.5f, 11.5f, vehiclesOnly: true, out Vector3 minePos))
+                            {
+                                Vector3 delta = minePos - vehPos;
+                                delta.y = 0f;
+                                float fwdProj = Vector3.Dot(delta, fwd);
+                                Vector3 right = new Vector3(fwd.z, 0f, -fwd.x);
+                                float latProj = Vector3.Dot(delta, right);
+                                if (fwdProj > 0.5f && fwdProj < 18.0f && Mathf.Abs(latProj) < 4.5f)
+                                {
+                                    float steerSide = latProj >= 0f ? -1f : 1f;
+                                    veh.Move(new Vector2(steerSide * 0.85f, 0.45f));
+                                }
+                            }
+                        }
+                    }
 
                     if (VisionConfig.EnableSmartApcDismount.Value)
                     {

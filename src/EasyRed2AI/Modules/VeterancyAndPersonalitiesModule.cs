@@ -820,6 +820,25 @@ namespace EasyRed2HumanAI
                         return true;
                     }
 
+                    // AT/AP pressure mines are planted onto the ground (target == null), never thrown as hand grenades at targets
+                    if (AiCore.IsPressureMineItem(__0, out bool isAtMine))
+                    {
+                        if (__1 == null || __1.Pointer == IntPtr.Zero)
+                        {
+                            if (__instance.transform != null)
+                            {
+                                AiCore.RegisterPlacedMine(
+                                    __instance.transform.position + __instance.transform.forward * 1.15f,
+                                    null,
+                                    isAtMine);
+                            }
+                            return true;
+                        }
+
+                        __instance.throw_end_time = Time.time + 3.0f;
+                        return false;
+                    }
+
                     if (__1 == null || __1.Pointer == IntPtr.Zero)
                     {
                         __instance.throw_end_time = Time.time + 3.0f;

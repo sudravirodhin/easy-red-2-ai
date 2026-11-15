@@ -36,19 +36,11 @@ namespace EasyRed2HumanAI
             public float PhaseSeed;
         }
 
-        private struct CachedGrenadeBlastInfo
-        {
-            public GrenadeType Type;
-            public float MaxPenMm;
-            public bool Valid;
-        }
-
         private static readonly Dictionary<IntPtr, PlaneAudioState> _planeAudioStates = new Dictionary<IntPtr, PlaneAudioState>(32);
         private static readonly Dictionary<IntPtr, int> _colliderImpactCache = new Dictionary<IntPtr, int>(512);
         private static readonly Dictionary<IntPtr, ParachuteDriftState> _parachuteDriftStates = new Dictionary<IntPtr, ParachuteDriftState>(32);
         private static readonly Dictionary<IntPtr, float> _vehicleExplosionArmorCache = new Dictionary<IntPtr, float>(64);
         private static readonly Dictionary<IntPtr, TrailRenderer[]> _cachedTracerTrails = new Dictionary<IntPtr, TrailRenderer[]>(64);
-        private static readonly Dictionary<string, CachedGrenadeBlastInfo> _grenadeBlastCache = new Dictionary<string, CachedGrenadeBlastInfo>(32, StringComparer.OrdinalIgnoreCase);
 
         public static int PlaneAudioLoopsDesyncedCount { get; private set; }
         public static int ThinCoverPenetrationsCount { get; private set; }
@@ -77,8 +69,6 @@ namespace EasyRed2HumanAI
                 _vehicleExplosionArmorCache.Clear();
             if (forceClear || _cachedTracerTrails.Count > 128)
                 _cachedTracerTrails.Clear();
-            if (forceClear || _grenadeBlastCache.Count > 64)
-                _grenadeBlastCache.Clear();
             if (forceClear || _inspectedBloodFxRoots.Count > 128)
             {
                 _inspectedBloodFxRoots.Clear();
@@ -215,19 +205,19 @@ namespace EasyRed2HumanAI
             {
                 __state = false;
 
-                // Prevent vanilla BulletInstance.OnHit NullReferenceException (0x1809DE99C / 0x1809E03ED)
-                // when two simultaneous projectiles/explosions destroy a destructible prop collider on the same tick!
-                if (__instance == null || __instance.Pointer == IntPtr.Zero || bulletData == null || bulletData.Pointer == IntPtr.Zero)
-                    return false;
-
-                Collider hitCol = hit.collider;
-                if (hitCol == null || hitCol.Pointer == IntPtr.Zero || hitCol.transform == null)
-                    return false;
-
-                VeteranAndTacticsPatches.BeginProjectileImpactContext(__instance, bulletData, hitDirection);
-
                 try
                 {
+                    // Prevent vanilla BulletInstance.OnHit NullReferenceException (0x1809DE99C / 0x1809E03ED)
+                    // when two simultaneous projectiles/explosions destroy a destructible prop collider on the same tick!
+                    if (__instance == null || __instance.Pointer == IntPtr.Zero || bulletData == null || bulletData.Pointer == IntPtr.Zero)
+                        return false;
+
+                    Collider hitCol = hit.collider;
+                    if (hitCol == null || hitCol.Pointer == IntPtr.Zero || hitCol.transform == null || hitCol.gameObject == null)
+                        return false;
+
+                    VeteranAndTacticsPatches.BeginProjectileImpactContext(__instance, bulletData, hitDirection);
+
                     // Guard against vanilla BulletInstance.OnHit -> Soldier.SyncSay -> Creature.GetSyncher NRE (0x1809DFBA2)
                     // when a long-flight artillery/mortar/aircraft shooter died, despawned, or lost its syncher mid-flight.
                     Soldier rawShooter = __instance.shooter;
@@ -891,35 +881,16 @@ namespace EasyRed2HumanAI
             if (throwable == null || targetVeh == null || targetVeh.Pointer == IntPtr.Zero)
                 return false;
 
+            if (AiCore.IsPressureMineItem(throwable, out _))
+                return false;
+
             if (throwable.TryCast<VirtualSmokeGrenade>() != null || throwable.TryCast<VirtualATGrenade>() != null)
                 return true;
 
             string itemId = throwable.item_id ?? string.Empty;
-            if (!_grenadeBlastCache.TryGetValue(itemId, out CachedGrenadeBlastInfo info))
-            {
-                info = default;
-                try
-                {
-                    ItemObject prefab = throwable.GetItemPrefab();
-                    ItemGrenade ig = prefab != null ? prefab.TryCast<ItemGrenade>() : null;
-                    if (ig != null)
-                    {
-                        info.Type = ig.grenadeType;
-                        info.MaxPenMm = ig.explosionMaxPenetration;
-                        info.Valid = true;
-                    }
-                }
-                catch { }
+            AiCore.TryGetThrowablePrefabInfo(throwable, out AiCore.ThrowablePrefabInfo info);
 
-                if (!string.IsNullOrEmpty(itemId))
-                {
-                    if (_grenadeBlastCache.Count > 96)
-                        _grenadeBlastCache.Clear();
-                    _grenadeBlastCache[itemId] = info;
-                }
-            }
-
-            if (info.Valid &&
+            if (info.IsValid &&
                 (info.Type == GrenadeType.smokeGrenade ||
                  info.Type == GrenadeType.ATGrenade ||
                  info.Type == GrenadeType.phosporusGrenade))
@@ -928,14 +899,8 @@ namespace EasyRed2HumanAI
             }
 
             // Modded incendiary / satchel / anti-tank throwable name fallback
-            if (!string.IsNullOrEmpty(itemId) &&
-                (itemId.IndexOf("molotov", StringComparison.OrdinalIgnoreCase) >= 0 ||
-                 itemId.IndexOf("satchel", StringComparison.OrdinalIgnoreCase) >= 0 ||
-                 itemId.IndexOf("geballte", StringComparison.OrdinalIgnoreCase) >= 0 ||
-                 itemId.IndexOf("hafthohl", StringComparison.OrdinalIgnoreCase) >= 0 ||
-                 itemId.IndexOf("panzerwurf", StringComparison.OrdinalIgnoreCase) >= 0 ||
-                 itemId.IndexOf("gammon", StringComparison.OrdinalIgnoreCase) >= 0 ||
-                 itemId.IndexOf("hawkins", StringComparison.OrdinalIgnoreCase) >= 0))
+            if (info.IsSatchelOrHeavyDemo ||
+                (!string.IsNullOrEmpty(itemId) && itemId.IndexOf("molotov", StringComparison.OrdinalIgnoreCase) >= 0))
             {
                 return true;
             }
@@ -949,7 +914,7 @@ namespace EasyRed2HumanAI
                 return true;
 
             // High-penetration HE charges (>= 12mm and able to defeat effective roof/hull blast armor)
-            if (info.Valid && info.MaxPenMm >= Mathf.Max(12.0f, effArmor))
+            if (info.IsValid && info.MaxPenetration >= Mathf.Max(12.0f, effArmor))
                 return true;
 
             // Open-topped tank destroyers / halftracks / unbuttoned commanders: allow fragging exposed alive enemy crew

@@ -101,6 +101,7 @@ namespace EasyRed2HumanAI
         public static ConfigEntry<bool> EnableConquestEconomyQuartermaster;
         public static ConfigEntry<int> ConquestPlayerTicketBuffer;
         public static ConfigEntry<bool> EnableTacticalRetreatsAndRegroup;
+        public static ConfigEntry<bool> EnableSpecialMunitionsAndSappers;
 
         // 7. Phase 3: Role-Based AI Personalities (3 Archetypes per Infantry & Vehicle Role)
         public static ConfigEntry<bool> EnableRolePersonalities;
@@ -634,6 +635,12 @@ namespace EasyRed2HumanAI
                 "EnableTacticalRetreatsAndRegroup",
                 true,
                 "3-Tier Tactical Retreats & Regroup: enables TeamNet sector withdrawals for shattered squads, Squad Leader fighting withdrawals (smoke + 'Retreat!' callout + fallback rally point) when mauled or facing uncounterable close armor, and individual 'Oh Shit' break-contact sprints before surrendering.");
+
+            EnableSpecialMunitionsAndSappers = config.Bind(
+                "6. Tactical Self-Preservation & Muzzle Discipline",
+                "EnableSpecialMunitionsAndSappers",
+                true,
+                "Special Munitions & Sapper AI: teaches bots to deploy AT/AP pressure mines along safe defensive/bridge choke points (with friendly proximity & objective-edge safety checks and friendly vehicle mine avoidance), use heavy satchels against enemy bunkers/emplacements, and deploy heavy tripod/weapon recipes.");
 
             // 7. AI Role Personalities (3 Archetypes per Infantry & Vehicle Role)
             EnableRolePersonalities = config.Bind(

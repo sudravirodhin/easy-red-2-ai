@@ -506,13 +506,20 @@ namespace EasyRed2HumanAI
                     ig = item.TryCast<ItemGrenade>();
                     if (ig != null)
                     {
-                        GrenadeType gt = ig.grenadeType;
-                        if (gt == GrenadeType.ATGrenade)
-                            kind = FloorItemKind.AtGrenade;
-                        else if (gt == GrenadeType.smokeGrenade)
-                            kind = FloorItemKind.SmokeGrenade;
+                        if (ig.fuseType == FuseType.VehiclePressionFuse || ig.fuseType == FuseType.InfantryPressionFuse)
+                        {
+                            kind = FloorItemKind.Ignore;
+                        }
                         else
-                            kind = FloorItemKind.FragGrenade;
+                        {
+                            GrenadeType gt = ig.grenadeType;
+                            if (gt == GrenadeType.ATGrenade)
+                                kind = FloorItemKind.AtGrenade;
+                            else if (gt == GrenadeType.smokeGrenade)
+                                kind = FloorItemKind.SmokeGrenade;
+                            else
+                                kind = FloorItemKind.FragGrenade;
+                        }
                     }
                     else if (item.TryCast<AmmoItem>() != null)
                     {
@@ -1270,6 +1277,7 @@ namespace EasyRed2HumanAI
             public Vector3 StallAnchorCenter;
             public float StallAnchorTime;
             public float NextSquadUnstallTime;
+            public int ConsecutiveStallCount;
 
             public bool IsThreatBeingPinned(float now)
             {
@@ -1807,6 +1815,7 @@ namespace EasyRed2HumanAI
         public static int TacticalRetreatsCount { get; private set; }
         public static int SquadLeaderBalksCount { get; private set; }
         public static int IndividualSelfPreservationBalksCount { get; private set; }
+        public static int FootBotUnsticksCount { get; private set; }
 
         internal static readonly HashSet<IntPtr> _aiCovertHoldFireSquads = new HashSet<IntPtr>();
         internal static readonly HashSet<IntPtr> _aiOrderedChargeSquads = new HashSet<IntPtr>();
@@ -1822,6 +1831,9 @@ namespace EasyRed2HumanAI
         internal static readonly Dictionary<IntPtr, float> _nextIndividualFallbackTime = new Dictionary<IntPtr, float>(128);
         internal static readonly Dictionary<IntPtr, float> _individualFallbackUntil = new Dictionary<IntPtr, float>(64);
         internal static readonly Dictionary<IntPtr, Vector3> _individualFallbackDest = new Dictionary<IntPtr, Vector3>(64);
+        internal static readonly Dictionary<IntPtr, float> _sapperStepBackUntil = new Dictionary<IntPtr, float>(32);
+        internal static readonly Dictionary<IntPtr, Vector3> _sapperStepBackDest = new Dictionary<IntPtr, Vector3>(32);
+        internal static readonly Dictionary<IntPtr, float> _nextSpecialMunitionTime = new Dictionary<IntPtr, float>(128);
 
         internal struct CasualtyDragState
         {
@@ -1829,6 +1841,8 @@ namespace EasyRed2HumanAI
             public Vector3 DropSpot;
             public float DragEndTime;
             public float NextScanTime;
+            public Vector3 StallAnchorPos;
+            public float StallAnchorTime;
         }
 
         internal struct FootStuckState
@@ -1839,6 +1853,7 @@ namespace EasyRed2HumanAI
             public float UnstickOverrideUntil;
             public Vector3 UnstickDest;
             public int StallStage;
+            public int ConsecutiveUnsticks;
         }
 
         internal static readonly Dictionary<IntPtr, CasualtyDragState> _casualtyDragStates = new Dictionary<IntPtr, CasualtyDragState>(32);
@@ -1890,6 +1905,10 @@ namespace EasyRed2HumanAI
             _nextIndividualFallbackTime.Clear();
             _individualFallbackUntil.Clear();
             _individualFallbackDest.Clear();
+            _sapperStepBackUntil.Clear();
+            _sapperStepBackDest.Clear();
+            _nextSpecialMunitionTime.Clear();
+            FootBotUnsticksCount = 0;
             _nextGlobalBotWeaponPickupTime = 0f;
         }
 
@@ -2614,6 +2633,15 @@ namespace EasyRed2HumanAI
                     _aiFollowColumnUntil.Remove(sqPtr);
                     if (sq.timed_order_end > now)
                         sq.timed_order_end = 0f;
+                    if (sq.currentTask != null && (!syncOnline || AiCore.TryConsumeBotRpcBudget(0.35f)))
+                    {
+                        try
+                        {
+                            sq.Leader_OrderAttackCurrentTask(leader);
+                            issuedSquadCoverOrderThisTick = true;
+                        }
+                        catch { }
+                    }
                 }
             }
 
@@ -2770,12 +2798,12 @@ namespace EasyRed2HumanAI
             }
 
             // B4. Attacking Squad Stall Watchdog: if an attacking AI foot squad makes < 3.5m progress for >= 8.5s
-            //     while > 32m from its objective and not pinned, release stale cover locks and re-issue the attack order!
+            //     while > 32m from its objective and not pinned, release stale cover locks and either re-issue attack
+            //     or contour around blocking cliffs/hillsides via a temporary lateral HoldArea waypoint!
             if (!issuedSquadCoverOrderThisTick &&
                 !board.IsDefendingObjective &&
                 board.HasActiveObjectiveTask &&
                 distToObj > 32.0f &&
-                !sq.InChargeTime() &&
                 leaderSupp < 35.0f &&
                 !leader.IsOnVehicle() &&
                 !leader.HasSurrended() &&
@@ -2787,20 +2815,31 @@ namespace EasyRed2HumanAI
                 {
                     board.StallAnchorCenter = board.SquadCenter;
                     board.StallAnchorTime = now;
+                    board.ConsecutiveStallCount = 0;
                     _squadBlackboards[sqPtr] = board;
                 }
                 else if ((now - board.StallAnchorTime) >= 8.5f &&
                          now >= board.NextSquadUnstallTime &&
                          (!syncOnline || AiCore.TryConsumeBotRpcBudget(0.45f)))
                 {
+                    board.ConsecutiveStallCount++;
                     board.StallAnchorCenter = board.SquadCenter;
                     board.StallAnchorTime = now;
-                    board.NextSquadUnstallTime = now + 14.0f;
+                    board.NextSquadUnstallTime = now + 13.0f;
                     _squadBlackboards[sqPtr] = board;
                     try
                     {
                         sq.OrderLeaveAllVehiclesAndCovers(false, true, false);
-                        sq.Leader_OrderAttackCurrentTask(leader);
+                        if (board.ConsecutiveStallCount >= 2 &&
+                            TryFindSquadHillsideContourPoint(leaderPos, board.ObjectivePosition, sqPtr, board.ConsecutiveStallCount, out Vector3 detourPt))
+                        {
+                            sq.HoldArea(detourPt, 12.0f, false);
+                            sq.timed_order_end = now + 11.0f;
+                        }
+                        else
+                        {
+                            sq.Leader_OrderAttackCurrentTask(leader);
+                        }
                         issuedSquadCoverOrderThisTick = true;
                     }
                     catch { }
@@ -2967,17 +3006,18 @@ namespace EasyRed2HumanAI
                 }
             }
 
-            // 3. Evaluate Follow Column (sq.FollowLeader) — Fast Unengaged Rear-Echelon Approach (>105m Out of Contact)
+            // 3. Evaluate Follow Column (sq.FollowLeader) — Fast Unengaged Rear-Echelon Approach (>115m Out of Contact)
             if (sq.order == Order.defend &&
                 !sq.InChargeTime() &&
                 !board.HasActiveThreat &&
                 !sq.IsEnemyAwareOfThisSquad &&
                 !board.IsDefendingObjective &&
                 !_garrisonAssignedObjectiveBySquad.ContainsKey(sqPtr) &&
-                distToObj >= 105.0f &&
+                distToObj >= 115.0f &&
                 distToObj < 9000.0f &&
                 leaderSupp < 2.0f &&
-                (!_nextAiFollowOrderTime.TryGetValue(sqPtr, out float nextFolT) || now >= nextFolT))
+                (!_nextAiFollowOrderTime.TryGetValue(sqPtr, out float nextFolT) || now >= nextFolT) &&
+                AreMajorityOfSquadFollowersNearLeader(sq, leader, leaderPos, 28.0f))
             {
                 const float followCost = 0.86f;
                 if (followCost < bestCost)
@@ -3170,28 +3210,93 @@ namespace EasyRed2HumanAI
                         return true;
                 }
 
-                InventoryManager inv = u.inventory;
-                if (inv != null)
-                {
-                    if (inv.FindItemOfType<VirtualATGrenade>() != null)
-                        return true;
+                if (AiCore.FindThrowableGrenadeInInventory(u, findAtGrenade: true, findFragGrenade: false) != null)
+                    return true;
 
-                    VirtualItem vGren = inv.FindItemOfType<VirtualGrenade>();
-                    if (vGren != null && !string.IsNullOrEmpty(vGren.item_id))
-                    {
-                        string id = vGren.item_id;
-                        if (id.IndexOf("molotov", StringComparison.OrdinalIgnoreCase) >= 0 ||
-                            id.IndexOf("satchel", StringComparison.OrdinalIgnoreCase) >= 0 ||
-                            id.IndexOf("geballte", StringComparison.OrdinalIgnoreCase) >= 0 ||
-                            id.IndexOf("hafthohl", StringComparison.OrdinalIgnoreCase) >= 0 ||
-                            id.IndexOf("gammon", StringComparison.OrdinalIgnoreCase) >= 0)
-                        {
-                            return true;
-                        }
-                    }
+                VirtualItem vGren = AiCore.FindThrowableGrenadeInInventory(u, findAtGrenade: false, findFragGrenade: true);
+                if (vGren != null && AiCore.TryGetThrowablePrefabInfo(vGren, out AiCore.ThrowablePrefabInfo gInfo) &&
+                    (gInfo.Type == GrenadeType.ATGrenade || gInfo.Type == GrenadeType.phosporusGrenade || gInfo.MaxPenetration >= 16.0f || gInfo.IsSatchelOrHeavyDemo))
+                {
+                    return true;
                 }
             }
             catch { }
+
+            return false;
+        }
+
+        private static bool AreMajorityOfSquadFollowersNearLeader(Squad sq, Soldier leader, Vector3 leaderPos, float maxDist)
+        {
+            if (sq == null || sq.units == null)
+                return true;
+
+            int aliveFootFollowers = 0;
+            int closeFollowers = 0;
+            float maxDistSq = maxDist * maxDist;
+            IntPtr leaderPtr = leader != null ? leader.Pointer : IntPtr.Zero;
+            int count = sq.units.Count;
+            for (int i = 0; i < count; i++)
+            {
+                Soldier u = sq.units[i];
+                if (u == null || u.Pointer == IntPtr.Zero || u.Pointer == leaderPtr || u.IsDead || u.HasSurrended() || u.IsOnVehicle() || u.transform == null)
+                    continue;
+
+                aliveFootFollowers++;
+                if ((u.transform.position - leaderPos).sqrMagnitude <= maxDistSq)
+                    closeFollowers++;
+            }
+
+            return aliveFootFollowers == 0 || (closeFollowers * 2 >= aliveFootFollowers);
+        }
+
+        private static bool TryFindSquadHillsideContourPoint(
+            Vector3 leaderPos,
+            Vector3 objPos,
+            IntPtr sqPtr,
+            int stallCount,
+            out Vector3 detourPos)
+        {
+            detourPos = Vector3.zero;
+            Vector3 toObj = objPos - leaderPos;
+            toObj.y = 0f;
+            if (toObj.sqrMagnitude < 16.0f)
+                return false;
+
+            Vector3 fwd = toObj.normalized;
+            Vector3 right = new Vector3(fwd.z, 0f, -fwd.x);
+            int primarySign = ((AiCore.GetDeterministicHash(sqPtr, stallCount) & 1) == 0) ? 1 : -1;
+            int envMask = AiCore.GetSolidEnvironmentMask();
+            int moveMask = AiCore.GetMovementObstacleMask();
+            AiCore.TryGetActiveWaterLevel(out float waterLevel);
+            bool hasWater = AiCore.TryGetActiveWaterLevel(out _);
+
+            float[] latWeights = { 0.90f, -0.90f, 1.0f, -1.0f };
+            float[] fwdWeights = { 0.44f, 0.44f, 0.0f, 0.0f };
+            float[] distances = { 22.0f, 26.0f, 18.0f };
+
+            for (int i = 0; i < latWeights.Length; i++)
+            {
+                Vector3 dir = (right * (latWeights[i] * primarySign) + fwd * fwdWeights[i]).normalized;
+                for (int dIdx = 0; dIdx < distances.Length; dIdx++)
+                {
+                    float dist = distances[dIdx];
+                    if (Physics.Raycast(leaderPos + Vector3.up * 1.1f, dir, Mathf.Min(dist, 12.0f), moveMask, QueryTriggerInteraction.Ignore))
+                        continue;
+
+                    Vector3 cand = leaderPos + dir * dist;
+                    if (!Physics.Raycast(cand + Vector3.up * 12.0f, Vector3.down, out RaycastHit gHit, 26.0f, envMask, QueryTriggerInteraction.Ignore))
+                        continue;
+
+                    if (gHit.normal.y < 0.60f || Mathf.Abs(gHit.point.y - leaderPos.y) > 7.5f)
+                        continue;
+
+                    if (hasWater && gHit.point.y <= waterLevel + 0.10f)
+                        continue;
+
+                    detourPos = gHit.point;
+                    return true;
+                }
+            }
 
             return false;
         }
@@ -4108,6 +4213,21 @@ namespace EasyRed2HumanAI
                 return true;
             }
 
+            if (_sapperStepBackUntil.TryGetValue(soldierPtr, out float sapUntil) &&
+                now < sapUntil &&
+                _sapperStepBackDest.TryGetValue(soldierPtr, out overrideDest))
+            {
+                return true;
+            }
+
+            if (_footStuckStates.TryGetValue(soldierPtr, out FootStuckState stuck) &&
+                now < stuck.UnstickOverrideUntil &&
+                stuck.UnstickDest.sqrMagnitude > 0.01f)
+            {
+                overrideDest = stuck.UnstickDest;
+                return true;
+            }
+
             if (_casualtyDragStates.TryGetValue(soldierPtr, out CasualtyDragState drag) &&
                 now < drag.DragEndTime &&
                 drag.Patient != null &&
@@ -4146,8 +4266,20 @@ namespace EasyRed2HumanAI
                 soldier == null ||
                 soldier.IsOnVehicle() ||
                 soldier.HasSurrended() ||
-                soldier.isInBodyAnimation ||
-                isStaffingEmplacement)
+                soldier.isInBodyAnimation)
+            {
+                return;
+            }
+
+            // Unconditional top-level carry check: even during Charges, emplacements, or budget contention,
+            // a soldier carrying a wounded comrade must evaluate drop conditions so Medics aren't blocked by IsCarried().
+            if (soldier.IsCarryingBody())
+            {
+                HandleActiveCasualtyCarryTick(ai, soldier, soldier.Pointer, Time.time);
+                return;
+            }
+
+            if (isStaffingEmplacement)
             {
                 return;
             }
@@ -4229,9 +4361,8 @@ namespace EasyRed2HumanAI
 
             if (canUnstickMove &&
                 !inPointBlankMelee &&
-                !isOnBridge &&
                 soldier.transform != null &&
-                TryRecoverChronicallyStuckFootBot(ai, soldier, ptr, soldier.transform.position, suppression, now))
+                TryRecoverChronicallyStuckFootBot(ai, soldier, ptr, soldier.transform.position, suppression, isOnBridge, dist, board.HasActiveObjectiveTask ? board.ObjectivePosition : Vector3.zero, board.HasActiveObjectiveTask, now))
             {
                 if (sq != null && sq.Pointer != IntPtr.Zero)
                     _squadBlackboards[sq.Pointer] = board;
@@ -4254,6 +4385,21 @@ namespace EasyRed2HumanAI
                 return;
             }
 
+            // Special Munitions & Sappers (Satchel Bunker/Emplacement Breaches, Safe AT/AP Mines, & Deployable Tripods):
+            if (VisionConfig.EnableSpecialMunitionsAndSappers.Value &&
+                canMoveAutonomously &&
+                !inPointBlankMelee &&
+                !soldier.isBleeding &&
+                !isEvadingArmor &&
+                !IsSoldierBailedOutVehicleCrew(soldier, sq) &&
+                soldier.transform != null &&
+                TryExecuteSpecialMunitionsAndTripods(ai, soldier, ptr, sq, ref board, soldier.transform.position, suppression, dist, isOnBridge, now))
+            {
+                if (sq != null && sq.Pointer != IntPtr.Zero)
+                    _squadBlackboards[sq.Pointer] = board;
+                return;
+            }
+
             // Build 32-Bit WorldState in O(1)
             GoapStateBits ws = BuildSoldierWorldState(
                 ai,
@@ -4270,9 +4416,13 @@ namespace EasyRed2HumanAI
                 now);
 
             bool hasActivePlan = _botGoapPlans.TryGetValue(ptr, out BotGoapPlan plan) && now < plan.PlanExpireTime;
+            bool closeBailedThreat = (ws & GoapStateBits.InPointBlankRange) != 0 ||
+                                     ((ws & GoapStateBits.CanFireAtVisibleEnemy) != 0 && dist <= 24.0f);
             bool nonBleedingBailedCrew =
                 IsSoldierBailedOutVehicleCrew(soldier, sq) &&
-                (ws & (GoapStateBits.IsBleeding | GoapStateBits.InPointBlankRange | GoapStateBits.CanFireAtVisibleEnemy)) == 0;
+                board.AliveMemberCount <= 5 &&
+                (ws & GoapStateBits.IsBleeding) == 0 &&
+                !closeBailedThreat;
             bool emergencyPreempt =
                 ((ws & GoapStateBits.InPointBlankRange) != 0 && plan.Step0 != GoapActionId.PointBlankBayonetBreach) ||
                 ((ws & GoapStateBits.IsBleeding) != 0 &&
@@ -4343,6 +4493,10 @@ namespace EasyRed2HumanAI
             IntPtr ptr,
             Vector3 myPos,
             float suppression,
+            bool isOnBridge,
+            float targetDist,
+            Vector3 objPos,
+            bool hasObjTask,
             float now)
         {
             _footStuckStates.TryGetValue(ptr, out FootStuckState st);
@@ -4359,35 +4513,44 @@ namespace EasyRed2HumanAI
                 }
 
                 SetBotPose(ai, soldier, suppression >= 35f ? SoldierPose.Crouch : SoldierPose.Idle, suppression < 35f);
-                AiCore.MoveBotTowardPosition(ai, soldier, st.UnstickDest, 0.6f, 1.5f);
+                AiCore.MoveBotTowardPosition(ai, soldier, st.UnstickDest, 0.8f, 2.0f);
                 return true;
             }
+
+            Vector3 desiredEnd = GetActualMoveEndpoint(ai, soldier);
+            Vector2 toEndFlat = new Vector2(desiredEnd.x - myPos.x, desiredEnd.z - myPos.z);
+            bool tryingToMoveFar = toEndFlat.sqrMagnitude > 3.2f * 3.2f;
+            bool farFromSquadOrGoal = toEndFlat.sqrMagnitude > 28.0f * 28.0f ||
+                                      (hasObjTask && (objPos - myPos).sqrMagnitude > 28.0f * 28.0f);
+
+            bool firingHaltedOnSpot = ai.visibleTarget != null &&
+                                      (IsInCommittedFiringHalt(ptr, now) ||
+                                       (!ai.IsMoving() && (!farFromSquadOrGoal || st.AnchorTime <= 0f || (now - st.AnchorTime) < 5.0f)));
 
             bool intentionallyStationary =
                 soldier.IsOnCover() ||
                 soldier.UsingBipod() ||
-                (ai.visibleTarget != null && (!ai.IsMoving() || IsInCommittedFiringHalt(ptr, now))) ||
+                firingHaltedOnSpot ||
                 soldier.isInHandsAnimation ||
                 soldier.isInBodyAnimation ||
                 soldier.IsCarryingBody();
 
-            Vector3 desiredEnd = GetActualMoveEndpoint(ai, soldier);
-            Vector2 toEndFlat = new Vector2(desiredEnd.x - myPos.x, desiredEnd.z - myPos.z);
-            bool tryingToMoveFar = toEndFlat.sqrMagnitude > 4.2f * 4.2f;
-
-            if (intentionallyStationary || !tryingToMoveFar || st.AnchorTime <= 0f || (myPos - st.AnchorPos).sqrMagnitude > 0.65f * 0.65f)
+            float movedSq = (myPos - st.AnchorPos).sqrMagnitude;
+            if (intentionallyStationary || !tryingToMoveFar || st.AnchorTime <= 0f || movedSq > 0.85f * 0.85f)
             {
                 st.AnchorPos = myPos;
                 st.AnchorTime = now;
                 st.StallStage = 0;
+                if (intentionallyStationary || !tryingToMoveFar || movedSq > 2.2f * 2.2f)
+                    st.ConsecutiveUnsticks = 0;
                 _footStuckStates[ptr] = st;
                 return false;
             }
 
             float stalledSec = now - st.AnchorTime;
 
-            // Stage 1 (2.4s): Clear stale direct-move shortcut and force a fresh A* path calculation around the obstacle
-            if (stalledSec >= 2.4f && st.StallStage == 0)
+            // Stage 1 (2.0s): Clear stale direct-move shortcut and force a fresh A* path calculation around the obstacle
+            if (stalledSec >= 2.0f && st.StallStage == 0)
             {
                 st.StallStage = 1;
                 _footStuckStates[ptr] = st;
@@ -4396,64 +4559,512 @@ namespace EasyRed2HumanAI
                 return false;
             }
 
-            if (stalledSec < 5.2f || now < st.NextUnstickTime)
+            if (stalledSec < 3.5f || now < st.NextUnstickTime)
                 return false;
 
-            // Stage 2 (5.2s): Blacklist unreachable cover, invalidate destination cache, and sidestep clear of walls/fences
+            st.ConsecutiveUnsticks++;
             st.AnchorPos = myPos;
             st.AnchorTime = now;
             st.StallStage = 0;
-            st.NextUnstickTime = now + 7.5f;
+            st.NextUnstickTime = now + 3.5f;
 
-            Vector3 fwd = new Vector3(toEndFlat.x, 0f, toEndFlat.y).normalized;
-            if (fwd.sqrMagnitude < 0.01f)
-                fwd = soldier.transform.forward;
-            Vector3 right = new Vector3(fwd.z, 0f, -fwd.x);
-            int sign = (AiCore.GetDeterministicHash(ptr, (int)(now * 0.5f)) & 1) == 0 ? 1 : -1;
-
-            int moveMask = AiCore.GetMovementObstacleMask();
-            Vector3 chestStart = myPos + new Vector3(0f, 0.85f, 0f);
-            for (int attempt = 0; attempt < 4; attempt++)
+            Vector3 fwd = new Vector3(toEndFlat.x, 0f, toEndFlat.y);
+            if (fwd.sqrMagnitude < 0.04f && hasObjTask)
             {
-                Vector3 dir;
-                switch (attempt)
+                Vector3 toObj = objPos - myPos;
+                fwd = new Vector3(toObj.x, 0f, toObj.z);
+            }
+            if (fwd.sqrMagnitude < 0.04f && soldier.transform != null)
+                fwd = new Vector3(soldier.transform.forward.x, 0f, soldier.transform.forward.z);
+            fwd = fwd.sqrMagnitude > 0.001f ? fwd.normalized : Vector3.forward;
+
+            Vector3 right = new Vector3(fwd.z, 0f, -fwd.x);
+            int sideSign = ((AiCore.GetDeterministicHash(ptr, st.ConsecutiveUnsticks) & 1) == 0) ? 1 : -1;
+            int envMask = AiCore.GetSolidEnvironmentMask();
+            int moveMask = AiCore.GetMovementObstacleMask();
+            bool hasWater = AiCore.TryGetActiveWaterLevel(out float waterLevel);
+            Vector3 chestStart = myPos + new Vector3(0f, 0.90f, 0f);
+
+            // 8 radial angles: 0 deg, +/-45 deg, +/-90 deg, +/-135 deg, 180 deg
+            float[] cosTable = { 1.0f, 0.7071f, 0.7071f, 0.0f, 0.0f, -0.7071f, -0.7071f, -1.0f };
+            float[] sinTable = { 0.0f, 0.7071f, -0.7071f, 1.0f, -1.0f, 0.7071f, -0.7071f, 0.0f };
+
+            // Stage 3 (>= 3 failed attempts): off-camera walkable hillside snap when completely wedged
+            if (st.ConsecutiveUnsticks >= 3 && !isOnBridge && !AiCore.IsPositionVisibleOnLocalScreen(myPos, 20.0f))
+            {
+                float[] snapDistances = { 12.0f, 16.0f, 8.5f };
+                for (int dIdx = 0; dIdx < snapDistances.Length; dIdx++)
                 {
-                    case 0: dir = (right * sign + fwd * 0.35f).normalized; break;
-                    case 1: dir = (-right * sign + fwd * 0.35f).normalized; break;
-                    case 2: dir = (right * sign - fwd * 0.55f).normalized; break;
-                    default: dir = (-right * sign - fwd * 0.55f).normalized; break;
+                    float snapDist = snapDistances[dIdx];
+                    for (int a = 0; a < 8; a++)
+                    {
+                        Vector3 dir = fwd * cosTable[a] + right * (sinTable[a] * sideSign);
+                        Vector3 probeBase = myPos + dir * snapDist;
+                        if (!Physics.Raycast(probeBase + Vector3.up * 10.0f, Vector3.down, out RaycastHit gHit, 24.0f, envMask, QueryTriggerInteraction.Ignore))
+                            continue;
+
+                        if (gHit.normal.y < 0.64f || Mathf.Abs(gHit.point.y - myPos.y) > 7.5f)
+                            continue;
+
+                        if (hasWater && gHit.point.y <= waterLevel + 0.15f)
+                            continue;
+
+                        if (Physics.CheckSphere(gHit.point + Vector3.up * 0.95f, 0.35f, moveMask, QueryTriggerInteraction.Ignore))
+                            continue;
+
+                        if (AiCore.TryGetNearbyKnownMine(gHit.point, 5.0f, false, out _))
+                            continue;
+
+                        if (AiCore.IsPositionVisibleOnLocalScreen(gHit.point, 20.0f))
+                            continue;
+
+                        ClearStaleCoverForUnstick(soldier, ptr);
+                        Vector3 snapPos = gHit.point + Vector3.up * 0.12f;
+                        try
+                        {
+                            soldier.transform.position = snapPos;
+                            Rigidbody rb = soldier.GetComponent<Rigidbody>();
+                            if (rb != null && !rb.isKinematic)
+                            {
+                                Vector3 v = rb.velocity;
+                                rb.velocity = new Vector3(0f, Mathf.Min(0f, v.y), 0f);
+                            }
+                            ai.UpdatePath();
+                        }
+                        catch { }
+
+                        st.ConsecutiveUnsticks = 0;
+                        st.UnstickOverrideUntil = 0f;
+                        _footStuckStates[ptr] = st;
+                        FootBotUnsticksCount++;
+                        return true;
+                    }
                 }
+            }
 
-                if (Physics.Raycast(chestStart, dir, 4.2f, moveMask, QueryTriggerInteraction.Ignore))
-                    continue;
+            // Stage 2: Radial hillside contour probe (prefers walkable side-slope contours when forward path is steep/blocked)
+            bool forwardSteepOrBlocked =
+                Physics.Raycast(chestStart, fwd, 3.6f, moveMask, QueryTriggerInteraction.Ignore) ||
+                !Physics.Raycast(myPos + fwd * 5.0f + Vector3.up * 8.0f, Vector3.down, out RaycastHit fwdHit, 18.0f, envMask, QueryTriggerInteraction.Ignore) ||
+                fwdHit.normal.y < 0.68f;
 
-                Vector3 cand = myPos + dir * 3.8f;
-                float groundY = ResourcesManager.GetTerrainAltitude(cand, 0f);
-                if (groundY < 0.05f || Mathf.Abs(groundY - myPos.y) > 2.4f)
-                    continue;
+            float[] stepDistances = { 6.0f, 11.0f };
+            float bestScore = -999f;
+            Vector3 bestCand = Vector3.zero;
+            bool foundCand = false;
 
-                cand.y = groundY;
-                _localCoverProtectedUntil.Remove(ptr);
-                _botGoapPlans.Remove(ptr);
-                if (soldier.HasDestinationAssigned)
+            for (int dIdx = 0; dIdx < stepDistances.Length; dIdx++)
+            {
+                float stepDist = stepDistances[dIdx];
+                for (int a = 0; a < 8; a++)
                 {
-                    AiDestination curDest = soldier.targetDestination;
-                    if (curDest != null && soldier.nonReachableCovers != null)
-                        soldier.nonReachableCovers.Add(curDest);
-                }
-                soldier.CoverPosition(null);
-                AiCore.InvalidateTargetDestinationCache(soldier);
+                    if (a == 0 && forwardSteepOrBlocked)
+                        continue;
 
-                st.UnstickDest = cand;
-                st.UnstickOverrideUntil = now + 2.4f;
+                    Vector3 dir = fwd * cosTable[a] + right * (sinTable[a] * sideSign);
+                    if (Physics.Raycast(chestStart, dir, Mathf.Min(stepDist * 0.85f, 4.5f), moveMask, QueryTriggerInteraction.Ignore))
+                        continue;
+
+                    Vector3 probe = myPos + dir * stepDist;
+                    if (!Physics.Raycast(probe + Vector3.up * 8.0f, Vector3.down, out RaycastHit gHit, 18.0f, envMask, QueryTriggerInteraction.Ignore))
+                        continue;
+
+                    if (gHit.normal.y < 0.60f || Mathf.Abs(gHit.point.y - myPos.y) > 5.5f)
+                        continue;
+
+                    if (hasWater && gHit.point.y <= waterLevel + 0.15f)
+                        continue;
+
+                    Vector3 candPos = gHit.point;
+                    if (isOnBridge)
+                    {
+                        if (!AiCore.IsSafeBridgeDeckStep(myPos, probe, out Vector3 deckPos))
+                            continue;
+                        candPos = deckPos;
+                    }
+                    if (AiCore.TryGetNearbyKnownMine(candPos, 4.5f, false, out _))
+                        continue;
+
+                    float angleScore = cosTable[a] * 1.4f + (Mathf.Abs(sinTable[a]) > 0.5f && forwardSteepOrBlocked ? 1.1f : 0f);
+                    float flatnessScore = (gHit.normal.y - 0.60f) * 2.5f;
+                    float score = angleScore + flatnessScore + (dIdx == 0 ? 0.35f : 0f);
+                    if (score > bestScore)
+                    {
+                        bestScore = score;
+                        bestCand = candPos;
+                        foundCand = true;
+                    }
+                }
+            }
+
+            if (foundCand)
+            {
+                ClearStaleCoverForUnstick(soldier, ptr);
+                st.UnstickDest = bestCand;
+                st.UnstickOverrideUntil = now + 3.2f;
                 _footStuckStates[ptr] = st;
 
                 SetBotPose(ai, soldier, suppression >= 35f ? SoldierPose.Crouch : SoldierPose.Idle, suppression < 35f);
-                AiCore.MoveBotTowardPosition(ai, soldier, cand, 0.6f, 1.5f);
+                AiCore.MoveBotTowardPosition(ai, soldier, bestCand, 1.0f, 3.0f);
+                FootBotUnsticksCount++;
                 return true;
             }
 
             _footStuckStates[ptr] = st;
+            return false;
+        }
+
+        private static void ClearStaleCoverForUnstick(Soldier soldier, IntPtr ptr)
+        {
+            _localCoverProtectedUntil.Remove(ptr);
+            _botGoapPlans.Remove(ptr);
+            if (soldier.HasDestinationAssigned)
+            {
+                AiDestination curDest = soldier.targetDestination;
+                if (curDest != null && soldier.nonReachableCovers != null)
+                    soldier.nonReachableCovers.Add(curDest);
+            }
+            soldier.CoverPosition(null);
+            AiCore.InvalidateTargetDestinationCache(soldier);
+        }
+
+        private static bool IsMinePlacementEnvironmentSafe(Soldier sapper, Vector3 myPos, Squad sq, ref SquadBlackboard board)
+        {
+            if (sapper == null || string.IsNullOrEmpty(sapper.faction))
+                return false;
+
+            if (board.HasActiveObjectiveTask && sq != null && sq.currentTask != null)
+            {
+                if (sq.currentTask.IsInsideTaskArea(myPos, 0.55f) ||
+                    (myPos - board.ObjectivePosition).sqrMagnitude < 14.0f * 14.0f)
+                {
+                    return false;
+                }
+            }
+
+            if (AiCore.TryGetNearbyKnownMine(myPos, 9.0f, false, out _))
+                return false;
+
+            string myFaction = AiCore.GetCachedFaction(sapper);
+            if (AiCore.TryGetNearestFriendlySpawnPosition(myFaction, myPos, out Vector3 friendlySpawn) &&
+                (myPos - friendlySpawn).sqrMagnitude < 45.0f * 45.0f)
+            {
+                return false;
+            }
+
+            AiCore.EnsureWorldSnapshot();
+            var soldiers = AiCore.WorldSoldiers;
+            int sCount = AiCore.WorldSoldierCount;
+            IntPtr sapperPtr = sapper.Pointer;
+
+            for (int i = 0; i < sCount; i++)
+            {
+                ref AiCore.SoldierSnapshot sSnap = ref soldiers[i];
+                if (sSnap.Ptr == sapperPtr || sSnap.HasSurrendered || sSnap.IsInjured)
+                    continue;
+
+                float dSq = (sSnap.Pos - myPos).sqrMagnitude;
+                if (AiCore.AreSameSideFactions(myFaction, sSnap.Faction))
+                {
+                    if (dSq <= 12.0f * 12.0f)
+                        return false;
+                }
+                else if (AiCore.AreEnemyFactions(myFaction, sSnap.Faction))
+                {
+                    if (dSq <= 22.0f * 22.0f)
+                        return false;
+                }
+            }
+
+            try
+            {
+                var allVeh = Vehicle.allVehicles;
+                if (allVeh != null)
+                {
+                    int vCount = allVeh.Count;
+                    for (int i = 0; i < vCount; i++)
+                    {
+                        Vehicle v = allVeh[i];
+                        if (v == null || v.Pointer == IntPtr.Zero || v.transform == null || v.IsAirVehicle() || v.IsCoverDestroyed())
+                            continue;
+
+                        if ((v.transform.position - myPos).sqrMagnitude <= 22.0f * 22.0f)
+                            return false;
+                    }
+                }
+            }
+            catch { }
+
+            return true;
+        }
+
+        private static bool HasRecipeIngredientsInInventory(
+            Il2CppSystem.Collections.Generic.List<VirtualItem> items,
+            DeployableVehicleRecipy recipe,
+            VirtualDeployableVehicle mainItem)
+        {
+            if (items == null || recipe == null)
+                return false;
+
+            var ings = recipe.ingredients;
+            if (ings == null || ings.Length == 0)
+                return true;
+
+            int ingLen = ings.Length;
+            int itemCount = items.Count;
+            string mainId = mainItem != null ? mainItem.item_id : null;
+            for (int i = 0; i < ingLen; i++)
+            {
+                string needed = ings[i];
+                if (string.IsNullOrEmpty(needed))
+                    continue;
+                if (!string.IsNullOrEmpty(mainId) && string.Equals(needed, mainId, StringComparison.OrdinalIgnoreCase))
+                    continue;
+
+                bool found = false;
+                for (int k = 0; k < itemCount; k++)
+                {
+                    VirtualItem vi = items[k];
+                    if (vi != null && !string.IsNullOrEmpty(vi.item_id) &&
+                        string.Equals(vi.item_id, needed, StringComparison.OrdinalIgnoreCase))
+                    {
+                        found = true;
+                        break;
+                    }
+                }
+                if (!found)
+                    return false;
+            }
+            return true;
+        }
+
+        private static bool TryExecuteSpecialMunitionsAndTripods(
+            SoldierAI ai,
+            Soldier soldier,
+            IntPtr ptr,
+            Squad sq,
+            ref SquadBlackboard board,
+            Vector3 myPos,
+            float suppression,
+            float dist,
+            bool isOnBridge,
+            float now)
+        {
+            if (soldier.inventory == null || soldier.inventory.inventory == null || soldier.inventory.inventory.items == null)
+                return false;
+
+            if (soldier.isInHandsAnimation || soldier.isInBodyAnimation || soldier.IsReloading)
+                return false;
+
+            if (_nextSpecialMunitionTime.TryGetValue(ptr, out float nextSpecialT) && now < nextSpecialT)
+                return false;
+
+            var items = soldier.inventory.inventory.items;
+            int itemCount = items.Count;
+            if (itemCount <= 0)
+                return false;
+
+            bool syncOnline = Photon.Pun.PhotonNetwork.InRoom;
+
+            // 1. Heavy Satchels / Demolition Charges vs bunkers, static emplacements, or enemy armor within throw range
+            Spottable demoTarget = ai.visibleTarget != null ? ai.visibleTarget : board.PrimaryTarget;
+            if (demoTarget != null && demoTarget.Pointer != IntPtr.Zero && now > soldier.throw_end_time + 5.0f)
+            {
+                Vehicle targetVeh = demoTarget.TryCast<Vehicle>();
+                AiCore.VehicleFastHandles vh = targetVeh != null ? AiCore.GetOrCreateVehicleHandles(targetVeh) : null;
+                bool isHeavyFortifiedOrArmor = targetVeh != null &&
+                                               !targetVeh.IsDisabled() &&
+                                               !targetVeh.IsCoverDestroyed() &&
+                                               vh != null &&
+                                               (vh.IsStaticEmplacement || vh.IsTank || vh.IsWheeledOrTank);
+                if (isHeavyFortifiedOrArmor && AiCore.TryGetSpottableCenter(demoTarget, out Vector3 targetPos))
+                {
+                    float dTarget = Vector3.Distance(myPos, targetPos);
+                    for (int i = 0; i < itemCount; i++)
+                    {
+                        VirtualItem vi = items[i];
+                        if (vi == null || !AiCore.TryGetThrowablePrefabInfo(vi, out AiCore.ThrowablePrefabInfo tInfo) || !tInfo.IsSatchelOrHeavyDemo)
+                            continue;
+
+                        float maxRange = Mathf.Min(23.0f, soldier.GetGrenadeThrowRange(vi));
+                        if (dTarget < 4.5f || dTarget > maxRange)
+                            continue;
+
+                        float safeRadius = Mathf.Max(8.5f, tInfo.ExplosionRadius + 3.0f);
+                        if (!IsSafeToThrowGrenadeAt(soldier, targetPos, dTarget, safeRadius))
+                            continue;
+
+                        if (syncOnline && !AiCore.TryConsumeBotRpcBudget(0.45f))
+                        {
+                            _nextSpecialMunitionTime[ptr] = now + 2.5f;
+                            return false;
+                        }
+
+                        soldier.SetGunTriggerPressed(false);
+                        soldier.Throw(vi, demoTarget);
+                        _nextSpecialMunitionTime[ptr] = now + 12.0f;
+                        AiCore.SpecialMunitionsUsedCount++;
+                        GoapPlansExecutedCount++;
+                        TrySayTacticalVoice(soldier, sq, VoiceManager.VoiceClip.granade, 0.05f);
+
+                        Vector3 away = myPos - targetPos;
+                        away.y = 0f;
+                        Vector3 awayDir = away.sqrMagnitude > 0.04f ? away.normalized : -soldier.transform.forward;
+                        _sapperStepBackDest[ptr] = myPos + awayDir * 9.0f;
+                        _sapperStepBackUntil[ptr] = now + 3.5f;
+                        AiCore.MoveBotTowardPosition(ai, soldier, _sapperStepBackDest[ptr], 1.0f, 3.5f);
+                        return true;
+                    }
+                }
+            }
+
+            // 2. AT & AP Pressure Mines along defensive/chokepoint approaches (strict friendly-fire safety checks!)
+            if (!isOnBridge &&
+                suppression < 18.0f &&
+                !ai.HasEnemyAndCanFireAtHim &&
+                now > soldier.throw_end_time + 5.0f &&
+                (board.IsDefendingObjective || (sq != null && sq.order == Order.defend) || board.ThreatIsArmor || !ai.IsMoving()))
+            {
+                VirtualItem mineItem = null;
+                bool isAtMine = false;
+                for (int i = 0; i < itemCount; i++)
+                {
+                    VirtualItem vi = items[i];
+                    if (vi == null || !AiCore.IsPressureMineItem(vi, out bool atFlag))
+                        continue;
+
+                    if (atFlag || board.IsDefendingObjective || (sq != null && sq.order == Order.defend))
+                    {
+                        mineItem = vi;
+                        isAtMine = atFlag;
+                        break;
+                    }
+                }
+
+                if (mineItem != null && IsMinePlacementEnvironmentSafe(soldier, myPos, sq, ref board))
+                {
+                    Vector3 fwd = soldier.transform != null ? soldier.transform.forward : Vector3.forward;
+                    fwd.y = 0f;
+                    fwd = fwd.sqrMagnitude > 0.01f ? fwd.normalized : Vector3.forward;
+                    Vector3 plantProbe = myPos + fwd * 1.15f;
+                    if (Physics.Raycast(plantProbe + Vector3.up * 1.2f, Vector3.down, out RaycastHit mGround, 2.8f, AiCore.GetSolidEnvironmentMask(), QueryTriggerInteraction.Ignore) &&
+                        mGround.normal.y >= 0.72f &&
+                        (!AiCore.TryGetActiveWaterLevel(out float mineWl) || mGround.point.y > mineWl + 0.15f))
+                    {
+                        if (syncOnline && !AiCore.TryConsumeBotRpcBudget(0.45f))
+                        {
+                            _nextSpecialMunitionTime[ptr] = now + 2.5f;
+                            return false;
+                        }
+
+                        soldier.SetGunTriggerPressed(false);
+                        soldier.Throw(mineItem, null);
+                        AiCore.RegisterPlacedMine(mGround.point, null, isAtMine);
+                        _nextSpecialMunitionTime[ptr] = now + 15.0f;
+                        AiCore.SpecialMunitionsUsedCount++;
+                        GoapPlansExecutedCount++;
+
+                        Vector3 stepBack = myPos - fwd * 6.5f;
+                        if (Physics.Raycast(stepBack + Vector3.up * 6.0f, Vector3.down, out RaycastHit backHit, 14.0f, AiCore.GetSolidEnvironmentMask(), QueryTriggerInteraction.Ignore) &&
+                            backHit.normal.y >= 0.58f)
+                        {
+                            stepBack = backHit.point;
+                        }
+                        soldier.CoverPosition(null);
+                        AiCore.InvalidateTargetDestinationCache(soldier);
+                        _sapperStepBackDest[ptr] = stepBack;
+                        _sapperStepBackUntil[ptr] = now + 3.2f;
+                        AiCore.MoveBotTowardPosition(ai, soldier, stepBack, 0.8f, 3.2f);
+                        return true;
+                    }
+                }
+            }
+
+            // 3. Deployable Tripods / Crew Weapons (VirtualDeployableVehicle -> Soldier.BuildVehicle)
+            if (!isOnBridge &&
+                !ai.IsMoving() &&
+                suppression < 15.0f &&
+                !AiCore.HasLowCeilingOverhead(myPos, 2.2f))
+            {
+                bool hasAxis = false;
+                Vector3 axisTarget = Vector3.zero;
+                if (board.HasActiveThreat)
+                {
+                    axisTarget = board.ThreatPosition;
+                    hasAxis = true;
+                }
+                else if (board.HasActiveObjectiveTask)
+                {
+                    axisTarget = board.ObjectivePosition;
+                    hasAxis = true;
+                }
+
+                if (hasAxis)
+                {
+                    float axisDistSq = (axisTarget - myPos).sqrMagnitude;
+                    if (axisDistSq >= 30.0f * 30.0f && axisDistSq <= 220.0f * 220.0f)
+                    {
+                        Vector3 toAxis = axisTarget - myPos;
+                        toAxis.y = 0f;
+                        Vector3 fwd = soldier.transform.forward;
+                        fwd.y = 0f;
+                        if (toAxis.sqrMagnitude > 1.0f && fwd.sqrMagnitude > 0.01f &&
+                            Vector3.Dot(fwd.normalized, toAxis.normalized) >= 0.25f)
+                        {
+                            for (int i = 0; i < itemCount; i++)
+                            {
+                                VirtualItem vi = items[i];
+                                if (vi == null)
+                                    continue;
+
+                                VirtualDeployableVehicle deployVi = vi.TryCast<VirtualDeployableVehicle>();
+                                if (deployVi == null)
+                                    continue;
+
+                                ItemObject prefab = null;
+                                try { prefab = vi.GetItemPrefab(); } catch { }
+                                ItemObjectDeployableVehicle deployObj = prefab != null ? prefab.TryCast<ItemObjectDeployableVehicle>() : null;
+                                if (deployObj == null || deployObj.recipies == null || deployObj.recipies.Length == 0)
+                                    continue;
+
+                                DeployableVehicleRecipy matched = null;
+                                int rLen = deployObj.recipies.Length;
+                                for (int r = 0; r < rLen; r++)
+                                {
+                                    DeployableVehicleRecipy rec = deployObj.recipies[r];
+                                    if (rec != null && HasRecipeIngredientsInInventory(items, rec, deployVi))
+                                    {
+                                        matched = rec;
+                                        break;
+                                    }
+                                }
+                                if (matched == null)
+                                    continue;
+
+                                if (!soldier.CanBuildVehicle(out Vector3 buildNormal))
+                                    continue;
+
+                                if (syncOnline && !AiCore.TryConsumeBotRpcBudget(0.50f))
+                                {
+                                    _nextSpecialMunitionTime[ptr] = now + 2.5f;
+                                    return false;
+                                }
+
+                                soldier.SetGunTriggerPressed(false);
+                                if (soldier.BuildVehicle(deployVi, matched, deployObj.deploy_animation, buildNormal))
+                                {
+                                    _nextSpecialMunitionTime[ptr] = now + 18.0f;
+                                    AiCore.SpecialMunitionsUsedCount++;
+                                    GoapPlansExecutedCount++;
+                                    return true;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            _nextSpecialMunitionTime[ptr] = now + 2.5f;
             return false;
         }
 
@@ -4532,8 +5143,8 @@ namespace EasyRed2HumanAI
 
             if (ai.visibleTarget != null)
                 ws |= GoapStateBits.HasVisibleEnemy;
-            // Bailed vehicle crews only block evacuation for close-quarters self-defense (<= 16m), never to plink at 60m riflemen with a sidearm!
-            if (ai.HasEnemyAndCanFireAtHim && (!isBailedVehicleCrew || dist <= 16.0f))
+            // Bailed vehicle crews only block evacuation for close-quarters self-defense (<= 24m), never to plink at distant riflemen!
+            if (ai.HasEnemyAndCanFireAtHim && (!isBailedVehicleCrew || dist <= 24.0f))
                 ws |= GoapStateBits.CanFireAtVisibleEnemy;
             if (isGunner)
                 ws |= GoapStateBits.IsMachineGunner;
@@ -4596,7 +5207,7 @@ namespace EasyRed2HumanAI
                 if (VisionConfig.EnableLastKnownSuppression.Value &&
                     (!_nextSuppressiveGrenadeTime.TryGetValue(soldier.Pointer, out float nextGren) || now >= nextGren || nextGren - now > 45.0f) &&
                     (board.BreacherPtr == IntPtr.Zero || board.BreacherPtr == soldier.Pointer || now >= board.BreachUntil) &&
-                    soldier.inventory.FindItemOfType<VirtualGrenade>() != null)
+                    AiCore.FindThrowableGrenadeInInventory(soldier, findAtGrenade: false, findFragGrenade: true) != null)
                 {
                     ws |= GoapStateBits.HasFragGrenade;
                 }
@@ -4619,8 +5230,9 @@ namespace EasyRed2HumanAI
                 }
             }
 
-            if ((board.FlankLeftCover != null && (board.FlankerLeftPtr == IntPtr.Zero || board.FlankerLeftPtr == soldier.Pointer)) ||
-                (board.FlankRightCover != null && (board.FlankerRightPtr == IntPtr.Zero || board.FlankerRightPtr == soldier.Pointer)))
+            if (!(soldier.IsSquadLeader() && board.AliveMemberCount >= 2) &&
+                ((board.FlankLeftCover != null && (board.FlankerLeftPtr == IntPtr.Zero || board.FlankerLeftPtr == soldier.Pointer)) ||
+                 (board.FlankRightCover != null && (board.FlankerRightPtr == IntPtr.Zero || board.FlankerRightPtr == soldier.Pointer))))
             {
                 ws |= GoapStateBits.FlankCoverAvailable;
             }
@@ -4744,7 +5356,7 @@ namespace EasyRed2HumanAI
                     bool hasUsableAtGun = (gun0 != null && gun0.IsAtWeapon() && (gun0.GetCurrentAmmoCount() > 0 || !soldier.IsOutOfAmmosFor(gun0))) ||
                                           (gun1 != null && gun1.IsAtWeapon() && (gun1.GetCurrentAmmoCount() > 0 || !soldier.IsOutOfAmmosFor(gun1))) ||
                                           (gun2 != null && gun2.IsAtWeapon() && (gun2.GetCurrentAmmoCount() > 0 || !soldier.IsOutOfAmmosFor(gun2)));
-                    bool hasAtGrenade = soldier.inventory != null && soldier.inventory.FindItemOfType<VirtualATGrenade>() != null;
+                    bool hasAtGrenade = AiCore.FindThrowableGrenadeInInventory(soldier, findAtGrenade: true, findFragGrenade: false) != null;
                     needAtWeapon = !hasUsableAtGun && !hasAtGrenade;
                 }
 
@@ -4812,7 +5424,7 @@ namespace EasyRed2HumanAI
                                        !isMedicRole &&
                                        suppression < 16f &&
                                        soldier.inventory != null &&
-                                       soldier.inventory.FindItemOfType<VirtualGrenade>() == null;
+                                       AiCore.FindThrowableGrenadeInInventory(soldier, findAtGrenade: false, findFragGrenade: true) == null;
 
                 // Do not immediately break off a smoke-covered push just to scavenge another smoke grenade right after throwing one!
                 bool wantSmokeGrenade = nonUrgentScavengeAllowed &&
@@ -4896,6 +5508,7 @@ namespace EasyRed2HumanAI
             // under heavy suppression and outnumbered!
             if (VisionConfig.EnableTacticalRetreatsAndRegroup.Value &&
                 !isBailedVehicleCrew &&
+                !(soldier.IsSquadLeader() && board.AliveMemberCount >= 2) &&
                 !soldier.isBleeding &&
                 !isOnBridge &&
                 !inPointBlankMelee &&
@@ -4953,6 +5566,7 @@ namespace EasyRed2HumanAI
             // 6. Squad Leader & Team Net Directive (Anvil Pinning vs. Hammer Flanking vs. Local Fire & Maneuver)
             bool nonBleedingBailedCrew =
                 IsSoldierBailedOutVehicleCrew(soldier, soldier.joinedSquad) &&
+                board.AliveMemberCount <= 5 &&
                 (ws & (GoapStateBits.IsBleeding | GoapStateBits.InPointBlankRange | GoapStateBits.CanFireAtVisibleEnemy)) == 0 &&
                 (ws & GoapStateBits.IsEntirelyAlone) != 0;
 
@@ -5604,7 +6218,7 @@ namespace EasyRed2HumanAI
                             {
                                 Vector3 tPos = targetSol.GetCenterOfUnit();
                                 float dFrag = Vector3.Distance(myPos, tPos);
-                                VirtualItem fragItem = soldier.inventory.FindItemOfType<VirtualGrenade>();
+                                VirtualItem fragItem = AiCore.FindThrowableGrenadeInInventory(soldier, findAtGrenade: false, findFragGrenade: true);
                                 if (fragItem != null &&
                                     dFrag >= 10.0f &&
                                     dFrag <= Mathf.Min(29.0f, soldier.GetGrenadeThrowRange(fragItem)) &&
@@ -5975,7 +6589,7 @@ namespace EasyRed2HumanAI
                                         else if (soldier.inventory != null)
                                         {
                                             VirtualItem atGren = targetInv.FindItemOfType<VirtualATGrenade>();
-                                            if (atGren != null)
+                                            if (atGren != null && !AiCore.IsPressureMineItem(atGren, out _))
                                             {
                                                 soldier.inventory.TakeIntoInventory(atGren, targetInv);
                                                 if (!targetInv.Contains(atGren))
@@ -6010,10 +6624,10 @@ namespace EasyRed2HumanAI
 
                                     if (scavCache.NeedFragGrenade &&
                                         soldier.inventory != null &&
-                                        soldier.inventory.FindItemOfType<VirtualGrenade>() == null)
+                                        AiCore.FindThrowableGrenadeInInventory(soldier, findAtGrenade: false, findFragGrenade: true) == null)
                                     {
                                         VirtualItem fg = targetInv.FindItemOfType<VirtualGrenade>();
-                                        if (fg != null)
+                                        if (fg != null && !AiCore.IsPressureMineItem(fg, out _))
                                         {
                                             soldier.inventory.TakeIntoInventory(fg, targetInv);
                                             if (!targetInv.Contains(fg))
@@ -6188,7 +6802,7 @@ namespace EasyRed2HumanAI
                                 }
                             }
 
-                            if (TryLinkUpOrJoinFriendlySquad(ai, soldier, myPos, 95f, out Vector3 linkDest1))
+                            if (TryLinkUpOrJoinFriendlySquad(ai, soldier, myPos, 140f, out Vector3 linkDest1))
                             {
                                 DetachStaleFootCoverForEvacuation(soldier);
                                 plan.LockUnitCoverChange = true;
@@ -6197,6 +6811,17 @@ namespace EasyRed2HumanAI
                                 plan.IsEvacuatingBailedCrew = true;
                                 SetBotPose(ai, soldier, suppression >= 34f ? SoldierPose.Crouch : SoldierPose.Idle, suppression < 34f);
                                 BotActionTrace.RecordEvent(soldier, BotTraceEventKind.CrewEvac, "crew_link_squad", dist);
+                                break;
+                            }
+
+                            if (TryRetreatBailedCrewTowardFriendlySpawn(ai, soldier, sq, myPos, out Vector3 fallbackSpawnOverride, out bool hasFallbackSpawn))
+                            {
+                                plan.LockUnitCoverChange = true;
+                                plan.HasMoveOverride = hasFallbackSpawn;
+                                plan.MoveOverrideDest = fallbackSpawnOverride;
+                                plan.IsEvacuatingBailedCrew = hasFallbackSpawn;
+                                SetBotPose(ai, soldier, suppression >= 34f ? SoldierPose.Crouch : SoldierPose.Idle, suppression < 34f);
+                                BotActionTrace.RecordEvent(soldier, BotTraceEventKind.CrewEvac, "crew_retreat_fallback", dist);
                                 break;
                             }
                         }
@@ -6889,6 +7514,11 @@ namespace EasyRed2HumanAI
             float doctrineSearchScale = Mathf.Clamp(1.0f / Mathf.Max(0.5f, factionProfile.ScavengeAndResupplyMult), 0.85f, 1.25f);
             float baseSearchRadius = (needAtWeapon || needUrgentPrimary) ? 20.0f : ((wantSquadMg || wantRadioPack) ? 16.0f : 12.5f);
             float maxSearchRadius = baseSearchRadius * doctrineSearchScale;
+            if (soldier.IsSquadLeader() && !soldier.isBleeding && soldier.joinedSquad != null &&
+                soldier.joinedSquad.units != null && soldier.joinedSquad.units.Count >= 2)
+            {
+                maxSearchRadius = Mathf.Min(maxSearchRadius, needAmmo ? 12.0f : 10.0f);
+            }
             float bestDistSq = maxSearchRadius * maxSearchRadius;
             IntPtr mySqPtrRadio = (soldier.joinedSquad != null) ? soldier.joinedSquad.Pointer : IntPtr.Zero;
             float lastRadLostTime = 0f;
@@ -7359,7 +7989,7 @@ namespace EasyRed2HumanAI
                         if (needAtWeapon)
                         {
                             VirtualItem atGren = inv.FindItemOfType<VirtualATGrenade>();
-                            if (atGren != null)
+                            if (atGren != null && !AiCore.IsPressureMineItem(atGren, out _))
                             {
                                 bestDistSq = dSq;
                                 result = new BotScavengeCache
@@ -7463,7 +8093,8 @@ namespace EasyRed2HumanAI
                         continue;
                     }
 
-                    bool hasFragInInv = wantFragGrenade && inv.FindItemOfType<VirtualGrenade>() != null;
+                    VirtualItem fgCand = wantFragGrenade ? inv.FindItemOfType<VirtualGrenade>() : null;
+                    bool hasFragInInv = fgCand != null && !AiCore.IsPressureMineItem(fgCand, out _);
                     bool hasSmokeInInv = wantSmokeGrenade && inv.FindItemOfType<VirtualSmokeGrenade>() != null;
                     bool hasBandageInInv = needBandage && inv.FindItemOfType<VirtualBandages>() != null;
                     bool hasAmmoInInv = needAmmo &&
@@ -7683,6 +8314,95 @@ namespace EasyRed2HumanAI
             return false;
         }
 
+        private static void HandleActiveCasualtyCarryTick(SoldierAI ai, Soldier soldier, IntPtr ptr, float now)
+        {
+            if (soldier == null)
+                return;
+
+            Vector3 myPos = soldier.transform != null ? soldier.transform.position : Vector3.zero;
+            bool hasState = _casualtyDragStates.TryGetValue(ptr, out CasualtyDragState activeDrag);
+            Soldier carried = soldier.carryData != null ? soldier.carryData.carriedSoldier : activeDrag.Patient;
+
+            bool stalled = false;
+            if (hasState)
+            {
+                if (activeDrag.StallAnchorTime <= 0f || (myPos - activeDrag.StallAnchorPos).sqrMagnitude > 0.75f * 0.75f)
+                {
+                    activeDrag.StallAnchorPos = myPos;
+                    activeDrag.StallAnchorTime = now;
+                }
+                else if ((now - activeDrag.StallAnchorTime) >= 2.2f)
+                {
+                    stalled = true;
+                }
+            }
+
+            bool nearbyMedicOrCloseEnemy = false;
+            string myFaction = AiCore.GetCachedFaction(soldier);
+            if (!string.IsNullOrEmpty(myFaction))
+            {
+                AiCore.EnsureWorldSnapshot();
+                var soldiers = AiCore.WorldSoldiers;
+                int count = AiCore.WorldSoldierCount;
+                for (int i = 0; i < count; i++)
+                {
+                    ref AiCore.SoldierSnapshot sSnap = ref soldiers[i];
+                    if (sSnap.Ptr == ptr || sSnap.HasSurrendered || sSnap.IsInjured || sSnap.IsOnVehicle)
+                        continue;
+
+                    float dSq = (sSnap.Pos - myPos).sqrMagnitude;
+                    if (AiCore.AreSameSideFactions(myFaction, sSnap.Faction))
+                    {
+                        bool isMedic = sSnap.IsMedic || (sSnap.IsPlayer && sSnap.Ref != null && sSnap.Ref.hasSyringe);
+                        if (isMedic && dSq <= 11.0f * 11.0f)
+                        {
+                            nearbyMedicOrCloseEnemy = true;
+                            break;
+                        }
+                    }
+                    else if (AiCore.AreEnemyFactions(myFaction, sSnap.Faction) && dSq <= 16.0f * 16.0f)
+                    {
+                        nearbyMedicOrCloseEnemy = true;
+                        break;
+                    }
+                }
+            }
+
+            bool shouldDrop = !VisionConfig.EnableBuddyCasualtyDragging.Value ||
+                              !hasState ||
+                              carried == null ||
+                              carried.IsDead ||
+                              !carried.IsInjured ||
+                              now >= activeDrag.DragEndTime ||
+                              (myPos - activeDrag.DropSpot).sqrMagnitude <= 2.6f * 2.6f ||
+                              stalled ||
+                              nearbyMedicOrCloseEnemy ||
+                              soldier.isBleeding ||
+                              soldier.IsInjured ||
+                              soldier.GetSuppressionValue() >= 45.0f;
+
+            if (shouldDrop)
+            {
+                // Unconditional release: never skip CarryBodySynched(null) due to RPC budget contention,
+                // otherwise the patient remains locked in pat.IsCarried() and medics cannot heal them!
+                soldier.CarryBodySynched(null);
+                _casualtyDragStates.Remove(ptr);
+                if (ai != null && soldier.transform != null)
+                {
+                    Vector3 clearStep = myPos - soldier.transform.forward * 2.4f;
+                    AiCore.MoveBotTowardPosition(ai, soldier, clearStep, 0.8f, 1.8f);
+                }
+                return;
+            }
+
+            _casualtyDragStates[ptr] = activeDrag;
+            if (ai != null)
+            {
+                SetBotPose(ai, soldier, SoldierPose.Crouch);
+                AiCore.MoveBotTowardPosition(ai, soldier, activeDrag.DropSpot, 1.4f, 2.6f);
+            }
+        }
+
         private static bool TryExecuteBuddyCasualtyDrag(
             SoldierAI ai,
             Soldier soldier,
@@ -7696,33 +8416,10 @@ namespace EasyRed2HumanAI
 
             IntPtr ptr = soldier.Pointer;
 
-            // 1. If already carrying a casualty, drag them to the sheltered drop spot and release them!
+            // 1. If already carrying a casualty, drag them to the sheltered drop spot or release immediately for Medics
             if (soldier.IsCarryingBody())
             {
-                bool hasState = _casualtyDragStates.TryGetValue(ptr, out CasualtyDragState activeDrag);
-                Soldier carried = soldier.carryData != null ? soldier.carryData.carriedSoldier : activeDrag.Patient;
-
-                bool shouldDrop = !VisionConfig.EnableBuddyCasualtyDragging.Value ||
-                                  !hasState ||
-                                  carried == null ||
-                                  carried.IsDead ||
-                                  !carried.IsInjured ||
-                                  now >= activeDrag.DragEndTime ||
-                                  (myPos - activeDrag.DropSpot).sqrMagnitude <= 2.25f * 2.25f ||
-                                  soldier.GetSuppressionValue() >= 55f;
-
-                if (shouldDrop)
-                {
-                    if (!Photon.Pun.PhotonNetwork.InRoom || AiCore.TryConsumeBotRpcBudget(0.35f))
-                    {
-                        soldier.CarryBodySynched(null);
-                        _casualtyDragStates.Remove(ptr);
-                    }
-                    return true;
-                }
-
-                SetBotPose(ai, soldier, SoldierPose.Crouch);
-                ai.MoveDirectlyToward(activeDrag.DropSpot, 2.6f);
+                HandleActiveCasualtyCarryTick(ai, soldier, ptr, now);
                 return true;
             }
 
@@ -7830,6 +8527,8 @@ namespace EasyRed2HumanAI
                     dragState.DropSpot = dropSpot;
                     dragState.DragEndTime = now + 7.0f;
                     dragState.NextScanTime = now + 18.0f;
+                    dragState.StallAnchorPos = myPos;
+                    dragState.StallAnchorTime = now;
                     _casualtyDragStates[ptr] = dragState;
                     CasualtiesDraggedCount++;
                     GoapPlansExecutedCount++;
@@ -8070,7 +8769,7 @@ namespace EasyRed2HumanAI
                 catch { }
             }
 
-            if (bestSq > 8f * 8f && ai != null)
+            if (ai != null)
             {
                 activeMoveDest = linkUpPos;
                 AiCore.MoveBotTowardPosition(ai, self, linkUpPos, 3.5f, 3.0f);

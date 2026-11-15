@@ -160,6 +160,37 @@ namespace EasyRed2HumanAI
         private static bool _mpInRoomCached;
         private static bool _mpIsMasterCached = true;
 
+        public struct ThrowablePrefabInfo
+        {
+            public bool IsValid;
+            public FuseType Fuse;
+            public GrenadeType Type;
+            public float MaxPenetration;
+            public float ExplosionRadius;
+            public bool IsPressureMine;
+            public bool IsAtMine;
+            public bool IsApMine;
+            public bool IsSatchelOrHeavyDemo;
+        }
+
+        public struct ActiveLandMine
+        {
+            public IntPtr Ptr;
+            public ItemGrenade Ref;
+            public Vector3 Pos;
+            public bool IsAtMine;
+            public float ExpireTime;
+        }
+
+        public static readonly ActiveLandMine[] ActiveLandMines = new ActiveLandMine[128];
+        public static int ActiveLandMineCount;
+        public static int SpecialMunitionsUsedCount { get; internal set; }
+
+        private static readonly Dictionary<string, ThrowablePrefabInfo> _throwablePrefabCache =
+            new Dictionary<string, ThrowablePrefabInfo>(64, StringComparer.OrdinalIgnoreCase);
+        private static readonly HashSet<IntPtr> _nonMineSpawnedItemPtrs = new HashSet<IntPtr>(512);
+        private static float _nextActiveMineScanTime;
+
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         public static string InternFaction(string raw)
         {
@@ -2360,12 +2391,7 @@ namespace EasyRed2HumanAI
             return false;
         }
 
-        /// <summary>
-        /// Checks whether an impact point is submerged below or across an active <see cref="FollowingWater"/>
-        /// or Layer 4 (<c>Water</c>) surface, or occluded from <paramref name="camPos"/> by a tactical smoke volume
-        /// (<c>visionMask &amp; ~bulletMask</c>).
-        /// </summary>
-        public static bool IsPointOccludedByWaterOrSmoke(Vector3 camPos, Vector3 impactPos)
+        public static bool TryGetActiveWaterLevel(out float waterLevel)
         {
             try
             {
@@ -2382,14 +2408,30 @@ namespace EasyRed2HumanAI
                         _cachedWaterRenderer.Pointer != IntPtr.Zero &&
                         _cachedWaterRenderer.enabled)
                     {
-                        float waterY = FollowingWater.WaterLevel;
-                        // Submerged flesh hit or sightline crossing the rendered water plane
-                        if (impactPos.y < waterY - 0.03f || (camPos.y - waterY) * (impactPos.y - waterY) < 0f)
-                            return true;
+                        waterLevel = FollowingWater.WaterLevel;
+                        return true;
                     }
                 }
             }
             catch { }
+
+            waterLevel = -9999f;
+            return false;
+        }
+
+        /// <summary>
+        /// Checks whether an impact point is submerged below or across an active <see cref="FollowingWater"/>
+        /// or Layer 4 (<c>Water</c>) surface, or occluded from <paramref name="camPos"/> by a tactical smoke volume
+        /// (<c>visionMask &amp; ~bulletMask</c>).
+        /// </summary>
+        public static bool IsPointOccludedByWaterOrSmoke(Vector3 camPos, Vector3 impactPos)
+        {
+            if (TryGetActiveWaterLevel(out float waterY))
+            {
+                // Submerged flesh hit or sightline crossing the rendered water plane
+                if (impactPos.y < waterY - 0.03f || (camPos.y - waterY) * (impactPos.y - waterY) < 0f)
+                    return true;
+            }
 
             int smokeMask = GetSmokeOcclusionMask();
             int lineMask = smokeMask | (1 << 4); // Smoke volumes (TransparentFX) + local Water colliders (Layer 4)
@@ -2439,6 +2481,39 @@ namespace EasyRed2HumanAI
             return hasCeiling;
         }
 
+        private static bool IsBridgeSideOpenDropOff(
+            Vector3 feetPos,
+            Vector3 horizDir,
+            int mask,
+            bool requireWater,
+            bool hasActiveWater,
+            float waterLevel)
+        {
+            // Check chest/head horizontal clearance first so nearby boulders, rising hillside banks, or walls
+            // never cause an elevated probe origin to start underground or look like an open drop.
+            Vector3 horizOrigin = feetPos + Vector3.up * 1.85f;
+            for (int k = 0; k < 2; k++)
+            {
+                float d = k == 0 ? 3.8f : 6.2f;
+                if (Physics.Raycast(horizOrigin, horizDir, d, mask, QueryTriggerInteraction.Ignore))
+                    return false;
+
+                // Cast down 4.35m from +2.50m above feetPos (threshold = -1.85m below feetPos.y)
+                Vector3 elevOrigin = new Vector3(feetPos.x + horizDir.x * d, feetPos.y + 2.50f, feetPos.z + horizDir.z * d);
+                if (!Physics.Raycast(elevOrigin, Vector3.down, out RaycastHit downHit, 4.35f, mask, QueryTriggerInteraction.Ignore))
+                {
+                    if (!requireWater || (hasActiveWater && feetPos.y <= waterLevel + 5.5f))
+                        return true;
+                }
+                else if (hasActiveWater && downHit.point.y <= waterLevel - 0.06f)
+                {
+                    return true;
+                }
+            }
+
+            return false;
+        }
+
         public static bool IsOnBridgeOrNarrowCrossing(Vector3 feetPos)
         {
             // Quantize to 2m x 1m x 2m spatial grid cell so bridge/crossing checks are O(1) after first probe
@@ -2454,33 +2529,27 @@ namespace EasyRed2HumanAI
             if (!HasLowCeilingOverhead(feetPos, 3.8f))
             {
                 int mask = GetSolidEnvironmentMask();
-                Vector3 baseOrigin = feetPos + Vector3.up * 0.85f;
-                // A 2.65m downward probe from +0.85m means any ground > 1.80m below feetPos.y is a drop-off
-                const float maxDropProbe = 2.65f;
+                if (Physics.Raycast(feetPos + Vector3.up * 0.85f, Vector3.down, out RaycastHit centerHit, 2.0f, mask, QueryTriggerInteraction.Ignore) &&
+                    centerHit.collider != null)
+                {
+                    bool isTerrain = centerHit.collider.TryCast<TerrainCollider>() != null;
+                    bool hasActiveWater = TryGetActiveWaterLevel(out float waterLevel);
 
-                bool dropPosX = !Physics.Raycast(baseOrigin + new Vector3(3.8f, 0f, 0f), Vector3.down, maxDropProbe, mask, QueryTriggerInteraction.Ignore) ||
-                                !Physics.Raycast(baseOrigin + new Vector3(6.2f, 0f, 0f), Vector3.down, maxDropProbe, mask, QueryTriggerInteraction.Ignore);
-                bool dropNegX = false;
-                if (dropPosX)
-                {
-                    dropNegX = !Physics.Raycast(baseOrigin + new Vector3(-3.8f, 0f, 0f), Vector3.down, maxDropProbe, mask, QueryTriggerInteraction.Ignore) ||
-                               !Physics.Raycast(baseOrigin + new Vector3(-6.2f, 0f, 0f), Vector3.down, maxDropProbe, mask, QueryTriggerInteraction.Ignore);
-                }
-
-                if (dropPosX && dropNegX)
-                {
-                    isBridge = true;
-                }
-                else
-                {
-                    bool dropPosZ = !Physics.Raycast(baseOrigin + new Vector3(0f, 0f, 3.8f), Vector3.down, maxDropProbe, mask, QueryTriggerInteraction.Ignore) ||
-                                    !Physics.Raycast(baseOrigin + new Vector3(0f, 0f, 6.2f), Vector3.down, maxDropProbe, mask, QueryTriggerInteraction.Ignore);
-                    if (dropPosZ)
+                    // Dry TerrainCollider hillsides (like Kos slopes) are NEVER bridges or narrow crossings.
+                    // Only allow TerrainCollider if near active water so true land-causeways still qualify.
+                    if (!isTerrain || (hasActiveWater && centerHit.point.y <= waterLevel + 5.5f))
                     {
-                        bool dropNegZ = !Physics.Raycast(baseOrigin + new Vector3(0f, 0f, -3.8f), Vector3.down, maxDropProbe, mask, QueryTriggerInteraction.Ignore) ||
-                                        !Physics.Raycast(baseOrigin + new Vector3(0f, 0f, -6.2f), Vector3.down, maxDropProbe, mask, QueryTriggerInteraction.Ignore);
-                        if (dropNegZ)
+                        bool dropPosX = IsBridgeSideOpenDropOff(feetPos, Vector3.right, mask, isTerrain, hasActiveWater, waterLevel);
+                        if (dropPosX && IsBridgeSideOpenDropOff(feetPos, Vector3.left, mask, isTerrain, hasActiveWater, waterLevel))
+                        {
                             isBridge = true;
+                        }
+                        else
+                        {
+                            bool dropPosZ = IsBridgeSideOpenDropOff(feetPos, Vector3.forward, mask, isTerrain, hasActiveWater, waterLevel);
+                            if (dropPosZ && IsBridgeSideOpenDropOff(feetPos, Vector3.back, mask, isTerrain, hasActiveWater, waterLevel))
+                                isBridge = true;
+                        }
                     }
                 }
             }
@@ -2509,16 +2578,8 @@ namespace EasyRed2HumanAI
             if (hit.collider == null || hit.collider.gameObject.layer == 4)
                 return false;
 
-            try
-            {
-                FollowingWater water = FollowingWater.instance;
-                if (water != null && water.Pointer != IntPtr.Zero && water.isActiveAndEnabled &&
-                    hit.point.y <= FollowingWater.WaterLevel + 0.15f)
-                {
-                    return false;
-                }
-            }
-            catch { }
+            if (TryGetActiveWaterLevel(out float waterLevel) && hit.point.y <= waterLevel + 0.15f)
+                return false;
 
             if (Physics.CheckSphere(hit.point + Vector3.up * 0.65f, 0.26f, mask, QueryTriggerInteraction.Ignore))
                 return false;
@@ -2802,6 +2863,39 @@ namespace EasyRed2HumanAI
             return (!ReferenceEquals(_cachedMainCamera, null) && _cachedMainCamera != null && _cachedMainCamera.isActiveAndEnabled)
                 ? _cachedMainCamera
                 : null;
+        }
+
+        /// <summary>
+        /// Returns true if <paramref name="worldPos"/> is within <paramref name="minPlayerDist"/> of any active human player
+        /// (local or co-op) or unobstructed inside the local camera frustum, so off-camera unstick snaps never pop in visibly.
+        /// </summary>
+        public static bool IsPositionVisibleOnLocalScreen(Vector3 worldPos, float minPlayerDist = 20.0f)
+        {
+            EnsurePlayerAimLanesUpdated();
+            float minDistSq = minPlayerDist * minPlayerDist;
+            for (int i = 0; i < ActivePlayerAimLaneCount; i++)
+            {
+                if ((worldPos - ActivePlayerAimLanes[i].FeetPos).sqrMagnitude < minDistSq)
+                    return true;
+            }
+
+            Camera cam = GetCachedMainCamera(Time.time);
+            if (cam == null || cam.transform == null)
+                return false;
+
+            Vector3 camPos = cam.transform.position;
+            if ((worldPos - camPos).sqrMagnitude < minDistSq)
+                return true;
+
+            Vector3 targetChest = worldPos + Vector3.up * 0.95f;
+            Vector3 vp = cam.WorldToViewportPoint(targetChest);
+            if (vp.z > 0.0f && vp.x >= -0.06f && vp.x <= 1.06f && vp.y >= -0.06f && vp.y <= 1.06f)
+            {
+                if (!Physics.Linecast(camPos, targetChest, GetSolidEnvironmentMask(), QueryTriggerInteraction.Ignore))
+                    return true;
+            }
+
+            return false;
         }
 
         private static void TryAppendPlayerAimLane(Soldier p, SoldierFastHandles h, bool isLocalPlayer, float now)
@@ -3591,6 +3685,278 @@ namespace EasyRed2HumanAI
             HitchProfiler.End(HitchBucket.WorldSnapshot, profSnapStart);
         }
 
+        private static bool ContainsHeavyDemoKeyword(string itemId)
+        {
+            if (string.IsNullOrEmpty(itemId))
+                return false;
+
+            return itemId.IndexOf("satchel", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                   itemId.IndexOf("geballte", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                   itemId.IndexOf("hafthohl", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                   itemId.IndexOf("panzerwurf", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                   itemId.IndexOf("gammon", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                   itemId.IndexOf("hawkins", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                   itemId.IndexOf("tnt", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                   itemId.IndexOf("dynamite", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                   itemId.IndexOf("demolition", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                   itemId.IndexOf("bangalore", StringComparison.OrdinalIgnoreCase) >= 0;
+        }
+
+        public static bool TryGetThrowablePrefabInfo(VirtualItem vi, out ThrowablePrefabInfo info)
+        {
+            if (ReferenceEquals(vi, null) || vi == null || vi.Pointer == IntPtr.Zero)
+            {
+                info = default;
+                return false;
+            }
+
+            string itemId = vi.item_id ?? string.Empty;
+            if (!string.IsNullOrEmpty(itemId) && _throwablePrefabCache.TryGetValue(itemId, out info))
+                return info.IsValid || info.IsPressureMine || info.IsSatchelOrHeavyDemo;
+
+            ItemObject prefab = null;
+            try { prefab = vi.GetItemPrefab(); } catch { }
+            return TryGetThrowablePrefabInfo(itemId, prefab, out info);
+        }
+
+        public static bool TryGetThrowablePrefabInfo(string itemId, ItemObject explicitPrefab, out ThrowablePrefabInfo info)
+        {
+            if (!string.IsNullOrEmpty(itemId) && _throwablePrefabCache.TryGetValue(itemId, out info))
+                return info.IsValid || info.IsPressureMine || info.IsSatchelOrHeavyDemo;
+
+            info = default;
+            try
+            {
+                ItemObject prefab = explicitPrefab;
+                if ((ReferenceEquals(prefab, null) || prefab == null) && !string.IsNullOrEmpty(itemId))
+                    prefab = ItemsDatabase.GetItemObject(itemId);
+
+                ItemGrenade ig = !ReferenceEquals(prefab, null) && prefab != null ? prefab.TryCast<ItemGrenade>() : null;
+                if (ig != null)
+                {
+                    info.IsValid = true;
+                    info.Fuse = ig.fuseType;
+                    info.Type = ig.grenadeType;
+                    info.MaxPenetration = ig.explosionMaxPenetration;
+                    info.ExplosionRadius = ig.explosionRadius;
+                    info.IsAtMine = info.Fuse == FuseType.VehiclePressionFuse;
+                    info.IsApMine = info.Fuse == FuseType.InfantryPressionFuse;
+                    info.IsPressureMine = info.IsAtMine || info.IsApMine;
+                    info.IsSatchelOrHeavyDemo = !info.IsPressureMine &&
+                                                (info.MaxPenetration >= 22.0f ||
+                                                 (info.ExplosionRadius >= 6.0f && info.MaxPenetration >= 16.0f) ||
+                                                 ContainsHeavyDemoKeyword(itemId));
+                }
+                else if (ContainsHeavyDemoKeyword(itemId))
+                {
+                    info.IsSatchelOrHeavyDemo = true;
+                }
+            }
+            catch { }
+
+            if (!string.IsNullOrEmpty(itemId))
+            {
+                if (_throwablePrefabCache.Count > 256)
+                    _throwablePrefabCache.Clear();
+                _throwablePrefabCache[itemId] = info;
+            }
+
+            return info.IsValid || info.IsPressureMine || info.IsSatchelOrHeavyDemo;
+        }
+
+        public static bool IsPressureMineItem(VirtualItem vi, out bool isAtMine)
+        {
+            if (TryGetThrowablePrefabInfo(vi, out ThrowablePrefabInfo info) && info.IsPressureMine)
+            {
+                isAtMine = info.IsAtMine;
+                return true;
+            }
+
+            isAtMine = false;
+            return false;
+        }
+
+        public static bool IsSatchelOrHeavyDemoItem(VirtualItem vi)
+        {
+            return TryGetThrowablePrefabInfo(vi, out ThrowablePrefabInfo info) && info.IsSatchelOrHeavyDemo;
+        }
+
+        /// <summary>
+        /// Safely searches a soldier's inventory for a THROWABLE AT grenade or standard frag grenade
+        /// while strictly excluding AT/AP pressure mines (<see cref="FuseType.VehiclePressionFuse"/> /
+        /// <see cref="FuseType.InfantryPressionFuse"/>), smoke grenades, and non-lethal consumables.
+        /// </summary>
+        public static VirtualItem FindThrowableGrenadeInInventory(Soldier s, bool findAtGrenade, bool findFragGrenade)
+        {
+            if (s == null || s.inventory == null || s.inventory.inventory == null)
+                return null;
+
+            var items = s.inventory.inventory.items;
+            if (items == null)
+                return null;
+
+            int count = items.Count;
+            VirtualItem fallbackAt = null;
+            for (int i = 0; i < count; i++)
+            {
+                VirtualItem vi = items[i];
+                if (ReferenceEquals(vi, null) || vi == null || vi.Pointer == IntPtr.Zero)
+                    continue;
+
+                if (IsPressureMineItem(vi, out _))
+                    continue;
+
+                if (vi.TryCast<VirtualSmokeGrenade>() != null)
+                    continue;
+
+                bool isAt = vi.TryCast<VirtualATGrenade>() != null;
+                if (isAt)
+                {
+                    if (findAtGrenade)
+                        return vi;
+                    continue;
+                }
+
+                if (vi.TryCast<VirtualGrenade>() != null)
+                {
+                    if (findFragGrenade)
+                        return vi;
+                    if (findAtGrenade && fallbackAt == null &&
+                        TryGetThrowablePrefabInfo(vi, out ThrowablePrefabInfo info) &&
+                        (info.Type == GrenadeType.ATGrenade || info.MaxPenetration >= 16.0f || info.IsSatchelOrHeavyDemo))
+                    {
+                        fallbackAt = vi;
+                    }
+                }
+            }
+
+            return fallbackAt;
+        }
+
+        public static void RegisterPlacedMine(Vector3 worldPos, ItemGrenade grenadeObj, bool isAtMine)
+        {
+            float now = Time.time;
+            IntPtr ptr = (!ReferenceEquals(grenadeObj, null) && grenadeObj != null) ? grenadeObj.Pointer : IntPtr.Zero;
+
+            for (int i = 0; i < ActiveLandMineCount; i++)
+            {
+                ref ActiveLandMine m = ref ActiveLandMines[i];
+                if ((ptr != IntPtr.Zero && m.Ptr == ptr) || (m.Pos - worldPos).sqrMagnitude <= 0.64f)
+                {
+                    m.Ptr = ptr;
+                    m.Ref = grenadeObj;
+                    m.Pos = worldPos;
+                    m.IsAtMine = isAtMine;
+                    m.ExpireTime = now + 240.0f;
+                    return;
+                }
+            }
+
+            if (ActiveLandMineCount < ActiveLandMines.Length)
+            {
+                ActiveLandMines[ActiveLandMineCount++] = new ActiveLandMine
+                {
+                    Ptr = ptr,
+                    Ref = grenadeObj,
+                    Pos = worldPos,
+                    IsAtMine = isAtMine,
+                    ExpireTime = now + 240.0f
+                };
+            }
+        }
+
+        public static void RefreshActiveLandMinesIfDue()
+        {
+            float now = Time.time;
+            if (now < _nextActiveMineScanTime && now >= _nextActiveMineScanTime - 2.0f)
+                return;
+
+            _nextActiveMineScanTime = now + 0.50f;
+            int writeIdx = 0;
+
+            // Keep recently registered or still-live tracked mines up front, culling detonated/expired entries
+            for (int i = 0; i < ActiveLandMineCount; i++)
+            {
+                ActiveLandMine m = ActiveLandMines[i];
+                if (now > m.ExpireTime)
+                    continue;
+
+                if (!ReferenceEquals(m.Ref, null))
+                {
+                    if (m.Ref == null || m.Ref.Pointer == IntPtr.Zero || m.Ref.exploded)
+                        continue;
+
+                    if (m.Ref.transform != null)
+                        m.Pos = m.Ref.transform.position;
+                }
+
+                ActiveLandMines[writeIdx++] = m;
+            }
+            ActiveLandMineCount = writeIdx;
+
+            try
+            {
+                var spawned = ItemObject.spawnedItems;
+                if (spawned == null)
+                    return;
+
+                if (_nonMineSpawnedItemPtrs.Count > 4096)
+                    _nonMineSpawnedItemPtrs.Clear();
+
+                int count = spawned.Count;
+                for (int i = 0; i < count; i++)
+                {
+                    ItemObject io = spawned[i];
+                    if (ReferenceEquals(io, null) || io == null || io.Pointer == IntPtr.Zero)
+                        continue;
+
+                    IntPtr ptr = io.Pointer;
+                    if (_nonMineSpawnedItemPtrs.Contains(ptr))
+                        continue;
+
+                    ItemGrenade ig = io.TryCast<ItemGrenade>();
+                    if (ig == null ||
+                        (ig.fuseType != FuseType.VehiclePressionFuse && ig.fuseType != FuseType.InfantryPressionFuse))
+                    {
+                        _nonMineSpawnedItemPtrs.Add(ptr);
+                        continue;
+                    }
+
+                    if (!ig.activated || ig.exploded || ig.transform == null)
+                        continue;
+
+                    RegisterPlacedMine(ig.transform.position, ig, ig.fuseType == FuseType.VehiclePressionFuse);
+                }
+            }
+            catch { }
+        }
+
+        public static bool TryGetNearbyKnownMine(Vector3 pos, float maxRadius, bool vehiclesOnly, out Vector3 minePos)
+        {
+            minePos = Vector3.zero;
+            if (ActiveLandMineCount <= 0)
+                return false;
+
+            float bestSq = maxRadius * maxRadius;
+            bool found = false;
+            for (int i = 0; i < ActiveLandMineCount; i++)
+            {
+                ref ActiveLandMine m = ref ActiveLandMines[i];
+                if (vehiclesOnly && !m.IsAtMine)
+                    continue;
+
+                float dSq = (m.Pos - pos).sqrMagnitude;
+                if (dSq < bestSq)
+                {
+                    bestSq = dSq;
+                    minePos = m.Pos;
+                    found = true;
+                }
+            }
+
+            return found;
+        }
+
         public static void ClearSpatialCaches()
         {
             _cachedSolidEnvMask = 0;
@@ -3630,6 +3996,13 @@ namespace EasyRed2HumanAI
             _nextPlayerAimLaneRefreshTime = 0f;
             _cachedMainCamera = null;
             _nextMainCameraLookupTime = 0f;
+            _throwablePrefabCache.Clear();
+            _nonMineSpawnedItemPtrs.Clear();
+            if (ActiveLandMineCount > 0)
+                Array.Clear(ActiveLandMines, 0, ActiveLandMineCount);
+            ActiveLandMineCount = 0;
+            _nextActiveMineScanTime = 0f;
+            SpecialMunitionsUsedCount = 0;
             WorldSquadCount = 0;
             WorldSoldierCount = 0;
             WorldInjuredSoldierCount = 0;
@@ -3653,6 +4026,10 @@ namespace EasyRed2HumanAI
                 _ceilingCache.Clear();
             if (_bridgeCellCache.Count > 4096)
                 _bridgeCellCache.Clear();
+            if (_nonMineSpawnedItemPtrs.Count > 4096)
+                _nonMineSpawnedItemPtrs.Clear();
+            if (_throwablePrefabCache.Count > 256)
+                _throwablePrefabCache.Clear();
         }
 
         // =====================================================================

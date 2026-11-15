@@ -5,6 +5,20 @@ For pre-compiled downloads, see **[GitHub Releases](https://github.com/sudraviro
 
 ---
 
+## `v0.8.7` — Kos Hillside Unstick, Sapper Special Munitions, Cohesion, Casualty Handoff & Campaign Picker (Release Candidate)
+* **Kos Hillside & Whole-Squad Stuck Recovery (`AiCore.cs`, `InfantryTacticsModule.cs`, `GoapAndBlackboardModule.cs`)**:
+  * Fixed dry `TerrainCollider` steep-hillside false positives in `IsOnBridgeOrNarrowCrossing` (separating true river/water bridges from solid terrain ridges and clearing `+1.85m` horizontally before downward cliff/drop-off probes in `IsBridgeSideOpenDropOff`), stopping lateral waypoint scatter from collapsing paths straight down Kos slopes (`Bridges:` inflation fixed).
+  * Overhauled `TryRecoverChronicallyStuckFootBot` with `5s` firing-halt stall detection (`> 28m` from goal), `6m`/`11m` radial hillside contour probes, and off-camera walkable recovery snaps (`IsPositionVisibleOnLocalScreen`, `Unstk:` telemetry), plus stalled attacking-squad lateral contour detours (`TryFindSquadHillsideContourPoint`).
+* **Casualty Carry Medic Handoff, Squad Leader Cohesion & Ejected Tank Crew Retreat (`GoapAndBlackboardModule.cs`, `MacroAndVehiclesModule.cs`)**:
+  * Added an unconditional top-level `IsCarryingBody()` tick (`HandleActiveCasualtyCarryTick`) bypassing the RPC budget so carriers immediately release (`CarryBodySynched(null)`) fallen buddies on arrival, timeout/stall, bleed/suppression, close contact (`<= 16m`), or when a friendly Medic closes within `11m`.
+  * Anchored AI Squad Leaders in `Order.follow` to `sq.currentTask.GetTaskDestination()`, auto-released `FollowLeader` into attack orders once followers regroup, and prevented intact Squad Leaders (`>= 2` alive) from wandering off on solo flanks, individual fallbacks, or distant scavenging.
+  * Fixed ejected / bailed tank crews standing idle next to ruined hulls (`EvaluateGroundedAiTankCrewSquad` + empty-hulk guard in `AIVehicle_RetreatCrew_Patch`), restoring retreat/linkup movement toward friendly lines or squads.
+* **Special Munitions, Sappers & Mine Avoidance (`EnableSpecialMunitionsAndSappers`)**:
+  * Added `TryExecuteSpecialMunitionsAndTripods` (`Sap:` telemetry): AI Sappers/AT deploy **AT/AP pressure mines** with strict friendly infantry (`12m`), vehicle (`22m`), active spawn (`45m`), cap-zone (`14m`), enemy buffer (`22m`), and mine-spacing (`9m`) safety checks, throw **heavy satchel/demo charges** against fortifications/armor (`9m` step-back), and build **deployable tripods** (`BuildVehicle`). Allied bots and armored vehicles actively steer/brake around friendly/detected mines (`TryGetNearbyKnownMine`). *(Droppable ammo boxes remain carried on living ammo bearers by design so peers can resupply without depleting the carrier bag.)*
+* **Topological `F5` Campaign Picker & NRE Hardenings (`FeatureMenuAndHud.cs`, `BallisticsAndImmersionModule.cs`)**:
+  * Fixed false mission-0 vanilla unlocks (`j == 0` / `battleIdx == 0`), amortized up to `3` `LoadBattle()` calls/frame, added Kahn topological prerequisite sorting (`previousMission_id -> battle_id`), auto-selected the active match on `F5` open, and added `[X/Y ★]`, `[NOW PLAYING]`, `[NEXT UP]`, and `[FINALE]` badges.
+  * Hardened `UpdateFriendlyPlayerCrosshairYield`, `RenderVeteran3DMarkersAndCleanup`, and `BulletInstance.OnHit` null guards against transient native cleanup NREs (`[Diag:UpdateErr]`).
+
 ## `v0.8.6` — Field Radio Inheritance & Retuning, Full-Army Staffing & Attrition Pivots
 * **Emergent Field Radio Inheritance & Enemy Radio Frequency Retuning (`GoapAndBlackboardModule.cs`)**:
   * Fixed two engine/scan bugs that left corpse `RadioLoot` at `0`: iterated all `VirtualClothing` slots (`clothItems[0..24]`) instead of stopping at index-0 uniforms, and explicitly called **`Soldier.SetWerable(myRadio, true)`** after `InventoryManager.TakeIntoInventory` (`0x1807E50E0`, which natively only equips `VirtualHelmet` and left looted `VirtualClothing` radio packs sitting unworn in inventory with `IsRadioman() == false`).

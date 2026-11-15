@@ -487,6 +487,15 @@ namespace EasyRed2HumanAI
                 return;
             }
 
+            try
+            {
+                UpdateFriendlyPlayerCrosshairYieldCore();
+            }
+            catch { }
+        }
+
+        private static void UpdateFriendlyPlayerCrosshairYieldCore()
+        {
             float now = Time.time;
             if (now < _nextPlayerCrosshairYieldPassTime && _nextPlayerCrosshairYieldPassTime - now <= 2.0f)
                 return;
@@ -542,8 +551,12 @@ namespace EasyRed2HumanAI
                             continue;
 
                         Soldier bot = uSnap.Ref;
+                        if (ReferenceEquals(bot, null) || bot == null || bot.Pointer == IntPtr.Zero)
+                            continue;
+
                         AiCore.SoldierFastHandles botH = AiCore.GetOrCreateSoldierHandles(bot);
-                        if (!AiCore.IsLocallyOwnedBot(botH) ||
+                        if (botH == null ||
+                            !AiCore.IsLocallyOwnedBot(botH) ||
                             botH.Ai == null ||
                             botH.Tr == null ||
                             bot.IsOnVehicle() ||
@@ -2915,7 +2928,7 @@ namespace EasyRed2HumanAI
                                  soldier.inventory != null &&
                                  Time.time > soldier.throw_end_time + 5.0f)
                         {
-                            VirtualItem fragItem = soldier.inventory.FindItemOfType<VirtualGrenade>();
+                            VirtualItem fragItem = AiCore.FindThrowableGrenadeInInventory(soldier, findAtGrenade: false, findFragGrenade: true);
                             if (fragItem != null &&
                                 __instance.distFromTarget <= soldier.GetGrenadeThrowRange(fragItem) &&
                                 UnityEngine.Random.Range(0, 100) > 60 &&
@@ -4648,13 +4661,20 @@ namespace EasyRed2HumanAI
                     if (!VisionConfig.EnableMod.Value || __instance == null)
                         return;
 
+                    AiCore.SoldierFastHandles h = AiCore.GetOrCreateSoldierHandlesByAi(__instance);
+                    if (!AiCore.IsLocallyOwnedBot(h) || h.Tr == null || h.Ref.IsOnVehicle())
+                        return;
+
+                    float now = Time.time;
+                    if (TryGetProtectedBotMoveOverride(h.Ptr, now, out Vector3 moveOverride))
+                    {
+                        __result = moveOverride;
+                        return;
+                    }
+
                     bool bridgeEnabled = VisionConfig.EnableBridgeCrossingDiscipline.Value;
                     bool ffEnabled = VisionConfig.EnableFriendlyFireAvoidance.Value;
                     if (!bridgeEnabled && !ffEnabled)
-                        return;
-
-                    AiCore.SoldierFastHandles h = AiCore.GetOrCreateSoldierHandlesByAi(__instance);
-                    if (!AiCore.IsLocallyOwnedBot(h) || h.Tr == null || h.Ref.IsOnVehicle())
                         return;
 
                     Soldier soldier = h.Ref;
@@ -4666,37 +4686,77 @@ namespace EasyRed2HumanAI
                     {
                         Vector3 midPos = Vector3.Lerp(myPos, moveDest, 0.5f);
 
-                        // Cancel vanilla's 5m-35m sideways waypoint scatter if the soldier is on a bridge,
-                        // moving onto/across a bridge, or if the laterally-scattered waypoint lands over a
-                        // river/ravine/drop-off (> 2.1m below __result.y) where CPathFinding.A would snap
-                        // the path down to riverbed/water nodes instead of the bridge deck.
-                        bool cancelLateralScatter =
+                        // Cancel vanilla's 5m-35m sideways waypoint scatter if the soldier is on/near an actual bridge
+                        // OR if the laterally-scattered waypoint lands on unwalkable cliff geometry (> ~54 deg) or deep water.
+                        bool isBridge =
                             AiCore.IsOnBridgeOrNarrowCrossing(myPos) ||
                             AiCore.IsOnBridgeOrNarrowCrossing(moveDest) ||
                             AiCore.IsOnBridgeOrNarrowCrossing(midPos) ||
-                            AiCore.IsOnBridgeOrNarrowCrossing(__result) ||
-                            !Physics.Raycast(
-                                __result + Vector3.up * 1.5f,
-                                Vector3.down,
-                                3.6f,
-                                AiCore.GetSolidEnvironmentMask(),
-                                QueryTriggerInteraction.Ignore);
+                            AiCore.IsOnBridgeOrNarrowCrossing(__result);
 
-                        if (cancelLateralScatter)
+                        int envMask = AiCore.GetSolidEnvironmentMask();
+                        Vector3 probeTop = new Vector3(__result.x, Mathf.Max(myPos.y, moveDest.y) + 12.0f, __result.z);
+                        bool hasGround = Physics.Raycast(
+                            probeTop,
+                            Vector3.down,
+                            out RaycastHit gHit,
+                            28.0f,
+                            envMask,
+                            QueryTriggerInteraction.Ignore);
+                        bool inWater = hasGround &&
+                                       AiCore.TryGetActiveWaterLevel(out float waterLevel) &&
+                                       gHit.point.y <= waterLevel - 0.15f;
+                        bool invalidScatterTerrain = !hasGround || gHit.normal.y < 0.58f || inWater;
+
+                        if (isBridge || invalidScatterTerrain)
                         {
                             __result = moveDest;
-                            onBridgeSpan = true;
-                            IntPtr ptr = h.Ptr;
-                            if (ptr != IntPtr.Zero &&
-                                (!_nextBridgeAssistCountTime.TryGetValue(ptr, out float nextCount) || Time.time >= nextCount))
+                            onBridgeSpan = isBridge;
+                            if (isBridge)
                             {
-                                _nextBridgeAssistCountTime[ptr] = Time.time + 8.0f;
-                                BridgeCrossingsAssistedCount++;
-                                if (VisionConfig.DebugLogging.Value)
+                                IntPtr ptr = h.Ptr;
+                                if (ptr != IntPtr.Zero &&
+                                    (!_nextBridgeAssistCountTime.TryGetValue(ptr, out float nextCount) || now >= nextCount))
                                 {
-                                    AiCore.LogDebug("BridgeDiscipline", $"{soldier.faction} soldier kept on bridge/causeway centerline (cancelled 5-35m lateral squad scatter).");
+                                    _nextBridgeAssistCountTime[ptr] = now + 8.0f;
+                                    BridgeCrossingsAssistedCount++;
+                                    if (VisionConfig.DebugLogging.Value)
+                                    {
+                                        AiCore.LogDebug("BridgeDiscipline", $"{soldier.faction} soldier kept on bridge/causeway centerline (cancelled 5-35m lateral squad scatter).");
+                                    }
                                 }
                             }
+                        }
+                        else
+                        {
+                            __result = gHit.point;
+                        }
+                    }
+
+                    // Keep squad-follower formation slots away from known armed mines
+                    if (!onBridgeSpan &&
+                        AiCore.TryGetNearbyKnownMine(__result, 4.5f, false, out Vector3 minePos) &&
+                        (moveDest - minePos).sqrMagnitude > 4.5f * 4.5f)
+                    {
+                        Vector3 away = __result - minePos;
+                        away.y = 0f;
+                        Vector3 awayDir = away.sqrMagnitude > 0.04f ? away.normalized : Vector3.right;
+                        Vector3 mineAvoid = minePos + awayDir * 5.0f;
+                        if (Physics.Raycast(
+                                mineAvoid + Vector3.up * 6.0f,
+                                Vector3.down,
+                                out RaycastHit avoidGround,
+                                14.0f,
+                                AiCore.GetSolidEnvironmentMask(),
+                                QueryTriggerInteraction.Ignore) &&
+                            avoidGround.normal.y >= 0.58f &&
+                            (!AiCore.TryGetActiveWaterLevel(out float avoidWaterY) || avoidGround.point.y > avoidWaterY - 0.15f))
+                        {
+                            __result = avoidGround.point;
+                        }
+                        else
+                        {
+                            __result = moveDest;
                         }
                     }
 
@@ -4704,7 +4764,7 @@ namespace EasyRed2HumanAI
                     if (ffEnabled &&
                         AiCore.TryGetBlockingFriendlyPlayerAimLane(
                             h.Ptr,
-                            AiCore.GetCachedFaction(h, Time.time),
+                            AiCore.GetCachedFaction(h, now),
                             __result,
                             0.25f,
                             out AiCore.PlayerAimLane lane,
@@ -5261,6 +5321,23 @@ namespace EasyRed2HumanAI
                     {
                         __result = moveOverride;
                         return false;
+                    }
+
+                    // Pin AI Squad Leaders in Order.follow to their squad's active task destination instead of
+                    // vanilla Soldier.GetBestMissionObjective(), so Squad Leaders never leave their squad behind.
+                    if (soldier.IsSquadLeader() && (!soldier.HasDestinationAssigned || soldier.targetDestination == null))
+                    {
+                        AiCore.SoldierFastHandles h = AiCore.GetOrCreateSoldierHandles(soldier);
+                        Squad sq = h != null ? AiCore.GetCachedSquad(h, now) : soldier.joinedSquad;
+                        if (sq != null && sq.order == Order.follow && sq.currentTask != null)
+                        {
+                            Vector3 taskDest = sq.currentTask.GetTaskDestination();
+                            if (taskDest.sqrMagnitude > 0.01f)
+                            {
+                                __result = taskDest;
+                                return false;
+                            }
+                        }
                     }
 
                     if (!soldier.HasDestinationAssigned || soldier.targetDestination == null)

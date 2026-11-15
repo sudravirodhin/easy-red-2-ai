@@ -1169,7 +1169,7 @@ namespace EasyRed2HumanAI
             if (dist < 10.0f || dist > 30.0f || liveDist < 10.0f || liveDist > 30.0f)
                 return false;
 
-            VirtualItem fragItem = soldier.inventory.FindItemOfType<VirtualGrenade>();
+            VirtualItem fragItem = AiCore.FindThrowableGrenadeInInventory(soldier, findAtGrenade: false, findFragGrenade: true);
             if (fragItem == null || Mathf.Max(dist, liveDist) > soldier.GetGrenadeThrowRange(fragItem))
                 return false;
 
