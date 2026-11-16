@@ -3094,19 +3094,39 @@ namespace EasyRed2HumanAI
         [HarmonyPatch(typeof(Squad), nameof(Squad.GetCoveredPositionInArea))]
         public static class Squad_GetCoveredPositionInArea_Patch
         {
-            public static void Prefix(Squad __instance)
+            public static bool Prefix(Squad __instance, ref AiDestination __result)
             {
                 try
                 {
-                    if (!VisionConfig.EnableMod.Value ||
-                        !VisionConfig.EnableSmartWallSideCover.Value ||
-                        __instance == null)
+                    if (__instance == null)
+                        return true;
+
+                    Order order = __instance.order;
+                    bool leaderMissing = order == Order.follow &&
+                                         (__instance.Leader == null || __instance.Leader.transform == null);
+                    bool phaseObjMissing = order != Order.defend &&
+                                           order != Order.follow &&
+                                           (BattleManager.instance == null ||
+                                            BattleManager.instance.currentPhase == null ||
+                                            BattleManager.instance.currentPhase.GetNearestObjective(__instance.moveOrderPosition) == null);
+                    if (leaderMissing || phaseObjMissing)
                     {
-                        return;
+                        Vector3 basePos = (__instance.Leader != null && __instance.Leader.transform != null)
+                            ? __instance.Leader.transform.position
+                            : __instance.moveOrderPosition;
+                        Vector3 groundPos = ResourcesManager.SetOnGround(basePos, Mathf.Max(5f, __instance.moveOrderRadius));
+                        __result = new DestinationWithoutCover(groundPos, SoldierPose.Idle).TryCast<AiDestination>();
+                        return false;
+                    }
+
+                    if (!VisionConfig.EnableMod.Value ||
+                        !VisionConfig.EnableSmartWallSideCover.Value)
+                    {
+                        return true;
                     }
 
                     if (__instance.Leader != null && !AiCore.IsLocallyOwnedBot(__instance.Leader))
-                        return;
+                        return true;
 
                     Vector3 refPos = (__instance.Leader != null && __instance.Leader.transform != null)
                         ? __instance.Leader.transform.position
@@ -3118,6 +3138,7 @@ namespace EasyRed2HumanAI
                     }
                 }
                 catch { }
+                return true;
             }
         }
     }

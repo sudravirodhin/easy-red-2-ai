@@ -205,7 +205,7 @@ namespace EasyRed2HumanAI
             if (canUnstickMove &&
                 !inPointBlankMelee &&
                 soldier.transform != null &&
-                TryRecoverChronicallyStuckFootBot(ai, soldier, ptr, soldier.transform.position, suppression, isOnBridge, dist, board.HasActiveObjectiveTask ? board.ObjectivePosition : Vector3.zero, board.HasActiveObjectiveTask, now))
+                TryRecoverChronicallyStuckFootBot(ai, soldier, ptr, ref board, soldier.transform.position, suppression, isOnBridge, dist, board.HasActiveObjectiveTask ? board.ObjectivePosition : Vector3.zero, board.HasActiveObjectiveTask, now))
             {
                 if (sq != null && sq.Pointer != IntPtr.Zero)
                     _squadBlackboards[sq.Pointer] = board;
@@ -396,13 +396,14 @@ namespace EasyRed2HumanAI
             }
         }
 
-        private static readonly float[] _playerUnstickCosTable = { 0.0f, 0.0f, 0.7071f, 0.7071f, -0.7071f, -0.7071f };
-        private static readonly float[] _playerUnstickSinTable = { 1.0f, -1.0f, 1.0f, -1.0f, 1.0f, -1.0f };
+        private static readonly float[] _playerUnstickCosTable = { 0.0f, 0.0f, 0.7071f, 0.7071f, -0.7071f, -0.7071f, -1.0f, 1.0f };
+        private static readonly float[] _playerUnstickSinTable = { 1.0f, -1.0f, 1.0f, -1.0f, 1.0f, -1.0f, 0.0f, 0.0f };
 
         private static bool TryRecoverChronicallyStuckFootBot(
             SoldierAI ai,
             Soldier soldier,
             IntPtr ptr,
+            ref SquadBlackboard board,
             Vector3 myPos,
             float suppression,
             bool isOnBridge,
@@ -510,7 +511,7 @@ namespace EasyRed2HumanAI
 
             // Player-style Step B ("Go Around"): Drop unreachable cover, sidestep 2.2m clear, and refresh A* path
             ai.moveDirectlyToward_end = 0f;
-            ClearStaleCoverForUnstick(soldier, ptr);
+            ClearStaleCoverForUnstick(soldier, ptr, ref board);
 
             Vector3 fwd = rawMoveDest.sqrMagnitude > 0.01f && toMoveDestFlat.sqrMagnitude > 0.25f
                 ? new Vector3(toMoveDestFlat.x, 0f, toMoveDestFlat.y)
@@ -532,6 +533,10 @@ namespace EasyRed2HumanAI
             Vector3 right = new Vector3(fwd.z, 0f, -fwd.x);
             int sideSign = ((AiCore.GetDeterministicHash(ptr, st.ConsecutiveUnsticks) & 1) == 0) ? 1 : -1;
             bool hasWater = AiCore.TryGetActiveWaterLevel(out float waterLevel);
+            bool alreadyInShallowWater = hasWater && myPos.y <= waterLevel + 0.25f;
+            float minAllowedWaterY = alreadyInShallowWater
+                ? Mathf.Max(waterLevel - 1.35f, myPos.y - 0.15f)
+                : (waterLevel + 0.15f);
             Vector3 waistOrigin = myPos + Vector3.up * 0.55f;
             const float stepDist = 2.2f;
 
@@ -548,7 +553,7 @@ namespace EasyRed2HumanAI
                 if (!AiCore.TryValidateAndSnapDirectMicroStep(myPos, rawProbe, out Vector3 candPos, out _, 2.5f, 0.72f))
                     continue;
 
-                if (hasWater && candPos.y <= waterLevel + 0.15f)
+                if (hasWater && candPos.y <= minAllowedWaterY)
                     continue;
 
                 if (isOnBridge)
@@ -589,7 +594,10 @@ namespace EasyRed2HumanAI
                     Vector3 probe = myPos + dir * slopeStepDist;
                     // +/-8.0m vertical window covers full 60 deg (normal.y >= 0.50, 4.5 * tan(60) = 7.79m) TerrainCollider
                     // climbs/descents while capping non-terrain rooftops/drops at +/-2.0m!
-                    if (!AiCore.TrySnapWalkableGroundProbe(myPos, probe, 8.0f, 16.0f, 0.50f, 2.0f, hasWater, waterLevel, out Vector3 candPos))
+                    if (!AiCore.TrySnapWalkableGroundProbe(myPos, probe, 8.0f, 16.0f, 0.50f, 2.0f, hasWater && !alreadyInShallowWater, waterLevel, out Vector3 candPos))
+                        continue;
+
+                    if (hasWater && candPos.y <= minAllowedWaterY)
                         continue;
 
                     if (AiCore.TryGetNearbyKnownMine(candPos, 4.0f, false, out _))
@@ -620,7 +628,7 @@ namespace EasyRed2HumanAI
             return false;
         }
 
-        private static void ClearStaleCoverForUnstick(Soldier soldier, IntPtr ptr)
+        private static void ClearStaleCoverForUnstick(Soldier soldier, IntPtr ptr, ref SquadBlackboard board)
         {
             if (AiCore.TryGetSoldierHandles(ptr, out var staleH))
             {
@@ -628,12 +636,23 @@ namespace EasyRed2HumanAI
                 staleH.Goap.Plan = default;
                 AiCore.ClearBotMoveOverride(staleH, AiCore.BotMoveOverrideKind.GoapAction);
             }
-            if (soldier.HasDestinationAssigned)
+            AiDestination curDest = soldier.HasDestinationAssigned ? soldier.targetDestination : null;
+            if (curDest != null && soldier.nonReachableCovers != null)
+                soldier.nonReachableCovers.Add(curDest);
+
+            if (board.FlankerLeftPtr == ptr ||
+                (curDest != null && board.FlankLeftCover != null && board.FlankLeftCover.Pointer == curDest.Pointer))
             {
-                AiDestination curDest = soldier.targetDestination;
-                if (curDest != null && soldier.nonReachableCovers != null)
-                    soldier.nonReachableCovers.Add(curDest);
+                board.FlankerLeftPtr = IntPtr.Zero;
+                board.FlankLeftCover = null;
             }
+            if (board.FlankerRightPtr == ptr ||
+                (curDest != null && board.FlankRightCover != null && board.FlankRightCover.Pointer == curDest.Pointer))
+            {
+                board.FlankerRightPtr = IntPtr.Zero;
+                board.FlankRightCover = null;
+            }
+
             soldier.CoverPosition(null);
             AiCore.InvalidateTargetDestinationCache(soldier);
         }
@@ -1268,12 +1287,16 @@ namespace EasyRed2HumanAI
                 case GoapActionId.MoveToFlankCover:
                     {
                         CombatCover chosenCover = null;
-                        if (board.FlankLeftCover != null && (board.FlankerLeftPtr == IntPtr.Zero || board.FlankerLeftPtr == ptr))
+                        if (board.FlankLeftCover != null &&
+                            (board.FlankerLeftPtr == IntPtr.Zero || board.FlankerLeftPtr == ptr) &&
+                            (soldier.nonReachableCovers == null || !soldier.nonReachableCovers.Contains(board.FlankLeftCover.Cast<AiDestination>())))
                         {
                             board.FlankerLeftPtr = ptr;
                             chosenCover = board.FlankLeftCover;
                         }
-                        else if (board.FlankRightCover != null && (board.FlankerRightPtr == IntPtr.Zero || board.FlankerRightPtr == ptr))
+                        else if (board.FlankRightCover != null &&
+                                 (board.FlankerRightPtr == IntPtr.Zero || board.FlankerRightPtr == ptr) &&
+                                 (soldier.nonReachableCovers == null || !soldier.nonReachableCovers.Contains(board.FlankRightCover.Cast<AiDestination>())))
                         {
                             board.FlankerRightPtr = ptr;
                             chosenCover = board.FlankRightCover;
@@ -1431,7 +1454,9 @@ namespace EasyRed2HumanAI
                         TryAdvanceBoundTowardThreat(ai, soldier, sq, myPos, board.ObjectivePosition, objDir, now, ref plan);
                     }
                     else if (board.HasActiveThreat &&
-                             (board.IsThreatBeingPinned(now) || now < board.SmokeActiveUntil) &&
+                             (board.IsThreatBeingPinned(now) ||
+                              now < board.SmokeActiveUntil ||
+                              (ws & (GoapStateBits.IsSuppressed | GoapStateBits.IsHeavilySuppressed | GoapStateBits.NearFreshCasualty)) == 0) &&
                              !ai.HasEnemyAndCanFireAtHim &&
                              (myPos - board.ThreatPosition).sqrMagnitude > 16f * 16f)
                     {
