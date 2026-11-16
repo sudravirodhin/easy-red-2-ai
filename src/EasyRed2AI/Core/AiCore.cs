@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.Runtime.CompilerServices;
+using System.Runtime.InteropServices;
 using System.Text;
 using Corvostudio.Weapons;
 using HarmonyLib;
@@ -16,7 +17,7 @@ namespace EasyRed2HumanAI
     /// solid-environment raycasts (ResourcesManager.groundMask), overhead ceiling caching,
     /// deterministic hashing, and dictionary/hashset memory hygiene.
     /// </summary>
-    public static class AiCore
+    public static partial class AiCore
     {
         private static int _cachedSolidEnvMask;
         private static int _cachedMovementObstacleMask;
@@ -101,12 +102,192 @@ namespace EasyRed2HumanAI
             public float NextEndpointCheckTime;
             public Vector3 CachedEndpoint;
             public int CachedNodesCount;
+            public IntPtr CachedPathPtr;
+            public A.d CachedPathObj;
             public float NextMoveDirectRedirectPathTime;
             public Vector3 LastRedirectedMoveDest;
 
             public float NextInventoryWeightAuditTime;
             public float PendingPickedWeaponRefillTime;
             public int PendingPickedWeaponSlot = -1;
+
+            public float CreatedAtTime;
+            public float LastSpawnOrientTime;
+            public float NextEnclosedSeatCheckTime;
+            public bool CachedIsButtonedArmoredCrew;
+
+            internal BotMoveOverrideState MoveOverride;
+            internal SoldierVeterancyState Veterancy;
+            internal SoldierVisionState Vision;
+            internal SoldierStanceState Stance;
+            internal SoldierCombatState Combat;
+            internal SoldierGoapState Goap;
+        }
+
+        internal enum BotMoveOverrideKind : byte
+        {
+            None = 0,
+            GoapAction = 1,
+            CasualtyDrag = 2,
+            UnstickSidestep = 3,
+            SapperStepBack = 4,
+            EmergencyFallback = 5
+        }
+
+        internal struct BotMoveOverrideState
+        {
+            public BotMoveOverrideKind Kind;
+            public Vector3 Dest;
+            public float ExpireTime;
+        }
+
+        internal struct SoldierVeterancyState
+        {
+            public VeteranAndTacticsPatches.SoldierRecord Record;
+            public float NextPromotionCheckTime;
+        }
+
+        internal struct SoldierVisionState
+        {
+            public float LastFiredTime;
+            public bool IsTurningToWatchSector;
+            public float NextSpotterCalloutTime;
+            public float NextSuppressiveGrenadeTime;
+            public float NextSuppressiveBurstCountTime;
+            public float NextCornerPieCountTime;
+            public VeteranAndTacticsPatches.WatchWindowCache WatchWindow;
+            public VeteranAndTacticsPatches.ThreatSectorCache ThreatSector;
+            public VeteranAndTacticsPatches.LocalCalloutRecord LocalCallout;
+            public VeteranAndTacticsPatches.LastKnownTargetInfo LastKnownTarget;
+            public VeteranAndTacticsPatches.CornerPieState CornerPie;
+            public VeteranAndTacticsPatches.StationaryWatchState StationaryWatch;
+            public VeteranAndTacticsPatches.CoverEyeBlockState CoverEyeBlock;
+        }
+
+        internal struct SoldierStanceState
+        {
+            public float StanceDropHoldFireUntil;
+            public float NextStanceDropAllowed;
+            public float CombatStanceHoldUntil;
+            public float CombatCrouchLockUntil;
+            public float NoProneUntil;
+            public float NextWallCheckTime;
+            public float WallBlockedUntil;
+            public float PeekRestoreTime;
+            public float NextPeekAllowedTime;
+            public float PoseLockUntil;
+            public float BipodStandUntil;
+            public float NextBipodSeekTime;
+            public float NextBipodDeployCheckTime;
+            public float NextWallSideCheckTime;
+            public float NextWallSidestepTime;
+            public float BleedCoverDeadline;
+            public float LocalCoverProtectedUntil;
+            public float NextLocalCoverSeekTime;
+            public float NextStandCrouchLofCheckTime;
+            public float NextIndoorCeilingCountTime;
+            public int LastBandageEvalFrame;
+            public bool CachedHasBandage;
+            public bool CachedCanSafelyBandage;
+            public string CachedBandageBlockReason;
+            public float CachedBandageGunfireDist;
+        }
+
+        internal struct SoldierCombatState
+        {
+            public float NextFFCheckTime;
+            public float FFBlockedUntil;
+            public float NextAntiStackTime;
+            public float NextVaultCheckTime;
+            public float NextLiberateCheckTime;
+            public float LiberateMoveStartTime;
+            public float LiberateMoveCooldownUntil;
+            public float NextBayonetCheckTime;
+            public float NextMeleeAttemptTime;
+            public float NextMeleeStepTime;
+            public float NextBoundingHoldCountTime;
+            public float NextBridgeAssistCountTime;
+            public float NextSurrenderCheckTime;
+            public float NextBotDoorCheckTime;
+            public float NextBandageBlockCountTime;
+            public float NextMeleeSuppressCountTime;
+            public float NextTankDisciplineCountTime;
+            public float NextFriendlyStepAsideTime;
+            public bool BayonetChecked;
+            public int LastMeleeEvalFrame;
+            public bool CachedInPointBlankMelee;
+            public Soldier CachedMeleeEnemy;
+            public float CachedMeleeLungeRange;
+            public float CachedMeleeCeaseFireRange;
+            public float CachedMeleeStrikeRange;
+            public int CachedMeleeSlotIndex;
+            public VeteranAndTacticsPatches.FireAndMovementState FireAndMovement;
+            public VeteranAndTacticsPatches.RotateAndFireFrameState RotateFireFrame;
+            public VeteranAndTacticsPatches.InfantrySightReactionState SightReaction;
+            public VeteranAndTacticsPatches.BarbedWireStuckState BarbedWireStuck;
+            public VeteranAndTacticsPatches.VehicleAimCache VehicleAim;
+        }
+
+        internal struct SoldierGoapState
+        {
+            public VeteranAndTacticsPatches.BotGoapPlan Plan;
+            public VeteranAndTacticsPatches.BotScavengeCache Scavenge;
+            public VeteranAndTacticsPatches.FootStuckState FootStuck;
+            public VeteranAndTacticsPatches.CasualtyDragState CasualtyDrag;
+            public float NextWeaponUpgradeAllowedTime;
+            public float NextBuddyBandageRefillTime;
+            public float NextBuddyAmmoResupplyTime;
+            public float NextBotBoxOrCrateResupplyTime;
+            public float NextSmokeGrenadeTime;
+            public float NextSoldierVoiceTime;
+            public float NextFlankCoverAssignTime;
+            public float NextSpecialMunitionTime;
+            public float NextIndividualFallbackTime;
+            public float MedicHealStartTime;
+            public IntPtr MedicHealTargetPtr;
+        }
+
+        internal static void SetBotMoveOverride(SoldierFastHandles h, BotMoveOverrideKind kind, Vector3 dest, float expireTime)
+        {
+            if (h == null)
+                return;
+
+            float now = Time.time;
+            if (kind >= h.MoveOverride.Kind || now >= h.MoveOverride.ExpireTime)
+            {
+                if (h.MoveOverride.Kind != BotMoveOverrideKind.None &&
+                    h.MoveOverride.Kind != kind &&
+                    now < h.MoveOverride.ExpireTime)
+                {
+                    MoveOverridePreemptionsCount++;
+                }
+
+                h.MoveOverride = new BotMoveOverrideState
+                {
+                    Kind = kind,
+                    Dest = dest,
+                    ExpireTime = expireTime
+                };
+            }
+        }
+
+        internal static void ClearBotMoveOverride(SoldierFastHandles h, BotMoveOverrideKind kind)
+        {
+            if (h != null && h.MoveOverride.Kind == kind)
+                h.MoveOverride = default;
+        }
+
+        internal static string GetMoveOverrideShortLabel(BotMoveOverrideKind kind)
+        {
+            switch (kind)
+            {
+                case BotMoveOverrideKind.GoapAction: return "GOAP";
+                case BotMoveOverrideKind.CasualtyDrag: return "Drag";
+                case BotMoveOverrideKind.UnstickSidestep: return "Unstick";
+                case BotMoveOverrideKind.SapperStepBack: return "SapperBack";
+                case BotMoveOverrideKind.EmergencyFallback: return "Fallback";
+                default: return "None";
+            }
         }
 
         public sealed class VehicleFastHandles
@@ -132,6 +313,7 @@ namespace EasyRed2HumanAI
             public bool CachedHasCloseFriendlyEscort;
             public Spottable CommanderSpottedTarget;
             public float CommanderSpotTime;
+            public float LastTurretFiredTime;
         }
 
         public struct TurretFastTraits
@@ -167,36 +349,6 @@ namespace EasyRed2HumanAI
         private static bool _mpInRoomCached;
         private static bool _mpIsMasterCached = true;
 
-        public struct ThrowablePrefabInfo
-        {
-            public bool IsValid;
-            public FuseType Fuse;
-            public GrenadeType Type;
-            public float MaxPenetration;
-            public float ExplosionRadius;
-            public bool IsPressureMine;
-            public bool IsAtMine;
-            public bool IsApMine;
-            public bool IsSatchelOrHeavyDemo;
-        }
-
-        public struct ActiveLandMine
-        {
-            public IntPtr Ptr;
-            public ItemGrenade Ref;
-            public Vector3 Pos;
-            public bool IsAtMine;
-            public float ExpireTime;
-        }
-
-        public static readonly ActiveLandMine[] ActiveLandMines = new ActiveLandMine[128];
-        public static int ActiveLandMineCount;
-        public static int SpecialMunitionsUsedCount { get; internal set; }
-
-        private static readonly Dictionary<string, ThrowablePrefabInfo> _throwablePrefabCache =
-            new Dictionary<string, ThrowablePrefabInfo>(64, StringComparer.OrdinalIgnoreCase);
-        private static readonly HashSet<IntPtr> _nonMineSpawnedItemPtrs = new HashSet<IntPtr>(512);
-        private static float _nextActiveMineScanTime;
         private static float _nextLocalPlayerRadioHintTime;
 
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
@@ -278,153 +430,6 @@ namespace EasyRed2HumanAI
         private static int _nextSquadDiagId;
         private static readonly Dictionary<IntPtr, int> _squadDiagIds = new Dictionary<IntPtr, int>(96);
         private static readonly Dictionary<string, string> _formattedFactionDisplayCache = new Dictionary<string, string>(32, StringComparer.Ordinal);
-        private static readonly HashSet<IntPtr> _confirmedVehicleCrewSquads = new HashSet<IntPtr>(64);
-        private static readonly HashSet<IntPtr> _confirmedPlaneCrewSquads = new HashSet<IntPtr>(32);
-        private static readonly HashSet<IntPtr> _confirmedInfantrySquads = new HashSet<IntPtr>(128);
-
-        public static void MarkConfirmedVehicleCrewSquad(Squad sq)
-        {
-            if (sq == null || sq.Pointer == IntPtr.Zero)
-                return;
-            _confirmedInfantrySquads.Remove(sq.Pointer);
-            _confirmedVehicleCrewSquads.Add(sq.Pointer);
-        }
-
-        public static void MarkConfirmedPlaneCrewSquad(Squad sq)
-        {
-            if (sq == null || sq.Pointer == IntPtr.Zero)
-                return;
-            _confirmedInfantrySquads.Remove(sq.Pointer);
-            _confirmedVehicleCrewSquads.Add(sq.Pointer);
-            _confirmedPlaneCrewSquads.Add(sq.Pointer);
-        }
-
-        public static bool IsConfirmedPlaneCrewSquad(Squad sq)
-        {
-            return sq != null && sq.Pointer != IntPtr.Zero && _confirmedPlaneCrewSquads.Contains(sq.Pointer);
-        }
-
-        public static void PruneSquadClassificationCaches(HashSet<IntPtr> activeSquadPtrs)
-        {
-            if (activeSquadPtrs == null)
-                return;
-            PruneSet(_confirmedVehicleCrewSquads, activeSquadPtrs);
-            PruneSet(_confirmedPlaneCrewSquads, activeSquadPtrs);
-            PruneSet(_confirmedInfantrySquads, activeSquadPtrs);
-        }
-
-        /// <summary>
-        /// Native Squad.get_IsVehicleCrew (0x18080D0A0) literally compiles to `!this.isOpenForJoiners`,
-        /// which returns true for EVERY closed/scripted foot-infantry squad and Volga/beach landing-boat squad!
-        /// This helper classifies genuine Tank, Aircraft (including 6-10 seat Heavy Bombers), and Combat-Vehicle crews
-        /// (and remembers them after bailout) without ever misclassifying closed infantry or paratrooper/troop-transport squads.
-        /// </summary>
-        public static bool IsTrueVehicleCrewSquad(Squad sq)
-        {
-            if (ReferenceEquals(sq, null) || sq == null || sq.Pointer == IntPtr.Zero)
-                return false;
-
-            IntPtr ptr = sq.Pointer;
-            if (_confirmedVehicleCrewSquads.Contains(ptr))
-                return true;
-
-            if (sq.isOpenForJoiners)
-                return false;
-
-            if (_confirmedInfantrySquads.Contains(ptr))
-                return false;
-
-            try
-            {
-                var units = sq.units;
-                int uCount = units != null ? units.Count : 0;
-                if (uCount <= 0)
-                    return false;
-
-                if (sq.isChargeSquad)
-                {
-                    _confirmedInfantrySquads.Add(ptr);
-                    return false;
-                }
-
-                // 1. Inspect seated vehicles BEFORE checking uCount > 5 so 6-10 seat Heavy Bomber crews
-                //    are recognized as aircrew rather than misclassified as foot infantry, while checking
-                //    veh.IsTransportVehicle() FIRST so C-47 / Ju-52 paratroopers & LCVPs stay infantry!
-                bool hasInfantrySpecialist = false;
-                for (int i = 0; i < uCount; i++)
-                {
-                    Soldier u = units[i];
-                    if (ReferenceEquals(u, null) || u == null || u.Pointer == IntPtr.Zero)
-                        continue;
-
-                    if (u.IsOnVehicle())
-                    {
-                        Vehicle veh = u.GetCurrentVehicle();
-                        VehicleFastHandles vh = GetOrCreateVehicleHandles(veh);
-                        if (vh != null && !vh.IsParachute)
-                        {
-                            if (veh.IsTransportVehicle())
-                            {
-                                _confirmedInfantrySquads.Add(ptr);
-                                return false;
-                            }
-
-                            if (vh.IsPlane || vh.IsAir)
-                            {
-                                MarkConfirmedPlaneCrewSquad(sq);
-                                return true;
-                            }
-
-                            if (vh.IsTank)
-                            {
-                                _confirmedVehicleCrewSquads.Add(ptr);
-                                return true;
-                            }
-
-                            VehicleWithWheels wheeled = veh.TryCast<VehicleWithWheels>();
-                            if (wheeled != null)
-                            {
-                                if (wheeled.IsTransportVehicle())
-                                {
-                                    _confirmedInfantrySquads.Add(ptr);
-                                    return false;
-                                }
-                                if (wheeled.RetreatCrewOnDestroy())
-                                {
-                                    _confirmedVehicleCrewSquads.Add(ptr);
-                                    return true;
-                                }
-                            }
-                        }
-                    }
-
-                    if (u.IsMedic() || u.hasSyringe || u.hasMg || u.isMarksMan || u.IsRadioman() || u.IsAmmoBoxCarrier() || u.isAtUnit)
-                    {
-                        hasInfantrySpecialist = true;
-                    }
-                }
-
-                if (uCount > 5 || hasInfantrySpecialist)
-                {
-                    _confirmedInfantrySquads.Add(ptr);
-                    return false;
-                }
-
-                Soldier mech = sq.GetMechanic();
-                if (mech != null && mech.Pointer != IntPtr.Zero && mech.GetRepairTools() != null)
-                {
-                    _confirmedVehicleCrewSquads.Add(ptr);
-                    return true;
-                }
-
-                if (sq.fullySpawned)
-                    _confirmedInfantrySquads.Add(ptr);
-            }
-            catch { }
-
-            return false;
-        }
-
         public static string FormatFactionWithAlliance(string rawFaction)
         {
             if (string.IsNullOrWhiteSpace(rawFaction))
@@ -583,13 +588,41 @@ namespace EasyRed2HumanAI
                 Syncher = s.soldierSyncher,
                 SyncherChecked = true,
                 Faction = InternFaction(s.faction),
-                NextFactionRefreshTime = now + 5.0f + jitter
+                NextFactionRefreshTime = now + 5.0f + jitter,
+                CreatedAtTime = now
             };
 
             _soldierHandlesByPtr[ptr] = h;
             if (aiPtr != IntPtr.Zero)
                 _soldierHandlesByAiPtr[aiPtr] = h;
             return h;
+        }
+
+        public static bool IsButtonedUpArmoredVehicleCrew(SoldierFastHandles targetSolH, VehicleFastHandles tvH)
+        {
+            if (targetSolH == null || tvH == null || tvH.IsAir || tvH.Ref == null || tvH.Ref.Pointer == IntPtr.Zero)
+                return false;
+
+            float now = Time.time;
+            if (now < targetSolH.NextEnclosedSeatCheckTime)
+                return targetSolH.CachedIsButtonedArmoredCrew;
+
+            targetSolH.NextEnclosedSeatCheckTime = now + 0.50f;
+            bool buttoned = false;
+            try
+            {
+                Vehicle veh = tvH.Ref;
+                if (!veh.IsCoverDestroyed() &&
+                    VeteranAndTacticsPatches.GetEffectiveVehicleExplosionArmor(veh) >= 8.0f &&
+                    VeteranAndTacticsPatches.IsSoldierInEnclosedVehicleSeat(veh, targetSolH.Ref))
+                {
+                    buttoned = true;
+                }
+            }
+            catch { }
+
+            targetSolH.CachedIsButtonedArmoredCrew = buttoned;
+            return buttoned;
         }
 
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
@@ -820,12 +853,12 @@ namespace EasyRed2HumanAI
             }
 
             float now = Time.time;
-            if (h.CachedDestPtr != IntPtr.Zero && now < h.NextDestCheckTime)
+            if (now < h.NextDestCheckTime)
                 return h.DestKind;
 
             h.NextDestCheckTime = now + 0.16f;
-            AiDestination dest = s.targetDestination;
-            IntPtr destPtr = (!ReferenceEquals(dest, null) && dest != null) ? dest.Pointer : IntPtr.Zero;
+            IntPtr sPtr = s.Pointer;
+            IntPtr destPtr = sPtr != IntPtr.Zero ? Marshal.ReadIntPtr(sPtr + 0x570) : IntPtr.Zero;
             if (destPtr == IntPtr.Zero)
             {
                 if (h.CachedDestPtr != IntPtr.Zero)
@@ -841,6 +874,17 @@ namespace EasyRed2HumanAI
 
             if (destPtr == h.CachedDestPtr)
                 return h.DestKind;
+
+            AiDestination dest = s.targetDestination;
+            if (ReferenceEquals(dest, null) || dest == null || dest.Pointer == IntPtr.Zero)
+            {
+                h.CachedDestPtr = IntPtr.Zero;
+                h.DestKind = CachedDestKind.None;
+                h.CachedCover = null;
+                h.CachedRepairTask = null;
+                h.CachedHealDest = null;
+                return CachedDestKind.None;
+            }
 
             h.CachedDestPtr = destPtr;
             h.CachedCover = null;
@@ -873,6 +917,57 @@ namespace EasyRed2HumanAI
 
             h.DestKind = CachedDestKind.Other;
             return CachedDestKind.Other;
+        }
+
+        /// <summary>
+        /// Zero-allocation raw <c>IntPtr</c> read for <c>SoldierAI.visibleTarget</c> (<c>+0x48</c>),
+        /// avoiding per-frame <c>Spottable</c> wrapper allocations in <c>MovementRoutine</c>.
+        /// </summary>
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        public static IntPtr GetRawVisibleTargetPtr(SoldierAI ai)
+        {
+            if (ReferenceEquals(ai, null))
+                return IntPtr.Zero;
+            IntPtr aiPtr = ai.Pointer;
+            return aiPtr != IntPtr.Zero ? Marshal.ReadIntPtr(aiPtr + 0x48) : IntPtr.Zero;
+        }
+
+        /// <summary>
+        /// Zero-allocation cached <c>A.d</c> path lookup (<c>SoldierAI.path</c> at <c>+0x90</c>).
+        /// Only materializes a managed <c>A.d</c> wrapper when the underlying native path pointer changes.
+        /// </summary>
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        public static A.d GetCachedAiPath(SoldierFastHandles h, SoldierAI ai)
+        {
+            if (ReferenceEquals(ai, null))
+                return null;
+            IntPtr aiPtr = ai.Pointer;
+            if (aiPtr == IntPtr.Zero)
+                return null;
+
+            IntPtr rawPathPtr = Marshal.ReadIntPtr(aiPtr + 0x90);
+            if (rawPathPtr == IntPtr.Zero)
+            {
+                if (h != null && h.CachedPathPtr != IntPtr.Zero)
+                {
+                    h.CachedPathPtr = IntPtr.Zero;
+                    h.CachedPathObj = null;
+                }
+                return null;
+            }
+
+            if (h != null)
+            {
+                if (rawPathPtr == h.CachedPathPtr && !ReferenceEquals(h.CachedPathObj, null))
+                    return h.CachedPathObj;
+
+                A.d resolved = ai.path;
+                h.CachedPathPtr = rawPathPtr;
+                h.CachedPathObj = resolved;
+                return resolved;
+            }
+
+            return ai.path;
         }
 
         public static VehicleFastHandles GetOrCreateVehicleHandles(Vehicle v)
@@ -1164,11 +1259,7 @@ namespace EasyRed2HumanAI
                     IntPtr roomPtr = PhotonNetwork.CurrentRoom.Pointer;
                     if (roomPtr != IntPtr.Zero && roomPtr != _lastPublishedRoomPtr && PhotonNetwork.LocalPlayer != null)
                     {
-                        _lastPublishedRoomPtr = roomPtr;
-                        _playerModdedCache.Clear();
-                        var props = new ExitGames.Client.Photon.Hashtable();
-                        props[(Il2CppSystem.String)"bh_ver"] = (Il2CppSystem.String)Plugin.PluginVersion;
-                        PhotonNetwork.LocalPlayer.SetCustomProperties(props);
+                        EnsureLocalModVersionPublished();
                     }
                 }
                 else
@@ -1178,6 +1269,7 @@ namespace EasyRed2HumanAI
                     {
                         _lastPublishedRoomPtr = IntPtr.Zero;
                         _playerModdedCache.Clear();
+                        _nextTargetedPlayerChatTime.Clear();
                     }
                 }
             }
@@ -1271,231 +1363,6 @@ namespace EasyRed2HumanAI
             return p == null || (p.changePoseAutomatically && !p.forcedPose.HasValue);
         }
 
-        /// <summary>
-        /// Universal game-mode objective classifier supporting Classic Invasion (<c>MissionTaskConquerArea</c>,
-        /// <c>MissionTaskDestroyVehicles</c>, <c>MissionTaskClearArea</c>), <c>MissionTaskRetreat</c>,
-        /// <c>MissionTaskPushFrontline</c>, Dynamic Conquest (<c>gamemode_conquest.lua</c>), Wave Defense
-        /// (<c>gamemode_defend.lua</c>), Retreat Finales (<c>phase_4.lua</c>), and Multi-Phase Lua Operations.
-        /// </summary>
-        public static bool ClassifyMissionObjectiveForFaction(
-            MissionObjective obj,
-            string faction,
-            BattleData bd,
-            out bool isHeldByFaction,
-            out bool canAttractFaction,
-            out float contestOrProgress01)
-        {
-            isHeldByFaction = false;
-            canAttractFaction = false;
-            contestOrProgress01 = 0f;
-
-            if (obj == null || obj.Pointer == IntPtr.Zero || string.IsNullOrEmpty(faction))
-                return false;
-
-            MissionTask task = obj.missionTask;
-            if (task == null || task.Pointer == IntPtr.Zero || !task.IsTaskEnabled())
-                return false;
-
-            MissionObjectiveScripted sObj = obj.TryCast<MissionObjectiveScripted>();
-            if (sObj != null)
-            {
-                if (!sObj.IsSettedUp() || sObj.IsSecured())
-                    return false;
-
-                // Dormant / staged / completed Lua objectives set both attractors false; ignore completely
-                if (!sObj.canAttractAllies && !sObj.canAttractAxis)
-                    return false;
-
-                bool isInvader = bd != null && bd.IsInvaderFaction(faction);
-                bool canAttract = sObj.CanAttractFaction(faction);
-                MissionTaskScripted mTask = task.TryCast<MissionTaskScripted>();
-                float rawPct = Mathf.Clamp01(task.GetTaskCompletationPercentage());
-
-                // MissionTaskScripted stores icon/icon_defenders as (luaIcon + 1): 1 = Attack (#attack/#chase), 2 = Defend (#defend/#retreat)
-                byte effIcon = mTask != null
-                    ? ((!isInvader && mTask.icon_defenders > 0) ? mTask.icon_defenders : mTask.icon)
-                    : (byte)0;
-
-                // Retreat Finales (SHARED/phase_4.lua): Defenders get icon_defenders = 2 with "#retreat" text and canAttract = true.
-                // Treat as an active evacuation rally objective (not a rear garrison) so all Defender squads withdraw into the zone!
-                if (!isInvader && canAttract && mTask != null && mTask.customTextDefenders == "#retreat")
-                {
-                    canAttractFaction = true;
-                    return true;
-                }
-
-                string sSec = sObj.securedFaction;
-                bool ownedByFaction = (effIcon == 2) ||
-                                      (!canAttract && !string.IsNullOrEmpty(sSec) && string.Equals(sSec, faction, StringComparison.OrdinalIgnoreCase));
-
-                if (ownedByFaction)
-                {
-                    isHeldByFaction = true;
-                    canAttractFaction = canAttract;
-                    // Conquest & Invader-captured Wave Defense flags set canAttract = false for the owner and rest at 0.99f when uncontested,
-                    // draining toward 0.0f when enemies capture! Defender-held Wave Defense / Lua Phase flags keep canAttract = true and rest at 0.0f.
-                    if (!canAttract)
-                        contestOrProgress01 = (rawPct > 0.01f && rawPct < 0.98f) ? Mathf.Clamp01(1.0f - rawPct) : 0f;
-                    else
-                        contestOrProgress01 = rawPct > 0.05f ? rawPct : 0f;
-                    return true;
-                }
-
-                if (canAttract)
-                {
-                    canAttractFaction = true;
-                    // On enemy-owned Conquest flags, rawPct starts at 0.99f under enemy ownership before neutralizing through 0.0f;
-                    // only report positive friendly capture momentum once neutralized or under friendly securedFaction!
-                    if (!string.IsNullOrEmpty(sSec) && !string.Equals(sSec, faction, StringComparison.OrdinalIgnoreCase))
-                        contestOrProgress01 = rawPct < 0.65f ? (1.0f - rawPct) * 0.45f : 0f;
-                    else if (mTask != null && mTask.icon == 2 && !isInvader && rawPct >= 0.95f)
-                        contestOrProgress01 = 0f; // Lost Wave Defense flag resting at 0.99f before counter-capture begins
-                    else
-                        contestOrProgress01 = rawPct;
-                    return true;
-                }
-
-                return false;
-            }
-
-            float capPct = Mathf.Clamp01(task.GetTaskCompletationPercentage());
-            if (task.TryCast<MissionTaskPushFrontline>() != null)
-            {
-                string secFaction = obj.GetSecuredFaction();
-                if (!string.IsNullOrEmpty(secFaction) && secFaction == faction)
-                {
-                    isHeldByFaction = true;
-                    contestOrProgress01 = capPct > 0.05f ? capPct : 0f;
-                    return true;
-                }
-                if (obj.CanAttractFaction(faction))
-                {
-                    canAttractFaction = true;
-                    contestOrProgress01 = capPct;
-                    return true;
-                }
-                return false;
-            }
-
-            if (obj.IsSecured())
-                return false;
-
-            if (task.TryCast<MissionTaskRetreat>() != null)
-            {
-                if (obj.CanAttractFaction(faction))
-                {
-                    canAttractFaction = true;
-                    return true;
-                }
-                return false;
-            }
-
-            string invFaction = obj.GetSecuredFaction();
-            if (!string.IsNullOrEmpty(invFaction) && invFaction != faction)
-            {
-                isHeldByFaction = true;
-                canAttractFaction = obj.CanAttractFaction(faction);
-                contestOrProgress01 = capPct > 0.05f ? capPct : 0f;
-                return true;
-            }
-
-            if (obj.CanAttractFaction(faction))
-            {
-                canAttractFaction = true;
-                contestOrProgress01 = capPct;
-                return true;
-            }
-
-            return false;
-        }
-
-        /// <summary>
-        /// Evaluates a squad's active <see cref="SquadTask"/> across all vanilla and scripted/dynamic game modes
-        /// so GOAP never misinterprets resting <c>0.99f</c> Conquest/WaveDefense bars as enemy back-caps.
-        /// </summary>
-        public static void EvaluateSquadTaskForFaction(
-            SquadTask curTask,
-            string faction,
-            BattleData bd,
-            bool isGarrisonAssigned,
-            out bool isDefending,
-            out float progressOrContest01)
-        {
-            isDefending = isGarrisonAssigned;
-            progressOrContest01 = 0f;
-            if (curTask == null || curTask.Pointer == IntPtr.Zero || string.IsNullOrEmpty(faction))
-                return;
-
-            var scriptedList = MissionObjectiveScripted.scriptedMissionObjectives;
-            if (scriptedList != null)
-            {
-                IntPtr taskPtr = curTask.Pointer;
-                int sCount = scriptedList.Count;
-                for (int i = 0; i < sCount; i++)
-                {
-                    MissionObjectiveScripted sObj = scriptedList[i];
-                    if (sObj != null && sObj.missionTask != null && sObj.missionTask.Pointer == taskPtr)
-                    {
-                        if (ClassifyMissionObjectiveForFaction(sObj, faction, bd, out bool held, out _, out float prog))
-                        {
-                            isDefending = isGarrisonAssigned || held;
-                            progressOrContest01 = prog;
-                        }
-                        return;
-                    }
-                }
-            }
-
-            float rawPct = Mathf.Clamp01(curTask.GetTaskCompletationPercentage());
-            if (curTask.TryCast<MissionTaskPushFrontline>() != null)
-            {
-                isDefending = isGarrisonAssigned;
-                progressOrContest01 = rawPct;
-                return;
-            }
-
-            if (curTask.TryCast<MissionTaskRetreat>() != null)
-            {
-                isDefending = false;
-                progressOrContest01 = 1.0f;
-                return;
-            }
-
-            bool isInvader = bd != null && bd.IsInvaderFaction(faction);
-            isDefending = isGarrisonAssigned || !isInvader;
-            progressOrContest01 = rawPct;
-        }
-
-        /// <summary>
-        /// Validates that an IL2CPP <see cref="Spottable"/> interface wrapper still points to an
-        /// alive, non-destroyed Unity <see cref="Component"/> with a valid native transform.
-        /// Prevents native NullReferenceExceptions in <c>Soldier.GetCenterOfUnit</c> / <c>TurretAI.CanSee</c>.
-        /// </summary>
-        public static bool IsValidAliveSpottable(Spottable s)
-        {
-            return TryResolveSpottableFast(s, out _, out _);
-        }
-
-        public static bool TryGetSpottableCenter(Spottable s, out Vector3 center)
-        {
-            if (!TryResolveSpottableFast(s, out _, out _))
-            {
-                center = Vector3.zero;
-                return false;
-            }
-
-            try
-            {
-                center = s.GetCenterOfUnit();
-                return true;
-            }
-            catch
-            {
-                center = Vector3.zero;
-                return false;
-            }
-        }
-
         public static bool IsMasterClient()
         {
             EnsureMpRoomStateCached();
@@ -1521,31 +1388,470 @@ namespace EasyRed2HumanAI
             return true;
         }
 
+        private static readonly Dictionary<int, float> _nextTargetedPlayerChatTime = new Dictionary<int, float>(16);
+        private static readonly Dictionary<string, string> _vehicleShortNameCache = new Dictionary<string, string>(64, StringComparer.Ordinal);
+        private static readonly HashSet<int> _reusableNotifiedActors = new HashSet<int>();
+
+        public static void EnsureLocalModVersionPublished()
+        {
+            try
+            {
+                if (!PhotonNetwork.InRoom || PhotonNetwork.CurrentRoom == null || PhotonNetwork.LocalPlayer == null)
+                    return;
+
+                IntPtr roomPtr = PhotonNetwork.CurrentRoom.Pointer;
+                if (roomPtr == IntPtr.Zero)
+                    return;
+
+                _lastPublishedRoomPtr = roomPtr;
+                _playerModdedCache.Clear();
+                var props = new ExitGames.Client.Photon.Hashtable();
+                props[(Il2CppSystem.String)"bh_ver"] = (Il2CppSystem.String)Plugin.PluginVersion;
+                PhotonNetwork.LocalPlayer.SetCustomProperties(props);
+            }
+            catch { }
+        }
+
+        public static void InvalidatePlayerModdedCache(int actorNum = -1)
+        {
+            if (actorNum < 0)
+                _playerModdedCache.Clear();
+            else
+                _playerModdedCache.Remove(actorNum);
+        }
+
+        /// <summary>
+        /// Strictly returns true ONLY when <paramref name="player"/> is the local player or has explicitly
+        /// published <c>"bh_ver"</c> in Photon CustomProperties. Unmodded vanilla clients return false.
+        /// </summary>
+        public static bool IsPhotonPlayerConfirmedModded(Photon.Realtime.Player player)
+        {
+            if (player == null)
+                return false;
+
+            try
+            {
+                if (player.IsLocal)
+                    return true;
+
+                int actorNum = player.ActorNumber;
+                float now = Time.unscaledTime;
+                if (_playerModdedCache.TryGetValue(actorNum, out var cached) && now < cached.ExpireTime)
+                    return cached.HasMod;
+
+                bool hasMod = false;
+                var props = player.CustomProperties;
+                if (props != null && props.ContainsKey((Il2CppSystem.String)"bh_ver"))
+                    hasMod = true;
+
+                if (_playerModdedCache.Count > 32)
+                    _playerModdedCache.Clear();
+                _playerModdedCache[actorNum] = (hasMod, now + 5.0f);
+                return hasMod;
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
+        public static bool SendTargetedVanillaChatMessage(
+            Photon.Realtime.Player targetPlayer,
+            string message,
+            float minPlayerInterval = 10.0f,
+            bool bypassRpcBudget = false)
+        {
+            if (!IsInMultiplayerRoom() ||
+                !IsMasterClient() ||
+                targetPlayer == null ||
+                targetPlayer.IsLocal ||
+                string.IsNullOrEmpty(message))
+            {
+                return false;
+            }
+
+            try
+            {
+                int actorNum = targetPlayer.ActorNumber;
+                float now = Time.unscaledTime;
+                if (minPlayerInterval > 0f &&
+                    _nextTargetedPlayerChatTime.TryGetValue(actorNum, out float nextAllowed) &&
+                    now < nextAllowed)
+                {
+                    return false;
+                }
+
+                BattleLoader bl = BattleLoader.instance;
+                if (bl == null || bl.photonView == null || PhotonNetwork.LocalPlayer == null)
+                    return false;
+
+                if (!bypassRpcBudget && !TryConsumeBotRpcBudget(0.20f))
+                    return false;
+
+                if (_nextTargetedPlayerChatTime.Count > 32)
+                    _nextTargetedPlayerChatTime.Clear();
+                if (minPlayerInterval > 0f)
+                    _nextTargetedPlayerChatTime[actorNum] = now + minPlayerInterval;
+
+                var rpcArgs = new Il2CppInterop.Runtime.InteropTypes.Arrays.Il2CppReferenceArray<Il2CppSystem.Object>(2);
+                rpcArgs[0] = PhotonNetwork.LocalPlayer.Cast<Il2CppSystem.Object>();
+                rpcArgs[1] = (Il2CppSystem.String)message;
+                bl.photonView.RPC("Chat_NewMessage", targetPlayer, rpcArgs);
+                return true;
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
         public static void TryShowLocalPlayerRadioHint(
             Squad targetSquad,
             string message,
             bool requireLeader = false,
-            float minInterval = 14.0f)
+            float minInterval = 14.0f,
+            bool notifyRemoteVanillaSquadmates = true)
         {
             if (string.IsNullOrEmpty(message))
                 return;
 
             float now = Time.time;
-            if (now < _nextLocalPlayerRadioHintTime)
-                return;
+            if (now >= _nextLocalPlayerRadioHintTime &&
+                IsLocalPlayerInSquad(targetSquad, out bool isLeader) &&
+                (!requireLeader || isLeader))
+            {
+                _nextLocalPlayerRadioHintTime = now + minInterval;
+                try
+                {
+                    PlayerController.HintToPlayer(message, false);
+                }
+                catch { }
+            }
 
-            if (!IsLocalPlayerInSquad(targetSquad, out bool isLeader))
+            if (!notifyRemoteVanillaSquadmates ||
+                !IsInMultiplayerRoom() ||
+                !IsMasterClient() ||
+                targetSquad == null ||
+                targetSquad.Pointer == IntPtr.Zero ||
+                !targetSquad.IsPlayerInSquad())
+            {
                 return;
+            }
 
-            if (requireLeader && !isLeader)
-                return;
-
-            _nextLocalPlayerRadioHintTime = now + minInterval;
             try
             {
-                PlayerController.HintToPlayer(message, false);
+                var units = targetSquad.units;
+                if (units == null)
+                    return;
+
+                Soldier sqLeader = targetSquad.Leader;
+                IntPtr leaderPtr = sqLeader != null ? sqLeader.Pointer : IntPtr.Zero;
+                _reusableNotifiedActors.Clear();
+
+                int count = units.Count;
+                for (int i = 0; i < count; i++)
+                {
+                    Soldier u = units[i];
+                    if (u == null || !u.IsAlive || !u.IsPlayer())
+                        continue;
+                    if (requireLeader && u.Pointer != leaderPtr)
+                        continue;
+
+                    SyncSoldier syncher = u.soldierSyncher;
+                    if (syncher == null || syncher.OwnSyncher)
+                        continue;
+
+                    Photon.Realtime.Player remotePlayer = syncher.Controller ?? syncher.Owner;
+                    if (remotePlayer == null || remotePlayer.IsLocal || IsPhotonPlayerConfirmedModded(remotePlayer))
+                        continue;
+
+                    if (_reusableNotifiedActors.Add(remotePlayer.ActorNumber))
+                    {
+                        SendTargetedVanillaChatMessage(remotePlayer, message, minInterval);
+                    }
+                }
+                _reusableNotifiedActors.Clear();
             }
             catch { }
+        }
+
+        private static readonly string[] WwiiPhoneticAlphabet =
+        {
+            "Able", "Baker", "Charlie", "Dog", "Easy", "Fox", "George", "How", "Item",
+            "Jig", "King", "Love", "Mike", "Nan", "Oboe", "Peter", "Queen", "Roger",
+            "Sugar", "Tare", "Uncle", "Victor", "William", "X-Ray", "Yoke", "Zebra"
+        };
+
+        /// <summary>
+        /// Formats single-letter ER2 squad codes (<c>"A"</c>..<c>"Z"</c>) as authentic WWII Phonetic
+        /// callsigns (<c>"Able Squad"</c>, <c>"Baker Squad"</c>, <c>"Easy Squad"</c>) so radio calls
+        /// never collide mentally with Objective letters (<c>Point A-E</c>) or keybinds (<c>[E]</c>).
+        /// </summary>
+        public static string FormatSquadPhoneticCallsign(Squad sq)
+        {
+            if (sq == null || sq.Pointer == IntPtr.Zero)
+                return "Allied Squad";
+
+            string raw = null;
+            try { raw = sq.squadName; } catch { }
+            if (string.IsNullOrWhiteSpace(raw))
+                return "Allied Squad";
+
+            string trimmed = raw.Trim();
+            if (trimmed.Length == 1)
+            {
+                char ch = char.ToUpperInvariant(trimmed[0]);
+                if (ch >= 'A' && ch <= 'Z')
+                    return $"{WwiiPhoneticAlphabet[ch - 'A']} Squad";
+            }
+            else if (trimmed.Length == 2 && char.IsLetter(trimmed[0]) && char.IsDigit(trimmed[1]))
+            {
+                char ch = char.ToUpperInvariant(trimmed[0]);
+                if (ch >= 'A' && ch <= 'Z')
+                    return $"{WwiiPhoneticAlphabet[ch - 'A']}-{trimmed[1]} Squad";
+            }
+
+            if (trimmed.IndexOf("Squad", StringComparison.OrdinalIgnoreCase) >= 0)
+                return trimmed;
+
+            return $"Squad {trimmed}";
+        }
+
+        public static string GetVehicleDisplayNameShort(Vehicle veh)
+        {
+            if (veh == null || veh.Pointer == IntPtr.Zero)
+                return "Allied Armor";
+
+            string nid = null;
+            try { nid = veh.name_id; } catch { }
+            if (!string.IsNullOrWhiteSpace(nid) && _vehicleShortNameCache.TryGetValue(nid, out string cached))
+                return cached;
+
+            string resolved = null;
+            if (!string.IsNullOrWhiteSpace(nid))
+            {
+                try
+                {
+                    string loc = Language.GetText(nid);
+                    if (!string.IsNullOrWhiteSpace(loc) && !loc.StartsWith("Missing", StringComparison.OrdinalIgnoreCase))
+                        resolved = loc.Trim();
+                }
+                catch { }
+            }
+
+            if (string.IsNullOrWhiteSpace(resolved))
+            {
+                try
+                {
+                    string rawName = veh.name;
+                    if (!string.IsNullOrWhiteSpace(rawName))
+                        resolved = rawName.Replace("(Clone)", "").Replace('_', ' ').Trim();
+                }
+                catch { }
+            }
+
+            if (string.IsNullOrWhiteSpace(resolved))
+                resolved = "Allied Armor";
+
+            if (!string.IsNullOrWhiteSpace(nid))
+            {
+                if (_vehicleShortNameCache.Count > 96)
+                    _vehicleShortNameCache.Clear();
+                _vehicleShortNameCache[nid] = resolved;
+            }
+            return resolved;
+        }
+
+        public static string FormatVehicleSupportCallsign(Vehicle veh, Squad crewSq, Vector3? listenerPos = null)
+        {
+            string vehName = GetVehicleDisplayNameShort(veh);
+            string sqCall = crewSq != null && crewSq.Pointer != IntPtr.Zero ? FormatSquadPhoneticCallsign(crewSq) : null;
+            string bearing = null;
+            if (listenerPos.HasValue && veh != null && veh.Pointer != IntPtr.Zero)
+            {
+                try
+                {
+                    Transform tr = veh.transform;
+                    if (tr != null)
+                        bearing = FormatRelativeBearingAndDistance(listenerPos.Value, tr.position);
+                }
+                catch { }
+            }
+
+            if (!string.IsNullOrEmpty(sqCall) && !string.IsNullOrEmpty(bearing))
+                return $"{vehName} ({sqCall}, {bearing})";
+            if (!string.IsNullOrEmpty(bearing))
+                return $"{vehName} ({bearing})";
+            if (!string.IsNullOrEmpty(sqCall))
+                return $"{vehName} ({sqCall})";
+            return vehName;
+        }
+
+        public static string FormatInfantrySupportCallsign(Squad sq, Vector3? listenerPos = null)
+        {
+            string sqCall = FormatSquadPhoneticCallsign(sq);
+            if (listenerPos.HasValue && sq != null && sq.Pointer != IntPtr.Zero)
+            {
+                try
+                {
+                    Soldier leader = sq.Leader;
+                    if (leader != null && leader.transform != null)
+                        return $"{sqCall} ({FormatRelativeBearingAndDistance(listenerPos.Value, leader.transform.position)})";
+                }
+                catch { }
+            }
+            return sqCall;
+        }
+
+        // =====================================================================
+        // Global 0.45s Cached DayNightCycle Darkness Snapshot & Match Theater
+        // =====================================================================
+        private static float _nextNightSnapshotTime;
+        public static float NightDarkness01 { get; private set; }
+        public static float VanillaNightFactor { get; private set; } = 1.0f;
+
+        public static void UpdateNightVisionSnapshotIfDue()
+        {
+            float now = Time.unscaledTime;
+            if (now < _nextNightSnapshotTime)
+                return;
+
+            _nextNightSnapshotTime = now + 0.45f;
+            try
+            {
+                var dnc = Corvostudio.SuperDayNightCycle.DayNightCycle.instance;
+                if (dnc == null || dnc.Pointer == IntPtr.Zero)
+                {
+                    NightDarkness01 = 0f;
+                    VanillaNightFactor = 1.0f;
+                    return;
+                }
+
+                float nv = Mathf.Clamp(Corvostudio.SuperDayNightCycle.DayNightCycle.NightVisionMultiplier, 0.10f, 1.0f);
+                VanillaNightFactor = 0.20f + 0.80f * nv;
+
+                float dayMult = Mathf.Clamp01(dnc.currentDayMultiplier);
+                if (dayMult >= 0.78f && nv >= 0.92f)
+                {
+                    NightDarkness01 = 0f;
+                    return;
+                }
+
+                float darkFromDay = 1.0f - Mathf.InverseLerp(0.05f, 0.78f, dayMult);
+                float darkFromNv = 1.0f - Mathf.InverseLerp(0.16f, 0.92f, nv);
+                float darkness = Mathf.Clamp01(darkFromDay * 0.68f + darkFromNv * 0.32f);
+                float clouds = Mathf.Clamp01(dnc.cloudsAmount);
+                darkness = Mathf.Clamp01(darkness * (1.0f + 0.18f * clouds));
+
+                float lightning = Mathf.Clamp01(Corvostudio.SuperDayNightCycle.DayNightCycle.lightningStrength);
+                if (lightning > 0.12f)
+                {
+                    darkness *= Mathf.Clamp01(1.0f - 0.75f * lightning);
+                }
+
+                NightDarkness01 = darkness;
+            }
+            catch
+            {
+                NightDarkness01 = 0f;
+                VanillaNightFactor = 1.0f;
+            }
+        }
+
+        public struct BattleTheaterSnapshot
+        {
+            public IntPtr BattleDataPtr;
+            public Gamemap Map;
+            public int Year;
+            public string InvadersFactionId;
+            public string DefendersFactionId;
+            public string InvadersBattalionLower;
+            public string DefendersBattalionLower;
+            public bool IsAmphibiousBeachMap;
+            public bool IsOpenDesertOrSteppeMap;
+            public bool IsDenseUrbanMap;
+            public bool IsJungleOrAtollMap;
+
+            public string GetBattalionLowerForFaction(string faction)
+            {
+                if (string.IsNullOrEmpty(faction))
+                    return string.Empty;
+                if (!string.IsNullOrEmpty(InvadersFactionId) && AreSameSideFactions(faction, InvadersFactionId))
+                    return InvadersBattalionLower ?? string.Empty;
+                if (!string.IsNullOrEmpty(DefendersFactionId) && AreSameSideFactions(faction, DefendersFactionId))
+                    return DefendersBattalionLower ?? string.Empty;
+                return string.Empty;
+            }
+        }
+
+        private static BattleTheaterSnapshot _cachedTheaterSnapshot;
+        public static int BattleTheaterGeneration { get; private set; } = 1;
+
+        public static BattleTheaterSnapshot GetBattleTheaterSnapshot()
+        {
+            try
+            {
+                BattleData bd = BattleManager.GetCurrentBattleData();
+                IntPtr bdPtr = (bd != null && bd.Pointer != IntPtr.Zero) ? bd.Pointer : IntPtr.Zero;
+                if (bdPtr == _cachedTheaterSnapshot.BattleDataPtr)
+                    return _cachedTheaterSnapshot;
+
+                if (bdPtr == IntPtr.Zero)
+                {
+                    _cachedTheaterSnapshot = default;
+                    BattleTheaterGeneration++;
+                    return _cachedTheaterSnapshot;
+                }
+
+                Gamemap map = bd.map;
+                int year = bd.year;
+                string invFac = InternFaction(bd.invadersFaction_id ?? string.Empty);
+                string defFac = InternFaction(bd.defendersFaction_id ?? string.Empty);
+                string invBat = ((bd.invadersBatalion_id ?? string.Empty) + " " + (bd.invadersBatalion ?? string.Empty)).Trim().ToLowerInvariant();
+                string defBat = ((bd.defendersBatalion_id ?? string.Empty) + " " + (bd.defendersBatalion ?? string.Empty)).Trim().ToLowerInvariant();
+
+                bool isBeach = map == Gamemap.Normandy ||
+                               map == Gamemap.Kwajalein ||
+                               map == Gamemap.RoiNamur ||
+                               map == Gamemap.Makin ||
+                               map == Gamemap.Anzio ||
+                               map == Gamemap.Kos;
+
+                bool isDesert = map == Gamemap.TunisiaNorth ||
+                                map == Gamemap.TunisiaSouth ||
+                                map == Gamemap.Nomonhan ||
+                                map == Gamemap.Balaton ||
+                                map == Gamemap.Aberdeen;
+
+                bool isUrban = map == Gamemap.Stalingrad ||
+                               map == Gamemap.Shanghai ||
+                               map == Gamemap.Nanking ||
+                               map == Gamemap.Budapest ||
+                               map == Gamemap.Cassino;
+
+                bool isJungleAtoll = map == Gamemap.Kwajalein ||
+                                     map == Gamemap.RoiNamur ||
+                                     map == Gamemap.Makin;
+
+                _cachedTheaterSnapshot = new BattleTheaterSnapshot
+                {
+                    BattleDataPtr = bdPtr,
+                    Map = map,
+                    Year = year,
+                    InvadersFactionId = invFac,
+                    DefendersFactionId = defFac,
+                    InvadersBattalionLower = invBat,
+                    DefendersBattalionLower = defBat,
+                    IsAmphibiousBeachMap = isBeach,
+                    IsOpenDesertOrSteppeMap = isDesert,
+                    IsDenseUrbanMap = isUrban,
+                    IsJungleOrAtollMap = isJungleAtoll
+                };
+                BattleTheaterGeneration++;
+            }
+            catch { }
+
+            return _cachedTheaterSnapshot;
         }
 
         private static readonly string[] CompassPoints8 = { "N", "NE", "E", "SE", "S", "SW", "W", "NW" };
@@ -1745,485 +2051,6 @@ namespace EasyRed2HumanAI
         }
 
         /// <summary>
-        /// Safely returns the active <see cref="BattlePhase"/> without throwing when
-        /// <c>BattleManager.phases</c> is null/empty (e.g., <c>sp_ME_...</c> Mission Editor V2 / reworked streaming battles).
-        /// </summary>
-        public static BattlePhase TryGetCurrentBattlePhase(BattleManager bm)
-        {
-            if (bm == null || bm.Pointer == IntPtr.Zero)
-                return null;
-
-            var phases = bm.phases;
-            if (phases == null)
-                return null;
-
-            int idx = bm.currentPhaseNum;
-            if ((uint)idx >= (uint)phases.Length)
-                return null;
-
-            return phases[idx];
-        }
-
-        /// <summary>
-        /// Resolves the horizontal direction toward enemy spawn territory on both classic <see cref="BattlePhase"/>
-        /// maps and <c>sp_ME_...</c> Mission Editor V2 streaming maps (falling back to <c>SpawnManager.activeSpawns</c>).
-        /// </summary>
-        public static bool TryGetEnemySpawnDirection(string myFaction, Vector3 fromPos, out Vector3 dir)
-        {
-            dir = Vector3.zero;
-            if (string.IsNullOrEmpty(myFaction))
-                return false;
-
-            string canonFaction = InternFaction(myFaction);
-            float now = Time.time;
-
-            try
-            {
-                BattlePhase phase = TryGetCurrentBattlePhase(BattleManager.instance);
-                IntPtr phasePtr = phase != null ? phase.Pointer : IntPtr.Zero;
-                var cacheKey = (phasePtr, canonFaction);
-
-                if (!_enemySpawnDirCache.TryGetValue(cacheKey, out EnemySpawnDirCacheEntry entry) || now >= entry.ExpireTime)
-                {
-                    entry = new EnemySpawnDirCacheEntry { ExpireTime = now + 5.0f };
-
-                    if (phase != null && phase.EnemyFactionHasSpawn(canonFaction))
-                    {
-                        entry.HasCentroid = true;
-                        entry.Centroid = phase.GetOppositeFactionTerritoryPosition(canonFaction);
-                    }
-                    else
-                    {
-                        var spawns = SpawnManager.activeSpawns;
-                        if (spawns != null && spawns.Count > 0)
-                        {
-                            Vector3 sum = Vector3.zero;
-                            int count = 0;
-                            for (int i = 0; i < spawns.Count; i++)
-                            {
-                                SpawnManager sp = spawns[i];
-                                if (sp == null || sp.Pointer == IntPtr.Zero || sp.gameObject == null || !sp.gameObject.activeInHierarchy)
-                                    continue;
-
-                                string spFact = sp.GetFaction();
-                                if (string.IsNullOrEmpty(spFact) || spFact == canonFaction || spFact == "Civilian" || AreSameSideFactions(canonFaction, spFact))
-                                    continue;
-
-                                sum += sp.GetSpawnPosition();
-                                count++;
-                            }
-
-                            if (count > 0)
-                            {
-                                entry.HasCentroid = true;
-                                entry.Centroid = sum / count;
-                            }
-                        }
-                    }
-
-                    if (_enemySpawnDirCache.Count > 32)
-                        _enemySpawnDirCache.Clear();
-                    _enemySpawnDirCache[cacheKey] = entry;
-                }
-
-                if (entry.HasCentroid)
-                {
-                    Vector3 toEnemy = entry.Centroid - fromPos;
-                    toEnemy.y = 0f;
-                    if (toEnemy.sqrMagnitude > 1.0f)
-                    {
-                        dir = toEnemy.normalized;
-                        return true;
-                    }
-                }
-            }
-            catch { }
-
-            return false;
-        }
-
-        private static bool TrySampleDryGroundAltitude(Vector3 cand, out float groundY)
-        {
-            float terrainY = ResourcesManager.GetTerrainAltitude(cand, 0f);
-            if (terrainY >= 0.12f)
-            {
-                groundY = terrainY;
-                return true;
-            }
-
-            // Outside Unity Terrain bounds (or on mesh islands/custom airfields where GetTerrainAltitude returns 0f),
-            // probe solid environment colliders directly so out-of-bounds grounded pilots still resolve dry footing!
-            Vector3 probeStart = new Vector3(cand.x, Mathf.Max(cand.y, 0f) + 85.0f, cand.z);
-            if (Physics.Raycast(probeStart, Vector3.down, out RaycastHit hit, 180.0f, GetSolidEnvironmentMask(), QueryTriggerInteraction.Ignore) &&
-                hit.point.y >= 0.05f &&
-                hit.normal.y >= 0.45f)
-            {
-                groundY = hit.point.y;
-                return true;
-            }
-
-            groundY = terrainY;
-            return false;
-        }
-
-        private static bool TryNormalizeFootSpawnPoint(Vector3 rawPos, out Vector3 groundedPos)
-        {
-            groundedPos = rawPos;
-            if (TrySampleDryGroundAltitude(rawPos, out float groundY))
-            {
-                if (rawPos.y > groundY + 14.0f)
-                    return false;
-
-                // Snap Y to ground altitude so 3D distance checks (e.g. MissionTaskRetreat.IsInsideTaskArea) trigger on foot
-                groundedPos = new Vector3(rawPos.x, Mathf.Max(groundY, 0.05f), rawPos.z);
-                return true;
-            }
-
-            return false;
-        }
-
-        private static bool TrySampleDryRetreatPoint(Vector3 originPos, Vector3 horizDir, float dist, out Vector3 dryPos)
-        {
-            dryPos = Vector3.zero;
-            horizDir.y = 0f;
-            if (horizDir.sqrMagnitude < 0.001f)
-                return false;
-            horizDir.Normalize();
-
-            for (int attempt = 0; attempt < 5; attempt++)
-            {
-                float yaw = 0f;
-                if (attempt == 1) yaw = 28f;
-                else if (attempt == 2) yaw = -28f;
-                else if (attempt == 3) yaw = 60f;
-                else if (attempt == 4) yaw = -60f;
-
-                Vector3 dir = attempt == 0 ? horizDir : (Quaternion.Euler(0f, yaw, 0f) * horizDir);
-                Vector3 cand = originPos + dir * dist;
-                if (TrySampleDryGroundAltitude(cand, out float alt))
-                {
-                    dryPos = new Vector3(cand.x, alt, cand.z);
-                    return true;
-                }
-            }
-
-            return false;
-        }
-
-        /// <summary>
-        /// Resolves the nearest dry, foot-reachable friendly spawn position on both classic <see cref="BattlePhase"/> maps
-        /// and <c>sp_ME_...</c> Mission Editor V2 streaming maps (via <c>SpawnManager.activeSpawns</c>).
-        /// Filters out sky aircraft spawns and deep-water boat spawns, and snaps Y to terrain altitude.
-        /// </summary>
-        public static bool TryGetNearestFriendlySpawnPosition(string myFaction, Vector3 fromPos, out Vector3 spawnPos)
-        {
-            spawnPos = Vector3.zero;
-            if (string.IsNullOrEmpty(myFaction))
-                return false;
-
-            try
-            {
-                BattlePhase phase = TryGetCurrentBattlePhase(BattleManager.instance);
-                if (phase != null)
-                {
-                    SpawnManager nearest = phase.GetNearestSpawn(myFaction, fromPos);
-                    if (nearest != null &&
-                        nearest.Pointer != IntPtr.Zero &&
-                        TryNormalizeFootSpawnPoint(nearest.GetSpawnPosition(), out spawnPos))
-                    {
-                        return true;
-                    }
-                }
-
-                var spawns = SpawnManager.activeSpawns;
-                if (spawns != null && spawns.Count > 0)
-                {
-                    float bestExactSq = float.MaxValue;
-                    Vector3 bestExactPos = Vector3.zero;
-                    bool foundExact = false;
-
-                    float bestAlliedSq = float.MaxValue;
-                    Vector3 bestAlliedPos = Vector3.zero;
-                    bool foundAllied = false;
-
-                    for (int i = 0; i < spawns.Count; i++)
-                    {
-                        SpawnManager sp = spawns[i];
-                        if (sp == null || sp.Pointer == IntPtr.Zero || sp.gameObject == null || !sp.gameObject.activeInHierarchy)
-                            continue;
-
-                        string spFaction = sp.GetFaction();
-                        if (string.IsNullOrEmpty(spFaction) || spFaction == "Civilian")
-                            continue;
-
-                        bool exactMatch = spFaction == myFaction;
-                        if (!exactMatch && !AreSameSideFactions(myFaction, spFaction))
-                            continue;
-
-                        if (!TryNormalizeFootSpawnPoint(sp.GetSpawnPosition(), out Vector3 cand))
-                            continue;
-
-                        float dSq = (cand - fromPos).sqrMagnitude;
-                        if (exactMatch)
-                        {
-                            if (dSq < bestExactSq)
-                            {
-                                bestExactSq = dSq;
-                                bestExactPos = cand;
-                                foundExact = true;
-                            }
-                        }
-                        else if (dSq < bestAlliedSq)
-                        {
-                            bestAlliedSq = dSq;
-                            bestAlliedPos = cand;
-                            foundAllied = true;
-                        }
-                    }
-
-                    if (foundExact)
-                    {
-                        spawnPos = bestExactPos;
-                        return true;
-                    }
-                    if (foundAllied)
-                    {
-                        spawnPos = bestAlliedPos;
-                        return true;
-                    }
-                }
-            }
-            catch { }
-
-            return false;
-        }
-
-        private static bool TryGetAnyFriendlySpawnHorizontalAnchor(string myFaction, Vector3 fromPos, out Vector3 anchorPos)
-        {
-            anchorPos = Vector3.zero;
-            if (string.IsNullOrEmpty(myFaction))
-                return false;
-
-            try
-            {
-                var spawns = SpawnManager.activeSpawns;
-                if (spawns != null && spawns.Count > 0)
-                {
-                    float bestSq = float.MaxValue;
-                    bool found = false;
-                    for (int i = 0; i < spawns.Count; i++)
-                    {
-                        SpawnManager sp = spawns[i];
-                        if (sp == null || sp.Pointer == IntPtr.Zero || sp.gameObject == null || !sp.gameObject.activeInHierarchy)
-                            continue;
-
-                        string spFact = sp.GetFaction();
-                        if (string.IsNullOrEmpty(spFact) || spFact == "Civilian")
-                            continue;
-
-                        if (spFact != myFaction && !AreSameSideFactions(myFaction, spFact))
-                            continue;
-
-                        Vector3 raw = sp.GetSpawnPosition();
-                        Vector3 d = raw - fromPos;
-                        d.y = 0f;
-                        float dSq = d.sqrMagnitude;
-                        if (dSq < bestSq)
-                        {
-                            bestSq = dSq;
-                            anchorPos = raw;
-                            found = true;
-                        }
-                    }
-                    if (found)
-                        return true;
-                }
-            }
-            catch { }
-
-            return false;
-        }
-
-        /// <summary>
-        /// Computes a rear evacuation point (~85m-125m toward friendly lines) for bailed-out tank crews and grounded aircrews
-        /// across classic <see cref="BattlePhase"/> maps, <c>sp_ME_...</c> Mission Editor V2 maps (where <c>currentPhase == null</c>),
-        /// out-of-bounds mesh terrain, and open ocean/carrier maps (when <paramref name="allowWaterSurfaceFallback"/> is true).
-        /// </summary>
-        public static bool TryComputeCrewRetreatDestination(
-            string myFaction,
-            Vector3 originPos,
-            out Vector3 retreatPos,
-            bool allowWaterSurfaceFallback = false)
-        {
-            retreatPos = Vector3.zero;
-            if (string.IsNullOrEmpty(myFaction))
-                return false;
-
-            try
-            {
-                bool originIsDry = TrySampleDryGroundAltitude(originPos, out _);
-
-                if (TryGetNearestFriendlySpawnPosition(myFaction, originPos, out Vector3 spawnPos))
-                {
-                    Vector3 toSpawn = spawnPos - originPos;
-                    toSpawn.y = 0f;
-                    float dist = toSpawn.magnitude;
-
-                    if (dist >= 18.0f && dist <= 115.0f)
-                    {
-                        retreatPos = spawnPos;
-                        return true;
-                    }
-
-                    if (dist > 115.0f)
-                    {
-                        Vector3 dir = toSpawn / dist;
-                        if (TrySampleDryRetreatPoint(originPos, dir, 95.0f, out retreatPos) ||
-                            TrySampleDryRetreatPoint(originPos, dir, 125.0f, out retreatPos) ||
-                            TrySampleDryRetreatPoint(originPos, dir, 68.0f, out retreatPos) ||
-                            TrySampleDryRetreatPoint(originPos, dir, 155.0f, out retreatPos))
-                        {
-                            return true;
-                        }
-
-                        // Pilot ditched or parachuted into open sea/lake far from shore: place a reachable 85m water-surface extraction zone!
-                        if ((allowWaterSurfaceFallback || !originIsDry) && dist > 175.0f)
-                        {
-                            retreatPos = new Vector3(originPos.x + dir.x * 85.0f, 0.0f, originPos.z + dir.z * 85.0f);
-                            return true;
-                        }
-
-                        if (dist <= 175.0f)
-                        {
-                            retreatPos = spawnPos;
-                            return true;
-                        }
-
-                        if (TrySampleDryRetreatPoint(originPos, dir, 42.0f, out retreatPos))
-                        {
-                            return true;
-                        }
-
-                        retreatPos = spawnPos;
-                        return true;
-                    }
-
-                    // Vehicle/plane crew landed right near friendly spawn (< 18m): step further rearward away from enemy
-                    if (TryGetEnemySpawnDirection(myFaction, originPos, out Vector3 enemyDir) &&
-                        TrySampleDryRetreatPoint(originPos, -enemyDir, 28.0f, out retreatPos))
-                    {
-                        return true;
-                    }
-
-                    if (dist >= 6.0f)
-                    {
-                        retreatPos = spawnPos;
-                        return true;
-                    }
-                }
-
-                // Carrier / Air-Superiority / Boat-Spawn fallback (where friendly spawns exist only in the sky or on ships):
-                if (TryGetAnyFriendlySpawnHorizontalAnchor(myFaction, originPos, out Vector3 anySpawnAnchor))
-                {
-                    Vector3 toAnchor = anySpawnAnchor - originPos;
-                    toAnchor.y = 0f;
-                    float aDist = toAnchor.magnitude;
-                    Vector3 aDir = aDist > 1.0f
-                        ? (toAnchor / aDist)
-                        : (TryGetEnemySpawnDirection(myFaction, originPos, out Vector3 eDir) ? -eDir : Vector3.back);
-
-                    if (TrySampleDryRetreatPoint(originPos, aDir, 95.0f, out retreatPos) ||
-                        TrySampleDryRetreatPoint(originPos, aDir, 65.0f, out retreatPos) ||
-                        TrySampleDryRetreatPoint(originPos, aDir, 130.0f, out retreatPos))
-                    {
-                        return true;
-                    }
-
-                    if (allowWaterSurfaceFallback || !originIsDry)
-                    {
-                        retreatPos = new Vector3(originPos.x + aDir.x * 85.0f, 0.0f, originPos.z + aDir.z * 85.0f);
-                        return true;
-                    }
-                }
-
-                // Pure Lua / SpawnAISquadGlobal fallback when no SpawnManager exists in scene:
-                EnsureWorldSnapshot();
-                int sqCount = WorldSquadCount;
-                var squads = WorldSquads;
-
-                float bestFriendlySq = 22.0f * 22.0f;
-                Vector3 bestFriendlyPos = Vector3.zero;
-                bool hasFriendly = false;
-
-                float nearestEnemySq = float.MaxValue;
-                Vector3 nearestEnemyPos = Vector3.zero;
-                bool hasEnemy = false;
-
-                for (int i = 0; i < sqCount; i++)
-                {
-                    ref SquadSnapshot snap = ref squads[i];
-                    if (snap.UnitCount == 0 || snap.RefOnPlane || string.IsNullOrEmpty(snap.Faction))
-                        continue;
-
-                    Vector3 delta = snap.RefPos - originPos;
-                    delta.y = 0f;
-                    float dSq = delta.sqrMagnitude;
-                    if (AreSameSideFactions(myFaction, snap.Faction))
-                    {
-                        if (!snap.IsVehicleCrew && dSq > bestFriendlySq)
-                        {
-                            if (TrySampleDryGroundAltitude(snap.RefPos, out float alt))
-                            {
-                                bestFriendlySq = dSq;
-                                bestFriendlyPos = new Vector3(snap.RefPos.x, alt, snap.RefPos.z);
-                                hasFriendly = true;
-                            }
-                        }
-                    }
-                    else if (AreEnemyFactions(myFaction, snap.Faction) && dSq < nearestEnemySq)
-                    {
-                        nearestEnemySq = dSq;
-                        nearestEnemyPos = snap.RefPos;
-                        hasEnemy = true;
-                    }
-                }
-
-                if (hasEnemy)
-                {
-                    Vector3 away = originPos - nearestEnemyPos;
-                    if (TrySampleDryRetreatPoint(originPos, away, 85.0f, out retreatPos) ||
-                        TrySampleDryRetreatPoint(originPos, away, 55.0f, out retreatPos))
-                    {
-                        return true;
-                    }
-
-                    if (allowWaterSurfaceFallback || !originIsDry)
-                    {
-                        away.y = 0f;
-                        Vector3 awayDir = away.sqrMagnitude > 0.01f ? away.normalized : Vector3.back;
-                        retreatPos = new Vector3(originPos.x + awayDir.x * 85.0f, 0.0f, originPos.z + awayDir.z * 85.0f);
-                        return true;
-                    }
-                }
-
-                if (hasFriendly)
-                {
-                    retreatPos = bestFriendlyPos;
-                    return true;
-                }
-
-                if (allowWaterSurfaceFallback || !originIsDry)
-                {
-                    retreatPos = new Vector3(originPos.x, 0.0f, originPos.z - 85.0f);
-                    return true;
-                }
-            }
-            catch { }
-
-            return false;
-        }
-
-        /// <summary>
         /// Checks whether the human player controlling <paramref name="s"/> has published the
         /// <c>"bh_ver"</c> Photon custom property (cached for 5s per ActorNumber).
         /// Returns true for local players/bots or on error so Host-assist only activates for confirmed unmodded remote players.
@@ -2243,20 +2070,7 @@ namespace EasyRed2HumanAI
                 if (controller == null)
                     return true;
 
-                int actorNum = controller.ActorNumber;
-                float now = Time.unscaledTime;
-                if (_playerModdedCache.TryGetValue(actorNum, out var cached) && now < cached.ExpireTime)
-                    return cached.HasMod;
-
-                bool hasMod = false;
-                var props = controller.CustomProperties;
-                if (props != null && props.ContainsKey((Il2CppSystem.String)"bh_ver"))
-                    hasMod = true;
-
-                if (_playerModdedCache.Count > 32)
-                    _playerModdedCache.Clear();
-                _playerModdedCache[actorNum] = (hasMod, now + 5.0f);
-                return hasMod;
+                return IsPhotonPlayerConfirmedModded(controller);
             }
             catch
             {
@@ -2264,10 +2078,26 @@ namespace EasyRed2HumanAI
             }
         }
 
+        public static int ActiveSoldierHandlesCount => _soldierHandlesByPtr.Count;
+        public static int ActiveVehicleHandlesCount => _vehicleHandlesByPtr.Count;
+        public static int MoveOverridePreemptionsCount { get; private set; }
+        public static int BotRpcBudgetGrantedCount { get; private set; }
+        public static int BotRpcBudgetThrottledCount { get; private set; }
+
         public static bool TryConsumeBotRpcBudget(float minInterval = 0.35f)
         {
+            int players = GetConnectedPlayerCount();
+            if (players <= 1)
+            {
+                BotRpcBudgetGrantedCount++;
+                return true;
+            }
+
             if (ShouldSkipBotCycleForNetworkPing())
+            {
+                BotRpcBudgetThrottledCount++;
                 return false;
+            }
 
             float now = Time.time;
             if (_nextAllowedBotRpcTime > now + 2.5f)
@@ -2276,15 +2106,15 @@ namespace EasyRed2HumanAI
             }
 
             if (now < _nextAllowedBotRpcTime)
-                return false;
-
-            int players = GetConnectedPlayerCount();
-            if (players > 1)
             {
-                minInterval *= (1.0f + Mathf.Min(players - 1, 12) * 0.25f);
+                BotRpcBudgetThrottledCount++;
+                return false;
             }
 
+            minInterval *= (1.0f + Mathf.Min(players - 1, 12) * 0.25f);
+
             _nextAllowedBotRpcTime = now + Mathf.Clamp(minInterval, 0.05f, 3.0f);
+            BotRpcBudgetGrantedCount++;
             return true;
         }
 
@@ -2469,389 +2299,6 @@ namespace EasyRed2HumanAI
             vh.CachedHasCloseFriendlyEscort = hasCloseFriendlyEscort;
         }
 
-        public static int GetSolidEnvironmentMask()
-        {
-            if (_cachedSolidEnvMask != 0)
-                return _cachedSolidEnvMask;
-
-            try
-            {
-                int gm = ResourcesManager.groundMask.value;
-                if (gm != 0)
-                {
-                    _cachedSolidEnvMask = gm;
-                    return gm;
-                }
-            }
-            catch { }
-
-            int terrainLayer = LayerMask.NameToLayer("Terrain");
-            _cachedSolidEnvMask = terrainLayer >= 0 ? ((1 << 0) | (1 << terrainLayer)) : (1 << 0);
-            return _cachedSolidEnvMask;
-        }
-
-        /// <summary>
-        /// Returns <c>ResourcesManager.vaultMask | groundMask</c> (<c>Default | Terrain | InvisibleTrepassableWall</c>),
-        /// which includes simplified invisible collision walls placed on sandbags, fences, parapets, and window sills.
-        /// Use for physical movement, vaulting, and wall-cover geometry probes (keep <see cref="GetSolidEnvironmentMask"/>
-        /// for optical sightlines and bullet LOS where <c>InvisibleTrepassableWall</c> is transparent).
-        /// </summary>
-        public static int GetMovementObstacleMask()
-        {
-            if (_cachedMovementObstacleMask != 0)
-                return _cachedMovementObstacleMask;
-
-            int mask = GetSolidEnvironmentMask();
-            try
-            {
-                int vm = ResourcesManager.vaultMask.value;
-                if (vm != 0)
-                    mask |= vm;
-            }
-            catch { }
-
-            int invWallLayer = LayerMask.NameToLayer("InvisibleTrepassableWall");
-            if (invWallLayer >= 0)
-                mask |= (1 << invWallLayer);
-
-            _cachedMovementObstacleMask = mask;
-            return mask;
-        }
-
-        public static bool IsMovementBlockedByObstacle(Vector3 origin, Vector3 dir, float dist)
-        {
-            if (dist <= 0.05f)
-                return false;
-
-            float dirSq = dir.sqrMagnitude;
-            if (dirSq < 1e-6f)
-                return false;
-
-            Vector3 normDir = Mathf.Abs(dirSq - 1.0f) > 0.01f ? (dir / Mathf.Sqrt(dirSq)) : dir;
-            int mask = GetMovementObstacleMask();
-
-            if (Physics.Raycast(origin, normDir, out RaycastHit rayHit, dist, mask, QueryTriggerInteraction.Ignore) &&
-                Mathf.Abs(rayHit.normal.y) < 0.68f)
-            {
-                return true;
-            }
-
-            // Catch wall corners, thin pillars, and doorframes within body radius without false-blocking walkable slopes/ramps.
-            float sphereDist = Mathf.Max(0.10f, dist - 0.05f);
-            if (Physics.SphereCast(origin + Vector3.up * 0.34f, 0.20f, normDir, out RaycastHit sphereHit, sphereDist, mask, QueryTriggerInteraction.Ignore) &&
-                Mathf.Abs(sphereHit.normal.y) < 0.68f)
-            {
-                return true;
-            }
-
-            return false;
-        }
-
-        public static bool IsDirectSegmentBlockedByWall(Vector3 fromFeetPos, Vector3 toFeetPos, out float flatDist)
-        {
-            Vector3 flatDelta = toFeetPos - fromFeetPos;
-            flatDelta.y = 0f;
-            float flatSq = flatDelta.sqrMagnitude;
-            if (flatSq <= 0.15f * 0.15f)
-            {
-                flatDist = Mathf.Sqrt(flatSq);
-                return false;
-            }
-
-            flatDist = Mathf.Sqrt(flatSq);
-            if (Mathf.Abs(toFeetPos.y - fromFeetPos.y) > 1.35f && flatDist < 2.6f)
-                return true;
-
-            Vector3 dir = flatDelta / flatDist;
-            return IsMovementBlockedByObstacle(fromFeetPos + Vector3.up * 0.48f, dir, flatDist);
-        }
-
-        public static int GetSmokeOcclusionMask()
-        {
-            if (_cachedSmokeOcclusionMask != 0)
-                return _cachedSmokeOcclusionMask;
-
-            try
-            {
-                int vm = ResourcesManager.visionMask.value;
-                int bm = ResourcesManager.bulletMask.value;
-                int diff = vm & ~bm;
-                if (diff != 0)
-                {
-                    _cachedSmokeOcclusionMask = diff;
-                    return diff;
-                }
-            }
-            catch { }
-
-            int tfxLayer = LayerMask.NameToLayer("TransparentFX");
-            _cachedSmokeOcclusionMask = tfxLayer >= 0 ? (1 << tfxLayer) : (1 << 1);
-            return _cachedSmokeOcclusionMask;
-        }
-
-        public static bool TryGetActiveCameraPosition(out Vector3 camPos)
-        {
-            try
-            {
-                Camera cam = ResourcesManager.mainCamera;
-                if (cam == null || cam.Pointer == IntPtr.Zero || !cam.isActiveAndEnabled)
-                    cam = Camera.main;
-
-                if (cam != null && cam.Pointer != IntPtr.Zero && cam.transform != null)
-                {
-                    camPos = cam.transform.position;
-                    return true;
-                }
-            }
-            catch { }
-
-            camPos = Vector3.zero;
-            return false;
-        }
-
-        public static bool TryGetActiveWaterLevel(out float waterLevel)
-        {
-            try
-            {
-                FollowingWater water = FollowingWater.instance;
-                if (water != null && water.Pointer != IntPtr.Zero && water.isActiveAndEnabled)
-                {
-                    if (water.Pointer != _cachedWaterInstancePtr)
-                    {
-                        _cachedWaterInstancePtr = water.Pointer;
-                        _cachedWaterRenderer = FollowingWater.GetRenderer();
-                    }
-
-                    if (_cachedWaterRenderer != null &&
-                        _cachedWaterRenderer.Pointer != IntPtr.Zero &&
-                        _cachedWaterRenderer.enabled)
-                    {
-                        waterLevel = FollowingWater.WaterLevel;
-                        return true;
-                    }
-                }
-            }
-            catch { }
-
-            waterLevel = -9999f;
-            return false;
-        }
-
-        /// <summary>
-        /// Checks whether an impact point is submerged below or across an active <see cref="FollowingWater"/>
-        /// or Layer 4 (<c>Water</c>) surface, or occluded from <paramref name="camPos"/> by a tactical smoke volume
-        /// (<c>visionMask &amp; ~bulletMask</c>).
-        /// </summary>
-        public static bool IsPointOccludedByWaterOrSmoke(Vector3 camPos, Vector3 impactPos)
-        {
-            if (TryGetActiveWaterLevel(out float waterY))
-            {
-                // Submerged flesh hit or sightline crossing the rendered water plane
-                if (impactPos.y < waterY - 0.03f || (camPos.y - waterY) * (impactPos.y - waterY) < 0f)
-                    return true;
-            }
-
-            int smokeMask = GetSmokeOcclusionMask();
-            int lineMask = smokeMask | (1 << 4); // Smoke volumes (TransparentFX) + local Water colliders (Layer 4)
-            float distSq = (impactPos - camPos).sqrMagnitude;
-            if (distSq > 0.25f && Physics.Linecast(camPos, impactPos, lineMask))
-                return true;
-
-            // PhysX Linecast starting inside a SphereCollider skips its own shell; CheckSphere catches inside-smoke hits
-            if (distSq > 4.0f && Physics.CheckSphere(impactPos, 0.20f, smokeMask))
-                return true;
-
-            if (distSq > 6.25f && Physics.CheckSphere(camPos, 0.15f, smokeMask))
-                return true;
-
-            return false;
-        }
-
-        public static bool RaycastEnvironment(Vector3 origin, Vector3 dir, float maxDist, Transform ignoreRoot, out RaycastHit envHit)
-        {
-            // ResourcesManager.groundMask (Default | Terrain) hits only solid environment geometry (walls, buildings,
-            // sandbags, terrain) and ignores soldier BodyPart colliders, ragdolls, items, foliage, and triggers.
-            // This eliminates multi-hop raycast loops and IL2CPP GetComponentInParent<Creature>() hierarchy walks!
-            return Physics.Raycast(origin, dir, out envHit, maxDist, GetSolidEnvironmentMask(), QueryTriggerInteraction.Ignore);
-        }
-
-        public static bool IsDirectionBlockedByEnvironment(Vector3 origin, Vector3 dir, float dist, Transform ignoreRoot)
-        {
-            return Physics.Raycast(origin, dir, dist, GetSolidEnvironmentMask(), QueryTriggerInteraction.Ignore);
-        }
-
-        public static bool HasLowCeilingOverhead(Vector3 feetPos, float maxHeight = 2.6f)
-        {
-            // Quantize to 2m x 1m x 2m spatial grid cell so indoor ceiling checks are O(1) after first probe
-            int gx = Mathf.RoundToInt(feetPos.x * 0.5f) & 0xFFFF;
-            int gy = Mathf.RoundToInt(feetPos.y) & 0xFFFF;
-            int gz = Mathf.RoundToInt(feetPos.z * 0.5f) & 0xFFFF;
-            long cellKey = ((long)gx << 32) | ((long)gy << 16) | (uint)gz;
-
-            if (_ceilingCache.TryGetValue(cellKey, out bool cachedLowCeiling))
-                return cachedLowCeiling;
-
-            Vector3 origin = feetPos + Vector3.up * 0.65f;
-            bool hasCeiling = Physics.Raycast(origin, Vector3.up, maxHeight, GetSolidEnvironmentMask(), QueryTriggerInteraction.Ignore);
-            if (_ceilingCache.Count > 2048)
-                _ceilingCache.Clear();
-            _ceilingCache[cellKey] = hasCeiling;
-            return hasCeiling;
-        }
-
-        private static bool IsBridgeSideOpenDropOff(
-            Vector3 feetPos,
-            Vector3 horizDir,
-            int mask,
-            bool requireWater,
-            bool hasActiveWater,
-            float waterLevel)
-        {
-            // Check chest/head horizontal clearance first so nearby boulders, rising hillside banks, or walls
-            // never cause an elevated probe origin to start underground or look like an open drop.
-            Vector3 horizOrigin = feetPos + Vector3.up * 1.85f;
-            for (int k = 0; k < 2; k++)
-            {
-                float d = k == 0 ? 3.8f : 6.2f;
-                if (Physics.Raycast(horizOrigin, horizDir, d, mask, QueryTriggerInteraction.Ignore))
-                    return false;
-
-                // Cast down 4.35m from +2.50m above feetPos (threshold = -1.85m below feetPos.y)
-                Vector3 elevOrigin = new Vector3(feetPos.x + horizDir.x * d, feetPos.y + 2.50f, feetPos.z + horizDir.z * d);
-                if (!Physics.Raycast(elevOrigin, Vector3.down, out RaycastHit downHit, 4.35f, mask, QueryTriggerInteraction.Ignore))
-                {
-                    if (!requireWater || (hasActiveWater && feetPos.y <= waterLevel + 5.5f))
-                        return true;
-                }
-                else if (hasActiveWater && downHit.point.y <= waterLevel - 0.06f)
-                {
-                    return true;
-                }
-            }
-
-            return false;
-        }
-
-        /// <summary>
-        /// Safely checks whether <paramref name="col"/> is a Unity <c>TerrainCollider</c> without calling generic
-        /// <c>TryCast&lt;TerrainCollider&gt;()</c> or <c>GetComponent&lt;TerrainCollider&gt;()</c>, because
-        /// <c>UnityEngine.TerrainPhysicsModule</c> is stripped in ER2's IL2CPP build and generic casts throw
-        /// <see cref="ArgumentException"/> ("UnityEngine.TerrainCollider is not an Il2Cpp reference type").
-        /// </summary>
-        public static bool IsTerrainCollider(Collider col)
-        {
-            if (ReferenceEquals(col, null) || col == null)
-                return false;
-
-            IntPtr ptr = col.Pointer;
-            if (ptr == IntPtr.Zero)
-                return false;
-
-            if (_terrainColliderCache.TryGetValue(ptr, out bool cached))
-                return cached;
-
-            bool isTerrain = false;
-            try
-            {
-                var il2cppType = col.GetIl2CppType();
-                if (il2cppType != null)
-                    isTerrain = string.Equals(il2cppType.Name, "TerrainCollider", StringComparison.Ordinal);
-            }
-            catch { }
-
-            if (_terrainColliderCache.Count > 256)
-                _terrainColliderCache.Clear();
-            _terrainColliderCache[ptr] = isTerrain;
-            return isTerrain;
-        }
-
-        public static bool IsOnBridgeOrNarrowCrossing(Vector3 feetPos)
-        {
-            // Quantize to 2m x 1m x 2m spatial grid cell so bridge/crossing checks are O(1) after first probe
-            int gx = Mathf.RoundToInt(feetPos.x * 0.5f) & 0xFFFF;
-            int gy = Mathf.RoundToInt(feetPos.y) & 0xFFFF;
-            int gz = Mathf.RoundToInt(feetPos.z * 0.5f) & 0xFFFF;
-            long cellKey = ((long)gx << 32) | ((long)gy << 16) | (uint)gz;
-
-            if (_bridgeCellCache.TryGetValue(cellKey, out bool cachedBridge))
-                return cachedBridge;
-
-            bool isBridge = false;
-            if (!HasLowCeilingOverhead(feetPos, 3.8f))
-            {
-                int mask = GetSolidEnvironmentMask();
-                if (Physics.Raycast(feetPos + Vector3.up * 0.85f, Vector3.down, out RaycastHit centerHit, 2.0f, mask, QueryTriggerInteraction.Ignore) &&
-                    centerHit.collider != null)
-                {
-                    bool isTerrain = IsTerrainCollider(centerHit.collider);
-                    bool hasActiveWater = TryGetActiveWaterLevel(out float waterLevel);
-
-                    // Dry TerrainCollider hillsides (like Kos slopes) are NEVER bridges or narrow crossings.
-                    // Only allow TerrainCollider if near active water so true land-causeways still qualify.
-                    if (!isTerrain || (hasActiveWater && centerHit.point.y <= waterLevel + 5.5f))
-                    {
-                        bool dropPosX = IsBridgeSideOpenDropOff(feetPos, Vector3.right, mask, isTerrain, hasActiveWater, waterLevel);
-                        if (dropPosX && IsBridgeSideOpenDropOff(feetPos, Vector3.left, mask, isTerrain, hasActiveWater, waterLevel))
-                        {
-                            isBridge = true;
-                        }
-                        else
-                        {
-                            bool dropPosZ = IsBridgeSideOpenDropOff(feetPos, Vector3.forward, mask, isTerrain, hasActiveWater, waterLevel);
-                            if (dropPosZ && IsBridgeSideOpenDropOff(feetPos, Vector3.back, mask, isTerrain, hasActiveWater, waterLevel))
-                                isBridge = true;
-                        }
-                    }
-                }
-            }
-
-            if (_bridgeCellCache.Count > 2048)
-                _bridgeCellCache.Clear();
-            _bridgeCellCache[cellKey] = isBridge;
-            return isBridge;
-        }
-
-        /// <summary>
-        /// Verifies that a candidate cover/bounding position for a soldier currently on a bridge or narrow crossing
-        /// lands squarely on walkable deck geometry at roughly the same elevation (not off an edge, into water, or inside a pillar).
-        /// </summary>
-        public static bool IsSafeBridgeDeckStep(Vector3 currentFeetPos, Vector3 candidatePos, out Vector3 snappedGroundPos)
-        {
-            snappedGroundPos = candidatePos;
-            int mask = GetSolidEnvironmentMask();
-            Vector3 probeOrigin = new Vector3(candidatePos.x, currentFeetPos.y + 1.35f, candidatePos.z);
-            if (!Physics.Raycast(probeOrigin, Vector3.down, out RaycastHit hit, 2.50f, mask, QueryTriggerInteraction.Ignore))
-                return false;
-
-            if (hit.normal.y < 0.65f || Mathf.Abs(hit.point.y - currentFeetPos.y) > 1.15f)
-                return false;
-
-            if (hit.collider == null || hit.collider.gameObject.layer == 4)
-                return false;
-
-            if (TryGetActiveWaterLevel(out float waterLevel) && hit.point.y <= waterLevel + 0.15f)
-                return false;
-
-            if (Physics.CheckSphere(hit.point + Vector3.up * 0.65f, 0.26f, mask, QueryTriggerInteraction.Ignore))
-                return false;
-
-            snappedGroundPos = hit.point;
-            return true;
-        }
-
-        public static float GetBarrelHeightForPose(SoldierPose pose)
-        {
-            switch (pose)
-            {
-                case SoldierPose.Prone:
-                    return 0.25f;
-                case SoldierPose.Crouch:
-                    return 0.68f;
-                default:
-                    return 1.24f;
-            }
-        }
-
         /// <summary>
         /// Extends a soldier's alertness window (<see cref="Soldier.SetAlertedFor"/>) without forcing
         /// <c>pointGunEndTime = Time.time + 3.0f</c> when the soldier does not currently have an
@@ -2958,22 +2405,28 @@ namespace EasyRed2HumanAI
             dest.y = targetPos.y;
             float moveDist = Mathf.Max(0.25f, flatDist - standoffDist);
 
-            // Player-style locomotion: use MoveDirectlyToward ONLY for unobstructed micro-steps (<= 2.5m on level ground).
-            // Anything farther, sloped, or obstructed uses vanilla async CPathFinding (MoveDestination + UpdatePath).
+            // Player-style locomotion: use MoveDirectlyToward ONLY for unobstructed, floor-snapped micro-steps (<= 2.5m).
+            // Anything farther, sloped, slab-blocked, or obstructed uses vanilla async CPathFinding (MoveDestination + UpdatePath).
             if (moveDist <= 2.5f &&
-                Mathf.Abs(dest.y - myPos.y) <= 0.85f &&
-                !IsMovementBlockedByObstacle(myPos + Vector3.up * 0.48f, dir, moveDist))
+                TryValidateAndSnapDirectMicroStep(myPos, dest, out Vector3 snappedDest, out _, 2.5f, 0.75f))
             {
                 float duration = Mathf.Clamp(moveDist / 2.6f + 0.55f, Mathf.Min(minDirectDuration, 1.4f), 2.0f);
-                ai.MoveDirectlyToward(dest, duration);
+                ai.MoveDirectlyToward(snappedDest, duration);
                 return;
             }
 
             if (ai.moveDirectlyToward_end > Time.time)
-                ai.moveDirectlyToward_end = 0f;
-
-            if ((ai.MoveDestination - dest).sqrMagnitude > 1.44f || (!ai.HasPath && !ai.HasPathRequest))
             {
+                ai.moveDirectlyToward_end = 0f;
+                ai.Stop(true);
+            }
+
+            if ((ai.MoveDestination - dest).sqrMagnitude > 1.44f ||
+                (!ai.HasPath && !ai.HasPathRequest) ||
+                ai.mustTeleport ||
+                ai.PathCalculationLocked)
+            {
+                ResetBotPathLockout(ai);
                 ai.MoveDestination = dest;
                 ai.UpdatePath();
             }
@@ -3072,399 +2525,6 @@ namespace EasyRed2HumanAI
             return false;
         }
 
-        // =====================================================================
-        // Zero-Allocation Human Player Aim-Lane Cache (SP + Co-op Crosshair Yield)
-        // Refreshed at 12.5 Hz (0.08s) so friendly bots avoid claiming cover or
-        // squad spacing inside a human player's sights and proactively duck/yield.
-        // =====================================================================
-        public struct PlayerAimLane
-        {
-            public IntPtr Ptr;
-            public Soldier Ref;
-            public Transform RootTr;
-            public string Faction;
-            public Vector3 FeetPos;
-            public Vector3 AimOrigin;
-            public Vector3 AimDir3D;
-            public Vector3 AimDirFlat;
-            public Vector3 RightFlat;
-            public float MaxClearForward;
-            public float HalfCorridorWidth;
-            public bool IsAdsOrFiring;
-            public bool IsProne;
-            public bool IsCrouched;
-        }
-
-        public static readonly PlayerAimLane[] ActivePlayerAimLanes = new PlayerAimLane[12];
-        public static int ActivePlayerAimLaneCount;
-        private static float _nextPlayerAimLaneRefreshTime;
-        private static Camera _cachedMainCamera;
-        private static float _nextMainCameraLookupTime;
-
-        private static Camera GetCachedMainCamera(float now)
-        {
-            if (!ReferenceEquals(_cachedMainCamera, null) && _cachedMainCamera != null && _cachedMainCamera.isActiveAndEnabled)
-                return _cachedMainCamera;
-
-            if (now < _nextMainCameraLookupTime)
-                return null;
-
-            _nextMainCameraLookupTime = now + 1.0f;
-            _cachedMainCamera = Camera.main;
-            return (!ReferenceEquals(_cachedMainCamera, null) && _cachedMainCamera != null && _cachedMainCamera.isActiveAndEnabled)
-                ? _cachedMainCamera
-                : null;
-        }
-
-        /// <summary>
-        /// Returns true if <paramref name="worldPos"/> is within <paramref name="minPlayerDist"/> of any active human player
-        /// (local or co-op) or unobstructed inside the local camera frustum, so off-camera unstick snaps never pop in visibly.
-        /// </summary>
-        public static bool IsPositionVisibleOnLocalScreen(Vector3 worldPos, float minPlayerDist = 20.0f)
-        {
-            EnsurePlayerAimLanesUpdated();
-            float minDistSq = minPlayerDist * minPlayerDist;
-            for (int i = 0; i < ActivePlayerAimLaneCount; i++)
-            {
-                if ((worldPos - ActivePlayerAimLanes[i].FeetPos).sqrMagnitude < minDistSq)
-                    return true;
-            }
-
-            Camera cam = GetCachedMainCamera(Time.time);
-            if (cam == null || cam.transform == null)
-                return false;
-
-            Vector3 camPos = cam.transform.position;
-            if ((worldPos - camPos).sqrMagnitude < minDistSq)
-                return true;
-
-            Vector3 targetChest = worldPos + Vector3.up * 0.95f;
-            Vector3 vp = cam.WorldToViewportPoint(targetChest);
-            if (vp.z > 0.0f && vp.x >= -0.06f && vp.x <= 1.06f && vp.y >= -0.06f && vp.y <= 1.06f)
-            {
-                if (!Physics.Linecast(camPos, targetChest, GetSolidEnvironmentMask(), QueryTriggerInteraction.Ignore))
-                    return true;
-            }
-
-            return false;
-        }
-
-        private static void TryAppendPlayerAimLane(Soldier p, SoldierFastHandles h, bool isLocalPlayer, float now)
-        {
-            if (ActivePlayerAimLaneCount >= ActivePlayerAimLanes.Length ||
-                h == null ||
-                h.Tr == null ||
-                p == null ||
-                !p.IsAlive ||
-                p.HasSurrended())
-            {
-                return;
-            }
-
-            string faction = GetCachedFaction(h, now);
-            if (string.IsNullOrEmpty(faction))
-                return;
-
-            bool onGroundVeh = false;
-            Transform rootTr = h.RootTr;
-            if (p.IsOnVehicle())
-            {
-                VehicleFastHandles vh = GetOrCreateVehicleHandles(p.GetCurrentVehicle());
-                if (vh == null || vh.IsAir || vh.IsParachute)
-                    return;
-
-                onGroundVeh = true;
-                if (vh.RootTr != null)
-                    rootTr = vh.RootTr;
-            }
-
-            Vector3 feetPos = h.Tr.position;
-            Vector3 aimOrigin;
-            Vector3 aimDir3D;
-
-            if (onGroundVeh && isLocalPlayer)
-            {
-                Camera cam = GetCachedMainCamera(now);
-                if (cam != null && cam.transform != null)
-                {
-                    aimOrigin = cam.transform.position;
-                    aimDir3D = cam.transform.forward;
-                }
-                else
-                {
-                    aimOrigin = p.GunPosition();
-                    aimDir3D = p.GetFireDir();
-                }
-            }
-            else
-            {
-                aimOrigin = p.GunPosition();
-                aimDir3D = p.GetFireDir();
-            }
-
-            if (aimDir3D.sqrMagnitude < 0.001f)
-                aimDir3D = h.Tr.forward;
-            else
-                aimDir3D.Normalize();
-
-            Vector3 aimFlat = new Vector3(aimDir3D.x, 0f, aimDir3D.z);
-            if (aimFlat.sqrMagnitude < 0.001f)
-            {
-                Vector3 trFwd = h.Tr.forward;
-                aimFlat = new Vector3(trFwd.x, 0f, trFwd.z);
-            }
-            if (aimFlat.sqrMagnitude < 0.001f)
-                return;
-
-            aimFlat.Normalize();
-            Vector3 rightFlat = new Vector3(aimFlat.z, 0f, -aimFlat.x);
-
-            bool adsOrFiring = onGroundVeh ||
-                               p.IsAiming ||
-                               p.IsAutoCoverAimActive ||
-                               p.pressTriggerRequest ||
-                               VisionPatches.HasFiredRecently(p, 2.2f);
-            SoldierPose pose = onGroundVeh ? SoldierPose.Crouch : p.m_pose;
-
-            ActivePlayerAimLanes[ActivePlayerAimLaneCount++] = new PlayerAimLane
-            {
-                Ptr = h.Ptr,
-                Ref = p,
-                RootTr = rootTr,
-                Faction = faction,
-                FeetPos = feetPos,
-                AimOrigin = aimOrigin,
-                AimDir3D = aimDir3D,
-                AimDirFlat = aimFlat,
-                RightFlat = rightFlat,
-                MaxClearForward = adsOrFiring ? 16.5f : 9.5f,
-                HalfCorridorWidth = adsOrFiring ? 1.35f : 0.95f,
-                IsAdsOrFiring = adsOrFiring,
-                IsProne = pose == SoldierPose.Prone,
-                IsCrouched = pose == SoldierPose.Crouch
-            };
-        }
-
-        public static void EnsurePlayerAimLanesUpdated()
-        {
-            float now = Time.time;
-            if (now >= _nextPlayerAimLaneRefreshTime || now < _nextPlayerAimLaneRefreshTime - 2.0f)
-            {
-                _nextPlayerAimLaneRefreshTime = now + 0.08f;
-                int prevCount = ActivePlayerAimLaneCount;
-                ActivePlayerAimLaneCount = 0;
-
-                try
-                {
-                    Soldier localPlayer = Soldier.CurrentControlledSoldierOrNull();
-                    IntPtr localPtr = IntPtr.Zero;
-                    if (!ReferenceEquals(localPlayer, null) && localPlayer != null && localPlayer.IsAlive)
-                    {
-                        SoldierFastHandles lpH = GetOrCreateSoldierHandles(localPlayer);
-                        if (lpH != null)
-                        {
-                            localPtr = lpH.Ptr;
-                            TryAppendPlayerAimLane(localPlayer, lpH, isLocalPlayer: true, now);
-                        }
-                    }
-
-                    if (IsInMultiplayerRoom())
-                    {
-                        EnsureWorldSnapshot();
-                        int solCount = WorldSoldierCount;
-                        var soldiers = WorldSoldiers;
-                        for (int i = 0; i < solCount && ActivePlayerAimLaneCount < ActivePlayerAimLanes.Length; i++)
-                        {
-                            ref SoldierSnapshot snap = ref soldiers[i];
-                            if (!snap.IsPlayer || snap.Ptr == localPtr || snap.Ref == null)
-                                continue;
-
-                            SoldierFastHandles rpH = GetOrCreateSoldierHandles(snap.Ref);
-                            TryAppendPlayerAimLane(snap.Ref, rpH, isLocalPlayer: false, now);
-                        }
-                    }
-                }
-                catch { }
-
-                if (prevCount > ActivePlayerAimLaneCount)
-                    Array.Clear(ActivePlayerAimLanes, ActivePlayerAimLaneCount, prevCount - ActivePlayerAimLaneCount);
-            }
-        }
-
-        /// <summary>
-        /// Zero-allocation, zero-raycast cover filter (~15ns) used in CombatCover.IsCoverAvailable
-        /// and local cover searches so friendly bots never claim cover spots inside a human player's sightline.
-        /// </summary>
-        [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        public static bool IsCoverInPlayerAimLane(Vector3 coverPos, Vector3 coverShootDirFlat)
-        {
-            EnsurePlayerAimLanesUpdated();
-            int count = ActivePlayerAimLaneCount;
-            if (count == 0)
-                return false;
-
-            for (int i = 0; i < count; i++)
-            {
-                ref PlayerAimLane lane = ref ActivePlayerAimLanes[i];
-                if (Mathf.Abs(coverPos.y - lane.FeetPos.y) > 2.2f)
-                    continue;
-
-                // Only reject cover searches facing the same general sector as the player (friendly cover);
-                // opposing enemy cover searches have shootDirection pointing back toward the player (dot < 0).
-                if (coverShootDirFlat.sqrMagnitude > 0.001f && Vector3.Dot(lane.AimDirFlat, coverShootDirFlat) < 0.05f)
-                    continue;
-
-                float dx = coverPos.x - lane.AimOrigin.x;
-                float dz = coverPos.z - lane.AimOrigin.z;
-                float fwd = dx * lane.AimDirFlat.x + dz * lane.AimDirFlat.z;
-                if (fwd < 0.35f || fwd > lane.MaxClearForward)
-                    continue;
-
-                float rayY = lane.AimOrigin.y + lane.AimDir3D.y * fwd;
-                if (rayY > coverPos.y + 2.35f || rayY < coverPos.y - 0.55f)
-                    continue;
-
-                float lat = Mathf.Abs(dx * lane.RightFlat.x + dz * lane.RightFlat.z);
-                if (lat <= lane.HalfCorridorWidth + 0.20f + fwd * 0.03f)
-                    return true;
-            }
-
-            return false;
-        }
-
-        public static bool TryGetBlockingFriendlyPlayerAimLane(
-            IntPtr botPtr,
-            string botFaction,
-            Vector3 worldPoint,
-            float extraWidth,
-            out PlayerAimLane blockingLane,
-            out float forwardDist,
-            out float signedLateral,
-            out Vector3 clearStepDir)
-        {
-            EnsurePlayerAimLanesUpdated();
-            int count = ActivePlayerAimLaneCount;
-            for (int i = 0; i < count; i++)
-            {
-                ref PlayerAimLane lane = ref ActivePlayerAimLanes[i];
-                if (lane.Ptr == botPtr || !AreSameSideFactions(botFaction, lane.Faction))
-                    continue;
-
-                if (Mathf.Abs(worldPoint.y - lane.FeetPos.y) > 2.30f)
-                    continue;
-
-                float dx = worldPoint.x - lane.AimOrigin.x;
-                float dz = worldPoint.z - lane.AimOrigin.z;
-                float fwd = dx * lane.AimDirFlat.x + dz * lane.AimDirFlat.z;
-                if (fwd < 0.30f || fwd > lane.MaxClearForward)
-                    continue;
-
-                // Ignore when the player is aiming steep overhead (e.g. AA fire at aircraft) or steep below
-                float rayY = lane.AimOrigin.y + lane.AimDir3D.y * fwd;
-                if (rayY > worldPoint.y + 2.35f || rayY < worldPoint.y - 0.55f)
-                    continue;
-
-                float sLat = dx * lane.RightFlat.x + dz * lane.RightFlat.z;
-                float halfWidth = lane.HalfCorridorWidth + extraWidth + fwd * 0.035f;
-                if (Mathf.Abs(sLat) <= halfWidth)
-                {
-                    blockingLane = lane;
-                    forwardDist = fwd;
-                    signedLateral = sLat;
-                    if (Mathf.Abs(sLat) > 0.08f)
-                        clearStepDir = sLat >= 0f ? lane.RightFlat : -lane.RightFlat;
-                    else
-                        clearStepDir = ((GetDeterministicHash(botPtr, 97) & 1) == 0) ? lane.RightFlat : -lane.RightFlat;
-                    return true;
-                }
-            }
-
-            blockingLane = default;
-            forwardDist = 0f;
-            signedLateral = 0f;
-            clearStepDir = Vector3.zero;
-            return false;
-        }
-
-        /// <summary>
-        /// Zero-allocation danger-close blast + dispersion safety check for handheld knee mortars and static/on-map
-        /// indirect-fire artillery/mortars. Checks the local player, remote human players, and all friendly squads.
-        /// </summary>
-        public static bool IsIndirectFireImpactDangerClose(
-            string myFaction,
-            Vector3 impactPos,
-            IntPtr shooterPtr = default,
-            float friendlySafeRadius = 29.0f,
-            float playerSafeRadius = 35.0f)
-        {
-            if (string.IsNullOrEmpty(myFaction))
-                return false;
-
-            float playerSafeSq = playerSafeRadius * playerSafeRadius;
-            float friendlySafeSq = friendlySafeRadius * friendlySafeRadius;
-
-            Soldier localPlayer = Soldier.CurrentControlledSoldierOrNull();
-            if (localPlayer != null &&
-                localPlayer.IsAlive &&
-                localPlayer.Pointer != shooterPtr)
-            {
-                SoldierFastHandles lpHandles = GetOrCreateSoldierHandles(localPlayer);
-                string lpFaction = GetCachedFaction(lpHandles, Time.time);
-                if (lpHandles != null &&
-                    lpHandles.Tr != null &&
-                    !string.IsNullOrEmpty(lpFaction) &&
-                    AreSameSideFactions(myFaction, lpFaction))
-                {
-                    Vehicle pVeh = localPlayer.IsOnVehicle() ? localPlayer.GetCurrentVehicle() : null;
-                    if (pVeh == null || !pVeh.IsAirVehicle())
-                    {
-                        Vector3 dP = lpHandles.Tr.position - impactPos;
-                        if (dP.x * dP.x + dP.z * dP.z <= playerSafeSq && Mathf.Abs(dP.y) <= 22.0f)
-                            return true;
-                    }
-                }
-            }
-
-            EnsureWorldSnapshot();
-            int sqCount = WorldSquadCount;
-            if (sqCount <= 0)
-                return false;
-
-            float maxSquadCheckRadius = Mathf.Max(friendlySafeRadius, playerSafeRadius) + 48.0f;
-            float maxSquadCheckSq = maxSquadCheckRadius * maxSquadCheckRadius;
-            var squads = WorldSquads;
-            var soldiers = WorldSoldiers;
-
-            for (int s = 0; s < sqCount; s++)
-            {
-                ref SquadSnapshot sqSnap = ref squads[s];
-                if (sqSnap.UnitCount == 0 || sqSnap.RefOnPlane || string.IsNullOrEmpty(sqSnap.Faction))
-                    continue;
-
-                if (!AreSameSideFactions(myFaction, sqSnap.Faction))
-                    continue;
-
-                Vector3 sqDelta = sqSnap.RefPos - impactPos;
-                if (sqDelta.x * sqDelta.x + sqDelta.z * sqDelta.z > maxSquadCheckSq)
-                    continue;
-
-                int end = sqSnap.UnitStartIndex + sqSnap.UnitCount;
-                for (int i = sqSnap.UnitStartIndex; i < end; i++)
-                {
-                    ref SoldierSnapshot solSnap = ref soldiers[i];
-                    if (solSnap.Ptr == shooterPtr || solSnap.Ref == null)
-                        continue;
-
-                    Vector3 d = solSnap.Pos - impactPos;
-                    float rSq = solSnap.IsPlayer ? playerSafeSq : friendlySafeSq;
-                    if (d.x * d.x + d.z * d.z <= rSq && Mathf.Abs(d.y) <= 22.0f)
-                        return true;
-                }
-            }
-
-            return false;
-        }
-
         [HarmonyPatch(typeof(Soldier), nameof(Soldier.AngleToDirection))]
         public static class Soldier_AngleToDirection_Patch
         {
@@ -3541,748 +2601,6 @@ namespace EasyRed2HumanAI
         }
 
         public static int TotalAdaptiveAiExtraTicks;
-
-        // =====================================================================
-        // Zero-GC Flat Battlefield World Snapshot (Eliminates Per-Frame & O(N^2)/O(N^3) Squad.AllSquads Scans)
-        // =====================================================================
-        public struct SquadSnapshot
-        {
-            public IntPtr Ptr;
-            public Squad Ref;
-            public Soldier Leader;
-            public Soldier RefSoldier;
-            public Vector3 RefPos;
-            public string Faction;
-            public int UnitStartIndex;
-            public int UnitCount;
-            public bool LeaderIsAlive;
-            public bool IsVehicleCrew;
-            public bool IsPlayerInSquad;
-            public bool LeaderOnVehicle;
-            public bool LeaderOnGroundVehicle;
-            public bool RefOnPlane;
-            public bool HasIntrinsicRadio;
-            public bool HasRadioOrRelay;
-            public bool IsSpottedOrAware;
-        }
-
-        public struct SoldierSnapshot
-        {
-            public IntPtr Ptr;
-            public Soldier Ref;
-            public IntPtr SquadPtr;
-            public Vector3 Pos;
-            public string Faction;
-            public bool IsPlayer;
-            public bool IsOnVehicle;
-            public bool IsSquadLeader;
-            public bool HasSurrendered;
-            public bool IsSpotted;
-            public bool IsInjured;
-            public bool IsMedic;
-            public bool IsAmmoCarrier;
-            public bool CanBorrowAmmo;
-            public bool HasHeadgear;
-        }
-
-        public static SquadSnapshot[] WorldSquads = new SquadSnapshot[96];
-        public static int WorldSquadCount;
-        public static SoldierSnapshot[] WorldSoldiers = new SoldierSnapshot[384];
-        public static int WorldSoldierCount;
-        public static SoldierSnapshot[] WorldInjuredSoldiers = new SoldierSnapshot[64];
-        public static int WorldInjuredSoldierCount;
-
-        private static readonly Dictionary<IntPtr, int> _worldSquadIndexByPtr = new Dictionary<IntPtr, int>(96);
-        private static readonly HashSet<IntPtr> _seenWorldSoldierPtrs = new HashSet<IntPtr>(384);
-        private static float _lastWorldSnapshotTime = -999f;
-
-        public static bool TryGetSquadSnapshot(IntPtr sqPtr, out SquadSnapshot snap)
-        {
-            EnsureWorldSnapshot();
-            if (sqPtr != IntPtr.Zero && _worldSquadIndexByPtr.TryGetValue(sqPtr, out int idx) && idx >= 0 && idx < WorldSquadCount)
-            {
-                snap = WorldSquads[idx];
-                return true;
-            }
-            snap = default;
-            return false;
-        }
-
-        public static void WarmWorldSnapshotIfDue()
-        {
-            if (!VisionConfig.EnableMod.Value || Time.timeSinceLevelLoad < 2.0f || IsHeavyWorkFrame() || Time.unscaledDeltaTime > 0.026f)
-                return;
-
-            float now = Time.time;
-            if (_lastWorldSnapshotTime < 0f || (now - _lastWorldSnapshotTime) >= 0.32f)
-            {
-                EnsureWorldSnapshot(0.32f);
-            }
-        }
-
-        public static void EnsureWorldSnapshot(float maxAge = 0.35f)
-        {
-            float now = Time.time;
-            if (now >= _lastWorldSnapshotTime && _lastWorldSnapshotTime > 0f)
-            {
-                float age = now - _lastWorldSnapshotTime;
-                if (age < maxAge)
-                    return;
-
-                // If heavy spatial/octree work already ran on this frame OR the previous frame just hitched (> 35ms),
-                // reuse the slightly older snapshot so the O(N) snapshot rebuild lands on a clean frame!
-                if ((IsHeavyWorkFrame() && age < maxAge + 0.30f) ||
-                    (Time.unscaledDeltaTime > 0.035f && age < maxAge + 0.55f))
-                {
-                    return;
-                }
-            }
-
-            NotifyDirectorWorkThisFrame();
-            long profSnapStart = HitchProfiler.Begin();
-            HitchProfiler.RecordWorldSnapshotRebuilt();
-            _lastWorldSnapshotTime = now;
-            int prevSqCount = WorldSquadCount;
-            int prevSolCount = WorldSoldierCount;
-            int prevInjCount = WorldInjuredSoldierCount;
-            WorldSquadCount = 0;
-            WorldSoldierCount = 0;
-            WorldInjuredSoldierCount = 0;
-            _worldSquadIndexByPtr.Clear();
-            _seenWorldSoldierPtrs.Clear();
-
-            try
-            {
-                var allSquads = Squad.AllSquads;
-                if (allSquads != null && allSquads.Count > 0)
-                {
-                    bool radioNetEnabled = VisionConfig.EnableRadiomanIntelNet != null && VisionConfig.EnableRadiomanIntelNet.Value;
-
-                    foreach (var kvp in allSquads)
-                    {
-                        Squad sq = kvp.Value;
-                        if (sq == null || sq.Pointer == IntPtr.Zero)
-                            continue;
-
-                        var units = sq.units;
-                        int uCount = units != null ? units.Count : 0;
-                        Soldier leader = sq.Leader;
-                        SoldierFastHandles leaderHandles = (!ReferenceEquals(leader, null) && leader != null) ? GetOrCreateSoldierHandles(leader) : null;
-                        bool leaderAlive = leaderHandles != null && leader.IsAlive && leaderHandles.Tr != null;
-
-                        Soldier refSoldier = leaderAlive ? leader : null;
-                        SoldierFastHandles refHandles = leaderAlive ? leaderHandles : null;
-                        int unitStart = WorldSoldierCount;
-                        int addedUnits = 0;
-                        bool hasAliveRadiomanNear = false;
-                        Vector3 leaderPos = leaderAlive ? leaderHandles.Tr.position : Vector3.zero;
-
-                        for (int i = 0; i < uCount; i++)
-                        {
-                            Soldier u = units[i];
-                            if (ReferenceEquals(u, null) || u == null || u.Pointer == IntPtr.Zero)
-                                continue;
-
-                            SoldierFastHandles uHandles = GetOrCreateSoldierHandles(u);
-                            if (uHandles == null || uHandles.Tr == null)
-                                continue;
-
-                            if (!u.IsAlive)
-                            {
-                                // In Easy Red 2, incapacitated casualties waiting for a medic have IsAlive == false (life_total == 0)
-                                // and IsInjured == true (!IsDead). Track them in WorldInjuredSoldiers while keeping WorldSoldiers strictly IsAlive!
-                                if (u.IsInjured && !u.IsDead && _seenWorldSoldierPtrs.Add(uHandles.Ptr))
-                                {
-                                    if (WorldInjuredSoldierCount >= WorldInjuredSoldiers.Length)
-                                        Array.Resize(ref WorldInjuredSoldiers, WorldInjuredSoldiers.Length * 2);
-
-                                    WorldInjuredSoldiers[WorldInjuredSoldierCount++] = new SoldierSnapshot
-                                    {
-                                        Ptr = uHandles.Ptr,
-                                        Ref = u,
-                                        SquadPtr = sq.Pointer,
-                                        Pos = uHandles.Tr.position,
-                                        Faction = GetCachedFaction(uHandles, now),
-                                        IsPlayer = u.IsPlayer(),
-                                        IsOnVehicle = u.IsOnVehicle(),
-                                        IsInjured = true
-                                    };
-                                }
-                                continue;
-                            }
-
-                            if (refSoldier == null)
-                            {
-                                refSoldier = u;
-                                refHandles = uHandles;
-                            }
-
-                            Vector3 uPos = uHandles.Tr.position;
-                            bool uSurr = u.HasSurrended();
-                            if (leaderAlive && radioNetEnabled && !hasAliveRadiomanNear && u.IsRadioman() && !uSurr)
-                            {
-                                if ((uPos - leaderPos).sqrMagnitude <= 32f * 32f)
-                                    hasAliveRadiomanNear = true;
-                            }
-
-                            if (WorldSoldierCount >= WorldSoldiers.Length)
-                                Array.Resize(ref WorldSoldiers, WorldSoldiers.Length * 2);
-
-                            _seenWorldSoldierPtrs.Add(uHandles.Ptr);
-                            WorldSoldiers[WorldSoldierCount++] = new SoldierSnapshot
-                            {
-                                Ptr = uHandles.Ptr,
-                                Ref = u,
-                                SquadPtr = sq.Pointer,
-                                Pos = uPos,
-                                Faction = GetCachedFaction(uHandles, now),
-                                IsPlayer = u.IsPlayer(),
-                                IsOnVehicle = u.IsOnVehicle(),
-                                IsSquadLeader = leaderAlive && uHandles.Ptr == leaderHandles.Ptr,
-                                HasSurrendered = uSurr,
-                                IsSpotted = u.IsSpotted,
-                                IsInjured = u.IsInjured,
-                                IsMedic = u.IsMedic(),
-                                IsAmmoCarrier = u.IsAmmoBoxCarrier(),
-                                CanBorrowAmmo = u.CanBorrowAmmo,
-                                HasHeadgear = u.hasHeadgear
-                            };
-                            addedUnits++;
-                        }
-
-                        if (refSoldier == null || refHandles == null)
-                            continue;
-
-                        Vector3 refPos = leaderAlive ? leaderPos : refHandles.Tr.position;
-                        string faction = GetCachedFaction(refHandles, now);
-                        bool leaderOnVeh = leaderAlive && leader.IsOnVehicle();
-                        bool leaderOnGroundVeh = false;
-                        bool leaderHasOnboardRadio = false;
-                        if (leaderOnVeh)
-                        {
-                            VehicleFastHandles lvh = GetOrCreateVehicleHandles(leader.GetCurrentVehicle());
-                            if (lvh != null && !lvh.IsParachute)
-                            {
-                                leaderHasOnboardRadio = true;
-                                if (!lvh.IsAir)
-                                    leaderOnGroundVeh = true;
-                            }
-                        }
-
-                        bool refOnPlane = false;
-                        if (refSoldier.IsOnVehicle())
-                        {
-                            VehicleFastHandles rvh = GetOrCreateVehicleHandles(refSoldier.GetCurrentVehicle());
-                            if (rvh != null && rvh.IsAir)
-                                refOnPlane = true;
-                        }
-
-                        bool isPlayerInSq = sq.IsPlayerInSquad();
-                        bool hasIntrinsicRadio = !radioNetEnabled ||
-                                                 (leaderAlive && (leaderHasOnboardRadio || hasAliveRadiomanNear || sq.RadioRequestActiveAndConfirmed()));
-
-                        bool spottedOrAware = sq.IsEnemyAwareOfThisSquad ||
-                                              sq.isMarked ||
-                                              sq.isHalfMarked ||
-                                              sq.isMarkedPinPoint ||
-                                              refSoldier.IsSpotted;
-
-                        if (WorldSquadCount >= WorldSquads.Length)
-                            Array.Resize(ref WorldSquads, WorldSquads.Length * 2);
-
-                        int sqIdx = WorldSquadCount++;
-                        _worldSquadIndexByPtr[sq.Pointer] = sqIdx;
-                        WorldSquads[sqIdx] = new SquadSnapshot
-                        {
-                            Ptr = sq.Pointer,
-                            Ref = sq,
-                            Leader = leader,
-                            RefSoldier = refSoldier,
-                            RefPos = refPos,
-                            Faction = faction,
-                            UnitStartIndex = unitStart,
-                            UnitCount = addedUnits,
-                            LeaderIsAlive = leaderAlive,
-                            IsVehicleCrew = IsTrueVehicleCrewSquad(sq),
-                            IsPlayerInSquad = isPlayerInSq,
-                            LeaderOnVehicle = leaderOnVeh,
-                            LeaderOnGroundVehicle = leaderOnGroundVeh,
-                            RefOnPlane = refOnPlane,
-                            HasIntrinsicRadio = hasIntrinsicRadio,
-                            HasRadioOrRelay = hasIntrinsicRadio,
-                            IsSpottedOrAware = spottedOrAware
-                        };
-                    }
-
-                    // Pass 2: Pure C# L1-cache Radio Relay propagation (< 2 microseconds, zero IL2CPP boundary crossings)
-                    if (radioNetEnabled && WorldSquadCount > 1)
-                    {
-                        for (int i = 0; i < WorldSquadCount; i++)
-                        {
-                            if (WorldSquads[i].HasRadioOrRelay || !WorldSquads[i].LeaderIsAlive || string.IsNullOrEmpty(WorldSquads[i].Faction))
-                                continue;
-
-                            string myFaction = WorldSquads[i].Faction;
-                            float relayR = VeteranAndTacticsPatches.GetFactionCommandProfile(myFaction).RadioRelayRadius;
-                            float relayRSq = relayR * relayR;
-                            Vector3 myPos = WorldSquads[i].RefPos;
-
-                            for (int j = 0; j < WorldSquadCount; j++)
-                            {
-                                if (i == j || !WorldSquads[j].LeaderIsAlive || !AreSameSideFactions(myFaction, WorldSquads[j].Faction))
-                                    continue;
-
-                                if (!WorldSquads[j].HasIntrinsicRadio && !WorldSquads[j].LeaderOnGroundVehicle)
-                                    continue;
-
-                                if ((WorldSquads[j].RefPos - myPos).sqrMagnitude <= relayRSq)
-                                {
-                                    WorldSquads[i].HasRadioOrRelay = true;
-                                    break;
-                                }
-                            }
-                        }
-                    }
-                    // Pass 3: Append any live soldiers detached from Squad.units (e.g. surrendered soldiers whose
-                    // joinedSquad was cleared by vanilla Soldier.Surrender(), or lone players/pilots).
-                    // Discover detached creatures every 1.05s and reuse cached handles on intermediate 0.35s snapshots
-                    // to eliminate 130+ Creature.allCreatures[i] wrapper allocations per snapshot!
-                    if (now >= _nextDetachedCreatureScanTime)
-                    {
-                        _nextDetachedCreatureScanTime = now + 1.05f;
-                        _cachedDetachedSoldiers.Clear();
-                        var allCreatures = Creature.allCreatures;
-                        if (allCreatures != null)
-                        {
-                            int cCount = allCreatures.Count;
-                            for (int cIdx = 0; cIdx < cCount; cIdx++)
-                            {
-                                Creature c = allCreatures[cIdx];
-                                if (ReferenceEquals(c, null) || c == null || c.Pointer == IntPtr.Zero || _seenWorldSoldierPtrs.Contains(c.Pointer))
-                                    continue;
-
-                                if (TryGetSoldierHandlesFromCreature(c, out SoldierFastHandles dh) && dh.Tr != null)
-                                    _cachedDetachedSoldiers.Add(dh);
-                            }
-                        }
-                    }
-
-                    for (int dIdx = 0; dIdx < _cachedDetachedSoldiers.Count; dIdx++)
-                    {
-                        SoldierFastHandles dh = _cachedDetachedSoldiers[dIdx];
-                        if (dh == null || ReferenceEquals(dh.Ref, null) || dh.Ref == null || dh.Tr == null || _seenWorldSoldierPtrs.Contains(dh.Ptr))
-                            continue;
-
-                        Soldier u = dh.Ref;
-                        if (!u.IsAlive)
-                        {
-                            if (u.IsInjured && !u.IsDead && _seenWorldSoldierPtrs.Add(dh.Ptr))
-                            {
-                                if (WorldInjuredSoldierCount >= WorldInjuredSoldiers.Length)
-                                    Array.Resize(ref WorldInjuredSoldiers, WorldInjuredSoldiers.Length * 2);
-
-                                WorldInjuredSoldiers[WorldInjuredSoldierCount++] = new SoldierSnapshot
-                                {
-                                    Ptr = dh.Ptr,
-                                    Ref = u,
-                                    SquadPtr = u.joinedSquad != null ? u.joinedSquad.Pointer : IntPtr.Zero,
-                                    Pos = dh.Tr.position,
-                                    Faction = GetCachedFaction(dh, now),
-                                    IsPlayer = u.IsPlayer(),
-                                    IsOnVehicle = u.IsOnVehicle(),
-                                    IsInjured = true
-                                };
-                            }
-                            continue;
-                        }
-
-                        if (!_seenWorldSoldierPtrs.Add(dh.Ptr))
-                            continue;
-
-                        if (WorldSoldierCount >= WorldSoldiers.Length)
-                            Array.Resize(ref WorldSoldiers, WorldSoldiers.Length * 2);
-
-                        WorldSoldiers[WorldSoldierCount++] = new SoldierSnapshot
-                        {
-                            Ptr = dh.Ptr,
-                            Ref = u,
-                            SquadPtr = u.joinedSquad != null ? u.joinedSquad.Pointer : IntPtr.Zero,
-                            Pos = dh.Tr.position,
-                            Faction = GetCachedFaction(dh, now),
-                            IsPlayer = u.IsPlayer(),
-                            IsOnVehicle = u.IsOnVehicle(),
-                            IsSquadLeader = false,
-                            HasSurrendered = u.HasSurrended(),
-                            IsSpotted = u.IsSpotted,
-                            IsInjured = u.IsInjured,
-                            IsMedic = u.IsMedic(),
-                            IsAmmoCarrier = u.IsAmmoBoxCarrier(),
-                            CanBorrowAmmo = u.CanBorrowAmmo,
-                            HasHeadgear = u.hasHeadgear
-                        };
-                    }
-                }
-            }
-            catch
-            {
-            }
-
-            if (prevSqCount > WorldSquadCount)
-                Array.Clear(WorldSquads, WorldSquadCount, prevSqCount - WorldSquadCount);
-            if (prevSolCount > WorldSoldierCount)
-                Array.Clear(WorldSoldiers, WorldSoldierCount, prevSolCount - WorldSoldierCount);
-            if (prevInjCount > WorldInjuredSoldierCount)
-                Array.Clear(WorldInjuredSoldiers, WorldInjuredSoldierCount, prevInjCount - WorldInjuredSoldierCount);
-            HitchProfiler.End(HitchBucket.WorldSnapshot, profSnapStart);
-        }
-
-        private static bool ContainsHeavyDemoKeyword(string itemId)
-        {
-            if (string.IsNullOrEmpty(itemId))
-                return false;
-
-            return itemId.IndexOf("satchel", StringComparison.OrdinalIgnoreCase) >= 0 ||
-                   itemId.IndexOf("geballte", StringComparison.OrdinalIgnoreCase) >= 0 ||
-                   itemId.IndexOf("hafthohl", StringComparison.OrdinalIgnoreCase) >= 0 ||
-                   itemId.IndexOf("panzerwurf", StringComparison.OrdinalIgnoreCase) >= 0 ||
-                   itemId.IndexOf("gammon", StringComparison.OrdinalIgnoreCase) >= 0 ||
-                   itemId.IndexOf("hawkins", StringComparison.OrdinalIgnoreCase) >= 0 ||
-                   itemId.IndexOf("tnt", StringComparison.OrdinalIgnoreCase) >= 0 ||
-                   itemId.IndexOf("dynamite", StringComparison.OrdinalIgnoreCase) >= 0 ||
-                   itemId.IndexOf("demolition", StringComparison.OrdinalIgnoreCase) >= 0 ||
-                   itemId.IndexOf("bangalore", StringComparison.OrdinalIgnoreCase) >= 0;
-        }
-
-        public static bool TryGetThrowablePrefabInfo(VirtualItem vi, out ThrowablePrefabInfo info)
-        {
-            if (ReferenceEquals(vi, null) || vi == null || vi.Pointer == IntPtr.Zero)
-            {
-                info = default;
-                return false;
-            }
-
-            string itemId = vi.item_id ?? string.Empty;
-            if (!string.IsNullOrEmpty(itemId) && _throwablePrefabCache.TryGetValue(itemId, out info))
-                return info.IsValid || info.IsPressureMine || info.IsSatchelOrHeavyDemo;
-
-            ItemObject prefab = null;
-            try { prefab = vi.GetItemPrefab(); } catch { }
-            return TryGetThrowablePrefabInfo(itemId, prefab, out info);
-        }
-
-        public static bool TryGetThrowablePrefabInfo(string itemId, ItemObject explicitPrefab, out ThrowablePrefabInfo info)
-        {
-            if (!string.IsNullOrEmpty(itemId) && _throwablePrefabCache.TryGetValue(itemId, out info))
-                return info.IsValid || info.IsPressureMine || info.IsSatchelOrHeavyDemo;
-
-            info = default;
-            try
-            {
-                ItemObject prefab = explicitPrefab;
-                if ((ReferenceEquals(prefab, null) || prefab == null) && !string.IsNullOrEmpty(itemId))
-                    prefab = ItemsDatabase.GetItemObject(itemId);
-
-                ItemGrenade ig = !ReferenceEquals(prefab, null) && prefab != null ? prefab.TryCast<ItemGrenade>() : null;
-                if (ig != null)
-                {
-                    info.IsValid = true;
-                    info.Fuse = ig.fuseType;
-                    info.Type = ig.grenadeType;
-                    info.MaxPenetration = ig.explosionMaxPenetration;
-                    info.ExplosionRadius = ig.explosionRadius;
-                    info.IsAtMine = info.Fuse == FuseType.VehiclePressionFuse;
-                    info.IsApMine = info.Fuse == FuseType.InfantryPressionFuse;
-                    info.IsPressureMine = info.IsAtMine || info.IsApMine;
-                    info.IsSatchelOrHeavyDemo = !info.IsPressureMine &&
-                                                (info.MaxPenetration >= 22.0f ||
-                                                 (info.ExplosionRadius >= 6.0f && info.MaxPenetration >= 16.0f) ||
-                                                 ContainsHeavyDemoKeyword(itemId));
-                }
-                else if (ContainsHeavyDemoKeyword(itemId))
-                {
-                    info.IsSatchelOrHeavyDemo = true;
-                }
-            }
-            catch { }
-
-            if (!string.IsNullOrEmpty(itemId))
-            {
-                if (_throwablePrefabCache.Count > 256)
-                    _throwablePrefabCache.Clear();
-                _throwablePrefabCache[itemId] = info;
-            }
-
-            return info.IsValid || info.IsPressureMine || info.IsSatchelOrHeavyDemo;
-        }
-
-        public static bool IsPressureMineItem(VirtualItem vi, out bool isAtMine)
-        {
-            if (TryGetThrowablePrefabInfo(vi, out ThrowablePrefabInfo info) && info.IsPressureMine)
-            {
-                isAtMine = info.IsAtMine;
-                return true;
-            }
-
-            isAtMine = false;
-            return false;
-        }
-
-        public static bool IsSatchelOrHeavyDemoItem(VirtualItem vi)
-        {
-            return TryGetThrowablePrefabInfo(vi, out ThrowablePrefabInfo info) && info.IsSatchelOrHeavyDemo;
-        }
-
-        /// <summary>
-        /// Safely searches a soldier's inventory for a THROWABLE AT grenade or standard frag grenade
-        /// while strictly excluding AT/AP pressure mines (<see cref="FuseType.VehiclePressionFuse"/> /
-        /// <see cref="FuseType.InfantryPressionFuse"/>), smoke grenades, and non-lethal consumables.
-        /// </summary>
-        public static VirtualItem FindThrowableGrenadeInInventory(Soldier s, bool findAtGrenade, bool findFragGrenade)
-        {
-            if (s == null || s.inventory == null || s.inventory.inventory == null)
-                return null;
-
-            var items = s.inventory.inventory.items;
-            if (items == null)
-                return null;
-
-            int count = items.Count;
-            VirtualItem fallbackAt = null;
-            for (int i = 0; i < count; i++)
-            {
-                VirtualItem vi = items[i];
-                if (ReferenceEquals(vi, null) || vi == null || vi.Pointer == IntPtr.Zero)
-                    continue;
-
-                if (IsPressureMineItem(vi, out _))
-                    continue;
-
-                if (vi.TryCast<VirtualSmokeGrenade>() != null)
-                    continue;
-
-                bool isAt = vi.TryCast<VirtualATGrenade>() != null;
-                if (isAt)
-                {
-                    if (findAtGrenade)
-                        return vi;
-                    continue;
-                }
-
-                if (vi.TryCast<VirtualGrenade>() != null)
-                {
-                    if (findFragGrenade)
-                        return vi;
-                    if (findAtGrenade && fallbackAt == null &&
-                        TryGetThrowablePrefabInfo(vi, out ThrowablePrefabInfo info) &&
-                        (info.Type == GrenadeType.ATGrenade || info.MaxPenetration >= 16.0f || info.IsSatchelOrHeavyDemo))
-                    {
-                        fallbackAt = vi;
-                    }
-                }
-            }
-
-            return fallbackAt;
-        }
-
-        public static void RegisterPlacedMine(Vector3 worldPos, ItemGrenade grenadeObj, bool isAtMine)
-        {
-            float now = Time.time;
-            IntPtr ptr = (!ReferenceEquals(grenadeObj, null) && grenadeObj != null) ? grenadeObj.Pointer : IntPtr.Zero;
-
-            for (int i = 0; i < ActiveLandMineCount; i++)
-            {
-                ref ActiveLandMine m = ref ActiveLandMines[i];
-                if ((ptr != IntPtr.Zero && m.Ptr == ptr) || (m.Pos - worldPos).sqrMagnitude <= 0.64f)
-                {
-                    m.Ptr = ptr;
-                    m.Ref = grenadeObj;
-                    m.Pos = worldPos;
-                    m.IsAtMine = isAtMine;
-                    m.ExpireTime = now + 240.0f;
-                    return;
-                }
-            }
-
-            if (ActiveLandMineCount < ActiveLandMines.Length)
-            {
-                ActiveLandMines[ActiveLandMineCount++] = new ActiveLandMine
-                {
-                    Ptr = ptr,
-                    Ref = grenadeObj,
-                    Pos = worldPos,
-                    IsAtMine = isAtMine,
-                    ExpireTime = now + 240.0f
-                };
-            }
-        }
-
-        public static void RefreshActiveLandMinesIfDue()
-        {
-            float now = Time.time;
-            if (now < _nextActiveMineScanTime && now >= _nextActiveMineScanTime - 2.0f)
-                return;
-
-            _nextActiveMineScanTime = now + 0.50f;
-            int writeIdx = 0;
-
-            // Keep recently registered or still-live tracked mines up front, culling detonated/expired entries
-            for (int i = 0; i < ActiveLandMineCount; i++)
-            {
-                ActiveLandMine m = ActiveLandMines[i];
-                if (now > m.ExpireTime)
-                    continue;
-
-                if (!ReferenceEquals(m.Ref, null))
-                {
-                    if (m.Ref == null || m.Ref.Pointer == IntPtr.Zero || m.Ref.exploded)
-                        continue;
-
-                    if (m.Ref.transform != null)
-                        m.Pos = m.Ref.transform.position;
-                }
-
-                ActiveLandMines[writeIdx++] = m;
-            }
-            ActiveLandMineCount = writeIdx;
-
-            try
-            {
-                var spawned = ItemObject.spawnedItems;
-                if (spawned == null)
-                    return;
-
-                if (_nonMineSpawnedItemPtrs.Count > 4096)
-                    _nonMineSpawnedItemPtrs.Clear();
-
-                int count = spawned.Count;
-                for (int i = 0; i < count; i++)
-                {
-                    ItemObject io = spawned[i];
-                    if (ReferenceEquals(io, null) || io == null || io.Pointer == IntPtr.Zero)
-                        continue;
-
-                    IntPtr ptr = io.Pointer;
-                    if (_nonMineSpawnedItemPtrs.Contains(ptr))
-                        continue;
-
-                    ItemGrenade ig = io.TryCast<ItemGrenade>();
-                    if (ig == null ||
-                        (ig.fuseType != FuseType.VehiclePressionFuse && ig.fuseType != FuseType.InfantryPressionFuse))
-                    {
-                        _nonMineSpawnedItemPtrs.Add(ptr);
-                        continue;
-                    }
-
-                    if (!ig.activated || ig.exploded || ig.transform == null)
-                        continue;
-
-                    RegisterPlacedMine(ig.transform.position, ig, ig.fuseType == FuseType.VehiclePressionFuse);
-                }
-            }
-            catch { }
-        }
-
-        public static bool TryGetNearbyKnownMine(Vector3 pos, float maxRadius, bool vehiclesOnly, out Vector3 minePos)
-        {
-            minePos = Vector3.zero;
-            if (ActiveLandMineCount <= 0)
-                return false;
-
-            float bestSq = maxRadius * maxRadius;
-            bool found = false;
-            for (int i = 0; i < ActiveLandMineCount; i++)
-            {
-                ref ActiveLandMine m = ref ActiveLandMines[i];
-                if (vehiclesOnly && !m.IsAtMine)
-                    continue;
-
-                float dSq = (m.Pos - pos).sqrMagnitude;
-                if (dSq < bestSq)
-                {
-                    bestSq = dSq;
-                    minePos = m.Pos;
-                    found = true;
-                }
-            }
-
-            return found;
-        }
-
-        public static void ClearSpatialCaches()
-        {
-            _cachedSolidEnvMask = 0;
-            _cachedMovementObstacleMask = 0;
-            _cachedSmokeOcclusionMask = 0;
-            _turretVehicleCache.Clear();
-            _turretTraitsCache.Clear();
-            _ceilingCache.Clear();
-            _bridgeCellCache.Clear();
-            _terrainColliderCache.Clear();
-            _sameSideFactionCache.Clear();
-            _enemyFactionCache.Clear();
-            _enemySpawnDirCache.Clear();
-            _soldierHandlesByPtr.Clear();
-            _soldierHandlesByAiPtr.Clear();
-            _squadDiagIds.Clear();
-            _confirmedVehicleCrewSquads.Clear();
-            _confirmedPlaneCrewSquads.Clear();
-            _confirmedInfantrySquads.Clear();
-            _formattedFactionDisplayCache.Clear();
-            _nextSoldierDiagId = 0;
-            _nextSquadDiagId = 0;
-            _vehicleHandlesByPtr.Clear();
-            _nonSoldierCreaturePtrs.Clear();
-            _nonUnitSpottablePtrs.Clear();
-            _cachedDetachedSoldiers.Clear();
-            _nextDetachedCreatureScanTime = 0f;
-            _worldSquadIndexByPtr.Clear();
-            if (WorldSquadCount > 0)
-                Array.Clear(WorldSquads, 0, WorldSquadCount);
-            if (WorldSoldierCount > 0)
-                Array.Clear(WorldSoldiers, 0, WorldSoldierCount);
-            if (WorldInjuredSoldierCount > 0)
-                Array.Clear(WorldInjuredSoldiers, 0, WorldInjuredSoldierCount);
-            if (ActivePlayerAimLaneCount > 0)
-                Array.Clear(ActivePlayerAimLanes, 0, ActivePlayerAimLaneCount);
-            ActivePlayerAimLaneCount = 0;
-            _nextPlayerAimLaneRefreshTime = 0f;
-            _cachedMainCamera = null;
-            _nextMainCameraLookupTime = 0f;
-            _throwablePrefabCache.Clear();
-            _nonMineSpawnedItemPtrs.Clear();
-            if (ActiveLandMineCount > 0)
-                Array.Clear(ActiveLandMines, 0, ActiveLandMineCount);
-            ActiveLandMineCount = 0;
-            _nextActiveMineScanTime = 0f;
-            WorldSquadCount = 0;
-            WorldSoldierCount = 0;
-            WorldInjuredSoldierCount = 0;
-            _lastWorldSnapshotTime = -999f;
-            _nextAllowedBotRpcTime = 0f;
-            _nextLocalPlayerRadioHintTime = 0f;
-            TotalAdaptiveAiExtraTicks = 0;
-            TotalPingGovernorSkippedCycles = 0;
-            TotalHitchesOver28ms = 0;
-            _currentWindowMaxFrameMs = 0f;
-            _previousWindowMaxFrameMs = 0f;
-            _nextFrameWindowRolloverTime = 0f;
-        }
-
-        public static void PruneSpatialCachesIfOversized()
-        {
-            if (_turretVehicleCache.Count > 256)
-                _turretVehicleCache.Clear();
-            if (_turretTraitsCache.Count > 256)
-                _turretTraitsCache.Clear();
-            if (_ceilingCache.Count > 4096)
-                _ceilingCache.Clear();
-            if (_bridgeCellCache.Count > 4096)
-                _bridgeCellCache.Clear();
-            if (_nonMineSpawnedItemPtrs.Count > 4096)
-                _nonMineSpawnedItemPtrs.Clear();
-            if (_throwablePrefabCache.Count > 256)
-                _throwablePrefabCache.Clear();
-        }
 
         // =====================================================================
         // Adaptive AI Brain Tick Scheduler (Creature.ProcessSequentialUpdates)

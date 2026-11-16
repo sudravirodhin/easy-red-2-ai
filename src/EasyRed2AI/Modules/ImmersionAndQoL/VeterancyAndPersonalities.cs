@@ -52,8 +52,9 @@ namespace EasyRed2HumanAI
             Pilot_Disciplined = 30
         }
 
-        private struct SoldierRecord
+        internal struct SoldierRecord
         {
+            public bool Initialized;
             public float SpawnTime;
             public float BonusSeconds;
             public float NextRoleCheckTime;
@@ -65,8 +66,6 @@ namespace EasyRed2HumanAI
             public bool NameInitialized;
         }
 
-        private static readonly Dictionary<IntPtr, SoldierRecord> _records = new Dictionary<IntPtr, SoldierRecord>(512);
-        private static readonly Dictionary<IntPtr, float> _nextPromotionCheckTime = new Dictionary<IntPtr, float>(256);
         internal static readonly Dictionary<IntPtr, (SoldierPersonality Pers, float ExpireTime)> _cachedVehiclePersonalities =
             new Dictionary<IntPtr, (SoldierPersonality Pers, float ExpireTime)>(64);
 
@@ -210,9 +209,13 @@ namespace EasyRed2HumanAI
 
         private static SoldierRecord GetOrCreateRecord(Soldier s)
         {
-            IntPtr ptr = s.Pointer;
+            AiCore.SoldierFastHandles h = AiCore.GetOrCreateSoldierHandles(s);
+            if (h == null)
+                return default;
+
             float now = Time.time;
-            if (!_records.TryGetValue(ptr, out SoldierRecord rec))
+            ref SoldierRecord rec = ref h.Veterancy.Record;
+            if (!rec.Initialized)
             {
                 string rawName = s.name_surname ?? "";
                 int bracketIdx = rawName.IndexOf(" [", StringComparison.Ordinal);
@@ -220,9 +223,10 @@ namespace EasyRed2HumanAI
                     rawName = rawName.Substring(0, bracketIdx);
 
                 byte roleCat = DetermineRoleCategory(s);
-                float jitter = (AiCore.GetDeterministicHash(ptr, 43) & 63) * 0.04f;
+                float jitter = (AiCore.GetDeterministicHash(h.Ptr, 43) & 63) * 0.04f;
                 rec = new SoldierRecord
                 {
+                    Initialized = true,
                     SpawnTime = now,
                     BonusSeconds = 0f,
                     NextRoleCheckTime = now + 4.0f + jitter,
@@ -232,7 +236,6 @@ namespace EasyRed2HumanAI
                     RoleCategory = roleCat,
                     Personality = RollPersonalityForRole(s, roleCat)
                 };
-                _records[ptr] = rec;
             }
             else if (now >= rec.NextRoleCheckTime)
             {
@@ -244,7 +247,6 @@ namespace EasyRed2HumanAI
                     rec.Personality = RollPersonalityForRole(s, currentRoleCat);
                     rec.NameInitialized = false;
                 }
-                _records[ptr] = rec;
             }
             return rec;
         }
@@ -491,9 +493,12 @@ namespace EasyRed2HumanAI
 
         public static int GetVeteranTierByPtr(IntPtr ptr)
         {
-            if (ptr == IntPtr.Zero || !VisionConfig.EnableVeteranSystem.Value || !_records.TryGetValue(ptr, out SoldierRecord rec))
+            if (!VisionConfig.EnableVeteranSystem.Value ||
+                !AiCore.TryGetSoldierHandles(ptr, out AiCore.SoldierFastHandles h) ||
+                !h.Veterancy.Record.Initialized)
                 return 0;
 
+            SoldierRecord rec = h.Veterancy.Record;
             float fullSeconds = Mathf.Max(60f, VisionConfig.VeteranFullMaturitySeconds.Value);
             float effectiveAlive = Mathf.Max(0f, Time.time - rec.SpawnTime) + rec.BonusSeconds;
             float v = Mathf.Clamp01(effectiveAlive / fullSeconds);
@@ -505,33 +510,34 @@ namespace EasyRed2HumanAI
 
         public static void AddCombatExperienceBonus(Soldier s, float bonusSeconds)
         {
-            if (s == null || s.Pointer == IntPtr.Zero || !VisionConfig.EnableVeteranSystem.Value)
+            if (!VisionConfig.EnableVeteranSystem.Value)
                 return;
 
-            IntPtr ptr = s.Pointer;
-            if (_records.TryGetValue(ptr, out SoldierRecord rec))
+            AiCore.SoldierFastHandles h = AiCore.GetOrCreateSoldierHandles(s);
+            if (h != null && h.Veterancy.Record.Initialized)
             {
                 // Cap combat bonus at 25% of full maturity so time survived remains the primary driver
                 float maxBonus = Mathf.Max(60f, VisionConfig.VeteranFullMaturitySeconds.Value) * 0.25f;
-                rec.BonusSeconds = Mathf.Min(maxBonus, rec.BonusSeconds + bonusSeconds);
-                _records[ptr] = rec;
+                h.Veterancy.Record.BonusSeconds = Mathf.Min(maxBonus, h.Veterancy.Record.BonusSeconds + bonusSeconds);
             }
         }
 
         private static void CheckAndApplyFieldPromotion(Soldier s)
         {
-            if (s == null || s.Pointer == IntPtr.Zero)
+            AiCore.SoldierFastHandles h = AiCore.GetOrCreateSoldierHandles(s);
+            if (h == null)
                 return;
 
-            IntPtr ptr = s.Pointer;
+            IntPtr ptr = h.Ptr;
             float now = Time.time;
-            if (_nextPromotionCheckTime.TryGetValue(ptr, out float nextPromo) && now < nextPromo)
+            if (now < h.Veterancy.NextPromotionCheckTime)
                 return;
 
             float jitter = (AiCore.GetDeterministicHash(ptr, 19) % 100) * 0.01f;
-            _nextPromotionCheckTime[ptr] = now + 4.0f + jitter;
+            h.Veterancy.NextPromotionCheckTime = now + 4.0f + jitter;
 
-            SoldierRecord rec = GetOrCreateRecord(s);
+            GetOrCreateRecord(s);
+            ref SoldierRecord rec = ref h.Veterancy.Record;
             int tier = VisionConfig.EnableVeteranSystem.Value ? GetVeteranTier(s) : 0;
             bool tierPromoted = false;
 
@@ -564,7 +570,6 @@ namespace EasyRed2HumanAI
             if (tierPromoted || !rec.NameInitialized)
             {
                 rec.NameInitialized = true;
-                _records[ptr] = rec;
 
                 bool showVetTag = VisionConfig.EnableVeteranSystem.Value && (VisionConfig.ShowVeteranSquadRosterTags.Value || VisionConfig.ShowVeteran3DIcons.Value);
                 bool showPersTag = VisionConfig.EnableRolePersonalities.Value && VisionConfig.ShowPersonalityInSquadRoster.Value;
@@ -578,10 +583,6 @@ namespace EasyRed2HumanAI
                 {
                     s.name_surname = desiredName;
                 }
-            }
-            else if (tierPromoted)
-            {
-                _records[ptr] = rec;
             }
         }
 
@@ -1010,9 +1011,57 @@ namespace EasyRed2HumanAI
             {
                 try
                 {
-                    if (__result && IsJapaneseKamikazeActive(__instance))
+                    if (__instance == null || !VisionConfig.EnableMod.Value)
+                        return;
+
+                    if (IsJapaneseKamikazeActive(__instance))
                     {
                         __result = false;
+                        return;
+                    }
+
+                    if (__result)
+                        return;
+
+                    VehiclePlane vp = __instance.veh;
+                    if (vp == null || vp.Pointer == IntPtr.Zero || vp.planeType != PlaneType.Fighter || vp.PlayerIsInside())
+                        return;
+
+                    // Only route to a refill station when at least one friendly AircraftRepairStation exists in the scene
+                    var stations = AircraftRepairStation.aircraftRepairStations;
+                    if (stations == null || stations.Count == 0)
+                        return;
+
+                    string myFac = vp.GetVehicleFaction();
+                    bool hasFriendlyStation = false;
+                    for (int i = 0; i < stations.Count; i++)
+                    {
+                        AircraftRepairStation st = stations[i];
+                        if (st != null && st.Pointer != IntPtr.Zero && AiCore.AreSameSideFactions(myFac, st.GetFaction()))
+                        {
+                            hasFriendlyStation = true;
+                            break;
+                        }
+                    }
+                    if (!hasFriendlyStation)
+                        return;
+
+                    // 1. Flak-damaged airframe (< 55% HP): fly through friendly AircraftRepairStation ring to repair & re-arm
+                    if (vp.Maxlife > 0 && vp.life < vp.Maxlife * 0.55f)
+                    {
+                        __result = true;
+                        return;
+                    }
+
+                    // 2. Dive-bomber / fighter-bomber ("Winchester" — all bombs/rockets expended):
+                    //    Vanilla AIPlane.NeedRefill (0x180572D95) skips CountBombs() whenever GetPilotTurret() != null!
+                    var bays = vp.bombBay;
+                    if (bays != null &&
+                        bays.Length > 0 &&
+                        vp.CountBombs() <= 0 &&
+                        (__instance.targetToAttack == null || !__instance.targetToAttack.IsAirVehicle()))
+                    {
+                        __result = true;
                     }
                 }
                 catch { }

@@ -10,18 +10,23 @@ namespace EasyRed2HumanAI
         public static ConfigEntry<bool> EnableHitchFlightRecorder;
         public static ConfigEntry<bool> EnableBotActionTrace;
         public static ConfigEntry<bool> EnableDeathScreenAttribution;
+        public static ConfigEntry<bool> EnableDogTagArchive;
         public static ConfigEntry<bool> EnableQuickTapSpot;
         public static ConfigEntry<bool> EnableExtendedRoomNames;
+        public static ConfigEntry<bool> EnableLobbyJoinMotd;
         public static ConfigEntry<bool> EnableMultiplayerBattleStatSyncFix;
+        public static ConfigEntry<bool> EnableObjectiveTeamplayScoring;
         public static ConfigEntry<bool> EnableAdaptiveAiTickScaling;
         public static ConfigEntry<float> UiScaleMultiplier;
         public static ConfigEntry<KeyCode> MapPickerHotkey;
+        public static ConfigEntry<KeyCode> DogTagArchiveHotkey;
 
         // 1. Infantry Sight & Stance
         public static ConfigEntry<float> StandingSightRange;
         public static ConfigEntry<float> CrouchingSightRange;
         public static ConfigEntry<float> ProneSightRange;
         public static ConfigEntry<bool> PreserveStanceStealthInCombat;
+        public static ConfigEntry<bool> EnableRealisticNightDarkness;
         public static ConfigEntry<float> CombatAwareStanceMultiplier;
         public static ConfigEntry<float> FiringRevealDuration;
         public static ConfigEntry<float> FiringSightRangeBonus;
@@ -155,6 +160,12 @@ namespace EasyRed2HumanAI
                 true,
                 "Display who killed you, whether it was Friendly Fire, what weapon/vehicle/explosive was used, hit location, and distance on the death screen.");
 
+            EnableDogTagArchive = config.Bind(
+                "0. General",
+                "EnableDogTagArchive",
+                true,
+                "QoL & Immersion: Persistently records every Common, Rare, and Unique dogtag you recover when opening a fallen soldier's inventory into a lean searchable archive (BepInEx/config/BattleHardened_DogTags.jsonl) — storing name, rank, nation, birth-death years (age), battle, Unix timestamp, and whether they were a fallen friend you brought home or an enemy trophy.");
+
             EnableQuickTapSpot = config.Bind(
                 "0. General",
                 "EnableQuickTapSpot",
@@ -167,11 +178,23 @@ namespace EasyRed2HumanAI
                 true,
                 "QoL: Lift vanilla's 8-character multiplayer room name cap up to 64 characters when hosting or searching for servers.");
 
+            EnableLobbyJoinMotd = config.Bind(
+                "0. General",
+                "EnableLobbyJoinMotd",
+                true,
+                "Co-op / Multiplayer QoL: When hosting a room, sends a concise one-time welcome message exclusively to newly joining players explaining Battle Hardened's humanized AI vision, cover/night realism, and squad radio mechanics.");
+
             EnableMultiplayerBattleStatSyncFix = config.Bind(
                 "0. General",
                 "EnableMultiplayerBattleStatSyncFix",
                 true,
-                "Co-op / Multiplayer Fix: Prevents Photon CustomProperties read-modify-write clobbering, EndBattleGUI RPC races, and duplicate vehicle-disable increments so Casualties, Prisoners, and Vehicles Lost match accurately across Host and all Clients.");
+                "Co-op / Multiplayer Fix: Fixes broken vanilla multiplayer scoreboard Kills, Deaths (including vehicle/plane crew deaths and abandoned bleed-outs), Score, and Score-descending row sorting, and prevents Photon CustomProperties clobbering and EndBattleGUI races so Casualties, Prisoners, and Vehicles Lost match accurately across Host and all Clients.");
+
+            EnableObjectiveTeamplayScoring = config.Bind(
+                "0. General",
+                "EnableObjectiveTeamplayScoring",
+                false,
+                "Opt-in multiplayer enhancement (default OFF; NOT a vanilla fix). Controlled by the Multiplayer Host via Photon Room CustomProperties ('bh_ptfo') so all modded players in a lobby use identical scoring rules. Requires EnableMultiplayerBattleStatSyncFix. Awards scoreboard bonuses: +1 Objective Attack/Defense Kill, +1 per 10s while actively capturing/reclaiming/contesting an objective (never uncontested rear-flag sitting), +5 Objective Capture completion, +2 Friendly Syringe Revive, and +3 Enemy Combat Vehicle Disable.");
 
             EnableAdaptiveAiTickScaling = config.Bind(
                 "0. General",
@@ -190,6 +213,12 @@ namespace EasyRed2HumanAI
                 "MapPickerHotkey",
                 KeyCode.F5,
                 "Hotkey to open the standalone In-Game Campaign & Mission Picker window (default F5).");
+
+            DogTagArchiveHotkey = config.Bind(
+                "0. General",
+                "DogTagArchiveHotkey",
+                KeyCode.F7,
+                "Hotkey to open the searchable Dogtag Collection Archive ('Brought Home' & 'Trophies', default F7; set to None to open only via the F6 menu button).");
 
             // 1. Infantry Sight & Stance
             StandingSightRange = config.Bind(
@@ -215,6 +244,12 @@ namespace EasyRed2HumanAI
                 "PreserveStanceStealthInCombat",
                 true,
                 "If true, squad combat awareness (IsEnemyAwareOfThisSquad) no longer jumps crouched/prone soldiers to a flat 300m visibility.");
+
+            EnableRealisticNightDarkness = config.Bind(
+                "1. Infantry Sight & Stance",
+                "EnableRealisticNightDarkness",
+                true,
+                "Realistic Night Darkness & Muzzle-Flare Contrast: Sharply reduces AI vision on silent unlit infantry, vehicles, and aircraft in darkness while making active muzzle flashes stand out brightly within the observer's sight cone.");
 
             CombatAwareStanceMultiplier = config.Bind(
                 "1. Infantry Sight & Stance",

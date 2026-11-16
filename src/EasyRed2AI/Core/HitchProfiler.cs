@@ -145,6 +145,7 @@ namespace EasyRed2HumanAI
         private static int _spawnedSquadCount;
         private static bool _spawnedWithVehicle;
         private static string _lastSpawnedSquadId;
+        private static int _netPropFlushesThisFrame;
 
         // Memory / GC baselines at the start of Frame N
         private static bool _il2cppGcSupported = true;
@@ -373,6 +374,12 @@ namespace EasyRed2HumanAI
                 _lastSpawnedSquadId = squadId;
         }
 
+        public static void NotifyNetPropFlush()
+        {
+            if (Enabled)
+                _netPropFlushesThisFrame++;
+        }
+
         public static void ResetOnSceneChange()
         {
             _prevBmFixedTime = -1f;
@@ -485,6 +492,7 @@ namespace EasyRed2HumanAI
             _spawnedSquadCount = 0;
             _spawnedWithVehicle = false;
             _lastSpawnedSquadId = null;
+            _netPropFlushesThisFrame = 0;
 
             SampleMemoryCounters(
                 out _frameStartIl2CppGc0,
@@ -776,6 +784,12 @@ namespace EasyRed2HumanAI
                     _sb.Append("CovProbes:").Append(_uncachedCoverProbes);
                     anyEvent = true;
                 }
+                if (_netPropFlushesThisFrame > 0)
+                {
+                    if (anyEvent) _sb.Append(' ');
+                    _sb.Append("NetFlush:").Append(_netPropFlushesThisFrame);
+                    anyEvent = true;
+                }
                 if (!anyEvent)
                     _sb.Append("none");
                 _sb.Append(']');
@@ -862,7 +876,13 @@ namespace EasyRed2HumanAI
                    .Append('/').Append((curMonoHeap / (1024.0 * 1024.0)).ToString("F1")).Append("MB]")
                    .Append(" | Net6[AvgAlloc:").Append(avgNetKb.ToString("F2"))
                    .Append("KB/f, GCs:").Append(_winNetGcCount)
-                   .Append(", Heap:").Append((curNetMem / (1024.0 * 1024.0)).ToString("F1")).Append("MB]");
+                   .Append(", Heap:").Append((curNetMem / (1024.0 * 1024.0)).ToString("F1")).Append("MB]")
+                   .Append(" | Handles[Sol:").Append(AiCore.ActiveSoldierHandlesCount)
+                   .Append(",Veh:").Append(AiCore.ActiveVehicleHandlesCount)
+                   .Append("] | NetSync[Flush:").Append(VeteranAndTacticsPatches.ScoreboardCoalescedFlushesCount)
+                   .Append(",Sup:").Append(VeteranAndTacticsPatches.ScoreboardVanillaPacketsSuppressedCount)
+                   .Append(",BotRPC:").Append(AiCore.BotRpcBudgetGrantedCount)
+                   .Append('/').Append(AiCore.BotRpcBudgetThrottledCount).Append(']');
 
                 Plugin.Log.LogInfo(_sb.ToString());
             }

@@ -337,13 +337,17 @@ namespace EasyRed2HumanAI
             byte bleed = (byte)((soldier.isBleeding || soldier.GetBleedValue() > 0.01f) ? 1 : 0);
             byte inCov = (byte)(soldier.IsOnCover() ? 1 : 0);
             byte pose = (byte)soldier.m_pose;
+            byte activeOvr = (byte)((h.MoveOverride.Kind > AiCore.BotMoveOverrideKind.GoapAction && now < h.MoveOverride.ExpireTime)
+                ? (byte)h.MoveOverride.Kind
+                : (byte)0);
 
             ulong sig = ((ulong)(byte)step0) |
                         ((ulong)(byte)step1 << 8) |
                         ((ulong)(byte)netDir << 16) |
                         ((ulong)bleed << 24) |
                         ((ulong)(isEvacCrew ? 1 : 0) << 28) |
-                        (((ulong)goalBit >> 26) << 32);
+                        (((ulong)goalBit >> 26) << 32) |
+                        ((ulong)activeOvr << 56);
 
             _botStates.TryGetValue(ptr, out BotLastTraceState st);
 
@@ -402,9 +406,23 @@ namespace EasyRed2HumanAI
                 Goal = VeteranAndTacticsPatches.GetGoapGoalShortName(goalBit),
                 Act0 = VeteranAndTacticsPatches.GetGoapActionShortName(step0),
                 Act1 = VeteranAndTacticsPatches.GetGoapActionShortName(step1),
-                Reason = emitStuck ? "no_progress_6s" : (isEvacCrew ? "bailed_crew_evac" : "plan_transition")
+                Reason = emitStuck ? "no_progress_6s" :
+                         (isEvacCrew ? "bailed_crew_evac" :
+                         (activeOvr != 0 ? GetOverrideTraceReason((AiCore.BotMoveOverrideKind)activeOvr) : "plan_transition"))
             };
             PushRecord(ref rec);
+        }
+
+        private static string GetOverrideTraceReason(AiCore.BotMoveOverrideKind kind)
+        {
+            switch (kind)
+            {
+                case AiCore.BotMoveOverrideKind.CasualtyDrag: return "ovr_drag";
+                case AiCore.BotMoveOverrideKind.UnstickSidestep: return "ovr_unstick";
+                case AiCore.BotMoveOverrideKind.SapperStepBack: return "ovr_sapper_back";
+                case AiCore.BotMoveOverrideKind.EmergencyFallback: return "ovr_fallback";
+                default: return "ovr_active";
+            }
         }
 
         private static void WriterThreadLoop()

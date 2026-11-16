@@ -5,788 +5,9 @@ using UnityEngine;
 
 namespace EasyRed2HumanAI
 {
-    public static partial class VisionPatches
-    {
-        // Tracks the last Time.time an individual soldier (by IL2CPP pointer) fired a weapon
-        private static readonly Dictionary<IntPtr, float> _lastFiredTime = new Dictionary<IntPtr, float>(256);
-        private static float _nextCleanupTime;
-
-        // Thread-local optic zoom multiplier passed from Observer (Creature.CanSee / TurretAI.CanSee)
-        // into Target (Soldier.CamoDistance / Soldier.CamoDistanceAwareEnemies)
-        [ThreadStatic]
-        private static float _currentObserverOpticMultiplier;
-
-        // Thread-local flag set only when an alive Tank Commander / close infantry escort checks optical LOS
-        // to hand off an off-bore threat to an enclosed turret gunner over crew intercom.
-        [ThreadStatic]
-        internal static bool AllowCommanderIntercomFovBypass;
-
-        // Live telemetry counters for HUD / debug feedback
-        public static int TotalSightChecks;
-        public static int BlockedByFOV;
-        public static int BlockedByRange;
-        public static int BoostedByScope;
-        public static int BlockedPlaneSpot;
-
-        public static float GetObserverOpticMultiplier()
-        {
-            return _currentObserverOpticMultiplier > 0.01f ? _currentObserverOpticMultiplier : 1.0f;
-        }
-
-        private struct RecentGunfireEntry
-        {
-            public IntPtr ShooterPtr;
-            public Vector3 Pos;
-            public string Faction;
-            public float FiredTime;
-        }
-
-        private const int GunfireRingSize = 32;
-        private const int GunfireRingMask = GunfireRingSize - 1;
-        private static readonly RecentGunfireEntry[] _gunfireRing = new RecentGunfireEntry[GunfireRingSize];
-        private static int _gunfireRingHead;
-
-        public static void RecordSoldierFired(Soldier s)
-        {
-            if (s == null || s.Pointer == IntPtr.Zero) return;
-            float now = Time.time;
-            IntPtr ptr = s.Pointer;
-            _lastFiredTime[ptr] = now;
-
-            AiCore.SoldierFastHandles h = AiCore.GetOrCreateSoldierHandles(s);
-            if (h == null || h.Tr == null)
-                return;
-
-            Vector3 pos = h.Tr.position;
-            string fac = AiCore.GetCachedFaction(h, now);
-
-            // Coalesce rapid-fire bursts from the same shooter so one MG42 doesn't evict 31 other shooters
-            for (int i = 0; i < GunfireRingSize; i++)
-            {
-                if (_gunfireRing[i].ShooterPtr == ptr)
-                {
-                    _gunfireRing[i].Pos = pos;
-                    _gunfireRing[i].Faction = fac;
-                    _gunfireRing[i].FiredTime = now;
-                    return;
-                }
-            }
-
-            int slot = _gunfireRingHead & GunfireRingMask;
-            _gunfireRingHead = (slot + 1) & GunfireRingMask;
-            _gunfireRing[slot] = new RecentGunfireEntry
-            {
-                ShooterPtr = ptr,
-                Pos = pos,
-                Faction = fac,
-                FiredTime = now
-            };
-        }
-
-        /// <summary>
-        /// Pure L1-cache scan over the 32 most recent shooters (zero IL2CPP calls, zero heap allocations).
-        /// Used to suppress suicidal melee lunges and prevent bandaging right next to active enemy gunfire.
-        /// </summary>
-        public static bool TryGetNearestEnemyGunfire(
-            Vector3 observerPos,
-            string observerFaction,
-            float maxRadius,
-            float maxAgeSeconds,
-            out float nearestDist)
-        {
-            nearestDist = -1f;
-            if (string.IsNullOrEmpty(observerFaction) || maxRadius <= 0f)
-                return false;
-
-            float now = Time.time;
-            float maxDistSq = maxRadius * maxRadius;
-            float bestDistSq = maxDistSq + 1f;
-            bool found = false;
-
-            for (int i = 0; i < GunfireRingSize; i++)
-            {
-                ref RecentGunfireEntry e = ref _gunfireRing[i];
-                if (e.ShooterPtr == IntPtr.Zero)
-                    continue;
-
-                float age = now - e.FiredTime;
-                if (age < 0f || age > maxAgeSeconds)
-                    continue;
-
-                float dx = e.Pos.x - observerPos.x;
-                float dy = e.Pos.y - observerPos.y;
-                float dz = e.Pos.z - observerPos.z;
-                float distSq = dx * dx + dy * dy + dz * dz;
-                if (distSq >= bestDistSq || distSq > maxDistSq)
-                    continue;
-
-                if (!AiCore.AreEnemyFactions(observerFaction, e.Faction))
-                    continue;
-
-                bestDistSq = distSq;
-                found = true;
-            }
-
-            if (found)
-            {
-                nearestDist = Mathf.Sqrt(bestDistSq);
-                return true;
-            }
-            return false;
-        }
-
-        /// <summary>
-        /// Zero-allocation scan over the 32-entry live gunfire ring buffer to compute the dominant
-        /// incoming enemy gunfire direction weighted by proximity and recency.
-        /// Ensures infantry take cover on the leeward side of actual incoming weapons fire even when
-        /// their own <c>visibleTarget</c> is null or occluded behind the wall/parapet!
-        /// </summary>
-        public static bool TryGetDominantEnemyGunfireDirection(
-            Vector3 observerPos,
-            string observerFaction,
-            float maxRadius,
-            float maxAgeSeconds,
-            out Vector3 fireDir,
-            out float nearestDist)
-        {
-            fireDir = Vector3.zero;
-            nearestDist = -1f;
-            if (string.IsNullOrEmpty(observerFaction) || maxRadius <= 0f || maxAgeSeconds <= 0f)
-                return false;
-
-            float now = Time.time;
-            float maxDistSq = maxRadius * maxRadius;
-            float bestDistSq = maxDistSq + 1f;
-            Vector3 weightedSum = Vector3.zero;
-
-            for (int i = 0; i < GunfireRingSize; i++)
-            {
-                ref RecentGunfireEntry e = ref _gunfireRing[i];
-                if (e.ShooterPtr == IntPtr.Zero)
-                    continue;
-
-                float age = now - e.FiredTime;
-                if (age < 0f || age > maxAgeSeconds)
-                    continue;
-
-                float dx = e.Pos.x - observerPos.x;
-                float dy = e.Pos.y - observerPos.y;
-                float dz = e.Pos.z - observerPos.z;
-                float distSq = dx * dx + dy * dy + dz * dz;
-                if (distSq < 0.25f || distSq > maxDistSq)
-                    continue;
-
-                if (!AiCore.AreEnemyFactions(observerFaction, e.Faction))
-                    continue;
-
-                if (distSq < bestDistSq)
-                    bestDistSq = distSq;
-
-                float horizLen = Mathf.Sqrt(dx * dx + dz * dz);
-                if (horizLen < 0.25f)
-                    continue;
-
-                float freshness = 1.25f - 0.75f * (age / maxAgeSeconds);
-                float weight = freshness / (12.0f + distSq);
-                weightedSum.x += (dx / horizLen) * weight;
-                weightedSum.z += (dz / horizLen) * weight;
-            }
-
-            if (weightedSum.sqrMagnitude > 1e-10f && bestDistSq <= maxDistSq)
-            {
-                fireDir = weightedSum.normalized;
-                nearestDist = Mathf.Sqrt(bestDistSq);
-                return true;
-            }
-
-            return false;
-        }
-
-        public static bool HasFiredRecently(Soldier s, float windowSeconds = 4.5f)
-        {
-            if (s == null || s.Pointer == IntPtr.Zero)
-                return false;
-
-            if (s.pressTriggerRequest)
-            {
-                _lastFiredTime[s.Pointer] = Time.time;
-                return true;
-            }
-
-            if (_lastFiredTime.TryGetValue(s.Pointer, out float firedAt))
-            {
-                float elapsed = Time.time - firedAt;
-                return elapsed >= 0f && elapsed <= windowSeconds;
-            }
-            return false;
-        }
-
-        public static float GetFiringVisibilityBonus(Soldier s)
-        {
-            if (s == null || s.Pointer == IntPtr.Zero) return 0f;
-            float duration = VisionConfig.FiringRevealDuration.Value;
-            if (duration <= 0f) return 0f;
-
-            // Stalker Marksmen have a 35% shorter firing reveal window when shooting from crouch/prone cover
-            if (s.m_pose >= SoldierPose.Crouch &&
-                VeteranAndTacticsPatches.GetPersonality(s) == VeteranAndTacticsPatches.SoldierPersonality.Marksman_Stalker)
-            {
-                duration *= 0.65f;
-            }
-
-            // Also catch sustained full-auto fire if trigger is currently depressed
-            if (s.pressTriggerRequest)
-            {
-                _lastFiredTime[s.Pointer] = Time.time;
-                return VisionConfig.FiringSightRangeBonus.Value;
-            }
-
-            if (_lastFiredTime.TryGetValue(s.Pointer, out float firedAt))
-            {
-                float elapsed = Time.time - firedAt;
-                if (elapsed >= 0f && elapsed < duration)
-                {
-                    float t = 1.0f - (elapsed / duration);
-                    return VisionConfig.FiringSightRangeBonus.Value * t;
-                }
-            }
-            return 0f;
-        }
-
-        private static readonly List<IntPtr> _reusableExpiredFirePtrs = new List<IntPtr>(64);
-
-        public static void ClearVisionCaches()
-        {
-            _lastFiredTime.Clear();
-            Array.Clear(_gunfireRing, 0, GunfireRingSize);
-            _gunfireRingHead = 0;
-            _nextCleanupTime = 0f;
-        }
-
-        public static void CleanupExpiredFiringRecords()
-        {
-            if (Time.time <= _nextCleanupTime && _nextCleanupTime - Time.time <= 30f)
-                return;
-
-            if (AiCore.IsHeavyWorkFrame() && Time.time < _nextCleanupTime + 1.0f)
-                return;
-
-            _nextCleanupTime = Time.time + 15f;
-            float cutoff = Time.time - Mathf.Max(10f, VisionConfig.FiringRevealDuration.Value);
-            _reusableExpiredFirePtrs.Clear();
-            foreach (var kvp in _lastFiredTime)
-            {
-                if (kvp.Value < cutoff) _reusableExpiredFirePtrs.Add(kvp.Key);
-            }
-            for (int i = 0; i < _reusableExpiredFirePtrs.Count; i++)
-            {
-                _lastFiredTime.Remove(_reusableExpiredFirePtrs[i]);
-            }
-            _reusableExpiredFirePtrs.Clear();
-
-            if (VisionConfig.DebugLogging.Value && TotalSightChecks > 0)
-            {
-                AiCore.LogDebug(
-                    "SightStats",
-                    $"SightChecks={TotalSightChecks}, BlockedFOV={BlockedByFOV}, BlockedRange={BlockedByRange}, ScopeBoosts={BoostedByScope}, BlockedPlane={BlockedPlaneSpot}",
-                    15.0f);
-            }
-        }
-
-        // =====================================================================
-        // 1. Track Individual Weapon Firing (Muzzle Flash / Gunshot Reveal)
-        // =====================================================================
-        [HarmonyPatch(typeof(Soldier), nameof(Soldier.StartFire))]
-        public static class Soldier_StartFire_Patch
-        {
-            public static void Postfix(Soldier __instance)
-            {
-                try
-                {
-                    if (!VisionConfig.EnableMod.Value || __instance == null) return;
-                    RecordSoldierFired(__instance);
-                    VeteranAndTacticsPatches.AddCombatExperienceBonus(__instance, 0.75f);
-                }
-                catch { }
-            }
-        }
-
-        // =====================================================================
-        // 2. Infantry Stance, Camouflage & Squad Awareness Sight Calculation
-        // =====================================================================
-        [HarmonyPatch(typeof(Soldier), nameof(Soldier.CamoDistanceAwareEnemies))]
-        public static class Soldier_CamoDistanceAwareEnemies_Patch
-        {
-            public static bool Prefix(Soldier __instance, bool __0, ref float __result)
-            {
-                try
-                {
-                    if (!VisionConfig.EnableMod.Value || ReferenceEquals(__instance, null) || __instance.Pointer == IntPtr.Zero)
-                        return true;
-
-                    AiCore.SoldierFastHandles h = AiCore.GetOrCreateSoldierHandles(__instance);
-                    if (h == null)
-                        return true;
-
-                    float camoMultiplier = AiCore.GetCachedCamoMultiplier(h, Time.time);
-
-                    SoldierPose pose = __instance.m_pose;
-                    float baseDist;
-                    if (!__0 || VisionConfig.PreserveStanceStealthInCombat.Value)
-                    {
-                        switch (pose)
-                        {
-                            case SoldierPose.Idle:
-                                baseDist = VisionConfig.StandingSightRange.Value;
-                                break;
-                            case SoldierPose.Crouch:
-                                baseDist = VisionConfig.CrouchingSightRange.Value;
-                                break;
-                            case SoldierPose.Prone:
-                                baseDist = VisionConfig.ProneSightRange.Value;
-                                break;
-                            default:
-                                baseDist = VisionConfig.StandingSightRange.Value;
-                                break;
-                        }
-
-                        if (__0)
-                        {
-                            baseDist *= VisionConfig.CombatAwareStanceMultiplier.Value;
-                        }
-                    }
-                    else
-                    {
-                        baseDist = 300.0f;
-                    }
-
-                    baseDist += GetFiringVisibilityBonus(__instance);
-                    float finalDist = baseDist * camoMultiplier * GetObserverOpticMultiplier();
-                    __result = finalDist;
-                    return false;
-                }
-                catch
-                {
-                    return true;
-                }
-            }
-        }
-
-        // =====================================================================
-        // 3. Infantry Observer FOV Cones & Scope Magnification (Creature.CanSee)
-        // =====================================================================
-        [HarmonyPatch(typeof(Creature), nameof(Creature.CanSee))]
-        public static class Creature_CanSee_Patch
-        {
-            public static bool Prefix(Creature __instance, Spottable __0, ref bool __result, out long __state)
-            {
-                long pStart = HitchProfiler.Begin();
-                __state = pStart;
-                bool runVanillaLinecast = true;
-                _currentObserverOpticMultiplier = 1.0f;
-                try
-                {
-                    if (!VisionConfig.EnableMod.Value || ReferenceEquals(__instance, null) || ReferenceEquals(__0, null))
-                        return true;
-
-                    if (!AiCore.TryResolveSpottableFast(__0, out AiCore.SoldierFastHandles targetSolH, out AiCore.VehicleFastHandles targetVehH))
-                    {
-                        __result = false;
-                        runVanillaLinecast = false;
-                        return false;
-                    }
-
-                    Soldier targetSoldier = targetSolH != null ? targetSolH.Ref : null;
-                    if (targetSoldier != null && targetSoldier.IsOnVehicle())
-                    {
-                        AiCore.VehicleFastHandles tvH = AiCore.GetOrCreateVehicleHandles(targetSoldier.GetCurrentVehicle());
-                        if (tvH != null && tvH.IsAir)
-                        {
-                            // Never allow ground infantry or turrets to target a pilot's Soldier body inside an aircraft cockpit;
-                            // they must target the Airplane vehicle itself.
-                            __result = false;
-                            runVanillaLinecast = false;
-                            return false;
-                        }
-                    }
-
-                    TotalSightChecks++;
-
-                    if (!AiCore.TryGetSoldierHandlesFromCreature(__instance, out AiCore.SoldierFastHandles obsH) || obsH.Tr == null)
-                        return true;
-
-                    Soldier observer = obsH.Ref;
-                    Vector3 observerPos = observer.FacePosition();
-                    Vector3 targetPos = __0.SpotPosition();
-                    Vector3 toTarget = targetPos - observerPos;
-                    float dist = toTarget.magnitude;
-
-                    Vector3 bodyFwd = obsH.Tr.forward;
-                    float angle;
-                    if (observer.IsAiming)
-                    {
-                        Vector3 gunDir = observer.GetFireDir();
-                        float gunAngle = Vector3.Angle(toTarget, gunDir);
-                        // At close/near combat range (<= 34m), human peripheral vision includes torso/head orientation
-                        // even when shouldering a rifle slightly off to one side.
-                        angle = dist <= 34.0f
-                            ? Mathf.Min(gunAngle, Vector3.Angle(toTarget, bodyFwd))
-                            : gunAngle;
-                    }
-                    else
-                    {
-                        angle = Vector3.Angle(toTarget, bodyFwd);
-                    }
-
-                    SoldierAI obsAi = obsH.Ai;
-                    bool isStationaryOverwatch = VisionConfig.EnableThreatSectorConcentration.Value &&
-                                                 !observer.IsPlayer() &&
-                                                 !observer.IsOnVehicle() &&
-                                                 !ReferenceEquals(obsAi, null) &&
-                                                 obsAi != null &&
-                                                 !obsAi.IsMoving();
-                    bool hasActiveThreatSector = isStationaryOverwatch &&
-                                                 VeteranAndTacticsPatches.HasActiveThreatSectorContact(observer);
-                    bool isQuietFlanker = targetSoldier != null &&
-                                          !targetSoldier.IsSpotted &&
-                                          !HasFiredRecently(targetSoldier, 4.0f);
-
-                    if (VisionConfig.EnforceHumanFOVWhenAlerted.Value)
-                    {
-                        float allowedHalfFOV = AiCore.EvaluateHumanSquintHalfFov(
-                            dist,
-                            VisionConfig.CloseOmnidirectionalRange.Value,
-                            VisionConfig.MidRangeMaxDistance.Value,
-                            VisionConfig.MidRangeHalfFOV.Value,
-                            VisionConfig.LongRangeHalfFOV.Value);
-
-                        // Only narrow peripheral awareness for stationary overwatch beyond 34m so close-quarters
-                        // flankers (12m-34m) never hit an artificial 60-degree blind-spot wall!
-                        if (hasActiveThreatSector && isQuietFlanker && dist > 34.0f)
-                        {
-                            float focusCap = Mathf.Lerp(76.0f, 52.0f, Mathf.InverseLerp(34.0f, 95.0f, dist));
-                            allowedHalfFOV = Mathf.Min(allowedHalfFOV, focusCap);
-                        }
-
-                        if (angle > allowedHalfFOV)
-                        {
-                            BlockedByFOV++;
-                            __result = false;
-                            runVanillaLinecast = false;
-                            return false;
-                        }
-                    }
-
-                    float opticZoom = VisionConfig.EnableScopeVisionScaling.Value
-                        ? AiCore.GetCachedOpticZoom(obsH, Time.time)
-                        : 1.0f;
-
-                    float allowedOpticHalfFOV = VisionConfig.OpticLongRangeHalfFOV.Value;
-                    VeteranAndTacticsPatches.SoldierPersonality observerPers = VeteranAndTacticsPatches.GetPersonality(observer);
-                    if (observerPers == VeteranAndTacticsPatches.SoldierPersonality.Marksman_Spotter)
-                    {
-                        allowedOpticHalfFOV += 5.0f;
-                    }
-
-                    if (opticZoom > 1.0f && angle <= allowedOpticHalfFOV)
-                    {
-                        _currentObserverOpticMultiplier = opticZoom;
-                        BoostedByScope++;
-                    }
-
-                    if (isStationaryOverwatch)
-                    {
-                        if (angle <= 28f)
-                        {
-                            float focusMult = (observerPers == VeteranAndTacticsPatches.SoldierPersonality.Gunner_Overwatch ||
-                                               observerPers == VeteranAndTacticsPatches.SoldierPersonality.Marksman_Spotter)
-                                ? 1.28f
-                                : 1.20f;
-                            _currentObserverOpticMultiplier = Mathf.Max(_currentObserverOpticMultiplier, focusMult);
-                        }
-                        else if (hasActiveThreatSector && isQuietFlanker && angle > 38f)
-                        {
-                            _currentObserverOpticMultiplier *= 0.72f;
-                        }
-                    }
-
-                    bool isWheeledOrTank = targetVehH != null ? targetVehH.IsWheeledOrTank : (targetSolH == null && __0.IsWheeledVehicleOrTank());
-                    if (isWheeledOrTank && dist > VisionConfig.VehicleCamoDistance.Value * GetObserverOpticMultiplier())
-                    {
-                        BlockedByRange++;
-                        __result = false;
-                        runVanillaLinecast = false;
-                        return false;
-                    }
-
-                    return true;
-                }
-                catch
-                {
-                    _currentObserverOpticMultiplier = 1.0f;
-                    return true;
-                }
-                finally
-                {
-                    HitchProfiler.End(HitchBucket.CanSeeMod, pStart);
-                    if (runVanillaLinecast && __instance != null && __0 != null)
-                        HitchProfiler.RecordCanSeeLinecastPassThrough();
-                }
-            }
-
-            public static void Postfix(bool __result, long __state)
-            {
-                if (!__result && VisionConfig.EnableMod.Value)
-                {
-                    BlockedByRange++;
-                }
-                _currentObserverOpticMultiplier = 1.0f;
-                HitchProfiler.End(HitchBucket.CanSeeTotal, __state);
-            }
-        }
-
-        // =====================================================================
-        // 4. Vehicle & Tank Turret Vision (TurretAI.CanSee)
-        // =====================================================================
-        [HarmonyPatch(typeof(TurretAI), nameof(TurretAI.CanSee))]
-        public static class TurretAI_CanSee_Patch
-        {
-            public static bool Prefix(TurretAI __instance, Spottable __0, ref bool __result, out long __state)
-            {
-                __state = HitchProfiler.Begin();
-                _currentObserverOpticMultiplier = 1.0f;
-                try
-                {
-                    if (!VisionConfig.EnableMod.Value || ReferenceEquals(__instance, null) || ReferenceEquals(__0, null))
-                        return true;
-
-                    Turret turret = __instance.turret;
-                    if (turret == null || !AiCore.TryResolveSpottableFast(__0, out AiCore.SoldierFastHandles targetSolH, out AiCore.VehicleFastHandles targetVehH))
-                    {
-                        __result = false;
-                        return false;
-                    }
-
-                    Soldier targetSoldier = targetSolH != null ? targetSolH.Ref : null;
-                    if (targetSoldier != null && targetSoldier.IsOnVehicle())
-                    {
-                        AiCore.VehicleFastHandles tvH = AiCore.GetOrCreateVehicleHandles(targetSoldier.GetCurrentVehicle());
-                        if (tvH != null && tvH.IsAir)
-                        {
-                            // Never allow ground/vehicle turrets to target the pilot Soldier inside an airplane cockpit;
-                            // turrets must target the Airplane vehicle itself (fixes pilot killed by "Machine Gun").
-                            __result = false;
-                            return false;
-                        }
-                    }
-
-                    TotalSightChecks++;
-
-                    Vector3 firePos = turret.GetFirePos();
-                    Vector3 targetPos = __0.SpotPosition();
-                    Vector3 toTarget = targetPos - firePos;
-                    float dist = toTarget.magnitude;
-                    Vector3 fireDir = turret.GetFireDir();
-                    float angle = Vector3.Angle(toTarget, fireDir);
-
-                    bool isWheeledOrTank = targetVehH != null ? targetVehH.IsWheeledOrTank : (targetSolH == null && __0.IsWheeledVehicleOrTank());
-                    bool isAir = targetVehH != null ? targetVehH.IsAir : (targetSolH == null && __0.IsAirVehicle());
-                    bool isInfantryTarget = !isWheeledOrTank && !isAir;
-
-                    AiCore.TurretFastTraits traits = AiCore.GetCachedTurretTraits(turret);
-                    float turretAimFov = traits.AimFov > 0.1f ? traits.AimFov : turret.GetAimingFOV();
-                    Vehicle turretVeh = traits.RootVehicle;
-                    AiCore.VehicleFastHandles obsVehH = traits.VehHandles;
-                    VeteranAndTacticsPatches.SoldierPersonality crewPers = turretVeh != null
-                        ? VeteranAndTacticsPatches.GetVehicleCrewPersonality(turretVeh)
-                        : VeteranAndTacticsPatches.SoldierPersonality.None;
-
-                    Spottable curTracked = __instance.CurrentVisibleTarget;
-                    bool isAlreadyTrackingThis = !ReferenceEquals(curTracked, null) &&
-                                                 curTracked != null &&
-                                                 curTracked.Pointer == __0.Pointer;
-
-                    if (VisionConfig.EnforceHumanFOVWhenAlerted.Value &&
-                        !isAlreadyTrackingThis &&
-                        !AllowCommanderIntercomFovBypass)
-                    {
-                        float allowedTurretHalfFov = 180.0f;
-
-                        if (traits.IsCommanderTurret)
-                        {
-                            // 1. Tank Commander Cupola / Periscope / Binoculars:
-                            //    Wide all-around observation up close (unbuttoned cupola vs periscope blocks), squinting with distance.
-                            if (dist <= 13.0f)
-                                allowedTurretHalfFov = traits.IsExposedCrewSeat ? 180.0f : 132.0f;
-                            else if (dist <= 65.0f)
-                                allowedTurretHalfFov = Mathf.Lerp(120.0f, 76.0f, (dist - 13.0f) / 52.0f);
-                            else
-                                allowedTurretHalfFov = Mathf.Lerp(76.0f, 44.0f, Mathf.Clamp01((dist - 65.0f) / 155.0f));
-                        }
-                        else if (obsVehH != null && obsVehH.IsAir)
-                        {
-                            // 2. Aircraft Defensive / Flexible Gunners: wide framed hemisphere, squinting at range.
-                            allowedTurretHalfFov = dist <= 120.0f
-                                ? 86.0f
-                                : Mathf.Lerp(86.0f, 54.0f, Mathf.Clamp01((dist - 120.0f) / 280.0f));
-                        }
-                        else if (obsVehH != null && obsVehH.IsWheeledOrTank && !traits.IsExposedCrewSeat && !traits.IsAA)
-                        {
-                            // 3. Enclosed / Buttoned-Up Tank & Armored Vehicle Guns (Main Cannon, Coax, Hull Bow MG):
-                            //    NO magical 360-degree bubble! Gunner stares through a narrow telescope/ball-mount slit;
-                            //    flankers outside this bore cone require an alive Commander / escort intercom handoff!
-                            float closeSlit = turretAimFov < 42.0f ? 28.0f : 34.0f;
-                            float midSlit = turretAimFov < 42.0f ? 22.0f : 27.0f;
-                            float farSlit = turretAimFov < 42.0f ? 15.0f : 19.0f;
-                            if (!isInfantryTarget)
-                            {
-                                // Large vehicle silhouettes & muzzle flashes are slightly easier to catch at the edge of a vision block
-                                closeSlit += 8.0f;
-                                midSlit += 6.0f;
-                                farSlit += 4.0f;
-                            }
-
-                            if (dist <= 10.0f)
-                                allowedTurretHalfFov = closeSlit + 6.0f;
-                            else if (dist <= 45.0f)
-                                allowedTurretHalfFov = Mathf.Lerp(closeSlit, midSlit, (dist - 10.0f) / 35.0f);
-                            else
-                                allowedTurretHalfFov = Mathf.Lerp(midSlit, farSlit, Mathf.Clamp01((dist - 45.0f) / 165.0f));
-                        }
-                        else if (traits.IsAA)
-                        {
-                            // 4A. Open 360-degree Flak / AA Mounts: point-blank ear awareness + wide sky/horizon scan.
-                            if (dist <= 9.5f)
-                                allowedTurretHalfFov = 180.0f;
-                            else if (dist <= 125.0f)
-                                allowedTurretHalfFov = 90.0f + (crewPers == VeteranAndTacticsPatches.SoldierPersonality.LightCrew_FlakWatch ? 12.0f : 0f);
-                            else
-                                allowedTurretHalfFov = Mathf.Lerp(88.0f, 58.0f, Mathf.Clamp01((dist - 125.0f) / 220.0f));
-                        }
-                        else
-                        {
-                            // 4B. Static Emplacements (Shielded AT Guns, HMG Tripods/Pillboxes) & Open-Top Pintle MGs:
-                            //     Exposed crew hear/sense point-blank threats (<= 8.5m), restricted laterally by gun shield / embrasure.
-                            if (traits.IsExposedCrewSeat && dist <= 8.5f)
-                                allowedTurretHalfFov = 180.0f;
-                            else if (dist <= 35.0f)
-                                allowedTurretHalfFov = Mathf.Lerp(traits.IsExposedCrewSeat ? 68.0f : 52.0f, 48.0f, Mathf.Clamp01((dist - 8.5f) / 26.5f));
-                            else
-                                allowedTurretHalfFov = Mathf.Lerp(48.0f, 30.0f, Mathf.Clamp01((dist - 35.0f) / 150.0f));
-                        }
-
-                        if (angle > allowedTurretHalfFov)
-                        {
-                            BlockedByFOV++;
-                            __result = false;
-                            return false;
-                        }
-                    }
-
-                    if (VisionConfig.EnableScopeVisionScaling.Value)
-                    {
-                        if (traits.IsCommanderTurret && angle <= 26.0f)
-                        {
-                            _currentObserverOpticMultiplier = Mathf.Min(1.45f, VisionConfig.MaxOpticZoomMultiplier.Value);
-                            BoostedByScope++;
-                        }
-                        else if (turretAimFov > 1f && turretAimFov < 45f)
-                        {
-                            float opticCone = VisionConfig.OpticLongRangeHalfFOV.Value;
-                            if (crewPers == VeteranAndTacticsPatches.SoldierPersonality.TankCrew_Sniper)
-                                opticCone += 5.0f;
-
-                            if (angle <= opticCone)
-                            {
-                                _currentObserverOpticMultiplier = Mathf.Clamp(50f / turretAimFov, 1.0f, VisionConfig.MaxOpticZoomMultiplier.Value);
-                                BoostedByScope++;
-                            }
-                        }
-                    }
-
-                    if (isWheeledOrTank && dist > VisionConfig.VehicleCamoDistance.Value * GetObserverOpticMultiplier())
-                    {
-                        BlockedByRange++;
-                        __result = false;
-                        return false;
-                    }
-
-                    return true;
-                }
-                catch
-                {
-                    _currentObserverOpticMultiplier = 1.0f;
-                    return true;
-                }
-            }
-
-            public static void Postfix(long __state)
-            {
-                _currentObserverOpticMultiplier = 1.0f;
-                HitchProfiler.End(HitchBucket.TurretPlaneSee, __state);
-            }
-        }
-
-        // =====================================================================
-        // 5. Aircraft Ground Spotting & CAS Target Priority (AIPlane.GetBestAircraftVisibleEnemy)
-        // =====================================================================
-        [HarmonyPatch(typeof(AIPlane), nameof(AIPlane.GetBestAircraftVisibleEnemy))]
-        public static class AIPlane_GetBestAircraftVisibleEnemy_Patch
-        {
-            public static void Prefix(out long __state)
-            {
-                __state = HitchProfiler.Begin();
-            }
-
-            public static void Postfix(AIPlane __instance, ref Spottable __result, long __state)
-            {
-                try
-                {
-                    if (!VisionConfig.EnableMod.Value || __instance == null)
-                        return;
-
-                    if (VisionConfig.LimitAircraftInfantrySpotting.Value && __result != null)
-                    {
-                        if (!__result.IsAirVehicle() && !__result.IsWheeledVehicleOrTank())
-                        {
-                            Soldier targetSoldier = __result.TryCast<Soldier>();
-                            if (targetSoldier != null)
-                            {
-                                Squad sq = targetSoldier.joinedSquad;
-                                bool isMarkedSquad = sq != null && (sq.isMarked || sq.isHalfMarked || sq.isMarkedPinPoint);
-                                if (!isMarkedSquad)
-                                {
-                                    float dist = Vector3.Distance(__instance.transform.position, targetSoldier.GetPosition());
-                                    bool recentlyFired = GetFiringVisibilityBonus(targetSoldier) > 10f;
-
-                                    if (dist > VisionConfig.AircraftUnmarkedInfantryMaxDist.Value ||
-                                        (targetSoldier.m_pose != SoldierPose.Idle && !recentlyFired))
-                                    {
-                                        BlockedPlaneSpot++;
-                                        __result = null;
-                                    }
-                                }
-                            }
-                        }
-                    }
-
-                    if (VisionConfig.EnableCombinedArmsPrioritySupport.Value)
-                    {
-                        VeteranAndTacticsPatches.TrySelectKnownAircraftTarget(__instance, ref __result);
-                    }
-                }
-                catch { }
-                finally
-                {
-                    HitchProfiler.End(HitchBucket.TurretPlaneSee, __state);
-                }
-            }
-        }
-    }
-
     public static partial class VeteranAndTacticsPatches
     {
-        private struct WatchWindowCache
+        internal struct WatchWindowCache
         {
             public Vector3 Pos;
             public float BaseAngleDeg;
@@ -794,17 +15,12 @@ namespace EasyRed2HumanAI
             public float ExpireTime;
         }
 
-        private static readonly Dictionary<IntPtr, WatchWindowCache> _watchWindowCache = new Dictionary<IntPtr, WatchWindowCache>(256);
-
-        private struct ThreatSectorCache
+        internal struct ThreatSectorCache
         {
             public float ExpireTime;
             public Vector3 WatchDir;
             public bool HasActiveContact;
         }
-
-        private static readonly Dictionary<IntPtr, ThreatSectorCache> _threatSectorCache = new Dictionary<IntPtr, ThreatSectorCache>(256);
-        private static readonly HashSet<IntPtr> _isTurningToWatchSector = new HashSet<IntPtr>();
 
         internal struct LocalCalloutRecord
         {
@@ -819,12 +35,6 @@ namespace EasyRed2HumanAI
             public float LastSeenTime;
             public bool WasInfantry;
         }
-
-        internal static readonly Dictionary<IntPtr, LocalCalloutRecord> _localCalloutCache = new Dictionary<IntPtr, LocalCalloutRecord>(256);
-        internal static readonly Dictionary<IntPtr, float> _nextSpotterCalloutTime = new Dictionary<IntPtr, float>(256);
-        internal static readonly Dictionary<IntPtr, LastKnownTargetInfo> _lastKnownTargets = new Dictionary<IntPtr, LastKnownTargetInfo>(256);
-        internal static readonly Dictionary<IntPtr, float> _nextSuppressiveGrenadeTime = new Dictionary<IntPtr, float>(256);
-        internal static readonly Dictionary<IntPtr, float> _nextSuppressiveBurstCountTime = new Dictionary<IntPtr, float>(256);
 
         internal struct CornerPieState
         {
@@ -852,10 +62,6 @@ namespace EasyRed2HumanAI
             public bool Blocked;
         }
 
-        internal static readonly Dictionary<IntPtr, CornerPieState> _cornerPieCache = new Dictionary<IntPtr, CornerPieState>(256);
-        internal static readonly Dictionary<IntPtr, float> _nextCornerPieCountTime = new Dictionary<IntPtr, float>(256);
-        internal static readonly Dictionary<IntPtr, StationaryWatchState> _stationaryWatchCache = new Dictionary<IntPtr, StationaryWatchState>(256);
-        internal static readonly Dictionary<IntPtr, CoverEyeBlockState> _coverEyeBlockCache = new Dictionary<IntPtr, CoverEyeBlockState>(256);
         public static int CornerPiesExecutedCount;
 
         // =====================================================================
@@ -888,7 +94,7 @@ namespace EasyRed2HumanAI
             if (VisionConfig.EnableLastKnownSuppression.Value)
             {
                 bool isWheeledOrTank = enemyVehH != null ? enemyVehH.IsWheeledOrTank : (enemySolH == null && visibleEnemy.IsWheeledVehicleOrTank());
-                _lastKnownTargets[spotterPtr] = new LastKnownTargetInfo
+                spotterH.Vision.LastKnownTarget = new LastKnownTargetInfo
                 {
                     Target = visibleEnemy,
                     LastSeenPos = enemyPos,
@@ -900,11 +106,11 @@ namespace EasyRed2HumanAI
             if (!VisionConfig.EnableLocalContactCallouts.Value)
                 return;
 
-            if (_nextSpotterCalloutTime.TryGetValue(spotterPtr, out float nextCallout) && now < nextCallout)
+            if (now < spotterH.Vision.NextSpotterCalloutTime)
                 return;
 
             bool isMpWithPlayers = AiCore.IsMultiplayerWithRemotePlayers();
-            _nextSpotterCalloutTime[spotterPtr] = now + (isMpWithPlayers ? 4.25f : 2.50f);
+            spotterH.Vision.NextSpotterCalloutTime = now + (isMpWithPlayers ? 4.25f : 2.50f);
 
             Vector3 spotterPos = spotterH.Tr.position;
             string myFaction = AiCore.GetCachedFaction(spotterH, now);
@@ -925,8 +131,7 @@ namespace EasyRed2HumanAI
                     AiCore.SoldierFastHandles allyH = AiCore.GetOrCreateSoldierHandles(ally);
                     if (allyH != null && allyH.Tr != null && (allyH.Tr.position - spotterPos).sqrMagnitude <= calloutRadiusSq)
                     {
-                        IntPtr allyPtr = allyH.Ptr;
-                        _localCalloutCache[allyPtr] = new LocalCalloutRecord
+                        allyH.Vision.LocalCallout = new LocalCalloutRecord
                         {
                             EnemyPos = enemyPos,
                             ExpireTime = now + 5.5f
@@ -969,11 +174,14 @@ namespace EasyRed2HumanAI
                                 if (ally == null || !ally.IsAlive)
                                     continue;
 
-                                _localCalloutCache[allySnap.Ptr] = new LocalCalloutRecord
+                                if (allySnap.Handles != null)
                                 {
-                                    EnemyPos = enemyPos,
-                                    ExpireTime = now + 5.5f
-                                };
+                                    allySnap.Handles.Vision.LocalCallout = new LocalCalloutRecord
+                                    {
+                                        EnemyPos = enemyPos,
+                                        ExpireTime = now + 5.5f
+                                    };
+                                }
                                 AiCore.RefreshAlertnessWithoutRaisingGun(ally, 12f);
                                 sharedWith++;
                             }
@@ -1113,13 +321,72 @@ namespace EasyRed2HumanAI
             return true;
         }
 
-        internal static bool TryFlushLastKnownEnemyWithGrenade(SoldierAI ai, Soldier soldier)
+        internal static bool TryThrowTacticalFragGrenade(
+            Soldier thrower,
+            Spottable target,
+            Vector3 targetPos,
+            float dist,
+            float minDist,
+            float maxDist,
+            float safeRadius,
+            float now,
+            bool sayVoice = true,
+            Vector3? extraSafetyPos = null,
+            float extraSafetyDist = 0f,
+            float cooldownSeconds = 14.0f)
+        {
+            if (thrower == null ||
+                target == null ||
+                target.Pointer == IntPtr.Zero ||
+                thrower.isInHandsAnimation ||
+                thrower.isInBodyAnimation ||
+                thrower.IsReloading ||
+                thrower.inventory == null ||
+                now <= thrower.throw_end_time + 5.0f)
+            {
+                return false;
+            }
+
+            if (dist < minDist || dist > maxDist)
+                return false;
+
+            if (extraSafetyPos.HasValue && (extraSafetyDist < minDist || extraSafetyDist > maxDist))
+                return false;
+
+            VirtualItem fragItem = AiCore.FindThrowableGrenadeInInventory(thrower, findAtGrenade: false, findFragGrenade: true);
+            float checkRangeDist = extraSafetyPos.HasValue ? Mathf.Max(dist, extraSafetyDist) : dist;
+            if (fragItem == null || checkRangeDist > thrower.GetGrenadeThrowRange(fragItem))
+                return false;
+
+            if (!IsSafeToThrowGrenadeAt(thrower, targetPos, dist, safeRadius))
+                return false;
+
+            if (extraSafetyPos.HasValue &&
+                !IsSafeToThrowGrenadeAt(thrower, extraSafetyPos.Value, extraSafetyDist, safeRadius))
+            {
+                return false;
+            }
+
+            if (!AiCore.TryConsumeBotRpcBudget(0.45f))
+                return false;
+
+            AiCore.SoldierFastHandles sh = AiCore.GetOrCreateSoldierHandles(thrower);
+            if (sh != null)
+                sh.Vision.NextSuppressiveGrenadeTime = now + cooldownSeconds;
+
+            thrower.Throw(fragItem, target);
+            if (sayVoice)
+                TrySayTacticalVoice(thrower, thrower.joinedSquad, VoiceManager.VoiceClip.granade, 0.05f);
+            return true;
+        }
+
+        internal static bool TryFlushLastKnownEnemyWithGrenade(SoldierAI ai, Soldier soldier, bool allowWhileMoving = false)
         {
             if (!VisionConfig.EnableLastKnownSuppression.Value || ai == null || soldier == null || soldier.Pointer == IntPtr.Zero)
                 return false;
 
             if (ai.visibleTarget != null ||
-                ai.IsMoving() ||
+                (!allowWhileMoving && ai.IsMoving()) ||
                 soldier.IsOnVehicle() ||
                 soldier.isInHandsAnimation ||
                 soldier.isInBodyAnimation ||
@@ -1129,15 +396,16 @@ namespace EasyRed2HumanAI
                 return false;
             }
 
-            IntPtr ptr = soldier.Pointer;
+            AiCore.SoldierFastHandles sh = AiCore.GetOrCreateSoldierHandles(soldier);
+            if (sh == null)
+                return false;
+
             float now = Time.time;
-            if (now <= soldier.throw_end_time + 6.0f)
+            if (now <= soldier.throw_end_time + 6.0f || now < sh.Vision.NextSuppressiveGrenadeTime)
                 return false;
 
-            if (_nextSuppressiveGrenadeTime.TryGetValue(ptr, out float nextGren) && now < nextGren)
-                return false;
-
-            if (!_lastKnownTargets.TryGetValue(ptr, out LastKnownTargetInfo lastInfo) || !lastInfo.WasInfantry)
+            LastKnownTargetInfo lastInfo = sh.Vision.LastKnownTarget;
+            if (lastInfo.LastSeenTime <= 0f || !lastInfo.WasInfantry)
                 return false;
 
             float elapsed = now - lastInfo.LastSeenTime;
@@ -1158,24 +426,23 @@ namespace EasyRed2HumanAI
 
             float dist = Vector3.Distance(myPos, lastInfo.LastSeenPos);
             float liveDist = Vector3.Distance(myPos, liveTargetPos);
-            if (dist < 10.0f || dist > 30.0f || liveDist < 10.0f || liveDist > 30.0f)
+            if (!TryThrowTacticalFragGrenade(
+                    soldier,
+                    lastInfo.Target,
+                    liveTargetPos,
+                    liveDist,
+                    10.0f,
+                    30.0f,
+                    11.5f,
+                    now,
+                    sayVoice: true,
+                    extraSafetyPos: lastInfo.LastSeenPos,
+                    extraSafetyDist: dist))
+            {
                 return false;
+            }
 
-            VirtualItem fragItem = AiCore.FindThrowableGrenadeInInventory(soldier, findAtGrenade: false, findFragGrenade: true);
-            if (fragItem == null || Mathf.Max(dist, liveDist) > soldier.GetGrenadeThrowRange(fragItem))
-                return false;
-
-            if (!IsSafeToThrowGrenadeAt(soldier, liveTargetPos, liveDist, 11.5f) ||
-                !IsSafeToThrowGrenadeAt(soldier, lastInfo.LastSeenPos, dist, 11.5f))
-                return false;
-
-            if (!AiCore.TryConsumeBotRpcBudget(0.45f))
-                return false;
-
-            _nextSuppressiveGrenadeTime[ptr] = now + 14.0f;
-            soldier.Throw(fragItem, lastInfo.Target);
             SuppressiveEventsCount++;
-            VeteranAndTacticsPatches.TrySayTacticalVoice(soldier, soldier.joinedSquad, VoiceManager.VoiceClip.granade, 0.05f);
             if (VisionConfig.DebugLogging.Value)
             {
                 AiCore.LogDebug("LastKnownGrenade", $"{soldier.faction} soldier threw frag grenade at last-known enemy cover ({dist:F0}m).");
@@ -1183,13 +450,35 @@ namespace EasyRed2HumanAI
             return true;
         }
 
-        private static bool TryMaintainSuppressiveFireOnLastKnown(SoldierAI ai, Soldier soldier, float deltaTime)
+        private static bool CanWeaponDeliverBlindSuppressiveFire(Soldier soldier, GenericGun heldGun, int ammoLeft, float dist)
         {
-            if (!VisionConfig.EnableLastKnownSuppression.Value || ai == null || soldier == null || soldier.Pointer == IntPtr.Zero)
+            if (soldier == null || heldGun == null || ammoLeft <= 3 || dist < 8.0f || dist > 135.0f || heldGun.DamageRange() < dist)
                 return false;
 
-            IntPtr ptr = soldier.Pointer;
-            if (!_lastKnownTargets.TryGetValue(ptr, out LastKnownTargetInfo lastInfo) || !lastInfo.WasInfantry)
+            SoldierPersonality pers = GetPersonality(soldier);
+            bool isDedicatedGunner = soldier.hasMg ||
+                                     soldier.IsGunner() ||
+                                     pers == SoldierPersonality.Gunner_Anchor ||
+                                     pers == SoldierPersonality.Gunner_Overwatch ||
+                                     pers == SoldierPersonality.Gunner_AssaultMG;
+            if (isDedicatedGunner)
+                return true;
+
+            // Use isManualBoltOperated (+0x178 weapon archetype), NEVER raw bolt_required (+0xA8 chamber flag)!
+            return !heldGun.isManualBoltOperated && ammoLeft >= 8 && dist <= 55.0f;
+        }
+
+        private static bool TryMaintainSuppressiveFireOnLastKnown(SoldierAI ai, Soldier soldier, float deltaTime)
+        {
+            if (!VisionConfig.EnableLastKnownSuppression.Value || ai == null)
+                return false;
+
+            AiCore.SoldierFastHandles sh = AiCore.GetOrCreateSoldierHandles(soldier);
+            if (sh == null)
+                return false;
+
+            LastKnownTargetInfo lastInfo = sh.Vision.LastKnownTarget;
+            if (lastInfo.LastSeenTime <= 0f || !lastInfo.WasInfantry)
                 return false;
 
             float now = Time.time;
@@ -1222,26 +511,9 @@ namespace EasyRed2HumanAI
                 return false;
 
             int ammoLeft = heldGun.GetCurrentAmmoCount();
-            if (ammoLeft <= 3)
-                return false;
-
             Vector3 aimPos = lastInfo.LastSeenPos + Vector3.up * 0.45f;
             float dist = Vector3.Distance(soldier.transform.position, aimPos);
-            if (dist < 8.0f || dist > 135.0f || heldGun.DamageRange() < dist)
-                return false;
-
-            SoldierPersonality pers = GetPersonality(soldier);
-            bool isDedicatedGunner = soldier.hasMg ||
-                                     soldier.IsGunner() ||
-                                     pers == SoldierPersonality.Gunner_Anchor ||
-                                     pers == SoldierPersonality.Gunner_Overwatch ||
-                                     pers == SoldierPersonality.Gunner_AssaultMG;
-            bool isCloseAutoSuppressor = !isDedicatedGunner &&
-                                         !heldGun.bolt_required &&
-                                         ammoLeft >= 12 &&
-                                         dist <= 55.0f;
-
-            if (!isDedicatedGunner && !isCloseAutoSuppressor)
+            if (!CanWeaponDeliverBlindSuppressiveFire(soldier, heldGun, ammoLeft, dist))
                 return false;
 
             // Verify unobstructed sightline up to the enemy's cover edge (dist - 2.5m) so gunners
@@ -1277,9 +549,9 @@ namespace EasyRed2HumanAI
                 ai.aimingEnemy = prevAiming;
             }
 
-            if (!_nextSuppressiveBurstCountTime.TryGetValue(ptr, out float nextCount) || now >= nextCount)
+            if (now >= sh.Vision.NextSuppressiveBurstCountTime)
             {
-                _nextSuppressiveBurstCountTime[ptr] = now + 3.0f;
+                sh.Vision.NextSuppressiveBurstCountTime = now + 3.0f;
                 SuppressiveEventsCount++;
                 if (VisionConfig.DebugLogging.Value)
                 {
@@ -1289,12 +561,79 @@ namespace EasyRed2HumanAI
             return true;
         }
 
+        internal static bool CanDeliverSuppressiveFireTowardPoint(
+            SoldierAI ai,
+            Soldier soldier,
+            Vector3 targetWorldPos,
+            Spottable knownTarget,
+            float now)
+        {
+            if (ai == null || soldier == null || soldier.Pointer == IntPtr.Zero)
+                return false;
+
+            if (ai.HasEnemyAndCanFireAtHim && AiCore.GetRawVisibleTargetPtr(ai) != IntPtr.Zero)
+                return true;
+
+            if (!VisionConfig.EnableLastKnownSuppression.Value ||
+                ai.IsMoving() ||
+                soldier.IsTowardWall() ||
+                soldier.IsReloading ||
+                soldier.MustReload() ||
+                soldier.GetSuppressionValue() >= 28f)
+            {
+                return false;
+            }
+
+            AiCore.SoldierFastHandles sh = AiCore.GetOrCreateSoldierHandles(soldier);
+            Spottable effTarget = (knownTarget != null && knownTarget.Pointer != IntPtr.Zero)
+                ? knownTarget
+                : (sh != null && sh.Vision.LastKnownTarget.LastSeenTime > 0f && now - sh.Vision.LastKnownTarget.LastSeenTime <= 2.25f
+                    ? sh.Vision.LastKnownTarget.Target
+                    : null);
+            if (effTarget == null || effTarget.Pointer == IntPtr.Zero)
+                return false;
+
+            Soldier targetSoldier = effTarget.TryCast<Soldier>();
+            if (targetSoldier == null || !targetSoldier.IsAlive)
+                return false;
+
+            GenericGun heldGun = soldier.GetHeldGun();
+            if (heldGun == null)
+                return false;
+
+            int ammoLeft = heldGun.GetCurrentAmmoCount();
+            Vector3 aimPos = targetWorldPos + Vector3.up * 0.45f;
+            Vector3 gunPos = soldier.GunPosition();
+            Vector3 toAim = aimPos - gunPos;
+            float dist = toAim.magnitude;
+            if (!CanWeaponDeliverBlindSuppressiveFire(soldier, heldGun, ammoLeft, dist))
+                return false;
+
+            if (dist > 3.5f && AiCore.RaycastEnvironment(gunPos, toAim / dist, dist - 2.5f, soldier.transform.root, out _))
+                return false;
+
+            // Seed LastKnownTarget when suppressing a verified unobstructed squad contact so MovementRoutine.Postfix
+            // fires real suppressive bursts at the enemy's cover edge instead of silent phantom pinning!
+            if (sh != null && (sh.Vision.LastKnownTarget.LastSeenTime <= 0f || now - sh.Vision.LastKnownTarget.LastSeenTime > 1.5f))
+            {
+                sh.Vision.LastKnownTarget = new LastKnownTargetInfo
+                {
+                    Target = effTarget,
+                    LastSeenPos = targetWorldPos,
+                    LastSeenTime = now - 0.15f,
+                    WasInfantry = true
+                };
+            }
+
+            return true;
+        }
+
         internal static void InvalidateWatchWindowCache(IntPtr soldierPtr)
         {
-            if (soldierPtr != IntPtr.Zero)
+            if (AiCore.TryGetSoldierHandles(soldierPtr, out AiCore.SoldierFastHandles sh))
             {
-                _watchWindowCache.Remove(soldierPtr);
-                _threatSectorCache.Remove(soldierPtr);
+                sh.Vision.WatchWindow = default;
+                sh.Vision.ThreatSector = default;
             }
         }
 
@@ -1306,11 +645,11 @@ namespace EasyRed2HumanAI
             if (soldier == null || soldier.Pointer == IntPtr.Zero)
                 return false;
 
-            // Pure O(1) dictionary lookup — NEVER trigger Squad.AllSquads iteration or 18-angle window raycast
-            // sweeps inside Creature.CanSee! ThreatSectorCache is populated by SequentialUpdate & MovementRoutine.
-            return _threatSectorCache.TryGetValue(soldier.Pointer, out ThreatSectorCache cached) &&
-                   Time.time < cached.ExpireTime &&
-                   cached.HasActiveContact;
+            // Pure O(1) handle lookup — NEVER trigger Squad.AllSquads iteration or 18-angle window raycast
+            // sweeps inside Creature.CanSee! ThreatSector is populated by SequentialUpdate & MovementRoutine.
+            return AiCore.TryGetSoldierHandles(soldier.Pointer, out AiCore.SoldierFastHandles sh) &&
+                   Time.time < sh.Vision.ThreatSector.ExpireTime &&
+                   sh.Vision.ThreatSector.HasActiveContact;
         }
 
         private static readonly float[] _watchSweepOffsets = new float[]
@@ -1356,10 +695,14 @@ namespace EasyRed2HumanAI
                 return Vector3.zero;
             baseDir.Normalize();
 
-            IntPtr ptr = soldier.Pointer;
+            AiCore.SoldierFastHandles sh = AiCore.GetOrCreateSoldierHandles(soldier);
+            if (sh == null)
+                return Vector3.zero;
+
+            IntPtr ptr = sh.Ptr;
             float baseAngleDeg = Mathf.Atan2(baseDir.x, baseDir.z) * Mathf.Rad2Deg;
-            if (_watchWindowCache.TryGetValue(ptr, out WatchWindowCache wCache) &&
-                Time.time < wCache.ExpireTime &&
+            WatchWindowCache wCache = sh.Vision.WatchWindow;
+            if (Time.time < wCache.ExpireTime &&
                 (myPos - wCache.Pos).sqrMagnitude < 0.25f &&
                 Mathf.Abs(Mathf.DeltaAngle(baseAngleDeg, wCache.BaseAngleDeg)) < 10.0f)
             {
@@ -1389,7 +732,7 @@ namespace EasyRed2HumanAI
             if (fannedHasWindowSill)
             {
                 finalDir = CenterGazeInWindowAperture(standOrigin, fannedDir, root, t, maxFanDeg);
-                _watchWindowCache[ptr] = new WatchWindowCache
+                sh.Vision.WatchWindow = new WatchWindowCache
                 {
                     Pos = myPos,
                     BaseAngleDeg = baseAngleDeg,
@@ -1421,7 +764,7 @@ namespace EasyRed2HumanAI
 
             if (!fannedBlocked && !nearbyWindowDetected && !inNarrowTrenchOrHall)
             {
-                _watchWindowCache[ptr] = new WatchWindowCache
+                sh.Vision.WatchWindow = new WatchWindowCache
                 {
                     Pos = myPos,
                     BaseAngleDeg = baseAngleDeg,
@@ -1495,7 +838,7 @@ namespace EasyRed2HumanAI
                 : chosenWatch;
 
             float cacheDur = (fannedBlocked || inNarrowTrenchOrHall) ? 3.8f : 8.0f;
-            _watchWindowCache[ptr] = new WatchWindowCache
+            sh.Vision.WatchWindow = new WatchWindowCache
             {
                 Pos = myPos,
                 BaseAngleDeg = baseAngleDeg,
@@ -1578,8 +921,9 @@ namespace EasyRed2HumanAI
 
             IntPtr ptr = sh.Ptr;
             float now = Time.time;
-            bool hadPrevCache = _threatSectorCache.TryGetValue(ptr, out ThreatSectorCache cached);
-            if (hadPrevCache && now < cached.ExpireTime)
+            ThreatSectorCache cached = sh.Vision.ThreatSector;
+            bool hadPrevCache = cached.ExpireTime > 0f;
+            if (now < cached.ExpireTime)
             {
                 watchDir = cached.WatchDir;
                 hasActiveContact = cached.HasActiveContact;
@@ -1596,9 +940,9 @@ namespace EasyRed2HumanAI
             float d0 = float.MaxValue, d1 = float.MaxValue, d2 = float.MaxValue, d3 = float.MaxValue;
 
             if (VisionConfig.EnableLocalContactCallouts.Value &&
-                _localCalloutCache.TryGetValue(ptr, out LocalCalloutRecord callout) &&
-                now < callout.ExpireTime)
+                now < sh.Vision.LocalCallout.ExpireTime)
             {
+                LocalCalloutRecord callout = sh.Vision.LocalCallout;
                 Vector3 toCalledEnemy = callout.EnemyPos - myPos;
                 toCalledEnemy.y = 0f;
                 float callDistSq = toCalledEnemy.sqrMagnitude;
@@ -1608,27 +952,90 @@ namespace EasyRed2HumanAI
                 }
             }
 
-            if (mySquad != null && mySquad.units != null)
+            // Personal LastKnownTarget memory (18s): don't forget the sector an enemy ducked behind 3s ago!
+            if (sh.Vision.LastKnownTarget.LastSeenTime > 0f)
             {
-                var units = mySquad.units;
-                int uCount = units.Count;
-                for (int i = 0; i < uCount; i++)
+                float lkAge = now - sh.Vision.LastKnownTarget.LastSeenTime;
+                if (lkAge >= 0f && lkAge <= 18.0f)
                 {
-                    Soldier mate = units[i];
-                    if (ReferenceEquals(mate, null) || mate == null || !mate.IsAlive) continue;
-                    AiCore.SoldierFastHandles mateH = AiCore.GetOrCreateSoldierHandles(mate);
-                    if (mateH == null || ReferenceEquals(mateH.Ai, null) || mateH.Ai == null) continue;
-                    Spottable mateTarget = mateH.Ai.visibleTarget;
-                    if (!AiCore.TryGetSpottableCenter(mateTarget, out Vector3 mateEnemyPos) || mateTarget.IsAirVehicle()) continue;
-
-                    Vector3 toEnemy = mateEnemyPos - myPos;
-                    toEnemy.y = 0f;
-                    float dSq = toEnemy.sqrMagnitude;
-                    if (dSq > 0.25f)
+                    Vector3 toLk = sh.Vision.LastKnownTarget.LastSeenPos - myPos;
+                    toLk.y = 0f;
+                    float lkSq = toLk.sqrMagnitude;
+                    if (lkSq > 0.25f)
                     {
-                        InsertClosestContact(toEnemy, dSq * 0.55f, ref contactCount, ref c0, ref d0, ref c1, ref d1, ref c2, ref d2, ref c3, ref d3);
+                        float lkWeight = lkAge <= 6.0f ? 0.65f : 1.15f;
+                        InsertClosestContact(toLk, lkSq * lkWeight, ref contactCount, ref c0, ref d0, ref c1, ref d1, ref c2, ref d2, ref c3, ref d3);
                     }
                 }
+            }
+
+            if (mySquad != null)
+            {
+                if (mySquad.Pointer != IntPtr.Zero && _squadBlackboards.TryGetValue(mySquad.Pointer, out SquadBlackboard sqBoard))
+                {
+                    if (sqBoard.HasActiveThreat)
+                    {
+                        Vector3 toSqThreat = sqBoard.ThreatPosition - myPos;
+                        toSqThreat.y = 0f;
+                        float sqTSq = toSqThreat.sqrMagnitude;
+                        if (sqTSq > 0.25f)
+                        {
+                            InsertClosestContact(toSqThreat, sqTSq * 0.65f, ref contactCount, ref c0, ref d0, ref c1, ref d1, ref c2, ref d2, ref c3, ref d3);
+                        }
+                    }
+                    else if (sqBoard.LastKnownThreatTime > 0f && (now - sqBoard.LastKnownThreatTime) <= 20.0f)
+                    {
+                        Vector3 toRecentSqThreat = sqBoard.LastKnownThreatPos - myPos;
+                        toRecentSqThreat.y = 0f;
+                        float rSq = toRecentSqThreat.sqrMagnitude;
+                        if (rSq > 0.25f)
+                        {
+                            InsertClosestContact(toRecentSqThreat, rSq * 1.15f, ref contactCount, ref c0, ref d0, ref c1, ref d1, ref c2, ref d2, ref c3, ref d3);
+                        }
+                    }
+
+                    if (sqBoard.IsConnectedToRadioNet &&
+                        now < sqBoard.NetDirectiveExpireTime &&
+                        sqBoard.NetDirectiveTargetPos.sqrMagnitude > 0.01f)
+                    {
+                        Vector3 toNetTarget = sqBoard.NetDirectiveTargetPos - myPos;
+                        toNetTarget.y = 0f;
+                        float nSq = toNetTarget.sqrMagnitude;
+                        if (nSq > 4.0f * 4.0f && nSq <= 320.0f * 320.0f)
+                        {
+                            InsertClosestContact(toNetTarget, nSq * 1.35f, ref contactCount, ref c0, ref d0, ref c1, ref d1, ref c2, ref d2, ref c3, ref d3);
+                        }
+                    }
+                }
+
+                if (mySquad.units != null)
+                {
+                    var units = mySquad.units;
+                    int uCount = units.Count;
+                    for (int i = 0; i < uCount; i++)
+                    {
+                        Soldier mate = units[i];
+                        if (ReferenceEquals(mate, null) || mate == null || !mate.IsAlive) continue;
+                        AiCore.SoldierFastHandles mateH = AiCore.GetOrCreateSoldierHandles(mate);
+                        if (mateH == null || ReferenceEquals(mateH.Ai, null) || mateH.Ai == null) continue;
+                        Spottable mateTarget = mateH.Ai.visibleTarget;
+                        if (!AiCore.TryGetSpottableCenter(mateTarget, out Vector3 mateEnemyPos) || mateTarget.IsAirVehicle()) continue;
+
+                        Vector3 toEnemy = mateEnemyPos - myPos;
+                        toEnemy.y = 0f;
+                        float dSq = toEnemy.sqrMagnitude;
+                        if (dSq > 0.25f)
+                        {
+                            InsertClosestContact(toEnemy, dSq * 0.55f, ref contactCount, ref c0, ref d0, ref c1, ref d1, ref c2, ref d2, ref c3, ref d3);
+                        }
+                    }
+                }
+            }
+
+            // Acoustic Ring Buffer: distant small arms (~140m), tank cannons / emplacements (~210m), and artillery/explosions (~260m)
+            if (VisionPatches.TryGetAudibleBattleDirection(myPos, myFaction, 9.0f, 11.0f, out Vector3 audibleVec, out float audibleEffDistSq))
+            {
+                InsertClosestContact(audibleVec, audibleEffDistSq, ref contactCount, ref c0, ref d0, ref c1, ref d1, ref c2, ref d2, ref c3, ref d3);
             }
 
             AiCore.EnsureWorldSnapshot();
@@ -1748,6 +1155,13 @@ namespace EasyRed2HumanAI
                     }
                 }
 
+                if (!foundObjectiveDir &&
+                    AiCore.TryGetNearestEnemyOrContestedObjectiveDirection(myFaction, myPos, out Vector3 contestedObjDir))
+                {
+                    fallbackBase = contestedObjDir;
+                    foundObjectiveDir = true;
+                }
+
                 if (!foundObjectiveDir && AiCore.TryGetEnemySpawnDirection(myFaction, myPos, out Vector3 enemySpawnDir))
                 {
                     fallbackBase = enemySpawnDir;
@@ -1767,7 +1181,7 @@ namespace EasyRed2HumanAI
 
             float sectorJitter = (AiCore.GetDeterministicHash(ptr, 53) % 160) * 0.01f;
             float cacheDuration = hasActiveContact ? 2.80f : 4.50f;
-            _threatSectorCache[ptr] = new ThreatSectorCache
+            sh.Vision.ThreatSector = new ThreatSectorCache
             {
                 ExpireTime = Time.time + cacheDuration + sectorJitter,
                 WatchDir = watchDir,
@@ -1789,10 +1203,10 @@ namespace EasyRed2HumanAI
                 return false;
 
             Soldier soldier = h.Ref;
-            IntPtr ptr = h.Ptr;
             float now = Time.time;
 
-            bool hadCache = _cornerPieCache.TryGetValue(ptr, out CornerPieState cached);
+            CornerPieState cached = h.Vision.CornerPie;
+            bool hadCache = cached.NextRefreshTime > 0f;
             if (hadCache && now < cached.NextRefreshTime)
             {
                 if (!cached.IsPieing || !cached.RaiseRifle || soldier.isTowardWallTps)
@@ -1803,10 +1217,10 @@ namespace EasyRed2HumanAI
                 return pieLookDir.sqrMagnitude > 0.01f;
             }
 
-            var path = ai.path;
-            if (path == null || path.NodesCount < 2 || soldier.isTowardWallTps)
+            var path = AiCore.GetCachedAiPath(h, ai);
+            if (ReferenceEquals(path, null) || path.Pointer == IntPtr.Zero || path.NodesCount < 2 || soldier.isTowardWallTps)
             {
-                _cornerPieCache[ptr] = new CornerPieState { NextRefreshTime = now + 0.32f, IsPieing = false };
+                h.Vision.CornerPie = new CornerPieState { NextRefreshTime = now + 0.32f, IsPieing = false };
                 return false;
             }
 
@@ -1817,7 +1231,7 @@ namespace EasyRed2HumanAI
             float distToCornerSq = toCorner.sqrMagnitude;
             if (distToCornerSq < 0.45f * 0.45f || distToCornerSq > 2.55f * 2.55f)
             {
-                _cornerPieCache[ptr] = new CornerPieState { NextRefreshTime = now + 0.26f, IsPieing = false };
+                h.Vision.CornerPie = new CornerPieState { NextRefreshTime = now + 0.26f, IsPieing = false };
                 return false;
             }
 
@@ -1829,7 +1243,7 @@ namespace EasyRed2HumanAI
             {
                 // Never override MovementRoutine with angled MoveFPSOptimized when the rifle is lowered;
                 // Easy Red 2's un-aimed TPS walk tree has no lateral strafe blend and causes sideways foot-sliding.
-                _cornerPieCache[ptr] = new CornerPieState { NextRefreshTime = now + 0.34f, IsPieing = false };
+                h.Vision.CornerPie = new CornerPieState { NextRefreshTime = now + 0.34f, IsPieing = false };
                 return false;
             }
 
@@ -1844,7 +1258,7 @@ namespace EasyRed2HumanAI
                 if (!cached.IsPieing)
                 {
                     cached.NextRefreshTime = now + 0.30f;
-                    _cornerPieCache[ptr] = cached;
+                    h.Vision.CornerPie = cached;
                     return false;
                 }
                 node1 = cached.CachedNode1;
@@ -1856,14 +1270,14 @@ namespace EasyRed2HumanAI
                 checkSeg1.y = 0f;
                 if (checkSeg1.sqrMagnitude < 0.64f)
                 {
-                    _cornerPieCache[ptr] = new CornerPieState { NextRefreshTime = now + 0.30f, IsPieing = false, HasVerifiedCorner = true, CachedNode0 = node0, CachedNode1 = node1 };
+                    h.Vision.CornerPie = new CornerPieState { NextRefreshTime = now + 0.30f, IsPieing = false, HasVerifiedCorner = true, CachedNode0 = node0, CachedNode1 = node1 };
                     return false;
                 }
 
                 float bendAngle = Vector3.Angle(seg0, checkSeg1.normalized);
                 if (bendAngle < 28f || bendAngle > 158f)
                 {
-                    _cornerPieCache[ptr] = new CornerPieState { NextRefreshTime = now + 0.30f, IsPieing = false, HasVerifiedCorner = true, CachedNode0 = node0, CachedNode1 = node1 };
+                    h.Vision.CornerPie = new CornerPieState { NextRefreshTime = now + 0.30f, IsPieing = false, HasVerifiedCorner = true, CachedNode0 = node0, CachedNode1 = node1 };
                     return false;
                 }
 
@@ -1874,7 +1288,7 @@ namespace EasyRed2HumanAI
                 if (beyondDist < 1.2f ||
                     !AiCore.IsDirectionBlockedByEnvironment(eyePos, toBeyond / beyondDist, Mathf.Min(beyondDist - 0.3f, 6.2f), h.RootTr))
                 {
-                    _cornerPieCache[ptr] = new CornerPieState { NextRefreshTime = now + 0.30f, IsPieing = false, HasVerifiedCorner = true, CachedNode0 = node0, CachedNode1 = node1 };
+                    h.Vision.CornerPie = new CornerPieState { NextRefreshTime = now + 0.30f, IsPieing = false, HasVerifiedCorner = true, CachedNode0 = node0, CachedNode1 = node1 };
                     return false;
                 }
             }
@@ -1891,7 +1305,7 @@ namespace EasyRed2HumanAI
             Vector3 desiredPie = Vector3.Slerp(seg0, seg1, 0.28f + 0.44f * pieT).normalized;
             pieLookDir = Vector3.RotateTowards(seg0, desiredPie, 38f * Mathf.Deg2Rad, 0f).normalized;
 
-            _cornerPieCache[ptr] = new CornerPieState
+            h.Vision.CornerPie = new CornerPieState
             {
                 NextRefreshTime = now + 0.14f,
                 IsPieing = true,
@@ -1902,9 +1316,9 @@ namespace EasyRed2HumanAI
                 CachedNode1 = node1
             };
 
-            if (!_nextCornerPieCountTime.TryGetValue(ptr, out float nextCount) || now >= nextCount)
+            if (now >= h.Vision.NextCornerPieCountTime)
             {
-                _nextCornerPieCountTime[ptr] = now + 4.5f;
+                h.Vision.NextCornerPieCountTime = now + 4.5f;
                 CornerPiesExecutedCount++;
             }
             return true;
@@ -2114,16 +1528,16 @@ namespace EasyRed2HumanAI
                         soldier.IsCarried() ||
                         soldier.IsCarryingBody())
                     {
-                        _isTurningToWatchSector.Remove(ptr);
+                        h.Vision.IsTurningToWatchSector = false;
                         return;
                     }
 
                     // Last-Known Position Suppressive Fire for stationary gunners / automatic weapons
                     if (VisionConfig.EnableLastKnownSuppression.Value &&
-                        __instance.visibleTarget == null &&
+                        AiCore.GetRawVisibleTargetPtr(__instance) == IntPtr.Zero &&
                         TryMaintainSuppressiveFireOnLastKnown(__instance, soldier, __0))
                     {
-                        _isTurningToWatchSector.Remove(ptr);
+                        h.Vision.IsTurningToWatchSector = false;
                         return;
                     }
 
@@ -2131,21 +1545,22 @@ namespace EasyRed2HumanAI
                         soldier.UsingBipod() ||
                         soldier.IsBipodTransitioning())
                     {
-                        _isTurningToWatchSector.Remove(ptr);
+                        h.Vision.IsTurningToWatchSector = false;
                         return;
                     }
 
                     Vector3 watchDir;
                     bool hasWatchDir;
 
-                    if (_stationaryWatchCache.TryGetValue(ptr, out StationaryWatchState wState) && now < wState.NextEvalTime)
+                    StationaryWatchState wState = h.Vision.StationaryWatch;
+                    if (now < wState.NextEvalTime)
                     {
                         hasWatchDir = wState.HasWatchDir;
                         watchDir = wState.WatchDir;
                     }
                     else
                     {
-                        hasWatchDir = TryGetKnownThreatSectorDirection(soldier, out watchDir, out _) && watchDir.sqrMagnitude > 0.01f;
+                        hasWatchDir = TryGetKnownThreatSectorDirection(soldier, out watchDir, out bool hasActiveWatchContact) && watchDir.sqrMagnitude > 0.01f;
                         if (hasWatchDir &&
                             __state.DestKind == AiCore.CachedDestKind.CombatCover &&
                             h.CachedCover != null &&
@@ -2159,40 +1574,53 @@ namespace EasyRed2HumanAI
                                 if (coverFwd.sqrMagnitude > 0.01f)
                                 {
                                     coverFwd.Normalize();
-                                    IntPtr covPtr = activeCover.Pointer;
-                                    SoldierPose pose = soldier.m_pose;
-                                    bool coverFwdBlockedAtEye;
-
-                                    if (_coverEyeBlockCache.TryGetValue(ptr, out CoverEyeBlockState eyeState) &&
-                                        eyeState.CoverPtr == covPtr &&
-                                        eyeState.Pose == pose &&
-                                        now < eyeState.ExpireTime)
+                                    float flankAngle = Vector3.Angle(coverFwd, watchDir);
+                                    if (hasActiveWatchContact && flankAngle > 55.0f)
                                     {
-                                        coverFwdBlockedAtEye = eyeState.Blocked;
+                                        // Active threat/gunfire/explosion on the flank (> 55 deg): allow the defender to turn
+                                        // his body toward the flanking threat instead of clamping gaze to old coverFwd!
+                                        if (soldier.m_pose == SoldierPose.Idle && AiCore.CanBotChangePoseAutonomously(soldier))
+                                        {
+                                            SetBotPose(__instance, soldier, SoldierPose.Crouch);
+                                        }
                                     }
                                     else
                                     {
-                                        float eyeH = pose == SoldierPose.Prone ? 0.34f : (pose == SoldierPose.Crouch ? 0.80f : 1.28f);
-                                        coverFwdBlockedAtEye = h.Tr != null && AiCore.IsDirectionBlockedByEnvironment(
-                                            h.Tr.position + Vector3.up * eyeH,
-                                            coverFwd,
-                                            1.85f,
-                                            h.RootTr);
-                                        _coverEyeBlockCache[ptr] = new CoverEyeBlockState
-                                        {
-                                            CoverPtr = covPtr,
-                                            Pose = pose,
-                                            ExpireTime = now + 2.5f,
-                                            Blocked = coverFwdBlockedAtEye
-                                        };
-                                    }
+                                        IntPtr covPtr = activeCover.Pointer;
+                                        SoldierPose pose = soldier.m_pose;
+                                        bool coverFwdBlockedAtEye;
 
-                                    if (!coverFwdBlockedAtEye)
-                                    {
-                                        float maxHalfArc = Mathf.Clamp(activeCover.localLookAngleWideness * 0.5f, 22f, 52f);
-                                        if (Vector3.Angle(coverFwd, watchDir) > maxHalfArc)
+                                        CoverEyeBlockState eyeState = h.Vision.CoverEyeBlock;
+                                        if (eyeState.CoverPtr == covPtr &&
+                                            eyeState.Pose == pose &&
+                                            now < eyeState.ExpireTime)
                                         {
-                                            watchDir = Vector3.RotateTowards(coverFwd, watchDir, maxHalfArc * Mathf.Deg2Rad, 0f).normalized;
+                                            coverFwdBlockedAtEye = eyeState.Blocked;
+                                        }
+                                        else
+                                        {
+                                            float eyeH = pose == SoldierPose.Prone ? 0.34f : (pose == SoldierPose.Crouch ? 0.80f : 1.28f);
+                                            coverFwdBlockedAtEye = h.Tr != null && AiCore.IsDirectionBlockedByEnvironment(
+                                                h.Tr.position + Vector3.up * eyeH,
+                                                coverFwd,
+                                                1.85f,
+                                                h.RootTr);
+                                            h.Vision.CoverEyeBlock = new CoverEyeBlockState
+                                            {
+                                                CoverPtr = covPtr,
+                                                Pose = pose,
+                                                ExpireTime = now + 2.5f,
+                                                Blocked = coverFwdBlockedAtEye
+                                            };
+                                        }
+
+                                        if (!coverFwdBlockedAtEye)
+                                        {
+                                            float maxHalfArc = Mathf.Clamp(activeCover.localLookAngleWideness * 0.5f, 22f, 52f);
+                                            if (flankAngle > maxHalfArc)
+                                            {
+                                                watchDir = Vector3.RotateTowards(coverFwd, watchDir, maxHalfArc * Mathf.Deg2Rad, 0f).normalized;
+                                            }
                                         }
                                     }
                                 }
@@ -2200,7 +1628,7 @@ namespace EasyRed2HumanAI
                         }
 
                         float jitter = (AiCore.GetDeterministicHash(ptr, 89) & 15) * 0.005f;
-                        _stationaryWatchCache[ptr] = new StationaryWatchState
+                        h.Vision.StationaryWatch = new StationaryWatchState
                         {
                             NextEvalTime = now + 0.22f + jitter,
                             HasWatchDir = hasWatchDir,
@@ -2211,11 +1639,11 @@ namespace EasyRed2HumanAI
                     if (hasWatchDir)
                     {
                         float angle = AiCore.HorizontalAngleToDirection(soldier, watchDir);
-                        if (_isTurningToWatchSector.Contains(ptr))
+                        if (h.Vision.IsTurningToWatchSector)
                         {
                             if (angle <= 4.0f)
                             {
-                                _isTurningToWatchSector.Remove(ptr);
+                                h.Vision.IsTurningToWatchSector = false;
                             }
                             else
                             {
@@ -2224,7 +1652,7 @@ namespace EasyRed2HumanAI
                         }
                         else if (angle > 14.0f)
                         {
-                            _isTurningToWatchSector.Add(ptr);
+                            h.Vision.IsTurningToWatchSector = true;
                             ThreatSectorOrientationsCount++;
                             AiCore.RotateBodyWithoutRaisingGun(soldier, watchDir, __0);
                         }
