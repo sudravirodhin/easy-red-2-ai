@@ -14,7 +14,12 @@ GEMINI.md
 backups/
 docs/*
 !docs/design-and-justifications.md
-tools/
+tools/*
+!tools/verify_patches/
+tools/verify_patches/*.dll
+tools/verify_patches/*.exe
+tools/verify_patches/*.pdb
+tools/verify_patches/*.gen.cs
 
 # Build Outputs & IDE Artifacts
 build/

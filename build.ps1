@@ -1,5 +1,6 @@
 param(
     [switch]$Deploy,
+    [switch]$Test,
     [string]$GameDir = $env:EASY_RED_2_DIR
 )
 
@@ -186,6 +187,20 @@ if (Test-Path (Join-Path $workspace "tools\bepinex\extracted")) {
     Copy-Item "$buildDir\EasyRed2HumanAI.dll" "$pluginsDir\EasyRed2HumanAI.dll" -Force
 }
 Write-Host "  -> Built $buildDir\EasyRed2HumanAI.dll" -ForegroundColor Green
+
+if ($Test) {
+    Write-Host "[Test 1/2] Running GOAP Planner, Acoustic & Ground Probe Suite..." -ForegroundColor Cyan
+    & (Join-Path $workspace "tools\verify_patches\VerifyGoapPlanner.ps1")
+    if ($LASTEXITCODE -ne 0) {
+        throw "VerifyGoapPlanner.ps1 failed!"
+    }
+
+    Write-Host "[Test 2/2] Running Deterministic Battle Loss & Emergence Model..." -ForegroundColor Cyan
+    & (Join-Path $workspace "tools\verify_patches\Run-BattleLossModel.ps1") -GameDir $resolvedGameDir
+    if ($LASTEXITCODE -ne 0) {
+        throw "Run-BattleLossModel.ps1 failed!"
+    }
+}
 
 if ($Deploy) {
     if (-not $resolvedGameDir) {

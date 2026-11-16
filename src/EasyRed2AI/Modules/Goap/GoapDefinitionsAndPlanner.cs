@@ -1703,7 +1703,8 @@ namespace EasyRed2HumanAI
                 // EVERY soldier prioritizes neutralizing the close attacker directly rather than area suppression!
                 bool closeCqbDirectFire = (ws & GoapStateBits.CanFireAtVisibleEnemy) != 0 &&
                                           (ws & GoapStateBits.CanProvideOverwatch) == 0;
-                bool canExecutePinNow = (ws & (GoapStateBits.CanProvideOverwatch | GoapStateBits.CanBlindSuppressThreat)) != 0 ||
+                bool canFirePinNow = (ws & (GoapStateBits.CanProvideOverwatch | GoapStateBits.CanBlindSuppressThreat)) != 0;
+                bool canExecutePinNow = canFirePinNow ||
                                         ((ws & GoapStateBits.HasSmokeGrenade) != 0 && (ws & GoapStateBits.AllyPinningThreat) == 0);
                 bool canExecuteSupportNow = canExecutePinNow ||
                                             (ws & (GoapStateBits.NeedAmmoOrMedScavenge | GoapStateBits.ComradeNeedsLiberation | GoapStateBits.IsEntirelyAlone)) != 0 ||
@@ -1716,11 +1717,12 @@ namespace EasyRed2HumanAI
                     !(board.IsDefendingObjective && board.ObjectiveCaptureProgress >= 0.65f) &&
                     (isMedic ||
                      (ws & GoapStateBits.IsRadioman) != 0 ||
+                     ((ws & GoapStateBits.IsMachineGunner) != 0 && !canFirePinNow) ||
                      ((ws & GoapStateBits.ObjectiveCapContestUrgent) == 0 && personality == SoldierPersonality.Leader_Tactician));
 
                 bool isBaseOfFireOrPinRole =
                     !closeCqbDirectFire &&
-                    canExecutePinNow &&
+                    canFirePinNow &&
                     !isDedicatedSupportRole &&
                     board.AliveMemberCount >= 3 &&
                     !(board.IsDefendingObjective && board.ObjectiveCaptureProgress >= 0.65f) &&
@@ -1728,7 +1730,11 @@ namespace EasyRed2HumanAI
                      personality == SoldierPersonality.Gunner_Anchor ||
                      personality == SoldierPersonality.Gunner_Overwatch ||
                      ((ws & GoapStateBits.ObjectiveCapContestUrgent) == 0 && board.NetDirective == SquadNetDirective.Anvil_PinAndCallSupport) ||
-                     ((ws & GoapStateBits.AllyPinningThreat) == 0 && (ws & GoapStateBits.CanProvideOverwatch) != 0));
+                     ((ws & GoapStateBits.AllyPinningThreat) == 0 && (ws & GoapStateBits.CanProvideOverwatch) != 0) ||
+                     ((ws & (GoapStateBits.IsSuppressed | GoapStateBits.IsHeavilySuppressed | GoapStateBits.NearFreshCasualty)) != 0 &&
+                      (ws & GoapStateBits.AllyPinningThreat) == 0 &&
+                      now >= board.SmokeActiveUntil &&
+                      (ws & GoapStateBits.ObjectiveCapContestUrgent) == 0));
 
                 desiredGoalBit = isDedicatedSupportRole
                     ? GoapStateBits.SquadSupported
@@ -1755,6 +1761,9 @@ namespace EasyRed2HumanAI
                 if (!canMove && IsMovementGoapAction(a0.Id))
                     continue;
                 if ((ws & a0.Required) != a0.Required || (ws & a0.Forbidden) != 0)
+                    continue;
+                if (a0.Id == GoapActionId.BoundWithOverwatch &&
+                    !CanExecuteBoundWithOverwatch(ws, soldierPtr, ref board, now, countSelfPreservationBalk: true))
                     continue;
 
                 float cost0 = GetPersonalityAndDirectiveAdjustedCost(a0, ws, soldierPtr, ref board, personality, vet01, now, ref factionProfile, ref micro);
@@ -1818,9 +1827,14 @@ namespace EasyRed2HumanAI
                         continue;
                     if ((wsAfter0 & a1.Required) != a1.Required || (wsAfter0 & a1.Forbidden) != 0)
                         continue;
-                    if ((wsAfter0 & desiredGoalBit) == 0 &&
-                        (ws & a1.Required) == a1.Required &&
-                        (ws & a1.Forbidden) == 0)
+                    if (a1.Id == GoapActionId.BoundWithOverwatch &&
+                        !CanExecuteBoundWithOverwatch(wsAfter0, soldierPtr, ref board, now, countSelfPreservationBalk: false))
+                        continue;
+                    bool a1AlreadyLegalOnWs = (ws & a1.Required) == a1.Required &&
+                                              (ws & a1.Forbidden) == 0 &&
+                                              (a1.Id != GoapActionId.BoundWithOverwatch ||
+                                               CanExecuteBoundWithOverwatch(ws, soldierPtr, ref board, now, countSelfPreservationBalk: false));
+                    if ((wsAfter0 & desiredGoalBit) == 0 && a1AlreadyLegalOnWs)
                     {
                         continue;
                     }
@@ -1873,7 +1887,12 @@ namespace EasyRed2HumanAI
                     else if ((ws & GoapStateBits.CanBlindSuppressThreat) != 0)
                         bestStep0 = GoapActionId.SuppressThreatPosition;
                     else if (canMove && (ws & GoapStateBits.IsBleeding) == 0)
-                        bestStep0 = (ws & GoapStateBits.InCover) == 0 ? GoapActionId.SeekEmergencyCover : GoapActionId.BoundWithOverwatch;
+                    {
+                        if ((ws & GoapStateBits.InCover) == 0)
+                            bestStep0 = GoapActionId.SeekEmergencyCover;
+                        else if (CanExecuteBoundWithOverwatch(ws, soldierPtr, ref board, now, countSelfPreservationBalk: false))
+                            bestStep0 = GoapActionId.BoundWithOverwatch;
+                    }
                 }
             }
 
@@ -1889,6 +1908,39 @@ namespace EasyRed2HumanAI
                 DesiredPose = SoldierPose.Crouch,
                 LockUnitCoverChange = false
             };
+        }
+
+        private static bool CanExecuteBoundWithOverwatch(
+            GoapStateBits evalWs,
+            IntPtr soldierPtr,
+            ref SquadBlackboard board,
+            float now,
+            bool countSelfPreservationBalk)
+        {
+            if ((evalWs & GoapStateBits.ObjectiveCapContestUrgent) != 0 && board.HasActiveObjectiveTask)
+                return true;
+
+            if ((evalWs & GoapStateBits.CanFireAtVisibleEnemy) != 0)
+                return false;
+
+            if ((evalWs & (GoapStateBits.IsSuppressed | GoapStateBits.IsHeavilySuppressed | GoapStateBits.NearFreshCasualty)) != 0 &&
+                (evalWs & GoapStateBits.AllyPinningThreat) == 0 &&
+                now >= board.SmokeActiveUntil)
+            {
+                if (countSelfPreservationBalk)
+                    IndividualSelfPreservationBalksCount++;
+                return false;
+            }
+
+            if (board.HasActiveThreat &&
+                AiCore.TryGetSoldierHandles(soldierPtr, out AiCore.SoldierFastHandles bndH) &&
+                bndH.Tr != null &&
+                (bndH.Tr.position - board.ThreatPosition).sqrMagnitude <= 16.0f * 16.0f)
+            {
+                return false;
+            }
+
+            return true;
         }
 
         private static float GetPersonalityAndDirectiveAdjustedCost(
@@ -1929,7 +1981,7 @@ namespace EasyRed2HumanAI
                     else if (personality == SoldierPersonality.Medic_Heroic ||
                              personality == SoldierPersonality.Medic_Combat ||
                              personality == SoldierPersonality.Medic_Triage)
-                        cost += 1.25f;
+                        cost += (board.AliveMemberCount >= 3 ? 2.20f : 1.25f);
                     break;
 
                 case GoapActionId.FlushThreatWithFrag:
