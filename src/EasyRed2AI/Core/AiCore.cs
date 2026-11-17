@@ -4,6 +4,7 @@ using System.Diagnostics;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Text;
+using System.Threading;
 using Corvostudio.Weapons;
 using HarmonyLib;
 using Photon.Pun;
@@ -39,6 +40,7 @@ namespace EasyRed2HumanAI
         private static readonly Dictionary<long, bool> _ceilingCache = new Dictionary<long, bool>(512);
         private static readonly Dictionary<long, bool> _bridgeCellCache = new Dictionary<long, bool>(512);
         private static readonly Dictionary<IntPtr, bool> _terrainColliderCache = new Dictionary<IntPtr, bool>(64);
+        private static readonly Dictionary<IntPtr, bool> _vehicleColliderCache = new Dictionary<IntPtr, bool>(256);
         private static readonly Dictionary<string, float> _debugLogCooldowns = new Dictionary<string, float>(32);
         private static readonly Dictionary<int, (bool HasMod, float ExpireTime)> _playerModdedCache = new Dictionary<int, (bool HasMod, float ExpireTime)>(16);
         private static readonly List<Vector3> _cachedRemotePlayerPositions = new List<Vector3>(12);
@@ -155,6 +157,8 @@ namespace EasyRed2HumanAI
             public float NextSuppressiveGrenadeTime;
             public float NextSuppressiveBurstCountTime;
             public float NextCornerPieCountTime;
+            public int LastMovementRoutineRenderFrame;
+            public byte LastMovementRoutineCatchUpMode; // 0 = VanillaFallthrough, 1 = CommittedMoveSprint, 2 = CommittedMoveWalk, 3 = CornerPie
             public VeteranAndTacticsPatches.WatchWindowCache WatchWindow;
             public VeteranAndTacticsPatches.ThreatSectorCache ThreatSector;
             public VeteranAndTacticsPatches.LocalCalloutRecord LocalCallout;
@@ -245,6 +249,9 @@ namespace EasyRed2HumanAI
             public float NextIndividualFallbackTime;
             public float MedicHealStartTime;
             public IntPtr MedicHealTargetPtr;
+            public IntPtr RemountTargetVehiclePtr;
+            public float RemountAttemptStartedAt;
+            public float RemountCooldownUntil;
         }
 
         internal static void SetBotMoveOverride(SoldierFastHandles h, BotMoveOverrideKind kind, Vector3 dest, float expireTime)
@@ -1133,9 +1140,153 @@ namespace EasyRed2HumanAI
 
         public static int TotalPingGovernorSkippedCycles;
 
+        // Alt-Tab Background FPS Cap & Two-Stage .NET 6 Nursery GC Pacing
+        [DllImport("user32.dll")]
+        private static extern IntPtr GetForegroundWindow();
+
+        [DllImport("user32.dll")]
+        private static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint lpdwProcessId);
+
+        [DllImport("kernel32.dll")]
+        private static extern uint GetCurrentProcessId();
+
+        private static uint _currentProcessId;
+        private static IntPtr _lastForegroundHwnd;
+        private static float _nextWindowFocusPollUnscaledTime;
+        private static bool _isGameWindowFocused = true;
+        private static bool _backgroundFpsCapActive;
+        private static int _savedVSyncCountBeforeUnfocus = 1;
+        private static int _savedTargetFpsBeforeUnfocus = -1;
+
+        private static int _lastManagedGc0Count;
+        private static long _lastManagedGcBaselineBytes;
+        private static bool _pendingGen1FinalizerReclaim;
+        private static int _gen1ReclaimDueFrame;
+
+        public static bool IsGameWindowFocused => _isGameWindowFocused;
+
+        public static void RestoreForegroundFpsIfCapped()
+        {
+            if (!_backgroundFpsCapActive)
+                return;
+
+            _backgroundFpsCapActive = false;
+            try
+            {
+                var graphic = SavableData.Settings?.graphic;
+                if (graphic != null)
+                {
+                    graphic.ApplyTargetFrameRate();
+                    return;
+                }
+            }
+            catch { }
+
+            try
+            {
+                QualitySettings.vSyncCount = _savedVSyncCountBeforeUnfocus;
+                Application.targetFrameRate = _savedTargetFpsBeforeUnfocus;
+            }
+            catch { }
+        }
+
+        private static void UpdateWindowFocusAndBackgroundFpsCap(float unscaledNow)
+        {
+            try
+            {
+                if (unscaledNow >= _nextWindowFocusPollUnscaledTime || unscaledNow < _nextWindowFocusPollUnscaledTime - 2.0f)
+                {
+                    _nextWindowFocusPollUnscaledTime = unscaledNow + 0.20f;
+                    if (_currentProcessId == 0u)
+                        _currentProcessId = GetCurrentProcessId();
+
+                    IntPtr hwnd = GetForegroundWindow();
+                    if (hwnd != _lastForegroundHwnd)
+                    {
+                        _lastForegroundHwnd = hwnd;
+                        if (hwnd == IntPtr.Zero)
+                        {
+                            _isGameWindowFocused = false;
+                        }
+                        else
+                        {
+                            GetWindowThreadProcessId(hwnd, out uint fgPid);
+                            _isGameWindowFocused = fgPid == _currentProcessId;
+                        }
+                    }
+                }
+
+                if (!_isGameWindowFocused)
+                {
+                    if (!_backgroundFpsCapActive)
+                    {
+                        _savedVSyncCountBeforeUnfocus = QualitySettings.vSyncCount;
+                        _savedTargetFpsBeforeUnfocus = Application.targetFrameRate;
+                        QualitySettings.vSyncCount = 0;
+                        Application.targetFrameRate = 30;
+                        _backgroundFpsCapActive = true;
+                    }
+                }
+                else
+                {
+                    RestoreForegroundFpsIfCapped();
+                }
+            }
+            catch { }
+        }
+
+        private static void UpdateManagedNurseryGcPacing(float dtMs)
+        {
+            if (!_isGameWindowFocused || Time.timeSinceLevelLoad <= 5.0f || dtMs <= 0f || dtMs >= 18.0f)
+                return;
+
+            try
+            {
+                float scaledNow = Time.time;
+                if (_lastWorldSnapshotTime < 0f ||
+                    scaledNow == _lastWorldSnapshotTime ||
+                    (scaledNow - _lastWorldSnapshotTime) >= 0.30f)
+                {
+                    return;
+                }
+
+                int curFrame = Time.frameCount;
+                int gc0 = GC.CollectionCount(0);
+                long netMem = GC.GetTotalMemory(false);
+
+                if (_lastManagedGcBaselineBytes == 0L || netMem < _lastManagedGcBaselineBytes || gc0 != _lastManagedGc0Count)
+                {
+                    _lastManagedGc0Count = gc0;
+                    _lastManagedGcBaselineBytes = netMem;
+                }
+
+                if (_pendingGen1FinalizerReclaim && curFrame >= _gen1ReclaimDueFrame)
+                {
+                    // Stage 2: reclaim Gen1 finalizable wrappers already drained by CoreCLR's background Finalizer thread.
+                    GC.Collect(1, GCCollectionMode.Forced, blocking: false);
+                    _pendingGen1FinalizerReclaim = false;
+                    _lastManagedGc0Count = GC.CollectionCount(0);
+                    _lastManagedGcBaselineBytes = GC.GetTotalMemory(false);
+                }
+                else if (!_pendingGen1FinalizerReclaim &&
+                         (netMem - _lastManagedGcBaselineBytes) >= 1800L * 1024L)
+                {
+                    // Stage 1: trim small ~1.8MB Gen0 wrapper growth early before CoreCLR's ~2.6MB Gen0 budget triggers mid-WorldSnapshot.
+                    GC.Collect(0, GCCollectionMode.Forced, blocking: false);
+                    _pendingGen1FinalizerReclaim = true;
+                    _gen1ReclaimDueFrame = curFrame + 20;
+                    _lastManagedGc0Count = GC.CollectionCount(0);
+                    _lastManagedGcBaselineBytes = GC.GetTotalMemory(false);
+                }
+            }
+            catch { }
+        }
+
         public static void RecordFrameTiming()
         {
             float now = Time.unscaledTime;
+            UpdateWindowFocusAndBackgroundFpsCap(now);
+
             if (now >= _nextFrameWindowRolloverTime)
             {
                 _previousWindowMaxFrameMs = _currentWindowMaxFrameMs;
@@ -1152,6 +1303,11 @@ namespace EasyRed2HumanAI
                 return;
 
             float dtMs = dt * 1000.0f;
+            if (!_isGameWindowFocused)
+                return;
+
+            UpdateManagedNurseryGcPacing(dtMs);
+
             if (dtMs > _currentWindowMaxFrameMs)
                 _currentWindowMaxFrameMs = dtMs;
             if (dtMs > 28.0f)
@@ -1220,6 +1376,110 @@ namespace EasyRed2HumanAI
             internal string GetFormattedText() => _builder != null ? _builder.ToString() : string.Empty;
         }
 
+        private const int AsyncLogRingCapacity = 512;
+        private const int AsyncLogRingMask = AsyncLogRingCapacity - 1;
+
+        private struct AsyncLogEntry
+        {
+            public int Ready;
+            public bool IsWarning;
+            public string Message;
+        }
+
+        private static readonly AsyncLogEntry[] _asyncLogRing = new AsyncLogEntry[AsyncLogRingCapacity];
+        private static int _asyncLogWriteSeq;
+        private static int _asyncLogReadSeq;
+        private static AutoResetEvent _asyncLogWake;
+        private static Thread _asyncLogThread;
+        private static volatile bool _asyncLogThreadStarted;
+        private static readonly object _asyncLogInitLock = new object();
+
+        private static void EnsureAsyncLoggerStarted()
+        {
+            if (_asyncLogThreadStarted)
+                return;
+
+            lock (_asyncLogInitLock)
+            {
+                if (_asyncLogThreadStarted)
+                    return;
+
+                _asyncLogWake = new AutoResetEvent(false);
+                _asyncLogThread = new Thread(AsyncLoggerThreadLoop)
+                {
+                    Name = "ER2AI_AsyncLogger",
+                    IsBackground = true,
+                    Priority = System.Threading.ThreadPriority.BelowNormal
+                };
+                _asyncLogThreadStarted = true;
+                _asyncLogThread.Start();
+            }
+        }
+
+        public static void EnqueueAsyncLog(bool isWarning, string message)
+        {
+            if (string.IsNullOrEmpty(message) || Plugin.Log == null)
+                return;
+
+            EnsureAsyncLoggerStarted();
+
+            int pending = Volatile.Read(ref _asyncLogWriteSeq) - Volatile.Read(ref _asyncLogReadSeq);
+            if (pending >= AsyncLogRingCapacity - 1)
+                return;
+
+            int seq = Interlocked.Increment(ref _asyncLogWriteSeq) - 1;
+            int slot = seq & AsyncLogRingMask;
+            Volatile.Write(ref _asyncLogRing[slot].Ready, 0);
+            _asyncLogRing[slot].IsWarning = isWarning;
+            _asyncLogRing[slot].Message = message;
+            Volatile.Write(ref _asyncLogRing[slot].Ready, 1);
+            _asyncLogWake?.Set();
+        }
+
+        private static void AsyncLoggerThreadLoop()
+        {
+            while (true)
+            {
+                try
+                {
+                    _asyncLogWake.WaitOne(200);
+                    while (true)
+                    {
+                        int r = Volatile.Read(ref _asyncLogReadSeq);
+                        int w = Volatile.Read(ref _asyncLogWriteSeq);
+                        if (r == w)
+                            break;
+
+                        int slot = r & AsyncLogRingMask;
+                        if (Volatile.Read(ref _asyncLogRing[slot].Ready) == 0)
+                        {
+                            Thread.Yield();
+                            if (Volatile.Read(ref _asyncLogRing[slot].Ready) == 0)
+                                break;
+                        }
+
+                        bool isWarn = _asyncLogRing[slot].IsWarning;
+                        string msg = _asyncLogRing[slot].Message;
+                        _asyncLogRing[slot].Message = null;
+                        Volatile.Write(ref _asyncLogRing[slot].Ready, 0);
+                        Volatile.Write(ref _asyncLogReadSeq, r + 1);
+
+                        if (!string.IsNullOrEmpty(msg) && Plugin.Log != null)
+                        {
+                            if (isWarn)
+                                Plugin.Log.LogWarning(msg);
+                            else
+                                Plugin.Log.LogInfo(msg);
+                        }
+                    }
+                }
+                catch
+                {
+                    Thread.Sleep(250);
+                }
+            }
+        }
+
         public static void LogDebug(
             string category,
             [InterpolatedStringHandlerArgument("category")] DebugLogInterpolatedStringHandler message,
@@ -1230,7 +1490,7 @@ namespace EasyRed2HumanAI
 
             _debugLogCooldowns[category] = Time.unscaledTime + minInterval;
             _lastDebugLogWriteFrame = Time.frameCount;
-            Plugin.Log.LogInfo($"[Diag:{category}] {message.GetFormattedText()}");
+            EnqueueAsyncLog(false, $"[Diag:{category}] {message.GetFormattedText()}");
         }
 
         public static void LogDebug(string category, string message, float minInterval = 4.0f)
@@ -1240,7 +1500,7 @@ namespace EasyRed2HumanAI
 
             _debugLogCooldowns[category] = Time.unscaledTime + minInterval;
             _lastDebugLogWriteFrame = Time.frameCount;
-            Plugin.Log.LogInfo($"[Diag:{category}] {message}");
+            EnqueueAsyncLog(false, $"[Diag:{category}] {message}");
         }
 
         public static int GetConnectedPlayerCount()

@@ -1,6 +1,6 @@
 # Why Everything Was Changed — Vanilla Root Causes & Engineering Justifications
 
-This document explains **what vanilla *Easy Red 2* (Game Build `921`, `GameAssembly.dll`) does under the hood**, **why each behavior caused gameplay, fairness, Co-op, or performance issues**, and **how [`EasyRed2HumanAI`](../src/EasyRed2AI/Plugin.cs) (`v0.8.6`) solves it**.
+This document explains **what vanilla *Easy Red 2* (Game Build `921`, `GameAssembly.dll`) does under the hood**, **why each behavior caused gameplay, fairness, Co-op, or performance issues**, and **how [`EasyRed2HumanAI`](../src/EasyRed2AI/Plugin.cs) (`v0.9.5`) solves it**.
 
 ---
 

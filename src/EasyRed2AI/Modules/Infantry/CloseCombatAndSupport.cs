@@ -333,7 +333,7 @@ namespace EasyRed2HumanAI
         {
             blockReason = null;
             gunfireDist = -1f;
-            if (soldier == null || !(soldier.isBleeding || soldier.GetBleedValue() > 0.01f))
+            if (soldier == null || !soldier.isBleeding)
             {
                 isBleedingWithBandage = false;
                 canSafelyBandage = false;

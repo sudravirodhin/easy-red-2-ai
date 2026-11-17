@@ -218,6 +218,10 @@ namespace EasyRed2HumanAI
             _playerBalkedFlankUntil = 0f;
             _playerBalkedFlankPos = Vector3.zero;
             _spawnRescueScatterCounter = 0;
+            _minimapMarkerTextByImgPtr.Clear();
+            _lastUnitMarkerTextComp = null;
+            _lastUsedUnitMarkerIndex = -1;
+            _insideMiniMapUpdate = false;
         }
 
         private struct PendingTurretIntercomHandoff
@@ -3995,13 +3999,87 @@ namespace EasyRed2HumanAI
         }
 
         // =====================================================================
-        // Vanilla AI Fix: Smart Tank & Plane AP-vs-HE Munition Selection (TurretGun.SelectBestAmmo)
-        // In vanilla BulletData.GetEfficiencyAgainstInfantry (0x1807AB900), 75mm/40mm solid AP cannon
-        // shells score 2—the exact same score as a 7.92mm Coaxial/Wing MG (while APHE=6 and HEAT=3)!
-        // Because GetBestAmmoIndexForInfantry (0x1808369B0) iterates weapons[0] (Main Cannon) first
-        // with a strict `>` check, tanks without HE (or out of HE) and planes with AP cannons waste
-        // anti-armor shells on foot soldiers instead of switching to their Coaxial / Wing Machine Gun!
+        // Vanilla AI Fix: Smart Emplacement, Tank & Plane Munition Selection (TurretGun.SelectBestAmmo)
+        // Fixes four compounding vanilla issues in TurretGun.SelectBestAmmo (0x18083C3D0) & BulletData (0x1807ABB80):
+        // 1) Vanilla BulletData.IsHe() (0x1807ABB80) returns TRUE for ShellType.APHE (3)! Almost every tank and
+        //    AT-gun emplacement (Pak 38/40, ZiS-3, 88mm, Panzer III/IV/Tiger, T-34, Sherman) uses APHE in slot 0.
+        // 2) Vanilla GetBestAmmoIndexForInfantry (0x180836A9C) and GetBestAmmoIndexForPlane (0x180836D8E) skip any
+        //    TurretWeapon where reloadEndTime > Time.time, so single-gun emplacements (which immediately start
+        //    reloading after firing) never switch from AP/APHE to HE!
+        // 3) Vanilla classifies unarmored trucks/jeeps (VehicleWithWheels) as tanks requiring APCR, and classifies
+        //    soldiers seated inside enclosed tanks as foot infantry.
+        // 4) Against armor, vanilla ignores distance penetration falloff (CalculateMmPenetrationWithFallof) and
+        //    post-penetration APHE lethality vs solid APCR/HEAT.
         // =====================================================================
+        internal static bool IsTrueHeOrAntiInfantryRound(BulletData bd)
+        {
+            if (bd == null)
+                return false;
+            ShellType st = bd.shellType;
+            return st == ShellType.HE ||
+                   st == ShellType.Rocket ||
+                   bd.IsFire() ||
+                   bd.IsShotgun() ||
+                   bd.IsFlak();
+        }
+
+        internal static float GetVehicleMaxHullArmorMm(Vehicle veh)
+        {
+            if (veh == null || veh.Pointer == IntPtr.Zero)
+                return 0f;
+            if (veh.IsStatic() || veh.IsAirVehicle())
+                return 0f;
+
+            float maxArmor = veh.TryCast<VehicleTank>() != null ? 25f : 0f;
+            var parts = veh.damageableParts;
+            if (parts != null)
+            {
+                int count = parts.Count;
+                for (int i = 0; i < count; i++)
+                {
+                    VehicleDamagablePart p = parts[i];
+                    if (p == null) continue;
+                    if (p.TryCast<VehicleDamageableWheelPart>() != null ||
+                        p.TryCast<VehicleDamageableTrackPart>() != null ||
+                        p.TryCast<VehicleDamagableDetachablePart>() != null)
+                    {
+                        continue;
+                    }
+                    float a = (float)(int)p.armorThickness;
+                    if (a > maxArmor)
+                        maxArmor = a;
+                }
+            }
+            return maxArmor;
+        }
+
+        private static bool HasTurretWeaponAmmoInSlot(
+            TurretWeapon w,
+            int aIdx,
+            InventoryManager inv,
+            ref bool refreshedInv)
+        {
+            if (w == null)
+                return false;
+            if (w.loadedAmmo_id == aIdx && w.loadedAmmoCount > 0)
+                return true;
+
+            var ammos = w.ammos;
+            if (ammos == null || aIdx < 0 || aIdx >= ammos.Length)
+                return false;
+
+            TurretWeaponBullet slot = ammos[aIdx];
+            if (slot == null)
+                return false;
+
+            if (slot.totalStoredAmmo <= 0 && !refreshedInv && inv != null && inv.inventory != null)
+            {
+                refreshedInv = true;
+                w.RefresStoredAmmoCount(inv.inventory);
+            }
+            return slot.totalStoredAmmo > 0;
+        }
+
         [HarmonyPatch(typeof(TurretGun), nameof(TurretGun.SelectBestAmmo), new Type[] { typeof(Spottable) })]
         public static class TurretGun_SelectBestAmmo_Patch
         {
@@ -4018,83 +4096,280 @@ namespace EasyRed2HumanAI
                         return;
                     }
 
-                    // Only intervene when the target is foot infantry (not a ground/sea vehicle or aircraft)
-                    if (__0.IsWheeledVehicleOrTank() || __0.IsAirVehicle())
-                        return;
-
                     var weapons = __instance.weapons;
                     if (weapons == null || weapons.Length == 0)
                         return;
 
                     int selW = __instance.selectedWeapon_id;
                     int selA = __instance.selectedAmmo_id;
-                    if (selW < 0 || selW >= weapons.Length)
-                        return;
+                    float now = Time.time;
+                    Vehicle rootVeh = __instance.rootVehicle;
+                    InventoryManager inv = rootVeh != null ? rootVeh.GetInventory() : null;
 
-                    TurretWeapon curWeap = weapons[selW];
-                    if (curWeap == null)
-                        return;
+                    // 1. Classify target: Aircraft vs. Armored Vehicle (Hull >= 8mm) vs. Soft/Infantry/Emplacement
+                    bool isAirTarget = __0.IsAirVehicle();
+                    bool isArmoredTarget = false;
+                    float targetArmorMm = 0f;
 
-                    BulletData curBd = curWeap.GetBulletDataFor(selA);
-                    if (curBd == null)
-                        curBd = curWeap.BulletData;
-
-                    // If current selection is already true HE / Frag / Fire / Shotgun or a rapid-fire MG (< 18mm), keep it!
-                    if (curBd == null ||
-                        curBd.IsHe() ||
-                        curBd.IsFire() ||
-                        curBd.IsShotgun() ||
-                        curBd.caliber < 18.0f)
+                    if (!isAirTarget)
                     {
-                        return;
-                    }
-
-                    // Currently selected weapon/ammo is a heavy non-HE shell (AP / APHE / HEAT >= 18mm) against foot infantry!
-                    // Pass 1: Look for any weapon/ammo slot that has true HE / Fire / Shotgun with available ammo.
-                    int bestHeW = -1, bestHeA = -1;
-                    int bestMgW = -1, bestMgA = -1;
-
-                    for (int wIdx = 0; wIdx < weapons.Length; wIdx++)
-                    {
-                        TurretWeapon w = weapons[wIdx];
-                        if (w == null || w.ammos == null)
-                            continue;
-
-                        var ammos = w.ammos;
-                        for (int aIdx = 0; aIdx < ammos.Length; aIdx++)
+                        Vehicle targetVeh = __0.TryCast<Vehicle>();
+                        if (targetVeh == null)
                         {
-                            TurretWeaponBullet ammoSlot = ammos[aIdx];
-                            bool hasLoadedThisSlot = (w.loadedAmmo_id == aIdx && w.loadedAmmoCount > 0);
-                            bool hasReserve = ammoSlot != null && ammoSlot.totalStoredAmmo > 0;
-                            if (!hasLoadedThisSlot && !hasReserve)
-                                continue;
-
-                            BulletData bd = w.GetBulletDataFor(aIdx);
-                            if (bd == null)
-                                continue;
-
-                            if (bestHeW < 0 && (bd.IsHe() || bd.IsFire() || bd.IsShotgun()))
+                            Soldier targetSol = __0.TryCast<Soldier>();
+                            if (targetSol != null && targetSol.IsOnVehicle())
                             {
-                                bestHeW = wIdx;
-                                bestHeA = aIdx;
+                                Vehicle seatVeh = targetSol.GetCurrentVehicle();
+                                if (seatVeh != null && seatVeh.Pointer != IntPtr.Zero)
+                                {
+                                    if (seatVeh.IsAirVehicle())
+                                    {
+                                        isAirTarget = true;
+                                    }
+                                    else
+                                    {
+                                        Seats seat = targetSol.GetCurrentVehicleSeat();
+                                        bool exposedSeat = seat != null && seat.showUnitSet;
+                                        if (!exposedSeat)
+                                            targetVeh = seatVeh;
+                                    }
+                                }
                             }
-                            else if (bestMgW < 0 && bd.caliber < 18.0f && !w.IsLowFireRate())
-                            {
-                                bestMgW = wIdx;
-                                bestMgA = aIdx;
-                            }
+                        }
+
+                        if (targetVeh != null && !isAirTarget)
+                        {
+                            targetArmorMm = GetVehicleMaxHullArmorMm(targetVeh);
+                            if (targetArmorMm >= 8.0f)
+                                isArmoredTarget = true;
                         }
                     }
 
-                    int targetW = bestHeW >= 0 ? bestHeW : bestMgW;
-                    int targetA = bestHeW >= 0 ? bestHeA : bestMgA;
-                    if (targetW >= 0 && (targetW != selW || targetA != selA))
+                    int targetW = -1;
+                    int targetA = -1;
+
+                    if (isAirTarget)
                     {
+                        // Aircraft target: prioritize Flak / Time-Fuse Flak, then rapid-fire AA autocannon/MG, then highest plane efficiency
+                        float bestAirScore = -1f;
+                        for (int wIdx = 0; wIdx < weapons.Length; wIdx++)
+                        {
+                            TurretWeapon w = weapons[wIdx];
+                            if (w == null || w.ammos == null)
+                                continue;
+
+                            bool refreshedInv = false;
+                            bool isReady = w.nextReloadEnd <= now;
+                            bool isRapidFire = !w.IsLowFireRate();
+                            var ammos = w.ammos;
+                            for (int aIdx = 0; aIdx < ammos.Length; aIdx++)
+                            {
+                                if (!HasTurretWeaponAmmoInSlot(w, aIdx, inv, ref refreshedInv))
+                                    continue;
+
+                                BulletData bd = w.GetBulletDataFor(aIdx) ?? w.BulletData;
+                                if (bd == null)
+                                    continue;
+
+                                float score = bd.GetEfficiencyAgainstPlanes();
+                                if (bd.IsFlak())
+                                    score += 50f;
+                                if (isRapidFire)
+                                    score += 20f;
+                                if (isReady)
+                                    score += 12f;
+
+                                if (score > bestAirScore)
+                                {
+                                    bestAirScore = score;
+                                    targetW = wIdx;
+                                    targetA = aIdx;
+                                }
+                            }
+                        }
+                    }
+                    else if (isArmoredTarget)
+                    {
+                        // Armored target (Tank, Armored Car, Halftrack with >= 8mm armor):
+                        // Evaluate effective penetration at target distance (CalculateMmPenetrationWithFallof),
+                        // preferring APHE when penetration suffices to pierce the target's armor, and APCR/HEAT when
+                        // maximum penetration is required. Fall back to heavy HE (>= 37mm) before coaxial MGs.
+                        float dist = __instance.transform != null
+                            ? Vector3.Distance(__instance.transform.position, __0.GetPosition())
+                            : 100f;
+                        float penThreshold = Mathf.Max(8f, targetArmorMm * 0.85f);
+                        float bestArmorScore = -1f;
+
+                        for (int wIdx = 0; wIdx < weapons.Length; wIdx++)
+                        {
+                            TurretWeapon w = weapons[wIdx];
+                            if (w == null || w.ammos == null)
+                                continue;
+
+                            bool refreshedInv = false;
+                            var ammos = w.ammos;
+                            for (int aIdx = 0; aIdx < ammos.Length; aIdx++)
+                            {
+                                if (!HasTurretWeaponAmmoInSlot(w, aIdx, inv, ref refreshedInv))
+                                    continue;
+
+                                BulletData bd = w.GetBulletDataFor(aIdx) ?? w.BulletData;
+                                if (bd == null)
+                                    continue;
+
+                                float kinPen = bd.CalculateMmPenetrationWithFallof(dist);
+                                float effPen = Mathf.Max(kinPen, bd.explosion_penetration);
+                                ShellType st = bd.shellType;
+
+                                float score;
+                                if (effPen >= penThreshold)
+                                {
+                                    // Round can penetrate target at this distance: prefer APHE > HEAT > solid AP/APCR > HE
+                                    float typeBonus = st == ShellType.APHE
+                                        ? 220f
+                                        : (st == ShellType.HEAT
+                                            ? 175f
+                                            : (st == ShellType.AP ? 140f : 80f));
+                                    score = 1000f + typeBonus + Mathf.Min(effPen, 250f) * 0.25f;
+                                }
+                                else if (effPen >= 12f)
+                                {
+                                    // Target armor is thick: rank strictly by effective penetration at distance
+                                    score = effPen * 5.0f + (st == ShellType.APHE ? 8f : 0f);
+                                }
+                                else if (bd.caliber >= 37f && IsTrueHeOrAntiInfantryRound(bd))
+                                {
+                                    // Out of AP/HEAT: heavy HE cannon shell can still track/concuss armor better than small-caliber MG
+                                    score = 25f + bd.caliber * 0.15f;
+                                }
+                                else
+                                {
+                                    score = effPen;
+                                }
+
+                                if (score > bestArmorScore)
+                                {
+                                    bestArmorScore = score;
+                                    targetW = wIdx;
+                                    targetA = aIdx;
+                                }
+                            }
+                        }
+                    }
+                    else
+                    {
+                        // Soft target (Foot Infantry, Exposed Crew, Static Gun Emplacement, or Unarmored Truck/Jeep):
+                        // 1) Find best True HE / Frag / Flak / Fire / Shotgun slot (both ready-now and reloading).
+                        // 2) Find best rapid-fire Coaxial / Wing MG (< 20mm) for firing while a tank's main gun reloads
+                        //    or when the main gun has no true HE left (never waste AP/APHE/HEAT cannon shells on foot infantry
+                        //    when HE or a Coaxial MG is available!).
+                        int bestReadyHeW = -1, bestReadyHeA = -1;
+                        float bestReadyHeScore = -1f;
+
+                        int bestAnyHeW = -1, bestAnyHeA = -1;
+                        float bestAnyHeScore = -1f;
+
+                        int bestMgW = -1, bestMgA = -1;
+                        float bestMgScore = -1f;
+
+                        for (int wIdx = 0; wIdx < weapons.Length; wIdx++)
+                        {
+                            TurretWeapon w = weapons[wIdx];
+                            if (w == null || w.ammos == null)
+                                continue;
+
+                            bool refreshedInv = false;
+                            bool isReady = w.nextReloadEnd <= now;
+                            bool isRapidFire = !w.IsLowFireRate();
+                            var ammos = w.ammos;
+                            for (int aIdx = 0; aIdx < ammos.Length; aIdx++)
+                            {
+                                if (!HasTurretWeaponAmmoInSlot(w, aIdx, inv, ref refreshedInv))
+                                    continue;
+
+                                BulletData bd = w.GetBulletDataFor(aIdx) ?? w.BulletData;
+                                if (bd == null)
+                                    continue;
+
+                                if (IsTrueHeOrAntiInfantryRound(bd))
+                                {
+                                    float heScore = bd.GetEfficiencyAgainstInfantry() * 10f + Mathf.Min(bd.caliber, 150f) * 0.2f;
+                                    if (heScore > bestAnyHeScore)
+                                    {
+                                        bestAnyHeScore = heScore;
+                                        bestAnyHeW = wIdx;
+                                        bestAnyHeA = aIdx;
+                                    }
+                                    if (isReady && heScore > bestReadyHeScore)
+                                    {
+                                        bestReadyHeScore = heScore;
+                                        bestReadyHeW = wIdx;
+                                        bestReadyHeA = aIdx;
+                                    }
+                                }
+                                else if (isRapidFire && bd.caliber < 20.0f)
+                                {
+                                    float mgScore = bd.GetEfficiencyAgainstInfantry() * 10f + (isReady ? 5f : 0f);
+                                    if (mgScore > bestMgScore)
+                                    {
+                                        bestMgScore = mgScore;
+                                        bestMgW = wIdx;
+                                        bestMgA = aIdx;
+                                    }
+                                }
+                            }
+                        }
+
+                        // If a cannon has a True HE slot available (bestAnyHeW >= 0) but currently has AP/APHE/HEAT loaded,
+                        // trigger Reload(bestAnyHeA) on that cannon immediately so the breech loads HE for the next shot!
+                        if (bestAnyHeW >= 0)
+                        {
+                            TurretWeapon heWeap = weapons[bestAnyHeW];
+                            if (heWeap != null && heWeap.loadedAmmo_id != bestAnyHeA)
+                            {
+                                heWeap.Reload((short)bestAnyHeA, inv, null, false, false);
+                            }
+                        }
+
+                        if (bestReadyHeW >= 0)
+                        {
+                            targetW = bestReadyHeW;
+                            targetA = bestReadyHeA;
+                        }
+                        else if (bestMgW >= 0)
+                        {
+                            targetW = bestMgW;
+                            targetA = bestMgA;
+                        }
+                        else if (bestAnyHeW >= 0)
+                        {
+                            targetW = bestAnyHeW;
+                            targetA = bestAnyHeA;
+                        }
+                    }
+
+                    if (targetW >= 0 && targetW < weapons.Length && targetA >= 0)
+                    {
+                        bool changed = (targetW != selW || targetA != selA);
                         __instance.selectedWeapon_id = (short)targetW;
                         __instance.selectedAmmo_id = (short)targetA;
                         __result = true;
-                        SmartAmmoSwitchesCount++;
-                        AiCore.LogDebug("SmartAmmo", $"Switched turret '{__instance.name}' from heavy AP ({curBd.caliber:F0}mm) to {(bestHeW >= 0 ? "HE" : "Coaxial/Wing MG")} vs infantry.");
+
+                        TurretWeapon chosenWeap = weapons[targetW];
+                        if (chosenWeap != null && chosenWeap.loadedAmmo_id != targetA)
+                        {
+                            chosenWeap.Reload((short)targetA, inv, null, false, false);
+                        }
+
+                        if (changed)
+                        {
+                            SmartAmmoSwitchesCount++;
+                            if (VisionConfig.DebugLogging.Value)
+                            {
+                                BulletData chosenBd = chosenWeap != null ? (chosenWeap.GetBulletDataFor(targetA) ?? chosenWeap.BulletData) : null;
+                                AiCore.LogDebug("SmartAmmo", $"Turret '{__instance.name}' selected weapon[{targetW}] ammo[{targetA}] (shell:{chosenBd?.shellType}, cal:{chosenBd?.caliber:F0}mm) vs {(isAirTarget ? "Air" : (isArmoredTarget ? $"Armor({targetArmorMm:F0}mm)" : "Soft/Infantry"))}.");
+                            }
+                        }
                     }
                 }
                 catch { }

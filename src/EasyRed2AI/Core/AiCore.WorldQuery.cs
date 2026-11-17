@@ -121,9 +121,9 @@ namespace EasyRed2HumanAI
                     if (ReferenceEquals(u, null) || u == null || u.Pointer == IntPtr.Zero)
                         continue;
 
-                    if (u.IsOnVehicle())
+                    Vehicle veh = u.IsOnVehicle() ? u.GetCurrentVehicle() : u.VehicleToOperate();
+                    if (veh != null && veh.Pointer != IntPtr.Zero)
                     {
-                        Vehicle veh = u.GetCurrentVehicle();
                         VehicleFastHandles vh = GetOrCreateVehicleHandles(veh);
                         if (vh != null && !vh.IsParachute)
                         {
@@ -585,7 +585,7 @@ namespace EasyRed2HumanAI
             return false;
         }
 
-        private static bool TryNormalizeFootSpawnPoint(Vector3 rawPos, out Vector3 groundedPos)
+        public static bool TryNormalizeFootSpawnPoint(Vector3 rawPos, out Vector3 groundedPos)
         {
             groundedPos = rawPos;
             if (TrySampleDryGroundAltitude(rawPos, out float groundY))
@@ -1063,7 +1063,8 @@ namespace EasyRed2HumanAI
             out Vector3 snappedTargetPos,
             out float flatDist,
             float maxFlatDist = 2.8f,
-            float maxStepDeltaY = 0.75f)
+            float maxStepDeltaY = 0.75f,
+            float maxStepDownDeltaY = -1f)
         {
             snappedTargetPos = rawTargetPos;
             Vector3 flatDelta = rawTargetPos - fromFeetPos;
@@ -1071,11 +1072,19 @@ namespace EasyRed2HumanAI
             float flatSq = flatDelta.sqrMagnitude;
             flatDist = flatSq > 1e-8f ? Mathf.Sqrt(flatSq) : 0f;
 
-            if (flatDist > maxFlatDist || Mathf.Abs(rawTargetPos.y - fromFeetPos.y) > 1.05f)
+            bool steppingOffVehicleHull = IsFootBotStandingOnVehicleHull(fromFeetPos);
+            float effectiveMaxUpY = steppingOffVehicleHull ? Mathf.Max(maxStepDeltaY, 2.85f) : maxStepDeltaY;
+            float requestedDownY = maxStepDownDeltaY > maxStepDeltaY ? maxStepDownDeltaY : maxStepDeltaY;
+            float effectiveMaxDownY = steppingOffVehicleHull ? Mathf.Max(requestedDownY, 2.85f) : requestedDownY;
+            float maxRawUpY = Mathf.Max(1.05f, effectiveMaxUpY + 0.35f);
+            float maxRawDownY = Mathf.Max(1.05f, effectiveMaxDownY + 0.35f);
+
+            float rawDeltaY = rawTargetPos.y - fromFeetPos.y;
+            if (flatDist > maxFlatDist || rawDeltaY > maxRawUpY || rawDeltaY < -maxRawDownY)
                 return false;
 
             // Sub-12cm in-place nudge: keep current floor Y so micro-jitter never drifts vertically.
-            if (flatSq <= 0.12f * 0.12f)
+            if (!steppingOffVehicleHull && flatSq <= 0.12f * 0.12f)
             {
                 snappedTargetPos = new Vector3(rawTargetPos.x, fromFeetPos.y, rawTargetPos.z);
                 return true;
@@ -1083,7 +1092,7 @@ namespace EasyRed2HumanAI
 
             int solidMask = GetSolidEnvironmentMask();
             float probeTopY = Mathf.Max(fromFeetPos.y, rawTargetPos.y) + 0.75f;
-            float probeDist = (probeTopY - fromFeetPos.y) + maxStepDeltaY + 0.15f;
+            float probeDist = (probeTopY - fromFeetPos.y) + effectiveMaxDownY + 0.15f;
             if (!Physics.Raycast(
                     new Vector3(rawTargetPos.x, probeTopY, rawTargetPos.z),
                     Vector3.down,
@@ -1092,12 +1101,50 @@ namespace EasyRed2HumanAI
                     solidMask,
                     QueryTriggerInteraction.Ignore) ||
                 floorHit.normal.y < 0.58f ||
-                Mathf.Abs(floorHit.point.y - fromFeetPos.y) > maxStepDeltaY)
+                IsVehicleCollider(floorHit.collider))
             {
                 return false;
             }
 
+            float snappedDeltaY = floorHit.point.y - fromFeetPos.y;
+            if (snappedDeltaY > effectiveMaxUpY || snappedDeltaY < -effectiveMaxDownY)
+                return false;
+
             snappedTargetPos = new Vector3(rawTargetPos.x, floorHit.point.y, rawTargetPos.z);
+
+            Vector3 dir = flatDist > 1e-4f ? (flatDelta / flatDist) : Vector3.forward;
+
+            // When intentionally stepping down off a >0.45m elevated ledge/rubble/wreck/hull onto lower ground,
+            // validate horizontal chest-height exit clearance and destination landing capsule instead of casting a
+            // diagonal +0.34m chord straight into the ledge corner the bot is currently perched on.
+            if (snappedDeltaY < -0.45f && (steppingOffVehicleHull || effectiveMaxDownY > 0.85f))
+            {
+                if (flatDist > 0.12f)
+                {
+                    Vector3 chestStart = fromFeetPos + Vector3.up * 0.90f;
+                    Vector3 chestEnd = new Vector3(snappedTargetPos.x, chestStart.y, snappedTargetPos.z);
+                    if ((Physics.Linecast(chestStart, chestEnd, out RaycastHit chestFwdHit, solidMask, QueryTriggerInteraction.Ignore) &&
+                         (!steppingOffVehicleHull || !IsVehicleCollider(chestFwdHit.collider))) ||
+                        (Physics.Linecast(chestEnd, chestStart, out RaycastHit chestRevHit, solidMask, QueryTriggerInteraction.Ignore) &&
+                         (!steppingOffVehicleHull || !IsVehicleCollider(chestRevHit.collider))) ||
+                        (!steppingOffVehicleHull && IsMovementBlockedByObstacle(chestStart, dir, Mathf.Min(flatDist, 2.2f))))
+                    {
+                        return false;
+                    }
+                }
+
+                if (Physics.CheckCapsule(
+                        snappedTargetPos + Vector3.up * 0.54f,
+                        snappedTargetPos + Vector3.up * 1.45f,
+                        0.24f,
+                        GetMovementObstacleMask(),
+                        QueryTriggerInteraction.Ignore))
+                {
+                    return false;
+                }
+
+                return true;
+            }
 
             // Bidirectional +0.34m chord check: catches one-sided Unity MeshCollider floor slabs/ceilings
             // both when stepping downward off/through an upper floor and upward under a stair/ceiling slab,
@@ -1105,15 +1152,16 @@ namespace EasyRed2HumanAI
             Vector3 startLift = fromFeetPos + Vector3.up * 0.34f;
             Vector3 endLift = snappedTargetPos + Vector3.up * 0.34f;
             if ((Physics.Linecast(startLift, endLift, out RaycastHit fwdHit, solidMask, QueryTriggerInteraction.Ignore) &&
-                 (!IsTerrainCollider(fwdHit.collider) || Mathf.Abs(fwdHit.normal.y) < 0.62f)) ||
+                 (!IsTerrainCollider(fwdHit.collider) || Mathf.Abs(fwdHit.normal.y) < 0.62f) &&
+                 (!steppingOffVehicleHull || !IsVehicleCollider(fwdHit.collider))) ||
                 (Physics.Linecast(endLift, startLift, out RaycastHit revHit, solidMask, QueryTriggerInteraction.Ignore) &&
-                 (!IsTerrainCollider(revHit.collider) || Mathf.Abs(revHit.normal.y) < 0.62f)))
+                 (!IsTerrainCollider(revHit.collider) || Mathf.Abs(revHit.normal.y) < 0.62f) &&
+                 (!steppingOffVehicleHull || !IsVehicleCollider(revHit.collider))))
             {
                 return false;
             }
 
-            Vector3 dir = flatDelta / flatDist;
-            if (IsMovementBlockedByObstacle(fromFeetPos + Vector3.up * 0.48f, dir, flatDist))
+            if (flatDist > 0.12f && !steppingOffVehicleHull && IsMovementBlockedByObstacle(fromFeetPos + Vector3.up * 0.48f, dir, flatDist))
                 return false;
 
             return true;
@@ -1207,14 +1255,21 @@ namespace EasyRed2HumanAI
             int smokeMask = GetSmokeOcclusionMask();
             int lineMask = smokeMask | (1 << 4); // Smoke volumes (TransparentFX) + local Water colliders (Layer 4)
             float distSq = (impactPos - camPos).sqrMagnitude;
-            if (distSq > 0.25f && Physics.Linecast(camPos, impactPos, lineMask))
-                return true;
+            if (distSq > 0.25f)
+            {
+                if (Physics.Linecast(camPos, impactPos, lineMask, QueryTriggerInteraction.Collide) ||
+                    Physics.Linecast(camPos, impactPos + Vector3.up * 0.75f, lineMask, QueryTriggerInteraction.Collide))
+                {
+                    return true;
+                }
+            }
 
             // PhysX Linecast starting inside a SphereCollider skips its own shell; CheckSphere catches inside-smoke hits
-            if (distSq > 4.0f && Physics.CheckSphere(impactPos, 0.20f, smokeMask))
+            // as well as low-body hits whose 1.5m blood mist cloud blooms into an adjacent smoke volume.
+            if (distSq > 2.25f && Physics.CheckSphere(impactPos + Vector3.up * 0.35f, 1.15f, smokeMask, QueryTriggerInteraction.Collide))
                 return true;
 
-            if (distSq > 6.25f && Physics.CheckSphere(camPos, 0.15f, smokeMask))
+            if (distSq > 4.0f && Physics.CheckSphere(camPos, 0.35f, smokeMask, QueryTriggerInteraction.Collide))
                 return true;
 
             return false;
@@ -1318,6 +1373,62 @@ namespace EasyRed2HumanAI
             return isTerrain;
         }
 
+        /// <summary>
+        /// Pointer-cached check identifying colliders belonging to a <see cref="Vehicle"/> hull, turret,
+        /// or chassis so foot bots never vault onto, or snap walkable ground destinations onto, vehicle roofs.
+        /// </summary>
+        public static bool IsVehicleCollider(Collider col)
+        {
+            if (ReferenceEquals(col, null) || col == null)
+                return false;
+
+            IntPtr ptr = col.Pointer;
+            if (ptr == IntPtr.Zero)
+                return false;
+
+            if (_vehicleColliderCache.TryGetValue(ptr, out bool cached))
+                return cached;
+
+            bool isVeh = false;
+            try
+            {
+                Rigidbody rb = col.attachedRigidbody;
+                if (rb != null && rb.GetComponent<Vehicle>() != null)
+                {
+                    isVeh = true;
+                }
+                else if (col.transform != null)
+                {
+                    Transform root = col.transform.root;
+                    if (root != null && root.GetComponent<Vehicle>() != null)
+                        isVeh = true;
+                    else if (col.GetComponentInParent<Vehicle>() != null)
+                        isVeh = true;
+                }
+            }
+            catch { }
+
+            if (_vehicleColliderCache.Count > 1024)
+                _vehicleColliderCache.Clear();
+            _vehicleColliderCache[ptr] = isVeh;
+            return isVeh;
+        }
+
+        /// <summary>
+        /// Returns <c>true</c> if a dismounted foot bot's feet are currently resting on top of a <see cref="Vehicle"/> collider.
+        /// </summary>
+        public static bool IsFootBotStandingOnVehicleHull(Vector3 feetPos)
+        {
+            return Physics.Raycast(
+                       feetPos + Vector3.up * 0.45f,
+                       Vector3.down,
+                       out RaycastHit hit,
+                       1.15f,
+                       GetSolidEnvironmentMask(),
+                       QueryTriggerInteraction.Ignore) &&
+                   IsVehicleCollider(hit.collider);
+        }
+
         public static bool IsOnBridgeOrNarrowCrossing(Vector3 feetPos)
         {
             // Quantize to 2m x 1m x 2m spatial grid cell so bridge/crossing checks are O(1) after first probe
@@ -1408,7 +1519,8 @@ namespace EasyRed2HumanAI
             float maxNonTerrainDeltaY,
             bool hasWater,
             float waterLevel,
-            out Vector3 snappedGroundPos)
+            out Vector3 snappedGroundPos,
+            float maxNonTerrainDownDeltaY = -1f)
         {
             snappedGroundPos = probePos;
             int envMask = GetSolidEnvironmentMask();
@@ -1424,8 +1536,31 @@ namespace EasyRed2HumanAI
                 return false;
             }
 
+            Collider gCol = gHit.collider;
             int obsMask = 0;
             bool verifiedTerrain = false;
+
+            if (IsVehicleCollider(gCol))
+            {
+                float vehSubDist = (gHit.point.y - 0.15f) - (topY - maxRayDist);
+                if (vehSubDist <= 0.05f ||
+                    !Physics.Raycast(
+                        new Vector3(probePos.x, gHit.point.y - 0.15f, probePos.z),
+                        Vector3.down,
+                        out RaycastHit vehSubHit,
+                        vehSubDist,
+                        envMask,
+                        QueryTriggerInteraction.Ignore) ||
+                    (gHit.point.y - vehSubHit.point.y) < 1.90f)
+                {
+                    return false;
+                }
+
+                gHit = vehSubHit;
+                gCol = vehSubHit.collider;
+                if (IsVehicleCollider(gCol))
+                    return false;
+            }
 
             // If an elevated ray (lifted high enough for steep >45 deg TerrainCollider climbs) hits an overhead
             // non-terrain roof, 2nd-floor slab, or bridge deck above currentFeetPos.y + maxNonTerrainDeltaY,
@@ -1433,7 +1568,7 @@ namespace EasyRed2HumanAI
             // still resolve walkable ground while sealed sheds/buildings remain blocked by their exterior walls.
             if (gHit.point.y - currentFeetPos.y > maxNonTerrainDeltaY)
             {
-                if (IsTerrainCollider(gHit.collider))
+                if (IsTerrainCollider(gCol))
                 {
                     verifiedTerrain = true;
                 }
@@ -1469,6 +1604,9 @@ namespace EasyRed2HumanAI
                     }
 
                     gHit = subHit;
+                    gCol = subHit.collider;
+                    if (IsVehicleCollider(gCol))
+                        return false;
                 }
             }
 
@@ -1480,10 +1618,11 @@ namespace EasyRed2HumanAI
 
             // Reject unreachable building/shed/bunker rooftops and deep cellar/canal drops on non-terrain
             // colliders while allowing full TerrainCollider hillside climbs/descents.
-            // Short-circuit on unmanaged |Δy| first so flat/gentle probes allocate zero IL2CPP Collider wrappers.
+            float effectiveDownLimit = maxNonTerrainDownDeltaY > maxNonTerrainDeltaY ? maxNonTerrainDownDeltaY : maxNonTerrainDeltaY;
+            float deltaY = gHit.point.y - currentFeetPos.y;
             if (!verifiedTerrain &&
-                Mathf.Abs(gHit.point.y - currentFeetPos.y) > maxNonTerrainDeltaY &&
-                !IsTerrainCollider(gHit.collider))
+                (deltaY > maxNonTerrainDeltaY || deltaY < -effectiveDownLimit) &&
+                !IsTerrainCollider(gCol))
             {
                 return false;
             }
@@ -2049,7 +2188,9 @@ namespace EasyRed2HumanAI
                         SoldierFastHandles refHandles = leaderAlive ? leaderHandles : null;
                         int unitStart = WorldSoldierCount;
                         int addedUnits = 0;
+                        bool isPlayerInSq = sq.IsPlayerInSquad();
                         bool hasAliveRadiomanNear = false;
+                        float maxRadDistSq = isPlayerInSq ? (95f * 95f) : (60f * 60f);
                         Vector3 leaderPos = leaderAlive ? leaderHandles.Tr.position : Vector3.zero;
 
                         for (int i = 0; i < uCount; i++)
@@ -2095,9 +2236,9 @@ namespace EasyRed2HumanAI
 
                             Vector3 uPos = uHandles.Tr.position;
                             bool uSurr = u.HasSurrended();
-                            if (leaderAlive && radioNetEnabled && !hasAliveRadiomanNear && u.IsRadioman() && !uSurr)
+                            if (radioNetEnabled && !hasAliveRadiomanNear && u.IsRadioman() && !uSurr)
                             {
-                                if ((uPos - leaderPos).sqrMagnitude <= 32f * 32f)
+                                if (!leaderAlive || (uPos - leaderPos).sqrMagnitude <= maxRadDistSq)
                                     hasAliveRadiomanNear = true;
                             }
 
@@ -2154,9 +2295,10 @@ namespace EasyRed2HumanAI
                                 refOnPlane = true;
                         }
 
-                        bool isPlayerInSq = sq.IsPlayerInSquad();
                         bool hasIntrinsicRadio = !radioNetEnabled ||
-                                                 (leaderAlive && (leaderHasOnboardRadio || hasAliveRadiomanNear || sq.RadioRequestActiveAndConfirmed()));
+                                                 leaderHasOnboardRadio ||
+                                                 hasAliveRadiomanNear ||
+                                                 (leaderAlive && sq.RadioRequestActiveAndConfirmed());
 
                         bool spottedOrAware = sq.IsEnemyAwareOfThisSquad ||
                                               sq.isMarked ||
@@ -2642,6 +2784,7 @@ namespace EasyRed2HumanAI
             _ceilingCache.Clear();
             _bridgeCellCache.Clear();
             _terrainColliderCache.Clear();
+            _vehicleColliderCache.Clear();
             _sameSideFactionCache.Clear();
             _enemyFactionCache.Clear();
             _enemySpawnDirCache.Clear();
@@ -2689,6 +2832,9 @@ namespace EasyRed2HumanAI
             TotalHitchesOver28ms = 0;
             _currentWindowMaxFrameMs = 0f;
             _previousWindowMaxFrameMs = 0f;
+            _pendingGen1FinalizerReclaim = false;
+            _lastManagedGcBaselineBytes = 0L;
+            RestoreForegroundFpsIfCapped();
             _nextFrameWindowRolloverTime = 0f;
             _nextWatchObjectiveSnapshotTime = 0f;
             _watchObjectiveSnapshotCount = 0;

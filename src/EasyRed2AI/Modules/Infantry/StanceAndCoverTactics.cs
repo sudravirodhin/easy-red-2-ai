@@ -49,7 +49,7 @@ namespace EasyRed2HumanAI
             AiCore.SoldierFastHandles sh = AiCore.GetOrCreateSoldierHandles(soldier);
 
             // Indoor Ceiling & Bridge Prone Prevention: prevent dropping Prone under windowsills/stairs or on bridge decks
-            if (pose == SoldierPose.Prone && !(soldier.isBleeding || soldier.GetBleedValue() > 0.01f))
+            if (pose == SoldierPose.Prone && !soldier.isBleeding)
             {
                 Vector3 feetPos = soldier.transform.position;
                 if (VisionConfig.EnableIndoorCeilingPronePrevention.Value &&
@@ -101,11 +101,20 @@ namespace EasyRed2HumanAI
                 return;
             }
 
-            bool isUrgentTransition = forceImmediate ||
-                                      (soldier.m_pose != SoldierPose.Idle && pose == SoldierPose.Idle && ai.IsMoving()) ||
-                                      (soldier.m_pose == SoldierPose.Prone && ai.IsMoving()) ||
-                                      (soldier.m_pose == SoldierPose.Idle && pose >= SoldierPose.Crouch && !ai.IsMoving() &&
-                                       (ai.HasEnemyAndCanFireAtHim || soldier.GetSuppressionValue() >= 15f));
+            bool blockCombativeStandOverride = pose == SoldierPose.Idle &&
+                                               soldier.m_pose >= SoldierPose.Crouch &&
+                                               ai.HasEnemyAndCanFireAtHim &&
+                                               !soldier.IsCharging() &&
+                                               !soldier.IsJumping() &&
+                                               sh != null &&
+                                               Time.time < sh.Stance.PoseLockUntil;
+
+            bool isUrgentTransition = !blockCombativeStandOverride &&
+                                      (forceImmediate ||
+                                       (soldier.m_pose != SoldierPose.Idle && pose == SoldierPose.Idle && ai.IsMoving()) ||
+                                       (soldier.m_pose == SoldierPose.Prone && ai.IsMoving()) ||
+                                       (soldier.m_pose == SoldierPose.Idle && pose >= SoldierPose.Crouch && !ai.IsMoving() &&
+                                        (ai.HasEnemyAndCanFireAtHim || soldier.GetSuppressionValue() >= 15f)));
 
             if (!isUrgentTransition && sh != null)
             {
@@ -220,6 +229,14 @@ namespace EasyRed2HumanAI
         {
             if (stealthCrouch)
                 return SoldierPose.Crouch;
+
+            if (!ReferenceEquals(ai, null) &&
+                !ai.IsMoving() &&
+                ai.HasEnemyAndCanFireAtHim &&
+                (ReferenceEquals(soldier, null) || !soldier.IsCharging()))
+            {
+                return SoldierPose.Crouch;
+            }
 
             IntPtr ptr = !ReferenceEquals(soldier, null) ? soldier.Pointer : IntPtr.Zero;
             if (IsActivelyDuckingFriendlyMuzzle(ptr, Time.time))
@@ -1611,9 +1628,18 @@ namespace EasyRed2HumanAI
                                 if (exposedCrew != null)
                                 {
                                     Spottable crewSpottable = exposedCrew.Cast<Spottable>();
+                                    float crewDist = Vector3.Distance(soldier.transform.position, exposedCrew.transform.position);
                                     __instance.visibleTarget = crewSpottable;
                                     soldier.CurrentVisibleTarget = crewSpottable;
-                                    __instance.distFromTarget = Vector3.Distance(soldier.transform.position, exposedCrew.transform.position);
+                                    __instance.distFromTarget = crewDist;
+                                    GenericGun heldGun = soldier.GetHeldGun();
+                                    bool inRange = heldGun == null || heldGun.DamageRange() >= crewDist;
+                                    __instance.targetInWeaponRange = inRange;
+                                    if (inRange && !soldier.HasMovementsSlowed())
+                                    {
+                                        __instance.allowFireAtEnemy = true;
+                                        __instance.moveLookingTarget = true;
+                                    }
                                     RecordAndBroadcastVisualContact(soldier, crewSpottable);
                                     if (Time.time >= h.Combat.NextTankDisciplineCountTime)
                                     {
@@ -1625,14 +1651,20 @@ namespace EasyRed2HumanAI
                             else if (!hasStowedAtReady)
                             {
                                 // Switch any rifleman, MG gunner, or dry AT unit away from an invulnerable tank
-                                // to visible enemy infantry advancing behind or beside the tank!
+                                // to visible enemy infantry or bailed crewmen advancing behind or beside the tank!
                                 if (TryFindVisibleFootEnemy(soldier, out Spottable altEnemy, out float altDist))
                                 {
                                     __instance.visibleTarget = altEnemy;
                                     soldier.CurrentVisibleTarget = altEnemy;
                                     __instance.distFromTarget = altDist;
                                     GenericGun heldGun = soldier.GetHeldGun();
-                                    __instance.targetInWeaponRange = heldGun != null && heldGun.DamageRange() >= altDist;
+                                    bool inRange = heldGun != null && heldGun.DamageRange() >= altDist;
+                                    __instance.targetInWeaponRange = inRange;
+                                    if (inRange && !soldier.HasMovementsSlowed())
+                                    {
+                                        __instance.allowFireAtEnemy = true;
+                                        __instance.moveLookingTarget = true;
+                                    }
                                     RecordAndBroadcastVisualContact(soldier, altEnemy);
                                 }
                                 else
@@ -1858,7 +1890,7 @@ namespace EasyRed2HumanAI
                     {
                         SetBotPose(__instance, soldier, SoldierPose.Crouch);
                     }
-                    else if (isEffectivelyMoving)
+                    else if (isEffectivelyMoving && (__instance.IsMoving() || !__instance.HasEnemyAndCanFireAtHim || soldier.IsCharging() || inPointBlankMelee))
                     {
                         bool inFallbackSprint = IsInIndividualOrGoapFallback(ptr, Time.time);
                         Vector3 moveEndpoint = GetActualMoveEndpoint(__instance, soldier);
@@ -2460,6 +2492,22 @@ namespace EasyRed2HumanAI
                                     customTargetPos = __0;
                                     dist = Vector3.Distance(myPos, __0);
                                 }
+                            }
+                            else if (TryFindVisibleFootEnemy(soldier, out Spottable rotAltEnemy, out float rotAltDist))
+                            {
+                                __instance.visibleTarget = rotAltEnemy;
+                                soldier.CurrentVisibleTarget = rotAltEnemy;
+                                __instance.distFromTarget = rotAltDist;
+                                __instance.targetInWeaponRange = true;
+                                if (!soldier.HasMovementsSlowed())
+                                {
+                                    __instance.allowFireAtEnemy = true;
+                                    __instance.moveLookingTarget = true;
+                                }
+                                __0 = rotAltEnemy.GetCenterOfUnit();
+                                hasCustomTarget = true;
+                                customTargetPos = __0;
+                                dist = rotAltDist;
                             }
                             else
                             {

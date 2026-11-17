@@ -190,7 +190,7 @@ namespace EasyRed2HumanAI
                 BulletData bd = ammoItem.GetBulletData();
                 if (bd != null)
                 {
-                    if (bd.IsHe() || bd.IsFire() || bd.explosion_penetration > 10f || bd.mmPenetration > 25)
+                    if (IsTrueHeOrAntiInfantryRound(bd) || bd.explosion_penetration > 10f || bd.mmPenetration > 25)
                     {
                         isExplosiveOrFlame = true;
                     }
@@ -480,6 +480,82 @@ namespace EasyRed2HumanAI
             }
 
             return false;
+        }
+
+        // =====================================================================
+        // Vanilla AI Fix: Handheld AT vs. Primary Firearm Selection (SoldierAI.UseBestWearedWeaponCheck)
+        // In vanilla SoldierAI.UseBestWearedWeaponCheck (0x180561950):
+        // 1) Vanilla only checks if visibleTarget is VehicleTank (0x180561B2E). When targeting an armored
+        //    VehicleWithWheels (halftrack / armored car), vanilla thinks the target is NOT a vehicle and
+        //    switches the soldier AWAY from their AT launcher back to their rifle (SwitchTo(1))!
+        // 2) Conversely, if a non-isAtUnit soldier scavenged an AT launcher into Slot 0 (or switched to an
+        //    AT weapon against armor) and now targets foot infantry, ensure they switch back to a standard
+        //    firearm/sidearm if they have one with ammo.
+        // =====================================================================
+        [HarmonyPatch(typeof(SoldierAI), nameof(SoldierAI.UseBestWearedWeaponCheck))]
+        public static class SoldierAI_UseBestWearedWeaponCheck_Patch
+        {
+            public static bool Prefix(SoldierAI __instance)
+            {
+                try
+                {
+                    if (!VisionConfig.EnableMod.Value || __instance == null)
+                        return true;
+
+                    Soldier soldier = __instance.character;
+                    if (!AiCore.IsLocallyOwnedBot(soldier) ||
+                        soldier.IsOnVehicle() ||
+                        soldier.isInHandsAnimation ||
+                        soldier.isInBodyAnimation ||
+                        !soldier.CanSwitchHeldItem)
+                    {
+                        return true;
+                    }
+
+                    Spottable vt = __instance.visibleTarget;
+                    if (vt != null && vt.Pointer != IntPtr.Zero && vt.IsWheeledVehicleOrTank() && !vt.IsAirVehicle())
+                    {
+                        Vehicle targetVeh = vt.TryCast<Vehicle>();
+                        if (targetVeh != null &&
+                            !targetVeh.IsStatic() &&
+                            GetVehicleMaxHullArmorMm(targetVeh) >= 6.0f &&
+                            soldier.transform != null)
+                        {
+                            float dist = Vector3.Distance(soldier.transform.position, vt.GetPosition());
+                            if (TryEquipOrHoldStowedAtWeaponAgainstVehicle(soldier, targetVeh, dist))
+                            {
+                                return false;
+                            }
+                        }
+                    }
+                    else
+                    {
+                        // Target is foot infantry (or no target): if currently holding a dedicated AT weapon in Slot 0,
+                        // switch back to a non-AT primary/secondary firearm if one has ammo!
+                        GenericGun g0 = soldier.GetHeldGun(0);
+                        if (g0 != null && g0.IsAtWeapon())
+                        {
+                            for (int slot = 1; slot <= 2; slot++)
+                            {
+                                GenericGun altGun = soldier.GetHeldGun(slot);
+                                if (altGun != null &&
+                                    !altGun.IsAtWeapon() &&
+                                    (altGun.GetCurrentAmmoCount() > 0 || !soldier.IsOutOfAmmosFor(altGun)))
+                                {
+                                    if (!Photon.Pun.PhotonNetwork.InRoom || AiCore.TryConsumeBotRpcBudget(0.35f))
+                                    {
+                                        soldier.SetGunTriggerPressed(false);
+                                        soldier.SwitchTo(slot);
+                                    }
+                                    return false;
+                                }
+                            }
+                        }
+                    }
+                }
+                catch { }
+                return true;
+            }
         }
 
         internal static bool IsTankThreateningPosition(Vehicle tankVeh, Vector3 observerPos, float maxThreatDist = 85f)

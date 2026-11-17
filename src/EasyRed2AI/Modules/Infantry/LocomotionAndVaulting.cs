@@ -424,16 +424,22 @@ namespace EasyRed2HumanAI
                     landHit.normal.y < 0.62f ||
                     landHit.collider == null ||
                     landHit.collider.gameObject.layer == 4 ||
+                    AiCore.IsVehicleCollider(landHit.collider) ||
                     Mathf.Abs(landHit.point.y - myPos.y) > 1.68f ||
                     Physics.CheckSphere(landHit.point + Vector3.up * 0.95f, 0.20f, vaultMask, QueryTriggerInteraction.Ignore))
                 {
-                    vaultOrRejectReason = "no_landing";
+                    vaultOrRejectReason = AiCore.IsVehicleCollider(landHit.collider) ? "vehicle_hull" : "no_landing";
                     return false;
                 }
                 vaultPos = landHit.point;
             }
 
             Collider frontCol = frontHit.collider;
+            if (AiCore.IsVehicleCollider(frontCol))
+            {
+                vaultOrRejectReason = "vehicle_hull";
+                return false;
+            }
             bool frontIsTerrain = AiCore.IsTerrainCollider(frontCol);
             float vaultLandingRise = vaultPos.y - myPos.y;
 
@@ -496,9 +502,14 @@ namespace EasyRed2HumanAI
                 }
             }
 
-            // 3B. Barbed Wire Discipline:
-            // Keep barbed wire unvaultable during normal movement so wire lines act as real tactical obstacles,
-            // allowing wire clambering ONLY if a bot has been genuinely wedged against the wire for >= 3.5s!
+            // 3B. Vehicle Hull & Barbed Wire Discipline:
+            // Never vault onto tank hulls, truck beds, or vehicle fenders; keep barbed wire unvaultable
+            // during normal movement so wire lines act as real tactical obstacles until wedged >= 3.5s.
+            if (AiCore.IsVehicleCollider(crestCol))
+            {
+                vaultOrRejectReason = "vehicle_hull";
+                return false;
+            }
             if (IsBarbedWireCollider(frontCol) || IsBarbedWireCollider(crestCol))
             {
                 AiCore.SoldierFastHandles vaultH = AiCore.GetOrCreateSoldierHandles(soldier);
@@ -552,6 +563,11 @@ namespace EasyRed2HumanAI
             Vector3 farOrigin = myPos + fwd * (frontHit.distance + 0.88f) + Vector3.up * (crestHeight + 0.65f);
             if (Physics.Raycast(farOrigin, Vector3.down, out RaycastHit farHit, crestHeight + 1.85f, groundMask, QueryTriggerInteraction.Ignore))
             {
+                if (AiCore.IsVehicleCollider(farHit.collider))
+                {
+                    vaultOrRejectReason = "vehicle_hull";
+                    return false;
+                }
                 if (farHit.point.y > myPos.y + crestHeight + 0.18f)
                 {
                     vaultOrRejectReason = "uphill_ramp";
@@ -1085,6 +1101,11 @@ namespace EasyRed2HumanAI
                 rejectReason = "no_landing_floor";
                 return false;
             }
+            if (AiCore.IsVehicleCollider(landFloorHit.collider))
+            {
+                rejectReason = "vehicle_hull";
+                return false;
+            }
 
             Vector3 landPt = landFloorHit.point;
             Vector3 horizDelta = new Vector3(landPt.x - myPos.x, 0f, landPt.z - myPos.z);
@@ -1149,13 +1170,23 @@ namespace EasyRed2HumanAI
             if (AiCore.TryGetActiveWaterLevel(out float waterY) && myPos.y <= waterY + 0.10f)
                 return true;
 
-            if (AiCore.TryValidateAndSnapDirectMicroStep(myPos, targetPos, out Vector3 snappedPos, out _, 2.8f, 0.75f))
+            float now = Time.time;
+            bool isUnstickRecovery =
+                (h.MoveOverride.Kind == AiCore.BotMoveOverrideKind.UnstickSidestep && now < h.MoveOverride.ExpireTime) ||
+                now < h.Goap.FootStuck.UnstickOverrideUntil;
+
+            if (AiCore.TryValidateAndSnapDirectMicroStep(
+                    myPos,
+                    targetPos,
+                    out Vector3 snappedPos,
+                    out _,
+                    isUnstickRecovery ? 4.8f : 2.8f,
+                    0.75f,
+                    isUnstickRecovery ? 2.90f : 0.75f))
             {
                 targetPos = snappedPos;
                 return true;
             }
-
-            float now = Time.time;
             if (ai.moveDirectlyToward_end > now)
             {
                 ai.moveDirectlyToward_end = 0f;

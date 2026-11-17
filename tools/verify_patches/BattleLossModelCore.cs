@@ -56,7 +56,7 @@ namespace UnityEngine
 
     public enum QueryTriggerInteraction { UseGlobal = 0, Ignore = 1, Collide = 2 }
 
-    public class Collider { public bool IsTerrain; }
+    public class Collider { public bool IsTerrain; public bool IsVehicle; }
 
     public struct RaycastHit
     {
@@ -198,6 +198,7 @@ namespace EasyRed2HumanAI
         public static int GetSolidEnvironmentMask() => 1;
         public static int GetMovementObstacleMask() => 3;
         public static bool IsTerrainCollider(Collider col) => col != null && col.IsTerrain;
+        public static bool IsVehicleCollider(Collider col) => col != null && col.IsVehicle;
         public static bool TryGetActiveWaterLevel(out float wl) { wl = t_waterLevel; return t_hasWater; }
     }
 

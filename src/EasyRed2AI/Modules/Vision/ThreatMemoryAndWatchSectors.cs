@@ -1338,6 +1338,7 @@ namespace EasyRed2HumanAI
                 public AiCore.SoldierFastHandles Handles;
                 public AiCore.CachedDestKind DestKind;
                 public bool PieHandled;
+                public bool SkipPostfix;
             }
 
             public static bool Prefix(SoldierAI __instance, float __0, out MovementRoutineState __state)
@@ -1355,6 +1356,36 @@ namespace EasyRed2HumanAI
 
                     __state.Handles = h;
                     Soldier soldier = h.Ref;
+                    int frameCount = Time.frameCount;
+                    if (h.Vision.LastMovementRoutineRenderFrame == frameCount && frameCount > 0)
+                    {
+                        __state.SkipPostfix = true;
+                        switch (h.Vision.LastMovementRoutineCatchUpMode)
+                        {
+                            case 1:
+                                __state.PieHandled = true;
+                                soldier.SetGunTriggerPressed(false);
+                                __instance.MoveOptimized(true, __0);
+                                return false;
+                            case 2:
+                                __state.PieHandled = true;
+                                soldier.SetGunTriggerPressed(false);
+                                __instance.MoveOptimized(false, __0);
+                                return false;
+                            case 3:
+                                __state.PieHandled = true;
+                                soldier.SetGunTriggerPressed(false);
+                                __instance.MoveFPSOptimized(0.88f, __0);
+                                soldier.RotateToward(h.Vision.CornerPie.PieLookDir, __0);
+                                return false;
+                            default:
+                                return true;
+                        }
+                    }
+
+                    h.Vision.LastMovementRoutineRenderFrame = frameCount;
+                    h.Vision.LastMovementRoutineCatchUpMode = 0;
+
                     AiCore.CachedDestKind destKind = AiCore.ResolveTargetDestination(h);
                     __state.DestKind = destKind;
 
@@ -1422,7 +1453,9 @@ namespace EasyRed2HumanAI
                     if (remDistSq > 5.5f * 5.5f &&
                         destKind != AiCore.CachedDestKind.VehicleRepair &&
                         !__instance.knifeCharge &&
-                        (!__instance.HasEnemyAndCanFireAtHim || __instance.distFromTarget > 6.2f) &&
+                        (__instance.HasPath || __instance.moveDirectlyToward_end > now) &&
+                        now >= h.Stance.StanceDropHoldFireUntil &&
+                        (!__instance.HasEnemyAndCanFireAtHim || soldier.IsCharging()) &&
                         (soldier.m_pose != SoldierPose.Idle || __instance.actualPose != SoldierPose.Idle) &&
                         !soldier.isInHandsAnimation &&
                         !soldier.IsReloading)
@@ -1480,6 +1513,7 @@ namespace EasyRed2HumanAI
                         raiseRifle)
                     {
                         __state.PieHandled = true;
+                        h.Vision.LastMovementRoutineCatchUpMode = 3;
                         soldier.SetGunTriggerPressed(false);
                         __instance.MoveFPSOptimized(0.88f, __0);
                         soldier.RotateToward(pieDir, __0);
@@ -1496,6 +1530,7 @@ namespace EasyRed2HumanAI
                         bool shouldSprint = soldier.m_pose != SoldierPose.Prone &&
                                             !soldier.IsStealth &&
                                             remDistSq > 1.65f * 1.65f;
+                        h.Vision.LastMovementRoutineCatchUpMode = shouldSprint ? (byte)1 : (byte)2;
                         __instance.MoveOptimized(shouldSprint, __0);
                         return false;
                     }
@@ -1509,7 +1544,7 @@ namespace EasyRed2HumanAI
                 try
                 {
                     AiCore.SoldierFastHandles h = __state.Handles;
-                    if (h == null || __state.PieHandled)
+                    if (h == null || __state.PieHandled || __state.SkipPostfix)
                         return;
 
                     Soldier soldier = h.Ref;

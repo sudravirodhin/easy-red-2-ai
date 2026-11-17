@@ -132,6 +132,7 @@ namespace EasyRed2HumanAI
         private static float _bmTimeScale = 1f;
         private static bool _bmModEnabled = true;
         private static bool _bmBattleEnded;
+        private static bool _bmWasFocused = true;
 
         // Per-frame event breadcrumbs (zero allocations)
         private static int _canSeeLinecastPassThroughs;
@@ -293,6 +294,7 @@ namespace EasyRed2HumanAI
             _bmTimeScale = Time.timeScale;
             _bmBattleEnded = BattleManager.isBattleEnded;
             _bmModEnabled = VisionConfig.EnableMod != null && VisionConfig.EnableMod.Value;
+            _bmWasFocused = AiCore.IsGameWindowFocused;
             return ts;
         }
 
@@ -385,6 +387,7 @@ namespace EasyRed2HumanAI
             _prevBmFixedTime = -1f;
             _bmFixedTime = -1f;
             _suppressedBurstHitches = 0;
+            _bmWasFocused = AiCore.IsGameWindowFocused;
         }
 
         [MethodImpl(MethodImplOptions.NoInlining)]
@@ -480,6 +483,7 @@ namespace EasyRed2HumanAI
             _bmEndStamp = 0;
             _lastHookEndStamp = startStamp;
             _bmFixedTime = -1f;
+            _bmWasFocused = AiCore.IsGameWindowFocused;
 
             _canSeeLinecastPassThroughs = 0;
             _uncachedCoverProbes = 0;
@@ -541,10 +545,13 @@ namespace EasyRed2HumanAI
                               dtMs < 500.0f;
             if (inGameplay)
             {
-                _winFrames++;
-                _winSumDtMs += dtMs;
-                if (dtMs > _winMaxDtMs)
-                    _winMaxDtMs = dtMs;
+                if (_bmWasFocused)
+                {
+                    _winFrames++;
+                    _winSumDtMs += dtMs;
+                    if (dtMs > _winMaxDtMs)
+                        _winMaxDtMs = dtMs;
+                }
 
                 if (il2cppUsedDelta > 0)
                 {
@@ -561,7 +568,8 @@ namespace EasyRed2HumanAI
                     _winNetGcCount += Math.Max(1, netG0Delta);
             }
 
-            if (inGameplay && dtMs > HitchThresholdMs)
+            float effectiveThresholdMs = _bmWasFocused ? HitchThresholdMs : 80.0f;
+            if (inGameplay && dtMs > effectiveThresholdMs)
             {
                 _totalAutopsyHitches++;
                 _winHitches++;
@@ -693,8 +701,10 @@ namespace EasyRed2HumanAI
                 _sb.Append(" F:").Append(_activeFrame)
                    .Append(" t:").Append(_bmScaledTime.ToString("F1"))
                    .Append("s | dt:").Append(dtMs.ToString("F1")).Append("ms")
-                   .Append(" Mod:").Append(_bmModEnabled ? "ON" : "OFF")
-                   .Append(" FixedSteps:").Append(fixedSteps);
+                   .Append(" Mod:").Append(_bmModEnabled ? "ON" : "OFF");
+                if (!_bmWasFocused)
+                    _sb.Append(" Focus:BG");
+                _sb.Append(" FixedSteps:").Append(fixedSteps);
 
                 _sb.Append(" | Phases[PreBM:").Append(preBmMs.ToString("F2"))
                    .Append("ms BM:").Append(bmMs.ToString("F2"))
@@ -843,7 +853,7 @@ namespace EasyRed2HumanAI
                 }
                 _sb.Append(']');
 
-                Plugin.Log.LogWarning(_sb.ToString());
+                AiCore.EnqueueAsyncLog(true, _sb.ToString());
             }
             catch
             {
@@ -884,7 +894,7 @@ namespace EasyRed2HumanAI
                    .Append(",BotRPC:").Append(AiCore.BotRpcBudgetGrantedCount)
                    .Append('/').Append(AiCore.BotRpcBudgetThrottledCount).Append(']');
 
-                Plugin.Log.LogInfo(_sb.ToString());
+                AiCore.EnqueueAsyncLog(false, _sb.ToString());
             }
             catch
             {

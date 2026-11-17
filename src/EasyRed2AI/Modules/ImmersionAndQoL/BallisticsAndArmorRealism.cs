@@ -79,7 +79,6 @@ namespace EasyRed2HumanAI
             if (forceClear)
             {
                 _activeIncendiaryGrenades.Clear();
-                ResetFirstPersonShadowRigOnSceneChange();
                 ResetObjectiveBarFactionState();
                 ResetTacticalReloadCancelState();
             }
@@ -301,8 +300,11 @@ namespace EasyRed2HumanAI
                                 // (`mmPen <= baseArmor || mmPen <= vanillaAngledArmor`), promote `canDamage = true`
                                 // solely for this impact on the Host so the Host evaluates our roof-armor check and
                                 // syncs SyncVehicle damage to all players with zero risk of double-damage.
+                                // Note: BulletData.IsHe() (0x1807ABB80) returns TRUE for ShellType.APHE (3)!
+                                // Check shellType explicitly so aircraft APHE cannons are included in Host-Assist.
                                 if (!__instance.canDamage &&
-                                    !bulletData.IsHe() &&
+                                    bulletData.shellType != ShellType.HE &&
+                                    bulletData.shellType != ShellType.Rocket &&
                                     vPart.armorThickness > 8f &&
                                     AiCore.IsMasterClient())
                                 {

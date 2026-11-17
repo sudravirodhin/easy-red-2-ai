@@ -3547,11 +3547,114 @@ namespace EasyRed2HumanAI
         /// Renders a pooled native <c>[HQ]</c> preview marker on the <c>M</c> tactical map whenever the local
         /// Player Squad Leader has an active unaccepted HQ / Radio Net order.
         /// </summary>
-        [HarmonyPatch(typeof(MiniMapGUI), nameof(MiniMapGUI.DisableRemainingUnitMarkers))]
-        public static class MiniMapGUI_DisableRemainingUnitMarkers_Patch
+        internal static readonly Dictionary<IntPtr, UnityEngine.UI.Text> _minimapMarkerTextByImgPtr =
+            new Dictionary<IntPtr, UnityEngine.UI.Text>(64);
+        internal static UnityEngine.UI.Text _lastUnitMarkerTextComp;
+        internal static int _lastUsedUnitMarkerIndex = -1;
+        internal static bool _insideMiniMapUpdate;
+
+        [HarmonyPatch(typeof(MiniMapGUI), nameof(MiniMapGUI.GetNextUnitMarker))]
+        public static class MiniMapGUI_GetNextUnitMarker_Patch
         {
-            public static void Prefix(MiniMapGUI __instance)
+            public static void Postfix(MiniMapGUI __instance, string __0, bool __1, UnityEngine.UI.Image __result)
             {
+                try
+                {
+                    _lastUnitMarkerTextComp = null;
+                    if (!VisionConfig.EnableMod.Value ||
+                        __instance == null ||
+                        __result == null ||
+                        __result.Pointer == IntPtr.Zero)
+                    {
+                        return;
+                    }
+
+                    _lastUsedUnitMarkerIndex = __instance.usedMarker_index;
+
+                    // Fix vanilla pooled marker reuse bug (0x1804A1D20 in MiniMapGUI.asm): when reusing a pooled
+                    // child marker, vanilla returns early without updating img.enabled or child(0) Text state!
+                    if (__result.enabled != __1)
+                        __result.enabled = __1;
+
+                    IntPtr imgPtr = __result.Pointer;
+                    if (!_minimapMarkerTextByImgPtr.TryGetValue(imgPtr, out UnityEngine.UI.Text txt) ||
+                        ReferenceEquals(txt, null) ||
+                        txt == null)
+                    {
+                        Transform tr = __result.transform;
+                        if (tr != null && tr.childCount > 0)
+                        {
+                            Transform child0 = tr.GetChild(0);
+                            if (child0 != null)
+                                txt = child0.GetComponent<UnityEngine.UI.Text>();
+                        }
+                        if (_minimapMarkerTextByImgPtr.Count > 256)
+                            _minimapMarkerTextByImgPtr.Clear();
+                        _minimapMarkerTextByImgPtr[imgPtr] = txt;
+                    }
+
+                    _lastUnitMarkerTextComp = txt;
+                    if (txt != null && txt.gameObject != null)
+                    {
+                        bool hasText = !string.IsNullOrEmpty(__0);
+                        if (txt.gameObject.activeSelf != hasText)
+                            txt.gameObject.SetActive(hasText);
+                        if (hasText && txt.text != __0)
+                            txt.text = __0;
+                    }
+                }
+                catch { }
+            }
+        }
+
+        [HarmonyPatch(typeof(Squad), nameof(Squad.GetMarkerIcon))]
+        public static class Squad_GetMarkerIcon_Patch
+        {
+            public static void Postfix(Squad __instance, bool __0)
+            {
+                try
+                {
+                    UnityEngine.UI.Text txt = _lastUnitMarkerTextComp;
+                    _lastUnitMarkerTextComp = null;
+                    if (!_insideMiniMapUpdate ||
+                        !__0 ||
+                        !VisionConfig.EnableMod.Value ||
+                        !VisionConfig.EnableMapSquadLabels.Value ||
+                        __instance == null ||
+                        txt == null ||
+                        txt.gameObject == null)
+                    {
+                        return;
+                    }
+
+                    string sqName = __instance.squadName;
+                    if (string.IsNullOrEmpty(sqName))
+                        return;
+
+                    string letter = sqName.Length == 1 ? sqName : sqName.Substring(0, 1);
+                    if (!txt.gameObject.activeSelf)
+                        txt.gameObject.SetActive(true);
+                    if (txt.text != letter)
+                        txt.text = letter;
+                }
+                catch { }
+            }
+        }
+
+        [HarmonyPatch(typeof(MiniMapGUI), nameof(MiniMapGUI.Update))]
+        public static class MiniMapGUI_Update_Patch
+        {
+            public static void Prefix()
+            {
+                _insideMiniMapUpdate = true;
+                _lastUsedUnitMarkerIndex = -1;
+                _lastUnitMarkerTextComp = null;
+            }
+
+            public static void Postfix(MiniMapGUI __instance)
+            {
+                _insideMiniMapUpdate = false;
+                _lastUnitMarkerTextComp = null;
                 try
                 {
                     if (!VisionConfig.EnableMod.Value || __instance == null || !MiniMapGUI.MiniMapOpened)
@@ -3559,6 +3662,11 @@ namespace EasyRed2HumanAI
 
                     if (!TryGetActivePendingPlayerHqOrder(out PlayerPendingHqOrderState pending))
                         return;
+
+                    // Note: MiniMapGUI.DisableRemainingUnitMarkers (0x1804A0820) is inlined at the end of
+                    // MiniMapGUI.Update (0x1804A8BAC). Restore usedMarker_index to _lastUsedUnitMarkerIndex
+                    // so GetNextUnitMarker claims the first unused slot while higher slots remain disabled!
+                    __instance.usedMarker_index = _lastUsedUnitMarkerIndex;
 
                     string badge = string.IsNullOrEmpty(pending.MapBadgeText) ? "[HQ]" : pending.MapBadgeText;
                     UnityEngine.UI.Image img = __instance.GetNextUnitMarker(badge, true);

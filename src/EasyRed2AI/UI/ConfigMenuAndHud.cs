@@ -99,7 +99,6 @@ namespace EasyRed2HumanAI
                     VeteranAndTacticsPatches.UpdateLobbyJoinMotdQueue();
                     VeteranAndTacticsPatches.UpdateLonePlayerSquadStatusAndRejoin();
                     VeteranAndTacticsPatches.UpdateQuickTapSpot(_showConfigMenu || _showMapPicker || _showDogTagArchive);
-                    VeteranAndTacticsPatches.CheckLocalPlayerFirstPersonShadowTeardown();
                     if (_showMapPicker)
                         BattleManager_OnGUI_Patch.StepResolveSelectedCampaignBattles();
 
@@ -163,7 +162,7 @@ namespace EasyRed2HumanAI
                         {
                             VisionConfig.EnableMod.Value = !VisionConfig.EnableMod.Value;
                             Plugin.Instance.Config.Save();
-                            VeteranAndTacticsPatches.RefreshLocalPlayerFirstPersonShadow();
+                            VeteranAndTacticsPatches.RefreshBottomLeftSquadRosterVisuals();
                             string state = VisionConfig.EnableMod.Value
                                 ? $"ENABLED (Stand:{VisionConfig.StandingSightRange.Value}m, Crouch:{VisionConfig.CrouchingSightRange.Value}m, Prone:{VisionConfig.ProneSightRange.Value}m)"
                                 : "DISABLED (Vanilla AI)";
@@ -174,8 +173,8 @@ namespace EasyRed2HumanAI
                             Plugin.Instance.Config.Reload();
                             HitchProfiler.RefreshConfigState();
                             BotActionTrace.RefreshConfigState();
-                            VeteranAndTacticsPatches.RefreshLocalPlayerFirstPersonShadow();
                             VeteranAndTacticsPatches.SyncPtfoRoomPropertyIfMaster();
+                            VeteranAndTacticsPatches.RefreshBottomLeftSquadRosterVisuals();
                             ShowToast($"[Battle Hardened v{Plugin.PluginVersion}] Reloaded Config! Stand:{VisionConfig.StandingSightRange.Value}m | Crouch:{VisionConfig.CrouchingSightRange.Value}m | Prone:{VisionConfig.ProneSightRange.Value}m | Personalities:{VisionConfig.EnableRolePersonalities.Value}");
                         }
                         else if (input.GetKeyDown(KeyCode.F10))
@@ -280,6 +279,11 @@ namespace EasyRed2HumanAI
                 Matrix4x4 oldGuiMatrix = GUI.matrix;
                 try
                 {
+                    // Draw 3D in-world squad member overhead names BEFORE applying the 1080p virtual UI matrix
+                    // because GuiExtension.OutlinedLabel uses raw Screen.width / Screen.height pixel coordinates
+                    // matching PlayerController.OnGUI (0x1807CBD20).
+                    VeteranAndTacticsPatches.DrawInWorldSquadMemberNames();
+
                     float uiScale = GetEffectiveImGuiScale(out float virtualW, out float virtualH);
                     if (Mathf.Abs(uiScale - 1.0f) > 0.001f)
                     {
@@ -590,7 +594,6 @@ namespace EasyRed2HumanAI
 
                     case 1: // 2. Vanilla Fixes
                         DrawSectionHeaderWithBundle(colLeftX, ref yL, colW, "Vanilla Infantry & Camera Bugfixes",
-                            VisionConfig.EnableFirstPersonShadowFix,
                             VisionConfig.EnableBloodSmokeWaterOcclusion,
                             VisionConfig.NeverShootStandingInOpen,
                             VisionConfig.EnforceStandingWhenOutOfCombat,
@@ -598,7 +601,6 @@ namespace EasyRed2HumanAI
                             VisionConfig.EnableWallShootingPrevention,
                             VisionConfig.EnableFriendlyFireAvoidance,
                             VisionConfig.EnableAntiDogpileMedicTriage);
-                        DrawToggleButton(colLeftX, ref yL, colW, rowH, "First-Person Self-Shadow Fix (Body/Gun)", VisionConfig.EnableFirstPersonShadowFix);
                         DrawToggleButton(colLeftX, ref yL, colW, rowH, "Smoke & Water Blood Spray Occlusion Fix", VisionConfig.EnableBloodSmokeWaterOcclusion);
                         DrawToggleButton(colLeftX, ref yL, colW, rowH, "Never Shoot Standing Upright in Open", VisionConfig.NeverShootStandingInOpen);
                         DrawToggleButton(colLeftX, ref yL, colW, rowH, "Enforce Standing Speed Out of Combat", VisionConfig.EnforceStandingWhenOutOfCombat);
@@ -708,6 +710,15 @@ namespace EasyRed2HumanAI
                         }
                         DrawToggleButton(colLeftX, ref yL, colW, rowH, ptfoLabel, VisionConfig.EnableObjectiveTeamplayScoring);
 
+                        yL += 10f;
+                        DrawSectionHeaderWithBundle(colLeftX, ref yL, colW, "Squad Roster, Map & Overhead Names",
+                            VisionConfig.EnableAlwaysShowSquadNames,
+                            VisionConfig.EnableInWorldSquadMemberNames,
+                            VisionConfig.EnableMapSquadLabels);
+                        DrawToggleButton(colLeftX, ref yL, colW, rowH, "Always Show Squad Roster Names (Bottom-Left)", VisionConfig.EnableAlwaysShowSquadNames);
+                        DrawToggleButton(colLeftX, ref yL, colW, rowH, "Always Show Own Squad 3D Overhead Names", VisionConfig.EnableInWorldSquadMemberNames);
+                        DrawToggleButton(colLeftX, ref yL, colW, rowH, "Tactical Map Friendly Squad Letters (A, B, C...)", VisionConfig.EnableMapSquadLabels);
+
                         DrawSectionHeaderWithBundle(colRightX, ref yR, colW, "Player QoL & Obituary",
                             VisionConfig.EnableQuickTapSpot,
                             VisionConfig.EnableDeathScreenAttribution,
@@ -777,8 +788,8 @@ namespace EasyRed2HumanAI
                     Plugin.Instance.Config.Reload();
                     HitchProfiler.RefreshConfigState();
                     BotActionTrace.RefreshConfigState();
-                    VeteranAndTacticsPatches.RefreshLocalPlayerFirstPersonShadow();
                     VeteranAndTacticsPatches.SyncPtfoRoomPropertyIfMaster();
+                    VeteranAndTacticsPatches.RefreshBottomLeftSquadRosterVisuals();
                     ShowToast($"[Battle Hardened v{Plugin.PluginVersion}] Reloaded configuration from disk!");
                 }
 
@@ -816,8 +827,8 @@ namespace EasyRed2HumanAI
                     VisionConfig.SetBundleEntries(true, bundleEntries);
                     HitchProfiler.RefreshConfigState();
                     BotActionTrace.RefreshConfigState();
-                    VeteranAndTacticsPatches.RefreshLocalPlayerFirstPersonShadow();
                     VeteranAndTacticsPatches.SyncPtfoRoomPropertyIfMaster();
+                    VeteranAndTacticsPatches.RefreshBottomLeftSquadRosterVisuals();
                     Plugin.Instance.Config.Save();
                 }
 
@@ -827,8 +838,8 @@ namespace EasyRed2HumanAI
                     VisionConfig.SetBundleEntries(false, bundleEntries);
                     HitchProfiler.RefreshConfigState();
                     BotActionTrace.RefreshConfigState();
-                    VeteranAndTacticsPatches.RefreshLocalPlayerFirstPersonShadow();
                     VeteranAndTacticsPatches.SyncPtfoRoomPropertyIfMaster();
+                    VeteranAndTacticsPatches.RefreshBottomLeftSquadRosterVisuals();
                     Plugin.Instance.Config.Save();
                 }
 
@@ -879,16 +890,13 @@ namespace EasyRed2HumanAI
                     {
                         BotActionTrace.RefreshConfigState();
                     }
-                    else if (entry == VisionConfig.EnableFirstPersonShadowFix)
-                    {
-                        VeteranAndTacticsPatches.RefreshLocalPlayerFirstPersonShadow();
-                    }
                     else if (entry == VisionConfig.EnableObjectiveTeamplayScoring ||
                              entry == VisionConfig.EnableMultiplayerBattleStatSyncFix ||
                              entry == VisionConfig.EnableMod)
                     {
                         VeteranAndTacticsPatches.SyncPtfoRoomPropertyIfMaster();
                     }
+                    VeteranAndTacticsPatches.RefreshBottomLeftSquadRosterVisuals();
                 }
                 y += height;
             }
@@ -1483,6 +1491,184 @@ namespace EasyRed2HumanAI
             }
         }
 
+        public static void DrawInWorldSquadMemberNames()
+        {
+            try
+            {
+                if (!VisionConfig.EnableMod.Value || !VisionConfig.EnableInWorldSquadMemberNames.Value)
+                    return;
+
+                Event ev = Event.current;
+                if (ev == null || ev.type != EventType.Repaint)
+                    return;
+
+                if (IsSpectatorCameraModeActive(out _, out _) ||
+                    SavableData.Settings == null ||
+                    SavableData.Settings.system == null ||
+                    !SavableData.Settings.system.enableGUI ||
+                    SavableData.Settings.system.disable3DMarkers)
+                {
+                    return;
+                }
+
+                PlayerController pc = PlayerController.currentController;
+                if (pc == null)
+                    return;
+
+                if (pc.IsAiming && !pc.IsLimitedAiming)
+                    return;
+
+                Soldier player = pc.ControlledCharacter;
+                if (player == null || !player.IsAlive)
+                    return;
+
+                Squad playerSquad = player.joinedSquad;
+                if (playerSquad == null || playerSquad.Pointer == IntPtr.Zero)
+                    return;
+
+                var cursorSoldiers = pc.cursorSoldiers;
+                if (cursorSoldiers == null || cursorSoldiers.Count == 0)
+                    return;
+
+                Camera cam = ResourcesManager.mainCamera;
+                if (cam == null)
+                    return;
+
+                IntPtr playerPtr = player.Pointer;
+                IntPtr playerSquadPtr = playerSquad.Pointer;
+                bool playerOnVehicle = player.IsOnVehicle();
+                Vector2 screenCenter = pc.screenCenter;
+                float maxHoverRadius = Screen.height * 0.20f;
+
+                // Pass 1: Identify the single center-hovered AI friendly that vanilla PlayerController.OnGUI (0x1807CBD20)
+                // is already drawing so we never double-render on top of the hovered soldier.
+                IntPtr vanillaHoveredPtr = IntPtr.Zero;
+                float bestVanillaAlpha = 0f;
+                int count = cursorSoldiers.Count;
+                if (maxHoverRadius > 1f)
+                {
+                    for (int i = 0; i < count; i++)
+                    {
+                        CursorSoldierData csd = cursorSoldiers[i];
+                        if (csd == null) continue;
+                        Soldier s = csd.soldier;
+                        if (s == null || !s.IsAlive || s.Pointer == playerPtr || s.IsPlayer())
+                            continue;
+                        if (playerOnVehicle && s.IsOnVehicle())
+                            continue;
+
+                        Vector3 uiPos = s.UINamePos();
+                        if (Marker3DGUI.IsOccluded(s, 2, uiPos))
+                            continue;
+
+                        Vector3 sp = cam.WorldToScreenPoint(uiPos);
+                        if (sp.z <= 0f)
+                            continue;
+
+                        float distToCursor = Vector2.Distance(new Vector2(sp.x, sp.y), screenCenter);
+                        float alpha = (1.0f - (distToCursor / maxHoverRadius)) * 2.0f;
+                        if (alpha > bestVanillaAlpha)
+                        {
+                            bestVanillaAlpha = alpha;
+                            vanillaHoveredPtr = s.Pointer;
+                        }
+                    }
+                }
+
+                GUIStyle lblStyle = GUI.skin != null ? GUI.skin.label : null;
+                TextAnchor oldAlign = TextAnchor.UpperLeft;
+                Color oldColor = GUI.color;
+                bool restoredStyle = false;
+
+                try
+                {
+                    float screenH = Screen.height;
+                    for (int i = 0; i < count; i++)
+                    {
+                        CursorSoldierData csd = cursorSoldiers[i];
+                        if (csd == null) continue;
+                        Soldier s = csd.soldier;
+                        if (s == null || !s.IsAlive || s.Pointer == playerPtr || s.Pointer == vanillaHoveredPtr)
+                            continue;
+
+                        // Human Co-op players already have their nickname rendered by vanilla PlayerController.OnGUI
+                        if (s.IsPlayer())
+                            continue;
+
+                        // Strictly restrict always-visible 3D overhead names to members of the player's own squad!
+                        Squad sq = s.joinedSquad;
+                        if (sq == null || sq.Pointer != playerSquadPtr)
+                            continue;
+
+                        if (playerOnVehicle && s.IsOnVehicle())
+                            continue;
+
+                        string dispName = s.name_surname;
+                        if (string.IsNullOrEmpty(dispName))
+                            continue;
+
+                        Vector3 uiPos = s.UINamePos();
+                        if (Marker3DGUI.IsOccluded(s, 2, uiPos))
+                            continue;
+
+                        Vector3 sp = cam.WorldToScreenPoint(uiPos);
+                        if (sp.z <= 0.5f || sp.z > 65.0f)
+                            continue;
+
+                        float distAlpha = Mathf.Clamp01((65.0f - sp.z) / 20.0f) * 0.88f;
+                        if (distAlpha <= 0.05f)
+                            continue;
+
+                        if (!restoredStyle && lblStyle != null)
+                        {
+                            oldAlign = lblStyle.alignment;
+                            lblStyle.alignment = TextAnchor.MiddleCenter;
+                            restoredStyle = true;
+                        }
+
+                        if (s.IsInjured || s.isBleeding)
+                            GUI.color = new Color(1.0f, 0.42f, 0.42f, distAlpha);
+                        else
+                            GUI.color = new Color(0.58f, 1.0f, 0.64f, distAlpha);
+
+                        Rect rect = new Rect(sp.x - 150f, (screenH - sp.y) - 25f, 300f, 50f);
+                        GuiExtension.OutlinedLabel(rect, dispName, 1);
+                    }
+                }
+                finally
+                {
+                    if (restoredStyle && lblStyle != null)
+                        lblStyle.alignment = oldAlign;
+                    GUI.color = oldColor;
+                }
+            }
+            catch { }
+        }
+
+        public static void RefreshBottomLeftSquadRosterVisuals()
+        {
+            try
+            {
+                PlayerGUI pgui = PlayerGUI.instance;
+                if (pgui == null || pgui.squadGUI_Panel == null)
+                    return;
+
+                Transform panel = pgui.squadGUI_Panel;
+                int childCount = panel.childCount;
+                for (int i = 0; i < childCount; i++)
+                {
+                    Transform child = panel.GetChild(i);
+                    if (child == null) continue;
+                    SquadSoldierLabel lbl = child.GetComponent<SquadSoldierLabel>();
+                    if (lbl != null && !lbl.isRespawnAction)
+                    {
+                        lbl.RefreshVisual();
+                    }
+                }
+            }
+            catch { }
+        }
+
         private static readonly HashSet<IntPtr> _reusableAlivePtrs = new HashSet<IntPtr>(256);
         private static readonly HashSet<IntPtr> _reusableVehiclePtrs = new HashSet<IntPtr>(64);
         private static readonly List<IntPtr> _reusableExpiredTasks = new List<IntPtr>(32);
@@ -1684,7 +1870,7 @@ namespace EasyRed2HumanAI
         }
 
         // =====================================================================
-        // Squad Roster UI Veteran & Personality Tags (SquadSoldierLabel)
+        // Squad Roster UI Always-Show Names, Veteran & Personality Tags (SquadSoldierLabel)
         // =====================================================================
         [HarmonyPatch(typeof(SquadSoldierLabel), nameof(SquadSoldierLabel.RefreshVisual))]
         public static class SquadSoldierLabel_RefreshVisual_Patch
@@ -1693,12 +1879,7 @@ namespace EasyRed2HumanAI
             {
                 try
                 {
-                    if (!VisionConfig.EnableMod.Value || __instance == null)
-                        return;
-
-                    bool showVet = VisionConfig.EnableVeteranSystem.Value && VisionConfig.ShowVeteranSquadRosterTags.Value;
-                    bool showPers = VisionConfig.EnableRolePersonalities.Value && VisionConfig.ShowPersonalityInSquadRoster.Value;
-                    if (!showVet && !showPers)
+                    if (!VisionConfig.EnableMod.Value || __instance == null || __instance.isRespawnAction)
                         return;
 
                     Soldier s = __instance.assignedSoldier;
@@ -1706,20 +1887,36 @@ namespace EasyRed2HumanAI
                     if (s == null || nameLabel == null)
                         return;
 
+                    if (VisionConfig.EnableAlwaysShowSquadNames.Value)
+                    {
+                        nameLabel.enabled = true;
+                    }
+
+                    bool showVet = VisionConfig.EnableVeteranSystem.Value && VisionConfig.ShowVeteranSquadRosterTags.Value;
+                    bool showPers = VisionConfig.EnableRolePersonalities.Value && VisionConfig.ShowPersonalityInSquadRoster.Value;
+
                     string curText = nameLabel.text ?? "";
                     int bracketIdx = curText.IndexOf(" [", StringComparison.Ordinal);
                     string baseText = bracketIdx >= 0 ? curText.Substring(0, bracketIdx) : curText;
 
-                    string tag = BuildSoldierBracketTag(s, showVet, showPers, true);
-                    nameLabel.text = baseText + tag;
+                    string tag = (showVet || showPers) ? BuildSoldierBracketTag(s, showVet, showPers, true) : "";
+                    string desiredText = baseText + tag;
+                    if (nameLabel.text != desiredText)
+                    {
+                        nameLabel.text = desiredText;
+                    }
 
-                    int tier = showVet ? GetVeteranTier(s) : 0;
-                    if (tier == 1)
-                        nameLabel.color = new Color(0.95f, 0.82f, 0.55f, 1f);
-                    else if (tier == 2)
-                        nameLabel.color = new Color(0.85f, 0.95f, 1.00f, 1f);
-                    else if (tier >= 3)
-                        nameLabel.color = new Color(1.00f, 0.86f, 0.22f, 1f);
+                    // Preserve vanilla's urgent red injuredColor when a squadmate is bleeding or incapacitated
+                    if (showVet && !s.IsInjured && !s.isBleeding)
+                    {
+                        int tier = GetVeteranTier(s);
+                        if (tier == 1)
+                            nameLabel.color = new Color(0.95f, 0.82f, 0.55f, 1f);
+                        else if (tier == 2)
+                            nameLabel.color = new Color(0.85f, 0.95f, 1.00f, 1f);
+                        else if (tier >= 3)
+                            nameLabel.color = new Color(1.00f, 0.86f, 0.22f, 1f);
+                    }
                 }
                 catch { }
             }

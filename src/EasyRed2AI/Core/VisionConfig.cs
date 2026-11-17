@@ -124,9 +124,11 @@ namespace EasyRed2HumanAI
         public static ConfigEntry<bool> EnableSpectatorHudRetention;
         public static ConfigEntry<bool> EnableSpectatorBotInspector;
         public static ConfigEntry<bool> EnableObjectiveBarFactionNames;
-        public static ConfigEntry<bool> EnableFirstPersonShadowFix;
         public static ConfigEntry<bool> EnableBloodSmokeWaterOcclusion;
         public static ConfigEntry<bool> EnableTacticalReloadAndBipodCancel;
+        public static ConfigEntry<bool> EnableAlwaysShowSquadNames;
+        public static ConfigEntry<bool> EnableInWorldSquadMemberNames;
+        public static ConfigEntry<bool> EnableMapSquadLabels;
 
         public static void Init(ConfigFile config)
         {
@@ -758,12 +760,6 @@ namespace EasyRed2HumanAI
                 true,
                 "QoL: Display formatted Faction + Alliance names (e.g. 'Germany (Axis)', 'USSR (Allies)') on the matching Left and Right sides of the top Objective Bar.");
 
-            EnableFirstPersonShadowFix = config.Bind(
-                "8. Ballistics & Immersion",
-                "EnableFirstPersonShadowFix",
-                true,
-                "Vanilla Visual Fix: renders a ShadowsOnly head/neck/body proxy on the local player via SoldierLodManager.ApplyFace while keeping animated FPS arms, sleeves, and held weapon shadows intact so first-person self-shadows include head, helmet, torso, arms, and weapon without clipping into the camera.");
-
             EnableBloodSmokeWaterOcclusion = config.Bind(
                 "8. Ballistics & Immersion",
                 "EnableBloodSmokeWaterOcclusion",
@@ -775,6 +771,24 @@ namespace EasyRed2HumanAI
                 "EnableTacticalReloadAndBipodCancel",
                 true,
                 "Player QoL: allows emergency animation canceling during reloads and mounted bipod states (weapon switch, knife/melee, grenade throw, vault, single-bullet fire interrupt, brief sprint hold, or dismounting bipod) without enabling fast-reload timing or ammo exploits.");
+
+            EnableAlwaysShowSquadNames = config.Bind(
+                "8. Ballistics & Immersion",
+                "EnableAlwaysShowSquadNames",
+                true,
+                "Player QoL: Always display your squadmates' names in the bottom-left Squad Roster HUD during gameplay (instead of hiding them unless selecting a squad or respawning).");
+
+            EnableInWorldSquadMemberNames = config.Bind(
+                "8. Ballistics & Immersion",
+                "EnableInWorldSquadMemberNames",
+                true,
+                "Player QoL: Draw 3D overhead names in-world exclusively for members of your own squad within 65m (other friendly squads remain hover-only so the screen stays uncluttered).");
+
+            EnableMapSquadLabels = config.Bind(
+                "8. Ballistics & Immersion",
+                "EnableMapSquadLabels",
+                true,
+                "Player QoL: Label friendly squads on the tactical map (M) with their single-letter phonetic squad code (A, B, C, etc., matching Able, Baker, Charlie...).");
         }
 
         public static void SetBundleEntries(bool state, params ConfigEntry<bool>[] entries)

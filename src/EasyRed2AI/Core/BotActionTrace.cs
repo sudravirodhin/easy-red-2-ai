@@ -65,9 +65,14 @@ namespace EasyRed2HumanAI
         private struct BotLastTraceState
         {
             public ulong LastPlanSig;
+            public ulong LastActionSig;
+            public float LastPlanEmitTime;
             public BotTraceEventKind LastDiscreteKind;
             public string LastDiscreteReason;
             public float LastDiscreteTime;
+            public float LastBandageBlockTime;
+            public float LastVaultRejectTime;
+            public float LastMeleeEnterTime;
             public Vector3 AnchorPos;
             public float AnchorTime;
             public float NextStuckEmitTime;
@@ -225,8 +230,33 @@ namespace EasyRed2HumanAI
             IntPtr ptr = h.Ptr;
             if (_botStates.TryGetValue(ptr, out BotLastTraceState st))
             {
+                if (kind == BotTraceEventKind.BandageBlocked &&
+                    st.LastBandageBlockTime > 0f &&
+                    now - st.LastBandageBlockTime < 3.50f &&
+                    now >= st.LastBandageBlockTime)
+                {
+                    return;
+                }
+
+                if (kind == BotTraceEventKind.VaultRejected &&
+                    st.LastVaultRejectTime > 0f &&
+                    now - st.LastVaultRejectTime < 3.50f &&
+                    now >= st.LastVaultRejectTime)
+                {
+                    return;
+                }
+
+                if (kind == BotTraceEventKind.MeleeEnter &&
+                    st.LastMeleeEnterTime > 0f &&
+                    now - st.LastMeleeEnterTime < 3.50f &&
+                    now >= st.LastMeleeEnterTime)
+                {
+                    return;
+                }
+
                 if (st.LastDiscreteKind == kind &&
                     ReferenceEquals(st.LastDiscreteReason, reason) &&
+                    st.LastDiscreteTime > 0f &&
                     now - st.LastDiscreteTime < 2.75f &&
                     now >= st.LastDiscreteTime)
                 {
@@ -237,6 +267,12 @@ namespace EasyRed2HumanAI
             st.LastDiscreteKind = kind;
             st.LastDiscreteReason = reason;
             st.LastDiscreteTime = now;
+            if (kind == BotTraceEventKind.BandageBlocked)
+                st.LastBandageBlockTime = now;
+            else if (kind == BotTraceEventKind.VaultRejected)
+                st.LastVaultRejectTime = now;
+            else if (kind == BotTraceEventKind.MeleeEnter)
+                st.LastMeleeEnterTime = now;
             _botStates[ptr] = st;
 
             SoldierAI ai = h.Ai ?? soldier.aiController;
@@ -256,7 +292,7 @@ namespace EasyRed2HumanAI
 
             GenericGun heldGun = soldier.GetHeldGun();
             short ammo = (short)(heldGun != null ? Mathf.Clamp(heldGun.GetCurrentAmmoCount(), 0, 999) : -1);
-            Squad sq = soldier.joinedSquad;
+            Squad sq = AiCore.GetCachedSquad(h, now);
             int sqId = sq != null ? AiCore.GetSquadDiagId(sq.Pointer) : 0;
 
             VeteranAndTacticsPatches.TryGetBotGoapSummary(
@@ -275,7 +311,7 @@ namespace EasyRed2HumanAI
                 SquadId = sqId,
                 Kind = kind,
                 Pose = (byte)soldier.m_pose,
-                Bleed = (byte)((soldier.isBleeding || soldier.GetBleedValue() > 0.01f) ? 1 : 0),
+                Bleed = (byte)(soldier.isBleeding ? 1 : 0),
                 InCover = (byte)(soldier.IsOnCover() ? 1 : 0),
                 Suppression = (short)Mathf.Clamp(Mathf.RoundToInt(soldier.GetSuppressionValue()), 0, 999),
                 Ammo = ammo,
@@ -334,24 +370,27 @@ namespace EasyRed2HumanAI
             IntPtr ptr = h.Ptr;
             Vector3 pos = h.Tr.position;
             Vector3 dest = ai.MoveDestination;
-            byte bleed = (byte)((soldier.isBleeding || soldier.GetBleedValue() > 0.01f) ? 1 : 0);
+            byte bleed = (byte)(soldier.isBleeding ? 1 : 0);
             byte inCov = (byte)(soldier.IsOnCover() ? 1 : 0);
             byte pose = (byte)soldier.m_pose;
             byte activeOvr = (byte)((h.MoveOverride.Kind > AiCore.BotMoveOverrideKind.GoapAction && now < h.MoveOverride.ExpireTime)
                 ? (byte)h.MoveOverride.Kind
                 : (byte)0);
 
-            ulong sig = ((ulong)(byte)step0) |
-                        ((ulong)(byte)step1 << 8) |
-                        ((ulong)(byte)netDir << 16) |
-                        ((ulong)bleed << 24) |
-                        ((ulong)(isEvacCrew ? 1 : 0) << 28) |
-                        (((ulong)goalBit >> 26) << 32) |
-                        ((ulong)activeOvr << 56);
+            ulong actionSig = ((ulong)(byte)step0) |
+                              ((ulong)(byte)step1 << 8) |
+                              ((ulong)(byte)netDir << 16) |
+                              ((ulong)bleed << 24) |
+                              ((ulong)(isEvacCrew ? 1 : 0) << 28) |
+                              ((ulong)activeOvr << 56);
+
+            ulong sig = actionSig | (((ulong)goalBit >> 26) << 32);
 
             _botStates.TryGetValue(ptr, out BotLastTraceState st);
 
-            bool emitPlanChange = st.LastPlanSig != sig;
+            bool emitPlanChange = st.LastActionSig != actionSig ||
+                                  (st.LastPlanSig != sig &&
+                                   (st.LastPlanEmitTime <= 0f || now - st.LastPlanEmitTime >= 2.50f || now < st.LastPlanEmitTime));
             bool emitStuck = false;
 
             if (st.AnchorTime <= 0f || (pos - st.AnchorPos).sqrMagnitude >= 0.36f)
@@ -370,7 +409,12 @@ namespace EasyRed2HumanAI
                 st.NextStuckEmitTime = now + 10.0f;
             }
 
-            st.LastPlanSig = sig;
+            if (emitPlanChange)
+            {
+                st.LastActionSig = actionSig;
+                st.LastPlanSig = sig;
+                st.LastPlanEmitTime = now;
+            }
             _botStates[ptr] = st;
 
             if (!emitPlanChange && !emitStuck)
@@ -382,7 +426,7 @@ namespace EasyRed2HumanAI
 
             GenericGun heldGun = soldier.GetHeldGun();
             short ammo = (short)(heldGun != null ? Mathf.Clamp(heldGun.GetCurrentAmmoCount(), 0, 999) : -1);
-            Squad sq = soldier.joinedSquad;
+            Squad sq = AiCore.GetCachedSquad(h, now);
             int sqId = sq != null ? AiCore.GetSquadDiagId(sq.Pointer) : 0;
 
             TraceRecord rec = new TraceRecord
@@ -437,12 +481,15 @@ namespace EasyRed2HumanAI
             {
                 try
                 {
-                    _wakeSignal.WaitOne(250);
+                    _wakeSignal.WaitOne(1000);
 
                     int r = _readSeq;
                     int w = Volatile.Read(ref _writeSeq);
                     if (r == w)
                         continue;
+
+                    Thread.Sleep(100);
+                    w = Volatile.Read(ref _writeSeq);
 
                     if (writer == null)
                     {

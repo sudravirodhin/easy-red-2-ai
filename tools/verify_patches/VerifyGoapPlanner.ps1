@@ -78,6 +78,7 @@ namespace UnityEngine
     public class Collider
     {
         public bool IsTerrain;
+        public bool IsVehicle;
     }
 
     public struct RaycastHit
@@ -310,6 +311,7 @@ namespace EasyRed2HumanAI
         public static int GetSolidEnvironmentMask() => 1;
         public static int GetMovementObstacleMask() => 3;
         public static bool IsTerrainCollider(Collider col) => col != null && col.IsTerrain;
+        public static bool IsVehicleCollider(Collider col) => col != null && col.IsVehicle;
 
 $wqSnapProbe
     }
@@ -604,15 +606,15 @@ $partC
                 Assert(!AiCore.TrySnapWalkableGroundProbe(myFeet, new Vector3(14.5f, 5.0f, 10f), 4.2f, 9.0f, 0.50f, 2.0f, false, 0f, out _),
                     "Non-terrain -2.05m cellar/canal drop should be rejected!");
 
-                // 9c. Gentle non-terrain street slope (+1.85m <= 2.0m) MUST pass AND allocate 0 Collider wrappers (short-circuit)
+                // 9c. Gentle non-terrain street slope (+1.85m <= 2.0m) MUST pass with single cached Collider wrapper access
                 RaycastHit.ColliderAccessCount = 0;
                 Physics.MockRayPoint = new Vector3(20.0f, 6.85f, 10f);
                 Physics.MockRayNormal = new Vector3(-0.17f, 0.985f, 0f).normalized;
                 Assert(AiCore.TrySnapWalkableGroundProbe(myFeet, new Vector3(20.0f, 5.0f, 10f), 6.5f, 13.5f, 0.55f, 2.0f, false, 0f, out Vector3 streetSnap) &&
                        Mathf.Abs(streetSnap.y - 6.85f) < 1e-4f,
                     "Gentle +1.85m urban street slope was wrongly rejected!");
-                Assert(RaycastHit.ColliderAccessCount == 0,
-                    $"Expected 0 RaycastHit.collider accesses when |dy| <= 2.0f, got {RaycastHit.ColliderAccessCount}!");
+                Assert(RaycastHit.ColliderAccessCount == 1,
+                    $"Expected 1 cached RaycastHit.collider access on gentle street slope, got {RaycastHit.ColliderAccessCount}!");
 
                 // 9d. Steep TerrainCollider hillside climbs & descents across FULL call-site envelopes:
                 //     - Pass 2 (4.5m @ 60 deg => +7.79m / -7.79m, liftY=8.0f, maxRayDist=16.0f, minNormalY=0.50f)
@@ -708,6 +710,38 @@ $partC
                 Physics.MockSubFloorPoint = new Vector3(14.5f, 5.45f, 10f); // only 1.65m headroom!
                 Assert(!AiCore.TrySnapWalkableGroundProbe(myFeet, new Vector3(14.5f, 5.0f, 10f), 8.0f, 16.0f, 0.50f, 2.0f, false, 0f, out _),
                     "Low 1.65m crawlspace beneath overhead slab should be rejected!");
+                Physics.MockSubFloorValid = false;
+
+                // 9i. Vehicle hull/fender colliders (+1.15m within |dy| <= 2.0m) MUST be rejected without sub-floor >= 1.90m!
+                var vehicleCol = new Collider { IsTerrain = false, IsVehicle = true };
+                Physics.MockRayHitValid = true;
+                Physics.MockRayCollider = vehicleCol;
+                Physics.MockRayNormal = Vector3.up;
+                Physics.MockRayPoint = new Vector3(14.5f, 6.15f, 10f); // +1.15m tank engine deck
+                Physics.MockSubFloorValid = false;
+                Assert(!AiCore.TrySnapWalkableGroundProbe(myFeet, new Vector3(14.5f, 5.0f, 10f), 8.0f, 16.0f, 0.50f, 2.0f, false, 0f, out _),
+                    "Tank/vehicle hull deck (+1.15m) with no sub-floor should be rejected!");
+
+                // Vehicle deck +1.15m over y=5.0m ground (only 1.15m clearance < 1.90m) MUST be rejected!
+                Physics.MockSubFloorValid = true;
+                Physics.MockSubFloorCollider = terrainCol;
+                Physics.MockSubFloorNormal = Vector3.up;
+                Physics.MockSubFloorPoint = new Vector3(14.5f, 5.0f, 10f);
+                Assert(!AiCore.TrySnapWalkableGroundProbe(myFeet, new Vector3(14.5f, 5.0f, 10f), 8.0f, 16.0f, 0.50f, 2.0f, false, 0f, out _),
+                    "Vehicle chassis overhang with only 1.15m clearance (< 1.90m) should be rejected!");
+
+                // High vehicle deck >= 1.90m above non-vehicle ground (e.g. tank crossing high trestle) snaps cleanly below!
+                Physics.MockRayPoint = new Vector3(14.5f, 7.50f, 10f); // 2.50m above y=5.0m non-vehicle deck
+                Physics.MockSubFloorCollider = nonTerrainCol;
+                Physics.MockSubFloorPoint = new Vector3(14.5f, 5.05f, 10f);
+                Assert(AiCore.TrySnapWalkableGroundProbe(myFeet, new Vector3(14.5f, 5.0f, 10f), 8.0f, 16.0f, 0.50f, 2.0f, false, 0f, out Vector3 underVehSnap) &&
+                       Mathf.Abs(underVehSnap.y - 5.05f) < 1e-4f,
+                    "Walkable ground with 2.45m clearance beneath high vehicle overhang should snap cleanly!");
+
+                // Sub-floor that is ALSO a vehicle collider MUST still be rejected!
+                Physics.MockSubFloorCollider = vehicleCol;
+                Assert(!AiCore.TrySnapWalkableGroundProbe(myFeet, new Vector3(14.5f, 5.0f, 10f), 8.0f, 16.0f, 0.50f, 2.0f, false, 0f, out _),
+                    "Secondary vehicle collider beneath primary vehicle collider should be rejected!");
                 Physics.MockSubFloorValid = false;
             }
 

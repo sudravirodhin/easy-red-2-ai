@@ -414,11 +414,22 @@ namespace EasyRed2HumanAI
         {
             AiCore.SoldierFastHandles stuckH = AiCore.GetOrCreateSoldierHandles(soldier);
             FootStuckState st = stuckH != null ? stuckH.Goap.FootStuck : default;
+            bool onVehicleHull = !soldier.IsOnVehicle() && AiCore.IsFootBotStandingOnVehicleHull(myPos);
 
             if (now < st.UnstickOverrideUntil)
             {
+                bool allowStepDown = onVehicleHull ||
+                                     st.ConsecutiveUnsticks >= 2 ||
+                                     (myPos.y - st.UnstickDest.y >= 0.85f);
                 if ((st.UnstickDest - myPos).sqrMagnitude <= 1.2f * 1.2f ||
-                    !AiCore.TryValidateAndSnapDirectMicroStep(myPos, st.UnstickDest, out Vector3 contSnapped, out _, 2.8f, 0.75f))
+                    !AiCore.TryValidateAndSnapDirectMicroStep(
+                        myPos,
+                        st.UnstickDest,
+                        out Vector3 contSnapped,
+                        out _,
+                        allowStepDown ? 4.8f : 2.8f,
+                        onVehicleHull ? 2.85f : 0.75f,
+                        allowStepDown ? 2.90f : 0.75f))
                 {
                     st.UnstickOverrideUntil = 0f;
                     st.AnchorPos = myPos;
@@ -435,7 +446,8 @@ namespace EasyRed2HumanAI
                     return false;
                 }
 
-                SetBotPose(ai, soldier, suppression >= 35f ? SoldierPose.Crouch : SoldierPose.Idle, suppression < 35f);
+                if (!ai.HasEnemyAndCanFireAtHim || targetDist <= 6.2f)
+                    SetBotPose(ai, soldier, suppression >= 35f ? SoldierPose.Crouch : SoldierPose.Idle, suppression < 35f);
                 ai.MoveDirectlyToward(contSnapped, 0.85f);
                 return true;
             }
@@ -452,7 +464,8 @@ namespace EasyRed2HumanAI
                                        sqLeader.IsAlive &&
                                        sqLeader.transform != null &&
                                        (sqLeader.transform.position - myPos).sqrMagnitude > 28.0f * 28.0f;
-            bool tryingToMove = toEndFlat.sqrMagnitude > 2.5f * 2.5f ||
+            bool tryingToMove = onVehicleHull ||
+                                toEndFlat.sqrMagnitude > 2.5f * 2.5f ||
                                 (ai.IsMoving() && rawMoveDest.sqrMagnitude > 0.01f && toMoveDestFlat.sqrMagnitude > 3.5f * 3.5f) ||
                                 laggingBehindLeader;
 
@@ -465,15 +478,16 @@ namespace EasyRed2HumanAI
                                        (!ai.IsMoving() && (!farFromSquadOrGoal || st.AnchorTime <= 0f || (now - st.AnchorTime) < 5.0f)));
 
             bool intentionallyStationary =
-                soldier.IsOnCover() ||
-                soldier.UsingBipod() ||
-                firingHaltedOnSpot ||
-                soldier.isInHandsAnimation ||
-                soldier.isInBodyAnimation ||
-                soldier.IsCarryingBody();
+                !onVehicleHull &&
+                (soldier.IsOnCover() ||
+                 soldier.UsingBipod() ||
+                 firingHaltedOnSpot ||
+                 soldier.isInHandsAnimation ||
+                 soldier.isInBodyAnimation ||
+                 soldier.IsCarryingBody());
 
             float movedSq = (myPos - st.AnchorPos).sqrMagnitude;
-            if (intentionallyStationary || !tryingToMove || st.AnchorTime <= 0f || movedSq > 0.65f * 0.65f)
+            if (intentionallyStationary || !tryingToMove || (!onVehicleHull && (st.AnchorTime <= 0f || movedSq > 0.65f * 0.65f)))
             {
                 st.AnchorPos = myPos;
                 st.AnchorTime = now;
@@ -484,16 +498,17 @@ namespace EasyRed2HumanAI
                 return false;
             }
 
-            if (now - st.AnchorTime < 1.8f || now < st.NextUnstickTime)
+            if ((!onVehicleHull && now - st.AnchorTime < 1.8f) || now < st.NextUnstickTime)
                 return false;
 
             st.ConsecutiveUnsticks++;
             st.AnchorPos = myPos;
             st.AnchorTime = now;
-            st.NextUnstickTime = now + 2.2f;
+            st.NextUnstickTime = now + (onVehicleHull ? 0.65f : 2.2f);
 
             // Player-style Step A ("Spacebar"): Try vaulting cleanly over an obstacle right in front
-            if (VisionConfig.EnableWallVaulting.Value &&
+            if (!onVehicleHull &&
+                VisionConfig.EnableWallVaulting.Value &&
                 soldier.m_pose != SoldierPose.Prone &&
                 !soldier.IsJumping() &&
                 soldier.CanVault(out Vector3 vaultPos) &&
@@ -538,19 +553,56 @@ namespace EasyRed2HumanAI
                 ? Mathf.Max(waterLevel - 1.35f, myPos.y - 0.15f)
                 : (waterLevel + 0.15f);
             Vector3 waistOrigin = myPos + Vector3.up * 0.55f;
-            const float stepDist = 2.2f;
+            float stepDist = onVehicleHull ? 2.8f : 2.2f;
+            bool destSignificantlyBelow = (desiredEnd.sqrMagnitude > 0.01f && myPos.y - desiredEnd.y >= 1.15f) ||
+                                          (rawMoveDest.sqrMagnitude > 0.01f && myPos.y - rawMoveDest.y >= 1.15f);
+            bool elevatedOrChronicTrap = onVehicleHull || st.ConsecutiveUnsticks >= 2 || destSignificantlyBelow;
+            float maxMicroFlatDist = elevatedOrChronicTrap ? 3.8f : 2.5f;
+            float maxMicroUpY = onVehicleHull ? 2.85f : 0.72f;
+            float maxMicroDownY = elevatedOrChronicTrap ? 2.85f : 0.72f;
 
             int tableLen = _playerUnstickCosTable.Length;
             int rotStart = st.ConsecutiveUnsticks % tableLen;
 
-            // Pass 1: Level/gentle-slope micro-step (<= 2.2m) pre-validated with TryValidateAndSnapDirectMicroStep
-            // so GuardDirectMoveSegment NEVER rejects it or cancels MoveDirectlyToward in a loop!
+            // Pass 1: Level/gentle-slope micro-step (<= 2.2m, or up to 3.3m with step-down when perched on an
+            // elevated ledge, parapet, rubble pile, or vehicle hull) pre-validated so GuardDirectMoveSegment allows it.
+            bool hasLevelFallback = false;
+            Vector3 levelFallbackCand = default;
             for (int k = 0; k < tableLen; k++)
             {
                 int a = (rotStart + k) % tableLen;
                 Vector3 dir = fwd * _playerUnstickCosTable[a] + right * (_playerUnstickSinTable[a] * sideSign);
                 Vector3 rawProbe = myPos + dir * stepDist;
-                if (!AiCore.TryValidateAndSnapDirectMicroStep(myPos, rawProbe, out Vector3 candPos, out _, 2.5f, 0.72f))
+                bool valid = AiCore.TryValidateAndSnapDirectMicroStep(
+                    myPos,
+                    rawProbe,
+                    out Vector3 candPos,
+                    out _,
+                    maxMicroFlatDist,
+                    maxMicroUpY,
+                    maxMicroDownY);
+
+                // If bot is perched on a wider ledge/porch/wreck (>2.2m to the edge), also probe at 3.25m for a drop-off.
+                if (!onVehicleHull && elevatedOrChronicTrap && (!valid || candPos.y > myPos.y - 0.55f))
+                {
+                    Vector3 wideProbe = myPos + dir * 3.25f;
+                    if (AiCore.TryValidateAndSnapDirectMicroStep(
+                            myPos,
+                            wideProbe,
+                            out Vector3 wideCand,
+                            out _,
+                            maxMicroFlatDist,
+                            maxMicroUpY,
+                            maxMicroDownY) &&
+                        wideCand.y <= myPos.y - 0.55f)
+                    {
+                        candPos = wideCand;
+                        rawProbe = wideProbe;
+                        valid = true;
+                    }
+                }
+
+                if (!valid)
                     continue;
 
                 if (hasWater && candPos.y <= minAllowedWaterY)
@@ -565,6 +617,16 @@ namespace EasyRed2HumanAI
                 if (AiCore.TryGetNearbyKnownMine(candPos, 4.0f, false, out _))
                     continue;
 
+                if (!onVehicleHull && elevatedOrChronicTrap && candPos.y > myPos.y - 0.55f)
+                {
+                    if (!hasLevelFallback)
+                    {
+                        hasLevelFallback = true;
+                        levelFallbackCand = candPos;
+                    }
+                    continue;
+                }
+
                 st.UnstickDest = candPos;
                 st.UnstickOverrideUntil = now + 1.35f;
                 if (stuckH != null)
@@ -573,28 +635,47 @@ namespace EasyRed2HumanAI
                     AiCore.SetBotMoveOverride(stuckH, AiCore.BotMoveOverrideKind.UnstickSidestep, candPos, now + 1.35f);
                 }
 
-                SetBotPose(ai, soldier, suppression >= 35f ? SoldierPose.Crouch : SoldierPose.Idle, suppression < 35f);
+                if (!ai.HasEnemyAndCanFireAtHim || targetDist <= 6.2f)
+                    SetBotPose(ai, soldier, suppression >= 35f ? SoldierPose.Crouch : SoldierPose.Idle, suppression < 35f);
                 ai.MoveDirectlyToward(candPos, 1.35f);
                 FootBotUnsticksCount++;
                 return true;
             }
 
+            if (hasLevelFallback)
+            {
+                st.UnstickDest = levelFallbackCand;
+                st.UnstickOverrideUntil = now + 1.35f;
+                if (stuckH != null)
+                {
+                    stuckH.Goap.FootStuck = st;
+                    AiCore.SetBotMoveOverride(stuckH, AiCore.BotMoveOverrideKind.UnstickSidestep, levelFallbackCand, now + 1.35f);
+                }
+
+                if (!ai.HasEnemyAndCanFireAtHim || targetDist <= 6.2f)
+                    SetBotPose(ai, soldier, suppression >= 35f ? SoldierPose.Crouch : SoldierPose.Idle, suppression < 35f);
+                ai.MoveDirectlyToward(levelFallbackCand, 1.35f);
+                FootBotUnsticksCount++;
+                return true;
+            }
+
             // Pass 2: Steep > 18.8 deg hillside or +0.34m curb fallback — route a 4.5m radial contour step through CPathFinding
-            // instead of MoveDirectlyToward so slope/curb guards never fight unstick!
+            // (and if CPathFinding cannot bridge a >= 0.85m ledge drop, allow direct drop-off override onto the validated ground).
             if (!isOnBridge)
             {
                 const float slopeStepDist = 4.5f;
+                float maxNonTerrainDrop = elevatedOrChronicTrap ? 2.85f : 2.0f;
                 for (int k = 0; k < tableLen; k++)
                 {
                     int a = (rotStart + k) % tableLen;
                     Vector3 dir = fwd * _playerUnstickCosTable[a] + right * (_playerUnstickSinTable[a] * sideSign);
-                    if (AiCore.IsMovementBlockedByObstacle(waistOrigin, dir, 1.75f))
+                    if (!elevatedOrChronicTrap && AiCore.IsMovementBlockedByObstacle(waistOrigin, dir, 1.75f))
                         continue;
 
                     Vector3 probe = myPos + dir * slopeStepDist;
                     // +/-8.0m vertical window covers full 60 deg (normal.y >= 0.50, 4.5 * tan(60) = 7.79m) TerrainCollider
-                    // climbs/descents while capping non-terrain rooftops/drops at +/-2.0m!
-                    if (!AiCore.TrySnapWalkableGroundProbe(myPos, probe, 8.0f, 16.0f, 0.50f, 2.0f, hasWater && !alreadyInShallowWater, waterLevel, out Vector3 candPos))
+                    // climbs/descents while capping non-terrain rooftops upward at +2.0m and downward drops at maxNonTerrainDrop.
+                    if (!AiCore.TrySnapWalkableGroundProbe(myPos, probe, 8.0f, 16.0f, 0.50f, 2.0f, hasWater && !alreadyInShallowWater, waterLevel, out Vector3 candPos, maxNonTerrainDrop))
                         continue;
 
                     if (hasWater && candPos.y <= minAllowedWaterY)
@@ -602,6 +683,27 @@ namespace EasyRed2HumanAI
 
                     if (AiCore.TryGetNearbyKnownMine(candPos, 4.0f, false, out _))
                         continue;
+
+                    if (elevatedOrChronicTrap &&
+                        (!ai.HasPath || myPos.y - candPos.y >= 0.85f) &&
+                        AiCore.TryValidateAndSnapDirectMicroStep(myPos, candPos, out Vector3 snappedDropDest, out _, 4.8f, onVehicleHull ? 2.85f : 0.75f, 2.90f))
+                    {
+                        float duration = 1.35f + Mathf.Min(st.ConsecutiveUnsticks, 4) * 0.25f;
+                        st.UnstickDest = snappedDropDest;
+                        st.UnstickOverrideUntil = now + duration;
+                        st.NextUnstickTime = now + duration + 0.6f;
+                        if (stuckH != null)
+                        {
+                            stuckH.Goap.FootStuck = st;
+                            AiCore.SetBotMoveOverride(stuckH, AiCore.BotMoveOverrideKind.UnstickSidestep, snappedDropDest, st.UnstickOverrideUntil);
+                        }
+
+                        if (!ai.HasEnemyAndCanFireAtHim || targetDist <= 6.2f)
+                            SetBotPose(ai, soldier, suppression >= 35f ? SoldierPose.Crouch : SoldierPose.Idle, suppression < 35f);
+                        ai.MoveDirectlyToward(snappedDropDest, duration);
+                        FootBotUnsticksCount++;
+                        return true;
+                    }
 
                     st.UnstickOverrideUntil = 0f;
                     st.NextUnstickTime = now + 2.6f;
@@ -611,7 +713,8 @@ namespace EasyRed2HumanAI
                         AiCore.SetBotMoveOverride(stuckH, AiCore.BotMoveOverrideKind.UnstickSidestep, candPos, now + 2.5f);
                     }
 
-                    SetBotPose(ai, soldier, suppression >= 35f ? SoldierPose.Crouch : SoldierPose.Idle, suppression < 35f);
+                    if (!ai.HasEnemyAndCanFireAtHim || targetDist <= 6.2f)
+                        SetBotPose(ai, soldier, suppression >= 35f ? SoldierPose.Crouch : SoldierPose.Idle, suppression < 35f);
                     AiCore.ResetBotPathLockout(ai);
                     ai.MoveDestination = candPos;
                     ai.UpdatePath();
@@ -997,16 +1100,23 @@ namespace EasyRed2HumanAI
             if (soldier == null || sq == null || !AiCore.IsTrueVehicleCrewSquad(sq) || soldier.IsOnVehicle())
                 return false;
 
-            if (sq.currentTask != null && sq.currentTask.TryCast<MissionTaskRetreat>() != null)
-                return true;
-
-            if (sq.SomeoneIsRepairing() ||
-                soldier.IsReachingVehicleToMount() ||
-                soldier.IsEnteringVehicle ||
-                soldier.VehicleToOperate() != null)
-            {
+            if (sq.SomeoneIsRepairing())
                 return false;
+
+            if (!IsSquadOnRetreatTask(sq) &&
+                (soldier.IsReachingVehicleToMount() ||
+                 soldier.IsEnteringVehicle ||
+                 soldier.VehicleToOperate() != null))
+            {
+                if (!AiCore.TryGetSoldierHandles(soldier.Pointer, out AiCore.SoldierFastHandles h) ||
+                    h.Goap.RemountCooldownUntil <= Time.time)
+                {
+                    return false;
+                }
             }
+
+            if (IsSquadOnRetreatTask(sq))
+                return true;
 
             AiDestination td = soldier.targetDestination;
             return td == null || td.TryCast<VehicleRepairTask>() == null;
@@ -2158,8 +2268,10 @@ namespace EasyRed2HumanAI
                                     plan.HasMoveOverride = hasSpawnOverride;
                                     plan.MoveOverrideDest = spawnOverride;
                                     plan.IsEvacuatingBailedCrew = hasSpawnOverride;
-                                    SetBotPose(ai, soldier, suppression >= 34f ? SoldierPose.Crouch : SoldierPose.Idle, suppression < 34f);
-                                    BotActionTrace.RecordEvent(soldier, BotTraceEventKind.CrewEvac, "crew_retreat_spawn", dist);
+                                    if (ai.HasEnemyAndCanFireAtHim && dist > 6.2f && !ai.IsMoving())
+                                        SetBotPose(ai, soldier, SoldierPose.Crouch);
+                                    else
+                                        ApplyDesiredMovingPose(ai, soldier, (spawnOverride - myPos).sqrMagnitude, suppression);
                                     break;
                                 }
                             }
@@ -2171,8 +2283,10 @@ namespace EasyRed2HumanAI
                                 plan.HasMoveOverride = true;
                                 plan.MoveOverrideDest = linkDest1;
                                 plan.IsEvacuatingBailedCrew = true;
-                                SetBotPose(ai, soldier, suppression >= 34f ? SoldierPose.Crouch : SoldierPose.Idle, suppression < 34f);
-                                BotActionTrace.RecordEvent(soldier, BotTraceEventKind.CrewEvac, "crew_link_squad", dist);
+                                if (ai.HasEnemyAndCanFireAtHim && dist > 6.2f && !ai.IsMoving())
+                                    SetBotPose(ai, soldier, SoldierPose.Crouch);
+                                else
+                                    ApplyDesiredMovingPose(ai, soldier, (linkDest1 - myPos).sqrMagnitude, suppression);
                                 break;
                             }
 
@@ -2182,8 +2296,10 @@ namespace EasyRed2HumanAI
                                 plan.HasMoveOverride = hasFallbackSpawn;
                                 plan.MoveOverrideDest = fallbackSpawnOverride;
                                 plan.IsEvacuatingBailedCrew = hasFallbackSpawn;
-                                SetBotPose(ai, soldier, suppression >= 34f ? SoldierPose.Crouch : SoldierPose.Idle, suppression < 34f);
-                                BotActionTrace.RecordEvent(soldier, BotTraceEventKind.CrewEvac, "crew_retreat_fallback", dist);
+                                if (ai.HasEnemyAndCanFireAtHim && dist > 6.2f && !ai.IsMoving())
+                                    SetBotPose(ai, soldier, SoldierPose.Crouch);
+                                else
+                                    ApplyDesiredMovingPose(ai, soldier, (fallbackSpawnOverride - myPos).sqrMagnitude, suppression);
                                 break;
                             }
                         }
@@ -2297,7 +2413,10 @@ namespace EasyRed2HumanAI
                                 shGoap.Stance.LocalCoverProtectedUntil = now + 4.5f;
                             plan.HasMoveOverride = true;
                             plan.MoveOverrideDest = fbDest;
-                            SetBotPose(ai, soldier, remSq <= 5.0f * 5.0f ? SoldierPose.Crouch : SoldierPose.Idle, remSq > 5.0f * 5.0f);
+                            if (ai.HasEnemyAndCanFireAtHim && dist > 6.2f && !ai.IsMoving())
+                                SetBotPose(ai, soldier, SoldierPose.Crouch);
+                            else
+                                SetBotPose(ai, soldier, remSq <= 5.0f * 5.0f ? SoldierPose.Crouch : SoldierPose.Idle, remSq > 5.0f * 5.0f);
                             AiCore.MoveBotTowardPosition(ai, soldier, fbDest, 2.2f, 3.0f);
                         }
                     }
@@ -2927,6 +3046,19 @@ namespace EasyRed2HumanAI
             if (soldier.targetDestination != null && soldier.targetDestination.TryCast<VehicleRepairTask>() != null)
                 return false;
 
+            float now = Time.time;
+            AiCore.SoldierFastHandles h = AiCore.GetOrCreateSoldierHandles(soldier);
+            bool locallyOwned = AiCore.IsLocallyOwnedBot(soldier);
+            if (h != null && now < h.Goap.RemountCooldownUntil)
+            {
+                if (locallyOwned && (soldier.VehicleToOperate() != null || soldier.IsReachingVehicleToMount()))
+                {
+                    soldier.CoverPosition(null);
+                    AiCore.InvalidateTargetDestinationCache(soldier);
+                }
+                return false;
+            }
+
             var allVehicles = Vehicle.allVehicles;
             if (allVehicles == null)
                 return false;
@@ -2938,6 +3070,7 @@ namespace EasyRed2HumanAI
             float bestDistSq = maxRadius * maxRadius;
             Vehicle bestVeh = null;
             string myFaction = soldier.faction;
+            bool mySqIsPlayerSquad = sq != null && sq.IsPlayerInSquad();
 
             for (int i = 0; i < vCount; i++)
             {
@@ -2949,11 +3082,19 @@ namespace EasyRed2HumanAI
                     veh.IsDisabled() ||
                     veh.IsCoverDestroyed() ||
                     veh.IsAirVehicle() ||
+                    veh.IsTransportVehicle() ||
                     veh.TryCast<MovableVehicle>() == null ||
                     _vehiclesCrewRetreatedFrom.Contains(veh.Pointer))
                 {
                     continue;
                 }
+
+                if (!mySqIsPlayerSquad && veh.PlayerIsInside())
+                    continue;
+
+                Squad insideSq = veh.GetSquadInside();
+                if (insideSq != null && insideSq.Pointer != IntPtr.Zero && (sq == null || insideSq.Pointer != sq.Pointer))
+                    continue;
 
                 if (veh.CanBeRepaired())
                 {
@@ -2972,21 +3113,21 @@ namespace EasyRed2HumanAI
                 if (dSq >= bestDistSq)
                     continue;
 
-                bool hasFreeSeat = false;
+                bool hasFreeCombatSeat = false;
                 if (veh.seats != null)
                 {
                     int sCount = veh.seats.Length;
                     for (int s = 0; s < sCount; s++)
                     {
                         Seats seat = veh.seats[s];
-                        if (seat != null && seat.unitSet == null)
+                        if (seat != null && seat.unitSet == null && (seat.isDriver || seat.hasTurret))
                         {
-                            hasFreeSeat = true;
+                            hasFreeCombatSeat = true;
                             break;
                         }
                     }
                 }
-                if (!hasFreeSeat)
+                if (!hasFreeCombatSeat)
                     continue;
 
                 bestDistSq = dSq;
@@ -2996,16 +3137,55 @@ namespace EasyRed2HumanAI
             if (bestVeh == null)
                 return false;
 
+            if (h != null)
+            {
+                if (h.Goap.RemountTargetVehiclePtr != bestVeh.Pointer ||
+                    now - h.Goap.RemountAttemptStartedAt > 15.0f)
+                {
+                    h.Goap.RemountTargetVehiclePtr = bestVeh.Pointer;
+                    h.Goap.RemountAttemptStartedAt = now;
+                }
+                else if (now - h.Goap.RemountAttemptStartedAt > 6.5f)
+                {
+                    // Prevent endless circling/stalling against solid hull BoxColliders if mounting cannot complete.
+                    h.Goap.RemountCooldownUntil = now + 45.0f;
+                    h.Goap.RemountTargetVehiclePtr = IntPtr.Zero;
+                    if (locallyOwned)
+                    {
+                        soldier.CoverPosition(null);
+                        AiCore.InvalidateTargetDestinationCache(soldier);
+                    }
+                    return false;
+                }
+            }
+
             Vector3 vehPos = bestVeh.transform.position;
+            Vector3 coverPos = bestVeh.GetCoverPosition();
+            float dxVeh = vehPos.x - myPos.x, dzVeh = vehPos.z - myPos.z;
+            float dxCov = coverPos.x - myPos.x, dzCov = coverPos.z - myPos.z;
+            bool nearHull = Mathf.Abs(myPos.y - vehPos.y) <= 2.8f &&
+                            ((dxVeh * dxVeh + dzVeh * dzVeh) <= 4.4f * 4.4f ||
+                             (dxCov * dxCov + dzCov * dzCov) <= 3.4f * 3.4f);
+
+            if (nearHull && locallyOwned)
+            {
+                bestVeh.OnCoverReached(soldier);
+                if (soldier.IsOnVehicle() || soldier.IsEnteringVehicle)
+                {
+                    if (h != null)
+                        h.Goap.RemountTargetVehiclePtr = IntPtr.Zero;
+                    return true;
+                }
+            }
+
             if (soldier.targetDestination == null || soldier.targetDestination.Pointer != bestVeh.Pointer)
-            {
                 AiCore.AssignBotCoverOrDestination(ai, soldier, bestVeh.Cast<AiDestination>());
-            }
-            else if (!ai.IsMoving() && !ai.HasPath && !ai.HasPathRequest)
-            {
-                AiCore.SetBotMoveDestinationAndRefreshPath(ai, vehPos, 0.04f);
-            }
-            ai.MoveDestination = vehPos;
+
+            Vector3 approachPos = coverPos;
+            if (AiCore.TryNormalizeFootSpawnPoint(approachPos, out Vector3 groundedApproach))
+                approachPos = groundedApproach;
+
+            AiCore.MoveBotTowardPosition(ai, soldier, approachPos, 0f, 1.0f);
             return true;
         }
 
@@ -3050,6 +3230,30 @@ namespace EasyRed2HumanAI
             return true;
         }
 
+        private static float GetClosestSquadMemberDistSq(
+            ref AiCore.SquadSnapshot sqSnap,
+            AiCore.SoldierSnapshot[] worldSoldiers,
+            int worldSoldierCount,
+            Vector3 fromPos,
+            out Vector3 closestPos)
+        {
+            closestPos = sqSnap.RefPos;
+            float bestDistSq = (closestPos - fromPos).sqrMagnitude;
+            int uStart = sqSnap.UnitStartIndex;
+            int uEnd = Math.Min(worldSoldierCount, uStart + sqSnap.UnitCount);
+            for (int uIdx = uStart; uIdx < uEnd; uIdx++)
+            {
+                Vector3 mPos = worldSoldiers[uIdx].Pos;
+                float mDistSq = (mPos - fromPos).sqrMagnitude;
+                if (mDistSq < bestDistSq)
+                {
+                    bestDistSq = mDistSq;
+                    closestPos = mPos;
+                }
+            }
+            return bestDistSq;
+        }
+
         internal static bool TryLinkUpOrJoinFriendlySquad(
             SoldierAI ai,
             Soldier self,
@@ -3071,6 +3275,8 @@ namespace EasyRed2HumanAI
             bool selfIsPlayer = self.IsPlayer();
 
             var squads = AiCore.WorldSquads;
+            var wSoldiers = AiCore.WorldSoldiers;
+            int wSolCount = AiCore.WorldSoldierCount;
             for (int i = 0; i < sqCount; i++)
             {
                 ref AiCore.SquadSnapshot other = ref squads[i];
@@ -3082,12 +3288,13 @@ namespace EasyRed2HumanAI
                 if (!selfIsPlayer && other.IsPlayerInSquad && other.UnitCount >= 8)
                     continue;
 
-                float dSq = (other.RefPos - myPos).sqrMagnitude;
+                float dSq = GetClosestSquadMemberDistSq(ref other, wSoldiers, wSolCount, myPos, out Vector3 nearestPos);
+
                 if (dSq < bestSq)
                 {
                     bestSq = dSq;
                     bestSquad = other.Ref;
-                    linkUpPos = other.RefPos;
+                    linkUpPos = nearestPos;
                 }
             }
 
@@ -3150,6 +3357,15 @@ namespace EasyRed2HumanAI
                                 }
 
                                 GoapPlansExecutedCount++;
+                                if (bestSquad.IsPlayerInSquad())
+                                {
+                                    string callsign = AiCore.FormatSquadPhoneticCallsign(bestSquad);
+                                    AiCore.TryShowLocalPlayerRadioHint(
+                                        bestSquad,
+                                        $"Straggler linked up \u2014 reinforced {callsign}",
+                                        requireLeader: false,
+                                        minInterval: 12.0f);
+                                }
                                 if (VisionConfig.DebugLogging.Value)
                                 {
                                     AiCore.LogDebug(
@@ -3178,6 +3394,7 @@ namespace EasyRed2HumanAI
         private static float _nextLonePlayerRejoinCheckTime;
         private static readonly HashSet<IntPtr> _hadMultiMemberPlayerSquads = new HashSet<IntPtr>();
         private static readonly Dictionary<IntPtr, IntPtr> _warnedWipedSquadByPlayerSoldier = new Dictionary<IntPtr, IntPtr>(8);
+        private static readonly Dictionary<IntPtr, float> _lonePlayerRejoinEligibleAfterTime = new Dictionary<IntPtr, float>(8);
 
         public static void UpdateLonePlayerSquadStatusAndRejoin()
         {
@@ -3193,6 +3410,8 @@ namespace EasyRed2HumanAI
                 _hadMultiMemberPlayerSquads.Clear();
             if (_warnedWipedSquadByPlayerSoldier.Count > 32)
                 _warnedWipedSquadByPlayerSoldier.Clear();
+            if (_lonePlayerRejoinEligibleAfterTime.Count > 32)
+                _lonePlayerRejoinEligibleAfterTime.Clear();
 
             // 1. Local Player
             Soldier localPlayer = Soldier.CurrentControlledSoldierOrNull();
@@ -3239,7 +3458,7 @@ namespace EasyRed2HumanAI
             if (sq == null || sq.Pointer == IntPtr.Zero || sq.IsVehicleCrew)
                 return;
 
-            int aliveCount = 0;
+            int activeOrDownedCount = 0;
             var units = sq.units;
             if (units != null)
             {
@@ -3247,24 +3466,58 @@ namespace EasyRed2HumanAI
                 for (int i = 0; i < uTotal; i++)
                 {
                     Soldier u = units[i];
-                    if (u != null && u.IsAlive && !u.IsDead)
-                        aliveCount++;
+                    if (u != null && !u.IsDead && (u.IsAlive || u.IsInjured) && !u.HasSurrended())
+                        activeOrDownedCount++;
                 }
             }
 
-            if (aliveCount >= 2)
+            if (activeOrDownedCount >= 2)
             {
                 _hadMultiMemberPlayerSquads.Add(sq.Pointer);
                 return;
             }
 
-            if (aliveCount != 1 || !_hadMultiMemberPlayerSquads.Contains(sq.Pointer))
+            if (activeOrDownedCount != 1 || !_hadMultiMemberPlayerSquads.Contains(sq.Pointer))
                 return;
 
             Vector3 pPos = player.transform.position;
             IntPtr oldSqPtr = sq.Pointer;
+            float now = Time.time;
 
-            // Reuse existing TryLinkUpOrJoinFriendlySquad when within 15m of an open friendly foot squad!
+            // Always show one-time wiped-squad warning BEFORE allowing auto-linkup (4.5s grace period)
+            if (!_warnedWipedSquadByPlayerSoldier.TryGetValue(player.Pointer, out IntPtr warnedSq) || warnedSq != oldSqPtr)
+            {
+                _warnedWipedSquadByPlayerSoldier[player.Pointer] = oldSqPtr;
+                _lonePlayerRejoinEligibleAfterTime[player.Pointer] = now + 4.5f;
+
+                string warnMsg;
+                if (player.HasRadio() &&
+                    TryFindNearestOpenFriendlyFootSquad(player.faction, oldSqPtr, pPos, out Squad nearSq, out Vector3 nearPos))
+                {
+                    string callsign = AiCore.FormatSquadPhoneticCallsign(nearSq);
+                    string bearing = AiCore.FormatRelativeBearingAndDistance(pPos, nearPos);
+                    warnMsg = $"Field Radio: Squad wiped out \u2014 {callsign} is {bearing}, link up to rejoin";
+                }
+                else
+                {
+                    warnMsg = "Your squad was wiped out \u2014 find a friendly squad to rejoin";
+                }
+
+                if (isLocalPlayer)
+                {
+                    try { PlayerController.HintToPlayer(warnMsg, false); } catch { }
+                }
+                else if (remoteVanillaOwner != null)
+                {
+                    AiCore.SendTargetedVanillaChatMessage(remoteVanillaOwner, warnMsg, minPlayerInterval: 10.0f);
+                }
+                return;
+            }
+
+            if (_lonePlayerRejoinEligibleAfterTime.TryGetValue(player.Pointer, out float eligTime) && now < eligTime)
+                return;
+
+            // Reuse existing TryLinkUpOrJoinFriendlySquad when within 15m of any member of an open friendly foot squad!
             if (TryLinkUpOrJoinFriendlySquad(null, player, pPos, 15.0f, out _))
             {
                 Squad newSq = player.joinedSquad;
@@ -3280,34 +3533,6 @@ namespace EasyRed2HumanAI
                 {
                     AiCore.SendTargetedVanillaChatMessage(remoteVanillaOwner, joinMsg, minPlayerInterval: 8.0f);
                 }
-                return;
-            }
-
-            // One-time wiped-squad warning toast (strictly gated on player.HasRadio() before revealing any squad callsign/bearing!)
-            if (_warnedWipedSquadByPlayerSoldier.TryGetValue(player.Pointer, out IntPtr warnedSq) && warnedSq == oldSqPtr)
-                return;
-
-            _warnedWipedSquadByPlayerSoldier[player.Pointer] = oldSqPtr;
-            string warnMsg;
-            if (player.HasRadio() &&
-                TryFindNearestOpenFriendlyFootSquad(player.faction, oldSqPtr, pPos, out Squad nearSq, out Vector3 nearPos))
-            {
-                string callsign = AiCore.FormatSquadPhoneticCallsign(nearSq);
-                string bearing = AiCore.FormatRelativeBearingAndDistance(pPos, nearPos);
-                warnMsg = $"Field Radio: Squad wiped out \u2014 {callsign} is {bearing}, link up to rejoin";
-            }
-            else
-            {
-                warnMsg = "Your squad was wiped out \u2014 find a friendly squad to rejoin";
-            }
-
-            if (isLocalPlayer)
-            {
-                try { PlayerController.HintToPlayer(warnMsg, false); } catch { }
-            }
-            else if (remoteVanillaOwner != null)
-            {
-                AiCore.SendTargetedVanillaChatMessage(remoteVanillaOwner, warnMsg, minPlayerInterval: 10.0f);
             }
         }
 
@@ -3326,6 +3551,8 @@ namespace EasyRed2HumanAI
             AiCore.EnsureWorldSnapshot();
             int sqCount = AiCore.WorldSquadCount;
             var squads = AiCore.WorldSquads;
+            var wSoldiers = AiCore.WorldSoldiers;
+            int wSolCount = AiCore.WorldSoldierCount;
             float bestDistSq = 450.0f * 450.0f;
 
             for (int i = 0; i < sqCount; i++)
@@ -3343,12 +3570,13 @@ namespace EasyRed2HumanAI
                     continue;
                 }
 
-                float dSq = (other.RefPos - fromPos).sqrMagnitude;
+                float dSq = GetClosestSquadMemberDistSq(ref other, wSoldiers, wSolCount, fromPos, out Vector3 candPos);
+
                 if (dSq < bestDistSq)
                 {
                     bestDistSq = dSq;
                     nearestSquad = other.Ref;
-                    nearestPos = other.RefPos;
+                    nearestPos = candPos;
                 }
             }
 

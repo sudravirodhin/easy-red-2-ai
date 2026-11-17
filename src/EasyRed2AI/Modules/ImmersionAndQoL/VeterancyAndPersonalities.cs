@@ -99,25 +99,42 @@ namespace EasyRed2HumanAI
         public static int BridgeCrossingsAssistedCount;
         public static int ShellShockSurrendersCount;
 
+        private static byte DetermineVehicleRoleCategory(Vehicle veh)
+        {
+            AiCore.VehicleFastHandles vh = AiCore.GetOrCreateVehicleHandles(veh);
+            if (vh != null)
+            {
+                if (vh.IsPlane)
+                    return 10; // Aircraft Pilot / Aircrew
+                if (vh.IsTank)
+                    return 8;  // Armored Tank / Tracked Vehicle Crew
+            }
+            return 9;          // Light / Wheeled / Halftrack / AA Crew
+        }
+
         private static byte DetermineRoleCategory(Soldier s)
         {
             if (s == null)
                 return 0;
 
             if (s.IsOnVehicle())
+                return DetermineVehicleRoleCategory(s.GetCurrentVehicle());
+
+            Squad sq = s.joinedSquad;
+            if (sq != null && !sq.isOpenForJoiners)
             {
-                AiCore.VehicleFastHandles vh = AiCore.GetOrCreateVehicleHandles(s.GetCurrentVehicle());
-                if (vh != null)
-                {
-                    if (vh.IsPlane)
-                        return 10; // Aircraft Pilot / Aircrew
-                    if (vh.IsTank)
-                        return 8;  // Armored Tank / Tracked Vehicle Crew
-                }
-                return 9;          // Light / Wheeled / Halftrack / AA Crew
+                Vehicle opVeh = s.VehicleToOperate();
+                if (opVeh != null && opVeh.Pointer != IntPtr.Zero && !opVeh.IsTransportVehicle())
+                    return DetermineVehicleRoleCategory(opVeh);
+
+                if (AiCore.IsConfirmedPlaneCrewSquad(sq))
+                    return 10; // Bailed Aircraft Pilot / Aircrew
+
+                if (AiCore.IsTrueVehicleCrewSquad(sq))
+                    return 8;  // Bailed Armored Tank / Vehicle Crew
             }
 
-            if (s.joinedSquad != null && s.joinedSquad.Leader != null && s.joinedSquad.Leader.Pointer == s.Pointer)
+            if (sq != null && sq.Leader != null && sq.Leader.Pointer == s.Pointer)
                 return 1; // Squad Leader / Officer
 
             if (s.hasSyringe)
@@ -240,12 +257,26 @@ namespace EasyRed2HumanAI
             else if (now >= rec.NextRoleCheckTime)
             {
                 rec.NextRoleCheckTime = now + 4.0f;
-                byte currentRoleCat = DetermineRoleCategory(s);
-                if (currentRoleCat != rec.RoleCategory)
+                bool preserveCrewRole = false;
+                if (rec.RoleCategory >= 8 && !s.IsOnVehicle())
                 {
-                    rec.RoleCategory = currentRoleCat;
-                    rec.Personality = RollPersonalityForRole(s, currentRoleCat);
-                    rec.NameInitialized = false;
+                    Squad sq = s.joinedSquad;
+                    bool joinedOpenInfantry = sq != null &&
+                                              sq.isOpenForJoiners &&
+                                              !AiCore.IsTrueVehicleCrewSquad(sq) &&
+                                              !AiCore.IsConfirmedPlaneCrewSquad(sq);
+                    preserveCrewRole = !joinedOpenInfantry;
+                }
+
+                if (!preserveCrewRole)
+                {
+                    byte currentRoleCat = DetermineRoleCategory(s);
+                    if (currentRoleCat != rec.RoleCategory)
+                    {
+                        rec.RoleCategory = currentRoleCat;
+                        rec.Personality = RollPersonalityForRole(s, currentRoleCat);
+                        rec.NameInitialized = false;
+                    }
                 }
             }
             return rec;
@@ -582,6 +613,15 @@ namespace EasyRed2HumanAI
                 if (s.name_surname != desiredName)
                 {
                     s.name_surname = desiredName;
+                }
+
+                Soldier controlled = Soldier.CurrentControlledSoldierOrNull();
+                if (controlled != null &&
+                    controlled.joinedSquad != null &&
+                    s.joinedSquad != null &&
+                    controlled.joinedSquad.Pointer == s.joinedSquad.Pointer)
+                {
+                    RefreshBottomLeftSquadRosterVisuals();
                 }
             }
         }

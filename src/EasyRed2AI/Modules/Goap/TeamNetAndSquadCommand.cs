@@ -164,11 +164,11 @@ namespace EasyRed2HumanAI
             if (sq.RadioRequestActiveAndConfirmed())
                 return true;
 
+            bool isPlayerSq = sq.IsPlayerInSquad();
             Soldier leader = sq.Leader;
-            if (leader == null || !leader.IsAlive || leader.transform == null)
-                return false;
+            bool leaderAlive = leader != null && leader.IsAlive && leader.transform != null;
 
-            if (leader.IsOnVehicle())
+            if (leaderAlive && leader.IsOnVehicle())
             {
                 Vehicle veh = leader.GetCurrentVehicle();
                 if (veh != null && veh.TryCast<VehicleParachute>() == null)
@@ -176,11 +176,14 @@ namespace EasyRed2HumanAI
             }
 
             Soldier rad = sq.GetRadioman();
-            return rad != null &&
-                   rad.IsAlive &&
-                   !rad.HasSurrended() &&
-                   rad.transform != null &&
-                   (rad.transform.position - leader.transform.position).sqrMagnitude <= 32f * 32f;
+            if (rad == null || !rad.IsAlive || rad.HasSurrended() || rad.transform == null)
+                return false;
+
+            if (!leaderAlive)
+                return true;
+
+            float maxDistSq = isPlayerSq ? (95f * 95f) : (60f * 60f);
+            return (rad.transform.position - leader.transform.position).sqrMagnitude <= maxDistSq;
         }
 
         internal static bool IsSquadConnectedToRadioNet(Squad sq)
@@ -2068,9 +2071,15 @@ namespace EasyRed2HumanAI
 
             // Check Radioman status & detect sudden loss or field recovery of squad Radioman
             Soldier rad = sq.GetRadioman();
-            bool hasAliveRadNow = rad != null && rad.IsAlive && !rad.HasSurrended();
-            bool radiomanJustDied = board.PreviouslyHadAliveRadioman && !hasAliveRadNow;
-            bool radiomanJustRecovered = !board.PreviouslyHadAliveRadioman && hasAliveRadNow && board.RadioNetToastInitState != 0;
+            bool hasAliveRadNow = (rad != null && rad.IsAlive && !rad.HasSurrended()) ||
+                                  IsMountedOnGroundVehicle(leader);
+            bool isFirstRadioInit = board.RadioNetToastInitState == 0;
+            if (isFirstRadioInit)
+            {
+                board.PreviouslyHadAliveRadioman = hasAliveRadNow;
+            }
+            bool radiomanJustDied = !isFirstRadioInit && board.PreviouslyHadAliveRadioman && !hasAliveRadNow;
+            bool radiomanJustRecovered = !isFirstRadioInit && !board.PreviouslyHadAliveRadioman && hasAliveRadNow;
 
             if (radiomanJustDied)
             {
@@ -2100,48 +2109,64 @@ namespace EasyRed2HumanAI
             if (VisionConfig.EnableRadiomanIntelNet.Value)
             {
                 bool liveRadioLink = HasLiveRadioOrRelayLink(sq);
-                if (board.RadioNetToastInitState == 0)
+                if (isFirstRadioInit)
                 {
-                    board.RadioNetToastInitState = liveRadioLink ? (byte)2 : (byte)1;
+                    board.RadioNetToastInitState = (liveRadioLink || hasAliveRadNow) ? (byte)2 : (byte)1;
                     board.RadioRelayPendingFlipSince = 0f;
                 }
                 else if (sq.IsPlayerInSquad())
                 {
-                    bool wasNotifiedConnected = board.RadioNetToastInitState == 2;
-                    if (liveRadioLink != wasNotifiedConnected)
+                    if (radiomanJustDied)
                     {
-                        bool immediateEvent = (!liveRadioLink && radiomanJustDied) || (liveRadioLink && radiomanJustRecovered);
-                        if (!immediateEvent && board.RadioRelayPendingFlipSince <= 0f)
+                        board.RadioNetToastInitState = liveRadioLink ? (byte)2 : (byte)1;
+                        board.RadioRelayPendingFlipSince = 0f;
+                        board.NextRadioNetStatusToastTime = now + 16.0f;
+                        string lostMsg = !liveRadioLink
+                            ? "Squad Radio: Radioman down \u2014 squad cut off from HQ Net! (Loot a radio or stay near friendly squads)"
+                            : "Squad Radio: Radioman down \u2014 squad holding HQ link via nearby friendly relay";
+                        AiCore.TryShowLocalPlayerRadioHint(sq, lostMsg, requireLeader: false, minInterval: 6.0f);
+                    }
+                    else if (radiomanJustRecovered)
+                    {
+                        board.RadioNetToastInitState = 2;
+                        board.RadioRelayPendingFlipSince = 0f;
+                        board.NextRadioNetStatusToastTime = now + 16.0f;
+                        Soldier lp = Soldier.CurrentControlledSoldierOrNull();
+                        bool playerIsRad = lp != null && lp.IsAlive && lp.joinedSquad != null && lp.joinedSquad.Pointer == sqPtr && lp.IsRadioman();
+                        string recMsg = playerIsRad
+                            ? "Squad Radio: You recovered a field radio \u2014 squad reconnected to HQ Radio Net!"
+                            : "Squad Radio: Field radio recovered \u2014 squad reconnected to HQ Radio Net!";
+                        AiCore.TryShowLocalPlayerRadioHint(sq, recMsg, requireLeader: false, minInterval: 6.0f);
+                    }
+                    else if (!hasAliveRadNow)
+                    {
+                        // Relay notices fire strictly when NO alive Radioman exists in the squad
+                        bool wasNotifiedConnected = board.RadioNetToastInitState == 2;
+                        if (liveRadioLink != wasNotifiedConnected)
                         {
-                            board.RadioRelayPendingFlipSince = now;
+                            if (board.RadioRelayPendingFlipSince <= 0f)
+                                board.RadioRelayPendingFlipSince = now;
+
+                            if ((now - board.RadioRelayPendingFlipSince) >= 4.0f && now >= board.NextRadioNetStatusToastTime)
+                            {
+                                board.RadioNetToastInitState = liveRadioLink ? (byte)2 : (byte)1;
+                                board.RadioRelayPendingFlipSince = 0f;
+                                board.NextRadioNetStatusToastTime = now + 20.0f;
+
+                                string relayMsg = !liveRadioLink
+                                    ? "Squad Radio: Squad out of friendly relay range \u2014 cut off from HQ Radio Net"
+                                    : "Squad Radio: Squad back in friendly relay range \u2014 reconnected to HQ Radio Net";
+                                AiCore.TryShowLocalPlayerRadioHint(sq, relayMsg, requireLeader: false, minInterval: 6.0f);
+                            }
                         }
-
-                        if (immediateEvent ||
-                            ((now - board.RadioRelayPendingFlipSince) >= 4.0f && now >= board.NextRadioNetStatusToastTime))
+                        else
                         {
-                            board.RadioNetToastInitState = liveRadioLink ? (byte)2 : (byte)1;
                             board.RadioRelayPendingFlipSince = 0f;
-                            board.NextRadioNetStatusToastTime = now + 20.0f;
-
-                            string netStatusMsg;
-                            if (!liveRadioLink)
-                            {
-                                netStatusMsg = (radiomanJustDied || (board.LastRadiomanLostTime > 0f && (now - board.LastRadiomanLostTime) <= 6.0f))
-                                    ? "Squad Radio: Radioman down \u2014 cut off from HQ Net! (Loot a radio or stay near friendly squads)"
-                                    : "Squad Radio: Out of friendly radio relay range \u2014 cut off from HQ Net";
-                            }
-                            else
-                            {
-                                netStatusMsg = hasAliveRadNow
-                                    ? "Squad Radio: Field radio recovered \u2014 reconnected to HQ Radio Net!"
-                                    : "Squad Radio: Back in friendly relay range \u2014 reconnected to HQ Radio Net";
-                            }
-
-                            AiCore.TryShowLocalPlayerRadioHint(sq, netStatusMsg, requireLeader: false, minInterval: 6.0f);
                         }
                     }
                     else
                     {
+                        board.RadioNetToastInitState = 2;
                         board.RadioRelayPendingFlipSince = 0f;
                     }
                 }

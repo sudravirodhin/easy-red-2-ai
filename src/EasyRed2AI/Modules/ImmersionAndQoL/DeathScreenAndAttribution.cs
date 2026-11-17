@@ -279,6 +279,29 @@ namespace EasyRed2HumanAI
             return trimmed;
         }
 
+        private static string FormatCannonShellLabel(BulletData bulletData)
+        {
+            if (bulletData == null)
+                return "Cannon";
+            switch (bulletData.shellType)
+            {
+                case ShellType.HE:
+                    return "HE Shell";
+                case ShellType.APHE:
+                    return "APHE Shell";
+                case ShellType.HEAT:
+                    return "HEAT Shell";
+                case ShellType.AP:
+                    return "AP Shell";
+                case ShellType.Rocket:
+                    return "Rocket";
+                default:
+                    if (bulletData.IsFlak())
+                        return "Flak Shell";
+                    return "Cannon";
+            }
+        }
+
         private static string FormatVehicleWeaponName(string vehName, Vehicle veh, BulletData bulletData)
         {
             if (bulletData != null)
@@ -286,9 +309,7 @@ namespace EasyRed2HumanAI
                 float cal = bulletData.caliber;
                 if (cal >= 30f)
                 {
-                    string shellType = bulletData.IsHe()
-                        ? "HE Shell"
-                        : (bulletData.IsAp() ? "AP Shell" : (bulletData.IsFlak() ? "Flak Shell" : "Cannon"));
+                    string shellType = FormatCannonShellLabel(bulletData);
                     return $"{vehName} ({Mathf.RoundToInt(cal)}mm {shellType})";
                 }
                 if (cal >= 18f)
@@ -318,7 +339,7 @@ namespace EasyRed2HumanAI
                 if (bulletData != null && bulletData.caliber >= 18f)
                 {
                     return bulletData.caliber >= 30f
-                        ? $"{Mathf.RoundToInt(bulletData.caliber)}mm {(bulletData.IsHe() ? "HE Shell" : "Cannon Shell")}"
+                        ? $"{Mathf.RoundToInt(bulletData.caliber)}mm {FormatCannonShellLabel(bulletData)}"
                         : $"{Mathf.RoundToInt(bulletData.caliber)}mm Autocannon";
                 }
                 return "";
