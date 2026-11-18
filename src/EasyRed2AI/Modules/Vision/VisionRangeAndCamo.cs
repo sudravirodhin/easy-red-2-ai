@@ -1142,22 +1142,37 @@ namespace EasyRed2HumanAI
                                     bool isMarkedSquad = sq != null && (sq.isMarked || sq.isHalfMarked || sq.isMarkedPinPoint);
                                     if (!isMarkedSquad)
                                     {
-                                        float dist = Vector3.Distance(__instance.transform.position, targetSoldier.GetPosition());
-                                        AiCore.TryGetSoldierHandles(targetSoldier.Pointer, out AiCore.SoldierFastHandles tSolH);
-                                        bool activeMuzzleFlare = tSolH != null && tSolH.Vision.LastFiredTime > 0f && (Time.time - tSolH.Vision.LastFiredTime) <= 1.85f;
-                                        bool recentlyFired = activeMuzzleFlare || GetFiringVisibilityBonus(targetSoldier) > 10f;
+                                        Vector3 planePos = __instance.transform.position;
+                                        Vector3 solPos = targetSoldier.GetPosition();
+                                        float dx = planePos.x - solPos.x;
+                                        float dz = planePos.z - solPos.z;
+                                        float horizDist = Mathf.Sqrt(dx * dx + dz * dz);
+                                        float altAbove = Mathf.Max(0f, planePos.y - solPos.y);
 
-                                        float maxAirInfDist = VisionConfig.AircraftUnmarkedInfantryMaxDist.Value;
+                                        AiCore.TryGetSoldierHandles(targetSoldier.Pointer, out AiCore.SoldierFastHandles tSolH);
+                                        bool activeMuzzleFlare = tSolH != null && tSolH.Vision.LastFiredTime > 0f && (Time.time - tSolH.Vision.LastFiredTime) <= 2.50f;
+                                        bool recentlyFired = activeMuzzleFlare || GetFiringVisibilityBonus(targetSoldier) > 8f;
+                                        bool squadEngaged = sq != null && sq.IsEnemyAwareOfThisSquad;
+
+                                        // Account for 350m-500m patrol altitude geometry: a 55-deg forward cone at 400m altitude
+                                        // has a minimum 3D slant distance of ~490m (horizontal standoff ~280m-580m).
+                                        float baseHorizDist = Mathf.Min(720.0f, Mathf.Max(VisionConfig.AircraftUnmarkedInfantryMaxDist.Value * 2.5f, altAbove * 1.35f + 140.0f));
+                                        float maxAirInfHorizDist = baseHorizDist;
                                         if (night01 >= 0.30f)
                                         {
-                                            maxAirInfDist = activeMuzzleFlare
-                                                ? Mathf.Max(maxAirInfDist, 225.0f)
-                                                : Mathf.Lerp(maxAirInfDist, 18.0f, night01);
+                                            maxAirInfHorizDist = activeMuzzleFlare
+                                                ? Mathf.Max(baseHorizDist * 0.75f, 320.0f)
+                                                : Mathf.Lerp(baseHorizDist, 45.0f, night01);
                                         }
 
-                                        if (dist > maxAirInfDist ||
+                                        bool concealedProne = VisionConfig.LimitAircraftInfantrySpotting.Value &&
+                                                              targetSoldier.m_pose == SoldierPose.Prone &&
+                                                              !recentlyFired &&
+                                                              !squadEngaged;
+
+                                        if (horizDist > maxAirInfHorizDist ||
                                             (night01 >= 0.45f && !activeMuzzleFlare) ||
-                                            (VisionConfig.LimitAircraftInfantrySpotting.Value && targetSoldier.m_pose != SoldierPose.Idle && !recentlyFired))
+                                            concealedProne)
                                         {
                                             BlockedPlaneSpot++;
                                             __result = null;

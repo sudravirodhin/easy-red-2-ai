@@ -38,39 +38,7 @@ namespace EasyRed2HumanAI
         public static int TankRockUnsticksCount;
         public static int SmartAmmoSwitchesCount;
 
-        internal struct RemoteVehicleMotionState
-        {
-            public Vector3 LastSamplePos;
-            public float LastSampleTime;
-            public Vector3 SmoothedVelocity;
-            public float LastMoveTime;
-            public float LastSignedSpeed;
-            public float LastPacketTime;
-            public float NextRoadkillScanTime;
-            public float NextGroundCheckTime;
-            public Vector3 LastSweptVehPos;
-            public float LastSweptTime;
-            public bool HasSweptPos;
-            public bool HasSample;
-        }
-
-        private struct DogfightBreakOffState
-        {
-            public Vector3 EscapeTargetPos;
-            public float ExpireTime;
-            public float CooldownUntil;
-            public float NextCheckTime;
-        }
-
-        internal static readonly Dictionary<IntPtr, RemoteVehicleMotionState> _remoteVehicleMotion = new Dictionary<IntPtr, RemoteVehicleMotionState>(32);
-        private static readonly Dictionary<IntPtr, float> _tankHighCenteredDuration = new Dictionary<IntPtr, float>(32);
-        private static readonly Dictionary<IntPtr, float> _nextTankUnstickCountTime = new Dictionary<IntPtr, float>(32);
         private static readonly HashSet<IntPtr> _hotStartedPlayerPlanes = new HashSet<IntPtr>();
-        private static readonly Dictionary<IntPtr, float> _planeHotStartWindowUntil = new Dictionary<IntPtr, float>(16);
-        private static readonly Dictionary<IntPtr, float> _remotePlaneSpawnSeenTime = new Dictionary<IntPtr, float>(16);
-        private static readonly Dictionary<IntPtr, float> _nextRemotePlaneGroundCheckTime = new Dictionary<IntPtr, float>(16);
-        private static readonly Dictionary<IntPtr, DogfightBreakOffState> _planeDogfightBreakOff = new Dictionary<IntPtr, DogfightBreakOffState>(16);
-        private static readonly Dictionary<IntPtr, float> _nextLocalDriverRoadkillScanTime = new Dictionary<IntPtr, float>(16);
         internal static readonly Dictionary<IntPtr, TurretAI> _turretAiByTurretPtr = new Dictionary<IntPtr, TurretAI>(64);
         internal static readonly Dictionary<IntPtr, string> _lastKnownVehicleFaction = new Dictionary<IntPtr, string>(64);
         internal static readonly HashSet<IntPtr> _creditedDestroyedVehicles = new HashSet<IntPtr>();
@@ -130,18 +98,10 @@ namespace EasyRed2HumanAI
         private static readonly List<ActiveRadioSupportInfo> _activeRadioRequests = new List<ActiveRadioSupportInfo>(16);
         private static readonly List<KnownEnemyCluster> _knownEnemyClusters = new List<KnownEnemyCluster>(32);
         private static readonly List<AirborneAircraftInfo> _airborneAircraft = new List<AirborneAircraftInfo>(16);
-        internal struct TankUnstickFrameState
-        {
-            public int Frame;
-            public bool ApplyForce;
-            public Vector3 ForceVec;
-        }
-
         private static readonly List<ActiveGroundVehicleInfo> _activeGroundVehicles = new List<ActiveGroundVehicleInfo>(24);
         private static readonly HashSet<IntPtr> _seenGroundVehiclePtrs = new HashSet<IntPtr>(24);
         internal static readonly Dictionary<IntPtr, Vector3> _claimedVehicleDestinations = new Dictionary<IntPtr, Vector3>(24);
         internal static readonly Dictionary<IntPtr, float> _nextArmorDispersionCountTime = new Dictionary<IntPtr, float>(32);
-        internal static readonly Dictionary<IntPtr, TankUnstickFrameState> _tankUnstickFrameCache = new Dictionary<IntPtr, TankUnstickFrameState>(32);
         private static readonly List<IntPtr> _reusableExpiredEmplacementBots = new List<IntPtr>(16);
 
         public static void ClearCombinedArmsCaches()
@@ -153,7 +113,6 @@ namespace EasyRed2HumanAI
             _seenGroundVehiclePtrs.Clear();
             _claimedVehicleDestinations.Clear();
             _nextArmorDispersionCountTime.Clear();
-            _tankUnstickFrameCache.Clear();
             _reusableExpiredEmplacementBots.Clear();
             _activeRepairStations.Clear();
             _vehiclesSeekingRepairStation.Clear();
@@ -168,14 +127,7 @@ namespace EasyRed2HumanAI
             _nextKamikazeTargetSearchTime.Clear();
             _lastKnownVehicleCrewSquad.Clear();
             _nextGroundedCrewRetreatCheckTime = 0f;
-            _tankHighCenteredDuration.Clear();
-            _nextTankUnstickCountTime.Clear();
             _hotStartedPlayerPlanes.Clear();
-            _planeHotStartWindowUntil.Clear();
-            _remotePlaneSpawnSeenTime.Clear();
-            _nextRemotePlaneGroundCheckTime.Clear();
-            _planeDogfightBreakOff.Clear();
-            _nextLocalDriverRoadkillScanTime.Clear();
             _turretAiByTurretPtr.Clear();
             _lastKnownVehicleFaction.Clear();
             _creditedDestroyedVehicles.Clear();
@@ -205,7 +157,6 @@ namespace EasyRed2HumanAI
             _squadObjectiveLossTrackers.Clear();
             _nextTurretFFCheckTime.Clear();
             _turretFFBlockedUntil.Clear();
-            _remoteVehicleMotion.Clear();
             _pendingTurretIntercom.Clear();
             _turretSightReaction.Clear();
             _planeAttackReaction.Clear();
@@ -576,7 +527,7 @@ namespace EasyRed2HumanAI
                 {
                     ref AiCore.SoldierSnapshot uSnap = ref soldiers[i];
                     Soldier u = uSnap.Ref;
-                    if (u == null)
+                    if (u == null || uSnap.HasSurrendered || uSnap.IsInjured)
                         continue;
 
                     if (uSnap.IsSpotted || VisionPatches.HasFiredRecently(u, 3.5f))
@@ -1329,10 +1280,21 @@ namespace EasyRed2HumanAI
             Vector3 targetPos = Vector3.zero;
             if (turretAi != null)
             {
-                if (AiCore.IsValidAliveSpottable(turretAi.CurrentVisibleTarget))
+                Spottable curTurretVis = turretAi.CurrentVisibleTarget;
+                if (curTurretVis != null && curTurretVis.Pointer != IntPtr.Zero)
                 {
-                    targetPos = turretAi.CurrentVisibleTarget.GetCenterOfUnit();
-                    hasTargetPos = true;
+                    if (AiCore.IsValidAliveSpottable(curTurretVis))
+                    {
+                        targetPos = curTurretVis.GetCenterOfUnit();
+                        hasTargetPos = true;
+                    }
+                    else
+                    {
+                        // Stale surrendered or syringe-captured target in TurretAI: clear and block fire immediately!
+                        turretAi.CurrentVisibleTarget = null;
+                        turretAi.targetInWeaponRange = false;
+                        return true;
+                    }
                 }
                 else if (turretAi.HasRadioSupportRequest)
                 {

@@ -416,8 +416,11 @@ namespace EasyRed2HumanAI
                 return false;
 
             Soldier targetSoldier = lastInfo.Target.TryCast<Soldier>();
-            if (targetSoldier == null || !targetSoldier.IsAlive)
+            if (AiCore.IsSoldierNonCombatantOrSurrendered(targetSoldier))
+            {
+                sh.Vision.LastKnownTarget = default;
                 return false;
+            }
 
             Vector3 myPos = soldier.transform.position;
             Vector3 liveTargetPos = targetSoldier.GetCenterOfUnit();
@@ -500,8 +503,11 @@ namespace EasyRed2HumanAI
                 return false;
 
             Soldier targetSoldier = lastInfo.Target.TryCast<Soldier>();
-            if (targetSoldier == null || !targetSoldier.IsAlive)
+            if (AiCore.IsSoldierNonCombatantOrSurrendered(targetSoldier))
+            {
+                sh.Vision.LastKnownTarget = default;
                 return false;
+            }
 
             if (soldier.GetSuppressionValue() >= 28f || soldier.IsReloading || soldier.MustReload())
                 return false;
@@ -594,8 +600,12 @@ namespace EasyRed2HumanAI
                 return false;
 
             Soldier targetSoldier = effTarget.TryCast<Soldier>();
-            if (targetSoldier == null || !targetSoldier.IsAlive)
+            if (AiCore.IsSoldierNonCombatantOrSurrendered(targetSoldier))
+            {
+                if (sh != null && sh.Vision.LastKnownTarget.Target != null && sh.Vision.LastKnownTarget.Target.Pointer == effTarget.Pointer)
+                    sh.Vision.LastKnownTarget = default;
                 return false;
+            }
 
             GenericGun heldGun = soldier.GetHeldGun();
             if (heldGun == null)

@@ -98,6 +98,7 @@ namespace EasyRed2HumanAI
                     VeteranAndTacticsPatches.UpdateMultiplayerBattleStatSync();
                     VeteranAndTacticsPatches.UpdateLobbyJoinMotdQueue();
                     VeteranAndTacticsPatches.UpdateLonePlayerSquadStatusAndRejoin();
+                    VeteranAndTacticsPatches.UpdateSquadRosterHeaderAndFastSync();
                     VeteranAndTacticsPatches.UpdateQuickTapSpot(_showConfigMenu || _showMapPicker || _showDogTagArchive);
                     if (_showMapPicker)
                         BattleManager_OnGUI_Patch.StepResolveSelectedCampaignBattles();
@@ -1645,6 +1646,175 @@ namespace EasyRed2HumanAI
             catch { }
         }
 
+        private static GameObject _squadHeaderGo;
+        private static RectTransform _squadHeaderRect;
+        private static Text _squadHeaderText;
+        private static float _nextSquadRosterSyncCheckTime;
+
+        public static void DetachSquadHeaderBeforeClear()
+        {
+            try
+            {
+                if (_squadHeaderRect != null)
+                {
+                    _squadHeaderRect.SetParent(null, false);
+                }
+                if (_squadHeaderGo != null && _squadHeaderGo.activeSelf)
+                {
+                    _squadHeaderGo.SetActive(false);
+                }
+            }
+            catch { }
+        }
+
+        public static void RefreshSquadHeaderLabel()
+        {
+            try
+            {
+                if (!VisionConfig.EnableMod.Value)
+                {
+                    if (_squadHeaderGo != null && _squadHeaderGo.activeSelf)
+                        _squadHeaderGo.SetActive(false);
+                    return;
+                }
+
+                PlayerGUI pgui = PlayerGUI.instance;
+                if (pgui == null || pgui.squadGUI_Panel == null || pgui.squadLabelPrefab == null)
+                    return;
+
+                Transform panel = pgui.squadGUI_Panel;
+                int childCount = panel.childCount;
+                int memberLabelCount = 0;
+                for (int i = 0; i < childCount; i++)
+                {
+                    Transform child = panel.GetChild(i);
+                    if (child == null) continue;
+                    SquadSoldierLabel lbl = child.GetComponent<SquadSoldierLabel>();
+                    if (lbl != null)
+                        memberLabelCount++;
+                }
+
+                Squad guiSquad = PlayerGUI.GUISquad;
+                if (guiSquad == null || guiSquad.Pointer == IntPtr.Zero)
+                {
+                    Soldier localSol = Soldier.CurrentControlledSoldierOrNull();
+                    if (localSol != null)
+                        guiSquad = localSol.joinedSquad;
+                }
+
+                if (memberLabelCount <= 0 || guiSquad == null || guiSquad.Pointer == IntPtr.Zero)
+                {
+                    if (_squadHeaderGo != null && _squadHeaderGo.activeSelf)
+                        _squadHeaderGo.SetActive(false);
+                    return;
+                }
+
+                RectTransform prefabRect = pgui.squadLabelPrefab.GetComponent<RectTransform>();
+                if (prefabRect == null)
+                    return;
+
+                if (_squadHeaderGo == null || _squadHeaderRect == null || _squadHeaderText == null)
+                {
+                    SquadSoldierLabel prefabLbl = pgui.squadLabelPrefab.GetComponent<SquadSoldierLabel>();
+                    Text templateText = prefabLbl != null ? prefabLbl.name_surname : null;
+                    if (templateText == null || templateText.gameObject == null)
+                        return;
+
+                    _squadHeaderGo = UnityEngine.Object.Instantiate(templateText.gameObject, panel);
+                    _squadHeaderGo.name = "BH_SquadHeaderLabel";
+                    _squadHeaderRect = _squadHeaderGo.GetComponent<RectTransform>();
+                    _squadHeaderText = _squadHeaderGo.GetComponent<Text>();
+                    if (_squadHeaderRect == null || _squadHeaderText == null)
+                        return;
+
+                    _squadHeaderText.fontStyle = FontStyle.Bold;
+                    _squadHeaderText.alignment = TextAnchor.MiddleLeft;
+                    _squadHeaderText.horizontalOverflow = HorizontalWrapMode.Overflow;
+                    _squadHeaderText.verticalOverflow = VerticalWrapMode.Overflow;
+                    _squadHeaderText.raycastTarget = false;
+                }
+
+                if (_squadHeaderRect.parent != panel)
+                {
+                    _squadHeaderRect.SetParent(panel, false);
+                }
+
+                _squadHeaderRect.anchorMin = prefabRect.anchorMin;
+                _squadHeaderRect.anchorMax = prefabRect.anchorMax;
+                _squadHeaderRect.pivot = prefabRect.pivot;
+                _squadHeaderRect.localScale = Vector3.one;
+                float rowHeight = prefabRect.sizeDelta.y > 1f ? prefabRect.sizeDelta.y : 25.0f;
+                _squadHeaderRect.sizeDelta = new Vector2(Mathf.Max(prefabRect.sizeDelta.x, 280.0f), rowHeight);
+
+                float headerY = (memberLabelCount + 1) * rowHeight + PlayerGUI.labelStartY - 2.0f;
+                _squadHeaderRect.anchoredPosition = new Vector2(4.0f, headerY);
+
+                string callsign = AiCore.FormatSquadPhoneticCallsign(guiSquad);
+                string headerStr = !string.IsNullOrEmpty(callsign) ? callsign.ToUpperInvariant() : "SQUAD";
+                if (_squadHeaderText.text != headerStr)
+                    _squadHeaderText.text = headerStr;
+
+                _squadHeaderText.color = new Color(1.00f, 0.88f, 0.45f, 0.96f);
+                _squadHeaderText.enabled = true;
+                if (!_squadHeaderGo.activeSelf)
+                    _squadHeaderGo.SetActive(true);
+            }
+            catch { }
+        }
+
+        public static void UpdateSquadRosterHeaderAndFastSync()
+        {
+            if (!VisionConfig.EnableMod.Value || Time.timeScale <= 0.01f)
+                return;
+
+            float now = Time.unscaledTime;
+            if (now < _nextSquadRosterSyncCheckTime && (_nextSquadRosterSyncCheckTime - now) <= 2.0f)
+                return;
+            _nextSquadRosterSyncCheckTime = now + 0.20f;
+
+            try
+            {
+                PlayerGUI pgui = PlayerGUI.instance;
+                if (pgui == null || pgui.squadGUI_Panel == null)
+                    return;
+
+                if (!PlayerGUI.IsSelectingSquad())
+                {
+                    Soldier localPlayer = Soldier.CurrentControlledSoldierOrNull();
+                    if (localPlayer != null && localPlayer.Pointer != IntPtr.Zero && localPlayer.IsAlive)
+                    {
+                        Squad pSq = localPlayer.joinedSquad;
+                        if (pSq != null && pSq.Pointer != IntPtr.Zero && (pSq.CountMembers > 1 || pSq.isOpenForJoiners))
+                        {
+                            Squad guiSq = PlayerGUI.GUISquad;
+                            int panelMemberLabels = 0;
+                            Transform panel = pgui.squadGUI_Panel;
+                            int childCount = panel.childCount;
+                            for (int i = 0; i < childCount; i++)
+                            {
+                                Transform child = panel.GetChild(i);
+                                if (child == null) continue;
+                                SquadSoldierLabel lbl = child.GetComponent<SquadSoldierLabel>();
+                                if (lbl != null && !lbl.isRespawnAction)
+                                    panelMemberLabels++;
+                            }
+
+                            if (guiSq == null ||
+                                guiSq.Pointer != pSq.Pointer ||
+                                panelMemberLabels != pSq.CountMembers)
+                            {
+                                PlayerGUI.ShowSquadList(pSq, 0.15f);
+                                PlayerGUI.UpdateSquadGUI();
+                            }
+                        }
+                    }
+                }
+
+                RefreshSquadHeaderLabel();
+            }
+            catch { }
+        }
+
         public static void RefreshBottomLeftSquadRosterVisuals()
         {
             try
@@ -1665,6 +1835,8 @@ namespace EasyRed2HumanAI
                         lbl.RefreshVisual();
                     }
                 }
+
+                RefreshSquadHeaderLabel();
             }
             catch { }
         }
@@ -1789,11 +1961,8 @@ namespace EasyRed2HumanAI
 
                 AiCore.PruneFastHandleCaches(_reusableAlivePtrs, _reusableVehiclePtrs);
                 AiCore.PruneDict(_cachedVehiclePersonalities, _reusableVehiclePtrs);
-                AiCore.PruneDict(_tankUnstickFrameCache, _reusableVehiclePtrs);
-                AiCore.PruneDict(_nextLocalDriverRoadkillScanTime, _reusableVehiclePtrs);
                 AiCore.PruneDict(_cachedVehicleSolidColliders, _reusableVehiclePtrs);
                 AiCore.PruneDict(_cachedVehicleExtents, _reusableVehiclePtrs);
-                AiCore.PruneDict(_remoteVehicleMotion, _reusableVehiclePtrs);
                 _reusableVehiclePtrs.Clear();
 
                 if (_cachedInventoryOwners.Count > 2048)
@@ -1839,13 +2008,6 @@ namespace EasyRed2HumanAI
                     _pendingTurretIntercom.Clear();
                 if (_planeAttackReaction.Count > 128)
                     _planeAttackReaction.Clear();
-                if (_planeDogfightBreakOff.Count > 128)
-                {
-                    _planeDogfightBreakOff.Clear();
-                    _remotePlaneSpawnSeenTime.Clear();
-                    _nextRemotePlaneGroundCheckTime.Clear();
-                    _planeHotStartWindowUntil.Clear();
-                }
                 AiCore.PruneSpatialCachesIfOversized();
 
                 if (_repairTaskStartTime.Count > 0)
@@ -1870,11 +2032,74 @@ namespace EasyRed2HumanAI
         }
 
         // =====================================================================
-        // Squad Roster UI Always-Show Names, Veteran & Personality Tags (SquadSoldierLabel)
+        // Squad Roster UI Always-Show Names, Active Soldier Marker, Squad Header & Fast Link-Up Sync
         // =====================================================================
+        [HarmonyPatch(typeof(PlayerGUI), nameof(PlayerGUI.ClearSquadList))]
+        public static class PlayerGUI_ClearSquadList_Patch
+        {
+            public static void Prefix()
+            {
+                DetachSquadHeaderBeforeClear();
+            }
+        }
+
+        [HarmonyPatch(typeof(PlayerGUI), nameof(PlayerGUI.ShowSquadList))]
+        public static class PlayerGUI_ShowSquadList_Patch
+        {
+            public static void Postfix()
+            {
+                RefreshSquadHeaderLabel();
+            }
+        }
+
+        [HarmonyPatch(typeof(PlayerGUI), nameof(PlayerGUI.LayoutSquadEntries))]
+        public static class PlayerGUI_LayoutSquadEntries_Patch
+        {
+            public static void Postfix()
+            {
+                RefreshSquadHeaderLabel();
+            }
+        }
+
+        [HarmonyPatch(typeof(Squad), nameof(Squad.Join))]
+        public static class Squad_Join_Patch
+        {
+            public static void Postfix(Squad __instance, Soldier __0)
+            {
+                try
+                {
+                    if (!VisionConfig.EnableMod.Value ||
+                        __instance == null ||
+                        __instance.Pointer == IntPtr.Zero ||
+                        __0 == null ||
+                        __0.Pointer == IntPtr.Zero ||
+                        PlayerGUI.instance == null ||
+                        PlayerGUI.IsSelectingSquad())
+                    {
+                        return;
+                    }
+
+                    Soldier localPlayer = Soldier.CurrentControlledSoldierOrNull();
+                    if (localPlayer != null &&
+                        localPlayer.Pointer != IntPtr.Zero &&
+                        localPlayer.IsAlive &&
+                        localPlayer.joinedSquad != null &&
+                        localPlayer.joinedSquad.Pointer == __instance.Pointer)
+                    {
+                        PlayerGUI.ShowSquadList(__instance, 0.15f);
+                        PlayerGUI.UpdateSquadGUI();
+                        RefreshSquadHeaderLabel();
+                    }
+                }
+                catch { }
+            }
+        }
+
         [HarmonyPatch(typeof(SquadSoldierLabel), nameof(SquadSoldierLabel.RefreshVisual))]
         public static class SquadSoldierLabel_RefreshVisual_Patch
         {
+            private const string ActiveSoldierPrefix = "\u25ba ";
+
             public static void Postfix(SquadSoldierLabel __instance)
             {
                 try
@@ -1892,30 +2117,59 @@ namespace EasyRed2HumanAI
                         nameLabel.enabled = true;
                     }
 
+                    bool isSelecting = PlayerGUI.IsSelectingSquad();
+                    bool isHighlightedInSelect = isSelecting &&
+                        ((PlayerGUI.highLightedUnit != null && PlayerGUI.highLightedUnit.Pointer == s.Pointer) ||
+                         (SquadSoldierLabel.currentHighlighted != null && SquadSoldierLabel.currentHighlighted.Pointer == __instance.Pointer));
+                    bool isCurrentPlayerSoldier = !isSelecting && (s.IsPlayer() || PlayerController.CharacterIsPlayer(s));
+                    bool isActiveMarkerRow = isHighlightedInSelect || isCurrentPlayerSoldier;
+
                     bool showVet = VisionConfig.EnableVeteranSystem.Value && VisionConfig.ShowVeteranSquadRosterTags.Value;
                     bool showPers = VisionConfig.EnableRolePersonalities.Value && VisionConfig.ShowPersonalityInSquadRoster.Value;
 
                     string curText = nameLabel.text ?? "";
+                    if (curText.StartsWith(ActiveSoldierPrefix, StringComparison.Ordinal))
+                    {
+                        curText = curText.Substring(ActiveSoldierPrefix.Length);
+                    }
                     int bracketIdx = curText.IndexOf(" [", StringComparison.Ordinal);
                     string baseText = bracketIdx >= 0 ? curText.Substring(0, bracketIdx) : curText;
 
                     string tag = (showVet || showPers) ? BuildSoldierBracketTag(s, showVet, showPers, true) : "";
-                    string desiredText = baseText + tag;
+                    string desiredText = (isActiveMarkerRow ? ActiveSoldierPrefix : "") + baseText + tag;
                     if (nameLabel.text != desiredText)
                     {
                         nameLabel.text = desiredText;
                     }
 
-                    // Preserve vanilla's urgent red injuredColor when a squadmate is bleeding or incapacitated
-                    if (showVet && !s.IsInjured && !s.isBleeding)
+                    // Preserve vanilla's urgent red injuredNameColor when a squadmate is bleeding or incapacitated
+                    if (!s.IsInjured && !s.isBleeding)
                     {
-                        int tier = GetVeteranTier(s);
-                        if (tier == 1)
-                            nameLabel.color = new Color(0.95f, 0.82f, 0.55f, 1f);
-                        else if (tier == 2)
-                            nameLabel.color = new Color(0.85f, 0.95f, 1.00f, 1f);
-                        else if (tier >= 3)
-                            nameLabel.color = new Color(1.00f, 0.86f, 0.22f, 1f);
+                        bool isOtherHumanPlayer = __instance.EvaluateState() == SquadSoldierLabel.LabelState.OtherPlayer;
+
+                        if (isActiveMarkerRow)
+                        {
+                            Color activeHighlight = isSelecting
+                                ? __instance.highlightColor
+                                : Color.white;
+                            nameLabel.color = activeHighlight;
+                            if (!isSelecting && __instance.role != null)
+                            {
+                                __instance.role.color = activeHighlight;
+                            }
+                        }
+                        else if (!isOtherHumanPlayer)
+                        {
+                            int tier = showVet ? GetVeteranTier(s) : 0;
+                            if (tier == 1)
+                                nameLabel.color = new Color(0.84f, 0.72f, 0.50f, 0.90f);
+                            else if (tier == 2)
+                                nameLabel.color = new Color(0.74f, 0.84f, 0.92f, 0.90f);
+                            else if (tier >= 3)
+                                nameLabel.color = new Color(0.95f, 0.80f, 0.24f, 0.92f);
+                            else
+                                nameLabel.color = new Color(0.68f, 0.70f, 0.73f, 0.88f);
+                        }
                     }
                 }
                 catch { }

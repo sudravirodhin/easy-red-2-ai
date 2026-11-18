@@ -916,7 +916,8 @@ namespace EasyRed2HumanAI
                         continue;
 
                     if (p.TryCast<VehicleDamageableWheelPart>() != null ||
-                        p.TryCast<VehicleDamageableTrackPart>() != null)
+                        p.TryCast<VehicleDamageableTrackPart>() != null ||
+                        p.TryCast<VehicleDamagableDetachablePart>() != null)
                     {
                         continue;
                     }
@@ -1242,6 +1243,7 @@ namespace EasyRed2HumanAI
         {
             public static bool Prefix(
                 VehicleDamagablePart __instance,
+                float __0,
                 float __1,
                 Vector3 __2,
                 Soldier __3,
@@ -1251,12 +1253,44 @@ namespace EasyRed2HumanAI
                 {
                     if (!VisionConfig.EnableMod.Value ||
                         !VisionConfig.EnableRealisticVehicleArmorAndTopAttack.Value ||
-                        __4 != HitType.Fire ||
                         __instance == null ||
                         __instance.Pointer == IntPtr.Zero)
                     {
                         return true;
                     }
+
+                    // Vanilla Bug Fix: VehicleDamagableDetachablePart (1mm-5mm external fenders, side skirts,
+                    // stowage boxes, spare wheels) overrides TryPenetrateArmor so bullets only detach the
+                    // external part, but forgot to override TryDamageWithExplosion! Without this guard, ANY
+                    // nearby blast with maxPenetration > 1mm hits a detachable fender and runs base
+                    // VehicleDamagablePart.TryDamageWithExplosion, dealing full DamageHull + DamageEngine +
+                    // DamageFuelTank through the tank's heavy armor!
+                    VehicleDamagableDetachablePart detachable = __instance.TryCast<VehicleDamagableDetachablePart>();
+                    if (detachable != null)
+                    {
+                        if (detachable.IsDetached() || __4 == HitType.Fire)
+                            return false;
+
+                        Vehicle detRoot = __instance.GetRootVehicle();
+                        if (detRoot != null &&
+                            detRoot.Pointer != IntPtr.Zero &&
+                            !detRoot.IsAirVehicle() &&
+                            detRoot.IsPhysicsEnabled &&
+                            detRoot.isActiveAndEnabled &&
+                            __0 > __instance.armorThickness &&
+                            AiCore.IsLocallyOwnedVehicle(detRoot))
+                        {
+                            string shooterFac = (__3 != null && __3.Pointer != IntPtr.Zero) ? __3.faction : null;
+                            if (BodyPart.AllowDamage(shooterFac, detRoot.GetVehicleFaction()))
+                            {
+                                detachable.Damage(__1);
+                            }
+                        }
+                        return false;
+                    }
+
+                    if (__4 != HitType.Fire)
+                        return true;
 
                     // Steel tank tracks never take fire damage
                     if (__instance.TryCast<VehicleDamageableTrackPart>() != null)
@@ -1328,6 +1362,144 @@ namespace EasyRed2HumanAI
                 }
                 catch { }
                 return true;
+            }
+        }
+
+        // ============================================================================
+        // 2C. TANK COLLISION HULL-DAMAGE & FALSE "HULL DAMAGED" POPUP FIX
+        // Fixes three vanilla collision bugs in VehicleWithWheels.OnCollisionEnter
+        // (0x18087B730) and VehicleDamagablePart.OnVehicleCollision (0x180814400):
+        //  1) Detachable fenders/skirts/stowage boxes (VehicleDamagableDetachablePart)
+        //     have `damageHullOnGettingRammed = true` (0x18081387E) and keep `rootVeh`
+        //     pointing to the tank even after Detach() adds a Rigidbody to them, causing
+        //     collisions with fenders/stowage or self-parts to call `rootVeh.DamageHull`!
+        //  2) Armored vehicles/tanks take direct hull HP damage when bumped by light
+        //     vehicles/props (`OnVehicleCollision` ignores armorThickness and mass ratio).
+        //  3) When a tank crushes a static emplacement/tent gun (`rootVeh.IsStaticVehicle()`),
+        //     `VehicleWithWheels.OnCollisionEnter` (0x18087C14B) checks `this.IsStaticVehicle()`
+        //     (false on the player's tank) instead of `rootVeh.IsStaticVehicle()`, popping up
+        //     "Hull damaged" / "Hull destroyed" on the tank driver's screen!
+        // ============================================================================
+        private static IntPtr _activeCollidingVehiclePtr;
+        private static bool _activeCollisionTargetIsStaticVehicle;
+
+        [HarmonyPatch(typeof(VehicleWithWheels), nameof(VehicleWithWheels.OnCollisionEnter))]
+        public static class VehicleWithWheels_OnCollisionEnter_Patch
+        {
+            public static void Prefix(VehicleWithWheels __instance, Collision __0)
+            {
+                try
+                {
+                    if (!VisionConfig.EnableMod.Value || __instance == null || __instance.Pointer == IntPtr.Zero)
+                        return;
+
+                    _activeCollidingVehiclePtr = __instance.Pointer;
+                    _activeCollisionTargetIsStaticVehicle = false;
+
+                    if (__0 != null && __0.Pointer != IntPtr.Zero)
+                    {
+                        GameObject go = __0.gameObject;
+                        if (go != null && go.Pointer != IntPtr.Zero)
+                        {
+                            VehicleDamagablePart part = go.GetComponent<VehicleDamagablePart>();
+                            if (part != null && part.Pointer != IntPtr.Zero)
+                            {
+                                Vehicle targetVeh = part.rootVeh;
+                                if (targetVeh != null && targetVeh.Pointer != IntPtr.Zero && targetVeh.IsStatic())
+                                {
+                                    _activeCollisionTargetIsStaticVehicle = true;
+                                }
+                            }
+                        }
+                    }
+                }
+                catch { }
+            }
+
+            public static void Finalizer()
+            {
+                _activeCollidingVehiclePtr = IntPtr.Zero;
+                _activeCollisionTargetIsStaticVehicle = false;
+            }
+        }
+
+        [HarmonyPatch(typeof(VehicleDamagablePart), nameof(VehicleDamagablePart.OnVehicleCollision))]
+        public static class VehicleDamagablePart_OnVehicleCollision_Patch
+        {
+            public static bool Prefix(
+                VehicleDamagablePart __instance,
+                float __0,
+                float __1,
+                ref bool __result)
+            {
+                try
+                {
+                    if (!VisionConfig.EnableMod.Value || __instance == null || __instance.Pointer == IntPtr.Zero)
+                        return true;
+
+                    Vehicle rootVeh = __instance.rootVeh;
+                    if (rootVeh == null || rootVeh.Pointer == IntPtr.Zero)
+                    {
+                        __result = false;
+                        return false;
+                    }
+
+                    // 1. Never allow a vehicle to ram its own child or detached VehicleDamagablePart collider
+                    if (_activeCollidingVehiclePtr != IntPtr.Zero && rootVeh.Pointer == _activeCollidingVehiclePtr)
+                    {
+                        __result = false;
+                        return false;
+                    }
+
+                    // 2. Collisions with external detachable parts (fenders, side skirts, stowage boxes)
+                    // should only damage/detach the external part, NEVER the main vehicle hull!
+                    VehicleDamagableDetachablePart detachable = __instance.TryCast<VehicleDamagableDetachablePart>();
+                    if (detachable != null)
+                    {
+                        if (!detachable.IsDetached() &&
+                            __1 > 4.0f &&
+                            !rootVeh.IsDisabled() &&
+                            AiCore.IsLocallyOwnedVehicle(rootVeh))
+                        {
+                            detachable.Damage((__0 * __1) * 0.01f);
+                        }
+                        __result = false;
+                        return false;
+                    }
+
+                    // 3. Armored vehicles and tanks should never take hull damage from light collisions
+                    // (e.g. bumping a motorcycle, jeep, wheeled gun cart, or light prop).
+                    bool isTank = rootVeh.TryCast<VehicleTank>() != null;
+                    float effArmor = GetEffectiveVehicleExplosionArmor(rootVeh);
+                    if (isTank || effArmor >= 8.0f || __instance.armorThickness >= 15.0f)
+                    {
+                        MovableVehicle mov = rootVeh.TryCast<MovableVehicle>();
+                        Rigidbody ownRb = mov != null ? mov.rb : null;
+                        float ownMass = (ownRb != null && ownRb.Pointer != IntPtr.Zero) ? Mathf.Max(4000f, ownRb.mass) : 12000f;
+
+                        // Require a heavy vehicle collision (>= 45% of the armored vehicle's mass and >= 3500 kg)
+                        // at >= 6.5 m/s (~23.4 km/h) before an armored hull can suffer structural ram damage.
+                        if (__0 < Mathf.Max(3500f, ownMass * 0.45f) || __1 < 6.5f)
+                        {
+                            __result = false;
+                            return false;
+                        }
+                    }
+                }
+                catch { }
+                return true;
+            }
+        }
+
+        [HarmonyPatch(typeof(VehicleDamagablePart), nameof(VehicleDamagablePart.InternalPartToDamageText))]
+        public static class VehicleDamagablePart_InternalPartToDamageText_Patch
+        {
+            public static void Prefix(ref bool __1)
+            {
+                if (_activeCollidingVehiclePtr != IntPtr.Zero && _activeCollisionTargetIsStaticVehicle)
+                {
+                    __1 = true;
+                }
             }
         }
 

@@ -496,90 +496,7 @@ namespace EasyRed2HumanAI
             if (mv != null)
                 speedMs = Mathf.Abs(mv.GetCurrentSpeed());
 
-            bool isTank = veh.TryCast<VehicleTank>() != null;
             float minFwd = Mathf.Max(0.85f, halfLength * 0.45f);
-
-            // Friendly Vehicle Convoy Spacing & Reverse Collision Guard:
-            // Prevent trailing tanks from rear-ending / hull-hugging lead vehicles on roads/bridges (holding 18m-24m
-            // anti-bombing road interval) while allowing instant lateral peel-off (> 22 deg) onto flank routes!
-            RefreshCombinedArmsIntelIfNeeded();
-            if (_activeGroundVehicles.Count > 1)
-            {
-                Vector3 steerDir = travelDir;
-                if (!isReversing && aiVeh != null && aiVeh.path != null && aiVeh.path.NodesCount > 0)
-                {
-                    Vector3 toNode = aiVeh.path.CurrentNode.point - vehPos;
-                    toNode.y = 0f;
-                    if (toNode.sqrMagnitude > 0.25f)
-                        steerDir = toNode.normalized;
-                }
-
-                long myId = vehPtr.ToInt64();
-                for (int i = 0; i < _activeGroundVehicles.Count; i++)
-                {
-                    ActiveGroundVehicleInfo other = _activeGroundVehicles[i];
-                    if (other.VehPtr == vehPtr || string.IsNullOrEmpty(other.Faction))
-                        continue;
-                    if (!AiCore.AreSameSideFactions(vehFaction, other.Faction))
-                        continue;
-
-                    Vector3 vDelta = other.Position - vehPos;
-                    if (Mathf.Abs(vDelta.y) > 4.5f)
-                        continue;
-                    vDelta.y = 0f;
-
-                    float fwdProj = Vector3.Dot(vDelta, travelDir);
-                    if (fwdProj <= minFwd)
-                        continue;
-
-                    float latDist = Mathf.Abs(Vector3.Dot(vDelta, vehRight));
-                    float closeBumperDist = halfLength + other.HalfLength + (isReversing ? 5.5f : 5.0f);
-
-                    if (isReversing)
-                    {
-                        if (fwdProj < closeBumperDist && latDist < (halfWidth + other.HalfWidth + 1.35f))
-                        {
-                            _vehicleYieldUntilTime[vehPtr] = now + 0.28f;
-                            return true;
-                        }
-                        continue;
-                    }
-
-                    float convoyDist = (isTank || other.IsTank)
-                        ? Mathf.Clamp(halfLength + other.HalfLength + 13.5f + speedMs * 0.75f, 18.0f, 24.5f)
-                        : Mathf.Clamp(halfLength + other.HalfLength + 7.5f + speedMs * 0.65f, 12.0f, 17.5f);
-
-                    if (fwdProj >= convoyDist || latDist >= (halfWidth + other.HalfWidth + 1.85f))
-                        continue;
-
-                    // Allow immediate lateral peel-off when pathing diverges > 22 deg and hulls have pivot clearance
-                    if (fwdProj > closeBumperDist && Vector3.Angle(steerDir, vDelta) > 22.0f)
-                        continue;
-
-                    float headingDot = Vector3.Dot(travelDir, other.Forward);
-                    if (other.IsPlayerInsideOrDriving ||
-                        (headingDot >= -0.35f && (other.IsStoppedOrShooting || speedMs > other.SpeedMs - 0.35f || fwdProj < closeBumperDist)))
-                    {
-                        _vehicleYieldUntilTime[vehPtr] = now + 0.28f;
-                        return true;
-                    }
-
-                    if (headingDot < -0.35f && myId > other.VehPtr.ToInt64())
-                    {
-                        if (!_vehicleContinuousYieldStart.TryGetValue(vehPtr, out float headOnStart))
-                        {
-                            headOnStart = now;
-                            _vehicleContinuousYieldStart[vehPtr] = headOnStart;
-                        }
-                        if ((now - headOnStart) <= 2.8f)
-                        {
-                            _vehicleYieldUntilTime[vehPtr] = now + 0.28f;
-                            return true;
-                        }
-                    }
-                }
-            }
-
             float maxStepAsideFwd = Mathf.Clamp(halfLength + 5.2f + speedMs * 0.65f, 5.5f, 11.0f);
             float maxBrakeFwd = Mathf.Clamp(halfLength + 3.8f + speedMs * 0.55f, 4.5f, 9.0f);
             float stepAsideHalfWidth = halfWidth + 1.45f;
@@ -654,8 +571,8 @@ namespace EasyRed2HumanAI
                     _vehicleContinuousYieldStart[vehPtr] = yieldStart;
                 }
 
-                // Always yield for the human player; yield up to 3.5s for AI infantry while they step aside
-                if (playerInBrakeCorridor || (now - yieldStart) <= 3.5f)
+                // Always yield for the human player; yield up to 2.0s for AI infantry while they step aside
+                if (playerInBrakeCorridor || (now - yieldStart) <= 2.0f)
                 {
                     _vehicleYieldUntilTime[vehPtr] = now + 0.24f;
                     if (TryRecordFriendlyYieldOrSave(vehPtr, now))
@@ -720,37 +637,6 @@ namespace EasyRed2HumanAI
                         float pauseUntil = Time.time + 0.24f;
                         if (__instance.resumeDriveTime < pauseUntil)
                             __instance.resumeDriveTime = pauseUntil;
-                        return;
-                    }
-
-                    // Friendly/observed AT mine avoidance: brake if an armed AT mine sits dead-ahead at close range on a bridge or corridor
-                    if (AiCore.ActiveLandMineCount > 0 &&
-                        veh.transform != null &&
-                        AiCore.IsLocallyOwnedVehicle(veh) &&
-                        !veh.IsAirVehicle())
-                    {
-                        Vector3 travelDir = isReversing ? -veh.transform.forward : veh.transform.forward;
-                        travelDir.y = 0f;
-                        if (travelDir.sqrMagnitude > 0.01f)
-                        {
-                            travelDir.Normalize();
-                            Vector3 vehPos = veh.transform.position;
-                            if (AiCore.TryGetNearbyKnownMine(vehPos + travelDir * 6.5f, 9.0f, vehiclesOnly: true, out Vector3 minePos))
-                            {
-                                Vector3 delta = minePos - vehPos;
-                                delta.y = 0f;
-                                float fwdProj = Vector3.Dot(delta, travelDir);
-                                Vector3 right = new Vector3(travelDir.z, 0f, -travelDir.x);
-                                float latProj = Vector3.Dot(delta, right);
-                                if (fwdProj > 0.5f && fwdProj < 9.5f && Mathf.Abs(latProj) < 3.4f &&
-                                    AiCore.IsOnBridgeOrNarrowCrossing(vehPos))
-                                {
-                                    float pauseUntil = Time.time + 0.50f;
-                                    if (__instance.resumeDriveTime < pauseUntil)
-                                        __instance.resumeDriveTime = pauseUntil;
-                                }
-                            }
-                        }
                     }
                 }
                 catch { }
@@ -771,36 +657,6 @@ namespace EasyRed2HumanAI
                     float now = Time.time;
                     _claimedVehicleDestinations[vehPtr] = __instance.setVehicleDestination;
 
-                    if (AiCore.ActiveLandMineCount > 0 &&
-                        !__instance.going_in_retro &&
-                        !__instance.stopToShoot &&
-                        now >= __instance.resumeDriveTime &&
-                        veh.transform != null &&
-                        AiCore.IsLocallyOwnedVehicle(veh) &&
-                        !veh.IsAirVehicle())
-                    {
-                        Vector3 fwd = veh.transform.forward;
-                        fwd.y = 0f;
-                        if (fwd.sqrMagnitude > 0.01f)
-                        {
-                            fwd.Normalize();
-                            Vector3 vehPos = veh.transform.position;
-                            if (AiCore.TryGetNearbyKnownMine(vehPos + fwd * 8.5f, 11.5f, vehiclesOnly: true, out Vector3 minePos))
-                            {
-                                Vector3 delta = minePos - vehPos;
-                                delta.y = 0f;
-                                float fwdProj = Vector3.Dot(delta, fwd);
-                                Vector3 right = new Vector3(fwd.z, 0f, -fwd.x);
-                                float latProj = Vector3.Dot(delta, right);
-                                if (fwdProj > 0.5f && fwdProj < 18.0f && Mathf.Abs(latProj) < 4.5f)
-                                {
-                                    float steerSide = latProj >= 0f ? -1f : 1f;
-                                    veh.Move(new Vector2(steerSide * 0.85f, 0.45f));
-                                }
-                            }
-                        }
-                    }
-
                     if (VisionConfig.EnableSmartApcDismount.Value)
                     {
                         if (!_nextApcCheckTime.TryGetValue(vehPtr, out float nextCheck) || now >= nextCheck)
@@ -810,7 +666,7 @@ namespace EasyRed2HumanAI
                         }
                     }
 
-                    if (VisionConfig.EnableCombinedArmsPrioritySupport.Value || VisionConfig.EnableTankStandoffAndReverse.Value)
+                    if (VisionConfig.EnableCombinedArmsPrioritySupport.Value)
                     {
                         if (!_nextVehicleSupportSteerTime.TryGetValue(vehPtr, out float nextSteer) || now >= nextSteer)
                         {
@@ -827,474 +683,6 @@ namespace EasyRed2HumanAI
             }
         }
 
-        [HarmonyPatch(typeof(SyncVehicle), nameof(SyncVehicle.SyncVehiclePosition))]
-        public static class SyncVehicle_SyncVehiclePosition_Patch
-        {
-            public struct PreSyncPosState
-            {
-                public Vector3 Pos;
-                public bool HasPos;
-            }
-
-            public static void Prefix(SyncVehicle __instance, out PreSyncPosState __state)
-            {
-                __state = default;
-                try
-                {
-                    if (!VisionConfig.EnableMod.Value || __instance == null)
-                        return;
-
-                    Vehicle veh = __instance.vehicle;
-                    if (veh == null || veh.Pointer == IntPtr.Zero || veh.transform == null)
-                        return;
-
-                    if (!veh.OwnDriverOrVehicle() && !veh.IsAirVehicle())
-                    {
-                        __state.Pos = veh.transform.position;
-                        __state.HasPos = true;
-                    }
-                }
-                catch { }
-            }
-
-            public static void Postfix(SyncVehicle __instance, float __2, PreSyncPosState __state)
-            {
-                try
-                {
-                    if (!VisionConfig.EnableMod.Value || __instance == null)
-                        return;
-
-                    Vehicle veh = __instance.vehicle;
-                    if (veh == null || veh.Pointer == IntPtr.Zero)
-                        return;
-
-                    float now = Time.time;
-                    IntPtr ptr = veh.Pointer;
-                    _remoteVehicleMotion.TryGetValue(ptr, out RemoteVehicleMotionState state);
-                    state.LastSignedSpeed = __2;
-                    state.LastPacketTime = now;
-
-                    // When SyncVehiclePosition snaps a lagging fast truck >6.0m in one frame, sweep the skipped
-                    // hull corridor immediately so enemies aren't jumped straight over on the Host.
-                    if (__state.HasPos && !veh.OwnDriverOrVehicle() && !veh.IsAirVehicle() && veh.transform != null)
-                    {
-                        Vector3 postPos = veh.transform.position;
-                        Vector3 snapDelta = postPos - __state.Pos;
-                        float snapDistSq = snapDelta.sqrMagnitude;
-                        if (snapDistSq > 1.0f * 1.0f && snapDistSq <= 16.0f * 16.0f)
-                        {
-                            Vector3 sweepFrom = (state.HasSweptPos &&
-                                                 now - state.LastSweptTime <= 0.55f &&
-                                                 (postPos - state.LastSweptVehPos).sqrMagnitude <= 16.0f * 16.0f)
-                                ? state.LastSweptVehPos
-                                : __state.Pos;
-                            Vector3 snapFlat = new Vector3(snapDelta.x, 0f, snapDelta.z);
-                            if (snapFlat.sqrMagnitude > 0.25f)
-                            {
-                                Vector3 snapVelFlat = snapFlat.normalized * Mathf.Max(Mathf.Abs(__2), 3.5f);
-                                RunVehicleRoadkillAndRightOfWayObbScan(veh, true, sweepFrom, postPos, false, Vector3.zero, snapVelFlat, now, true);
-                            }
-
-                            state.LastSweptVehPos = postPos;
-                            state.LastSweptTime = now;
-                            state.HasSweptPos = true;
-                            state.LastSamplePos = postPos;
-                            state.LastSampleTime = now;
-                            state.HasSample = true;
-                        }
-                        else if (snapDistSq > 16.0f * 16.0f)
-                        {
-                            // Reset sweep anchor across respawn / cross-map teleports
-                            state.LastSweptVehPos = postPos;
-                            state.LastSweptTime = now;
-                            state.HasSweptPos = true;
-                            state.LastSamplePos = postPos;
-                            state.LastSampleTime = now;
-                            state.HasSample = true;
-                        }
-                    }
-
-                    _remoteVehicleMotion[ptr] = state;
-                }
-                catch { }
-            }
-        }
-
-        private static bool ClipSweptAxis(float coord, float delta, float halfExt, ref float tMin, ref float tMax)
-        {
-            if (Mathf.Abs(delta) <= 1e-5f)
-                return Mathf.Abs(coord) <= halfExt;
-
-            float inv = 1f / delta;
-            float t0 = (coord - halfExt) * inv;
-            float t1 = (coord + halfExt) * inv;
-            if (t0 > t1)
-            {
-                float tmp = t0;
-                t0 = t1;
-                t1 = tmp;
-            }
-            if (t0 > tMin)
-                tMin = t0;
-            if (t1 < tMax)
-                tMax = t1;
-            return tMin <= tMax;
-        }
-
-        private static bool IsPointInSweptLocalBox(
-            float solF, float solR, float solY,
-            float dF, float dR, float dY,
-            float halfL, float halfW, float halfY)
-        {
-            float tMin = 0f;
-            float tMax = 1f;
-            return ClipSweptAxis(solF, dF, halfL, ref tMin, ref tMax) &&
-                   ClipSweptAxis(solR, dR, halfW, ref tMin, ref tMax) &&
-                   ClipSweptAxis(solY, dY, halfY, ref tMin, ref tMax);
-        }
-
-        private static void RunVehicleRoadkillAndRightOfWayObbScan(
-            Vehicle veh,
-            bool hasSweepStart,
-            Vector3 sweepStartVehPos,
-            Vector3 curPos,
-            bool hasLeadPos,
-            Vector3 leadPos,
-            Vector3 velFlat,
-            float now,
-            bool isRemoteDriverScan)
-        {
-            float horizSpeed = velFlat.magnitude;
-            if (horizSpeed <= 0.85f || veh == null || veh.transform == null)
-                return;
-
-            string vehFaction = GetVehicleCrewFaction(veh);
-            if (string.IsNullOrEmpty(vehFaction))
-                return;
-
-            Vector3 fwdFlat = veh.transform.forward;
-            fwdFlat.y = 0f;
-            fwdFlat = fwdFlat.sqrMagnitude > 0.001f ? fwdFlat.normalized : Vector3.forward;
-
-            Vector3 rightFlat = veh.transform.right;
-            rightFlat.y = 0f;
-            rightFlat = rightFlat.sqrMagnitude > 0.001f ? rightFlat.normalized : Vector3.right;
-
-            Vector4 obb = GetCachedVehicleLocalHullObb(veh);
-            float halfW = obb.x + 0.50f;
-            float halfL = obb.y + 0.60f;
-            Vector3 localCenterOffset = rightFlat * obb.z + fwdFlat * obb.w;
-            Vector3 curCenter = curPos + localCenterOffset;
-
-            float startDist = hasSweepStart ? Vector3.Distance(sweepStartVehPos, curPos) : 0f;
-            if (startDist <= 0.05f || startDist > 16.0f)
-            {
-                hasSweepStart = false;
-                startDist = 0f;
-            }
-            Vector3 startCenter = hasSweepStart ? (sweepStartVehPos + localCenterOffset) : curCenter;
-            Vector3 startSeg = startCenter - curCenter;
-            float startF = startSeg.x * fwdFlat.x + startSeg.z * fwdFlat.z;
-            float startR = startSeg.x * rightFlat.x + startSeg.z * rightFlat.z;
-            float startY = startSeg.y;
-
-            float leadDist = hasLeadPos ? Vector3.Distance(curPos, leadPos) : 0f;
-            if (leadDist <= 0.05f || leadDist > 12.0f)
-            {
-                hasLeadPos = false;
-                leadDist = 0f;
-            }
-            Vector3 leadCenter = hasLeadPos ? (leadPos + localCenterOffset) : curCenter;
-            Vector3 leadSeg = leadCenter - curCenter;
-            float leadF = leadSeg.x * fwdFlat.x + leadSeg.z * fwdFlat.z;
-            float leadR = leadSeg.x * rightFlat.x + leadSeg.z * rightFlat.z;
-            float leadY = leadSeg.y;
-
-            float broadRadius = halfL + halfW + Mathf.Max(startDist, leadDist) + 2.75f;
-            float broadRadiusSq = broadRadius * broadRadius;
-
-            AiCore.EnsureWorldSnapshot();
-            int solCount = AiCore.WorldSoldierCount;
-            var soldiers = AiCore.WorldSoldiers;
-            Vector3 travelDir = velFlat / horizSpeed;
-            Vector3 anchorCenter = hasSweepStart ? startCenter : curCenter;
-
-            for (int i = 0; i < solCount; i++)
-            {
-                ref AiCore.SoldierSnapshot sSnap = ref soldiers[i];
-                if (sSnap.IsOnVehicle || sSnap.Ref == null)
-                    continue;
-
-                Vector3 snapDelta = sSnap.Pos - curCenter;
-                if ((snapDelta.x * snapDelta.x + snapDelta.z * snapDelta.z) > broadRadiusSq)
-                    continue;
-
-                Soldier s = sSnap.Ref;
-                if (s == null || !s.IsAlive || s.IsOnVehicle())
-                    continue;
-
-                AiCore.SoldierFastHandles sHandles = AiCore.GetOrCreateSoldierHandles(s);
-                if (sHandles == null || sHandles.Tr == null)
-                    continue;
-
-                // Use live transform position once inside the broadphase circle so fast-moving soldiers/vehicles never miss due to snapshot age
-                Vector3 livePos = sHandles.Tr.position;
-                Vector3 rel = livePos - curCenter;
-                float solF = rel.x * fwdFlat.x + rel.z * fwdFlat.z;
-                float solR = rel.x * rightFlat.x + rel.z * rightFlat.z;
-                float solY = rel.y;
-
-                bool hitHull = (Mathf.Abs(solY) <= 2.85f && Mathf.Abs(solF) <= halfL && Mathf.Abs(solR) <= halfW) ||
-                               (hasSweepStart && IsPointInSweptLocalBox(solF, solR, solY, startF, startR, startY, halfL, halfW, 2.85f)) ||
-                               (hasLeadPos && IsPointInSweptLocalBox(solF, solR, solY, leadF, leadR, leadY, halfL, halfW, 2.85f));
-                if (!hitHull)
-                    continue;
-
-                string sFac = !string.IsNullOrEmpty(sSnap.Faction) ? sSnap.Faction : AiCore.GetCachedFaction(sHandles, now);
-                bool sameFaction = !string.IsNullOrEmpty(sFac) &&
-                                   AiCore.AreSameSideFactions(vehFaction, sFac);
-
-                if (sameFaction)
-                {
-                    if (VisionConfig.EnableFriendlyVehicleRightOfWay.Value)
-                    {
-                        s.DisableHitByVehicleFor(1.6f);
-                        if (!sSnap.IsPlayer && AiCore.IsLocallyOwnedBot(s))
-                        {
-                            TryNudgeFriendlySoldierAside(s, veh, curCenter, travelDir, rightFlat, obb.x, now, true);
-                        }
-                    }
-                }
-                else if (s.AllowHitByVehicle)
-                {
-                    // On remote-driver scan (Host watching client vehicle), only the soldier's owner applies authoritative damage;
-                    // on local-driver scan (driver's own machine), allow immediate roadkill damage synced via SyncDamageWithOthers.
-                    if (isRemoteDriverScan && !AiCore.IsLocallyOwnedSoldier(s))
-                        continue;
-
-                    Vector3 fromAnchor = livePos - anchorCenter;
-                    float alongTravel = fromAnchor.x * travelDir.x + fromAnchor.z * travelDir.z;
-                    if (alongTravel >= -obb.y * 0.45f)
-                    {
-                        if (!isRemoteDriverScan)
-                            NotifyVehicleRoadkillHit(veh, s);
-                        s.DisableHitByVehicleFor(1.0f);
-                        s.Damage(1000f);
-                        if (isRemoteDriverScan)
-                        {
-                            RemoteClientRoadkillsAssistedCount++;
-                            if (VisionConfig.DebugLogging.Value)
-                            {
-                                AiCore.LogDebug("RoadkillAssist", $"Host swept OBB roadkill applied for remote client driver ({horizSpeed:F1}m/s).");
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        [HarmonyPatch(typeof(SyncVehicle), nameof(SyncVehicle.UpdatePosAndRot))]
-        public static class SyncVehicle_UpdatePosAndRot_Patch
-        {
-            public static void Postfix(SyncVehicle __instance)
-            {
-                try
-                {
-                    if (!VisionConfig.EnableMod.Value || __instance == null)
-                        return;
-
-                    Vehicle veh = __instance.vehicle;
-                    if (veh == null || veh.Pointer == IntPtr.Zero || veh.OwnDriverOrVehicle() || veh.transform == null)
-                        return;
-
-                    IntPtr ptr = veh.Pointer;
-                    float now = Time.time;
-                    _remoteVehicleMotion.TryGetValue(ptr, out RemoteVehicleMotionState state);
-                    if (!veh.HasDriverAlive && !(state.LastPacketTime > 0f && now - state.LastPacketTime <= 0.45f))
-                        return;
-
-                    Vector3 curPos = veh.transform.position;
-                    float dt = now - state.LastSampleTime;
-                    if (!state.HasSample || dt >= 0.08f)
-                    {
-                        if (state.HasSample && dt > 0.04f && dt < 0.65f)
-                        {
-                            state.SmoothedVelocity = (curPos - state.LastSamplePos) / dt;
-                            state.LastMoveTime = now;
-                        }
-                        state.LastSamplePos = curPos;
-                        state.LastSampleTime = now;
-                        state.HasSample = true;
-                    }
-
-                    if (VisionConfig.EnableCoopAirborneSpawnFix.Value && veh.IsAirVehicle())
-                    {
-                        if (now >= state.NextGroundCheckTime)
-                        {
-                            state.NextGroundCheckTime = now + 0.25f;
-                            VehiclePlane vp = veh.TryCast<VehiclePlane>();
-                            if (vp != null)
-                            {
-                                vp.RefreshGrounded();
-                            }
-                        }
-                        _remoteVehicleMotion[ptr] = state;
-                        return;
-                    }
-
-                    // Host-Authoritative Remote Client Roadkill & Friendly Right-of-Way OBB Scan:
-                    // Do NOT gate on IsLocallyOwnedVehicle(veh) because when a remote client drives a truck/tank,
-                    // veh.OwnDriverOrVehicle() is false on the Host while the Host owns all AI soldiers!
-                    if (now >= state.NextRoadkillScanTime)
-                    {
-                        state.NextRoadkillScanTime = now + 0.06f;
-
-                        Vector3 fwdFlat = veh.transform.forward;
-                        fwdFlat.y = 0f;
-                        fwdFlat = fwdFlat.sqrMagnitude > 0.001f ? fwdFlat.normalized : Vector3.forward;
-
-                        Vector3 velFlat = Vector3.zero;
-                        if (now - state.LastMoveTime <= 0.45f)
-                        {
-                            velFlat = new Vector3(state.SmoothedVelocity.x, 0f, state.SmoothedVelocity.z);
-                        }
-                        if (now - state.LastPacketTime <= 0.75f)
-                        {
-                            Vector3 packetVel = fwdFlat * state.LastSignedSpeed;
-                            if (packetVel.sqrMagnitude > velFlat.sqrMagnitude)
-                                velFlat = packetVel;
-                        }
-                        bool hasDestPos = __instance.syncDestPos.HasValue;
-                        Vector3 destPos = hasDestPos ? __instance.syncDestPos.Value : curPos;
-                        if (velFlat.sqrMagnitude < 0.25f && hasDestPos)
-                        {
-                            Vector3 fallbackVel = fwdFlat * __instance.last_speed_update;
-                            if (fallbackVel.sqrMagnitude > velFlat.sqrMagnitude)
-                                velFlat = fallbackVel;
-                        }
-
-                        if (velFlat.sqrMagnitude > 0.85f * 0.85f)
-                        {
-                            bool hasSweepStart = state.HasSweptPos && (now - state.LastSweptTime <= 0.55f);
-                            RunVehicleRoadkillAndRightOfWayObbScan(veh, hasSweepStart, state.LastSweptVehPos, curPos, hasDestPos, destPos, velFlat, now, true);
-                        }
-
-                        state.LastSweptVehPos = curPos;
-                        state.LastSweptTime = now;
-                        state.HasSweptPos = true;
-                    }
-
-                    _remoteVehicleMotion[ptr] = state;
-                }
-                catch { }
-            }
-        }
-
-        /// <summary>
-        /// Local Driver (Human & AI) Swept OBB Roadkill Scan (VehicleWithWheels.FixedUpdate):
-        /// In Unity 2022 PhysX, grounded AI bots have m_controller disabled and fast trucks can step cleanly
-        /// through triggers, while vanilla's 3D 70-degree center-to-feet angle check rejects close bumper/sprocket
-        /// hits. Run a throttled swept OBB scan for moving locally owned vehicles in forward AND reverse.
-        /// </summary>
-        [HarmonyPatch(typeof(VehicleWithWheels), nameof(VehicleWithWheels.FixedUpdate))]
-        public static class VehicleWithWheels_FixedUpdate_Patch
-        {
-            public static void Prefix(out long __state)
-            {
-                __state = HitchProfiler.Begin();
-            }
-
-            public static void Postfix(VehicleWithWheels __instance, long __state)
-            {
-                try
-                {
-                    if (!VisionConfig.EnableMod.Value || ReferenceEquals(__instance, null))
-                        return;
-
-                    IntPtr ptr = __instance.Pointer;
-                    if (ptr == IntPtr.Zero)
-                        return;
-
-                    float now = Time.time;
-                    if (_nextLocalDriverRoadkillScanTime.TryGetValue(ptr, out float nextScan) && now < nextScan)
-                        return;
-
-                    if (__instance == null ||
-                        !__instance.OwnDriverOrVehicle() ||
-                        !__instance.HasDriverAlive ||
-                        __instance.IsDisabled() ||
-                        __instance.transform == null)
-                    {
-                        // Throttle unoccupied/remote vehicles for 0.25s in pure C# so FixedUpdate catch-up steps skip IL2CPP calls
-                        _nextLocalDriverRoadkillScanTime[ptr] = now + 0.25f;
-                        return;
-                    }
-
-                    bool isPlayerDriving = __instance.PlayerIsDriving();
-                    float scanDt = isPlayerDriving ? 0.05f : 0.10f;
-                    _nextLocalDriverRoadkillScanTime[ptr] = now + scanDt;
-
-                    Rigidbody rb = __instance.rb;
-                    if (rb == null || rb.isKinematic)
-                        return;
-
-                    Vector3 rbVel = rb.velocity;
-                    Vector3 velFlat = new Vector3(rbVel.x, 0f, rbVel.z);
-                    float minSpeed = isPlayerDriving ? 1.0f : 1.35f;
-                    if (velFlat.sqrMagnitude > minSpeed * minSpeed)
-                    {
-                        Vector3 curPos = __instance.transform.position;
-                        Vector3 sweepStartPos = curPos - velFlat * (scanDt + 0.01f);
-                        RunVehicleRoadkillAndRightOfWayObbScan(__instance, true, sweepStartPos, curPos, false, Vector3.zero, velFlat, now, false);
-                    }
-                }
-                catch { }
-                finally
-                {
-                    HitchProfiler.End(HitchBucket.VehFixedUpdate, __state);
-                }
-            }
-        }
-
-        private static bool TryApplyTriggerRoadkillHit(Vehicle veh, Soldier soldier, Vector3 velFlat, bool isRemoteDriver)
-        {
-            float horizSpeed = velFlat.magnitude;
-            if (horizSpeed <= 0.85f || veh.transform == null || soldier.transform == null)
-                return false;
-
-            Vector3 fwdFlat = veh.transform.forward;
-            fwdFlat.y = 0f;
-            fwdFlat = fwdFlat.sqrMagnitude > 0.001f ? fwdFlat.normalized : Vector3.forward;
-
-            Vector3 rightFlat = veh.transform.right;
-            rightFlat.y = 0f;
-            rightFlat = rightFlat.sqrMagnitude > 0.001f ? rightFlat.normalized : Vector3.right;
-
-            Vector4 obb = GetCachedVehicleLocalHullObb(veh);
-            Vector3 hullCenter = veh.transform.position + rightFlat * obb.z + fwdFlat * obb.w;
-            Vector3 toSoldierFlat = soldier.transform.position - hullCenter;
-            toSoldierFlat.y = 0f;
-
-            if (toSoldierFlat.sqrMagnitude < 0.64f ||
-                Vector3.Dot(velFlat / horizSpeed, toSoldierFlat.normalized) > -0.25f)
-            {
-                if (!isRemoteDriver)
-                    NotifyVehicleRoadkillHit(veh, soldier);
-                soldier.DisableHitByVehicleFor(1.0f);
-                soldier.Damage(1000f);
-                if (isRemoteDriver)
-                {
-                    RemoteClientRoadkillsAssistedCount++;
-                    if (VisionConfig.DebugLogging.Value)
-                    {
-                        AiCore.LogDebug("RoadkillAssist", $"Host trigger roadkill applied for remote client driver ({horizSpeed:F1}m/s).");
-                    }
-                }
-                return true;
-            }
-            return false;
-        }
-
         [HarmonyPatch(typeof(VehicleWithWheels), nameof(VehicleWithWheels.OnTriggerEnter))]
         public static class VehicleWithWheels_OnTriggerEnter_Patch
         {
@@ -1302,8 +690,13 @@ namespace EasyRed2HumanAI
             {
                 try
                 {
-                    if (!VisionConfig.EnableMod.Value || __instance == null || __0 == null)
+                    if (!VisionConfig.EnableMod.Value ||
+                        !VisionConfig.EnableFriendlyVehicleRightOfWay.Value ||
+                        __instance == null ||
+                        __0 == null)
+                    {
                         return true;
+                    }
 
                     GameObject go = __0.gameObject;
                     if (go == null)
@@ -1321,11 +714,7 @@ namespace EasyRed2HumanAI
 
                     if (isSameFaction)
                     {
-                        if (!VisionConfig.EnableFriendlyVehicleRightOfWay.Value)
-                            return true;
-
-                        // Friendly soldier: grant hit immunity, temporarily disable solid hull/controller pinball bounce,
-                        // and smoothly walk AI bots clear of the hull/tracks!
+                        // Friendly soldier: grant hit immunity and smoothly step AI bots clear of the hull/tracks!
                         soldier.DisableHitByVehicleFor(1.65f);
 
                         float now = Time.time;
@@ -1343,8 +732,6 @@ namespace EasyRed2HumanAI
                             TryNudgeFriendlySoldierAside(soldier, __instance, hullCenter, vehFwd, vehRight, obb.x, now, true);
                         }
 
-                        // In vanilla VehicleWithWheels.OnTriggerEnter (0x18087C92B-0x18087C940), same-faction collisions
-                        // still deal 1000f lethal roadkill damage whenever soldier.IsPlayer() or veh.PlayerIsInside()!
                         if ((soldier.IsPlayer() || __instance.PlayerIsInside()) && TryRecordFriendlyYieldOrSave(__instance.Pointer, now))
                         {
                             AiCore.LogDebug(
@@ -1354,78 +741,6 @@ namespace EasyRed2HumanAI
 
                         return false;
                     }
-
-                    bool ownVeh = __instance.OwnDriverOrVehicle();
-                    bool canApplyHit = ownVeh || AiCore.IsLocallyOwnedSoldier(soldier);
-                    if (!canApplyHit ||
-                        !soldier.AllowHitByVehicle ||
-                        soldier.IsOnVehicle() ||
-                        __instance.transform == null ||
-                        soldier.transform == null)
-                    {
-                        return true;
-                    }
-
-                    float triggerNow = Time.time;
-
-                    // Fix 1: Remote multiplayer client driving a vehicle/truck/tank (evaluated on soldier's owner, e.g. Host).
-                    if (!ownVeh)
-                    {
-                        bool hasMotionState = _remoteVehicleMotion.TryGetValue(__instance.Pointer, out RemoteVehicleMotionState mState);
-                        bool hasRemotePacketDriver = hasMotionState &&
-                                                     mState.LastPacketTime > 0f &&
-                                                     triggerNow - mState.LastPacketTime <= 0.45f;
-                        if (!__instance.HasDriverAlive && !hasRemotePacketDriver)
-                            return true;
-
-                        Vector3 velFlat = Vector3.zero;
-                        Vector3 fwdFlat = __instance.transform.forward;
-                        fwdFlat.y = 0f;
-                        fwdFlat = fwdFlat.sqrMagnitude > 0.001f ? fwdFlat.normalized : Vector3.forward;
-
-                        if (hasMotionState)
-                        {
-                            if (triggerNow - mState.LastMoveTime <= 0.45f)
-                            {
-                                velFlat = new Vector3(mState.SmoothedVelocity.x, 0f, mState.SmoothedVelocity.z);
-                            }
-
-                            if (triggerNow - mState.LastPacketTime <= 0.75f)
-                            {
-                                Vector3 packetVel = fwdFlat * mState.LastSignedSpeed;
-                                if (packetVel.sqrMagnitude > velFlat.sqrMagnitude)
-                                    velFlat = packetVel;
-                            }
-                        }
-
-                        SyncVehicle syncher = __instance.vehicleSyncher;
-                        if (velFlat.sqrMagnitude < 0.25f && syncher != null && syncher.syncDestPos.HasValue)
-                        {
-                            Vector3 fallbackVel = fwdFlat * syncher.last_speed_update;
-                            if (fallbackVel.sqrMagnitude > velFlat.sqrMagnitude)
-                                velFlat = fallbackVel;
-                        }
-
-                        return !TryApplyTriggerRoadkillHit(__instance, soldier, velFlat, true);
-                    }
-
-                    // Fix 2: Local driver (Client or Host) running over an enemy in forward OR reverse:
-                    // Bypass vanilla's broken 3D 70-degree center-to-feet angle check & forward-only speed check using 2D XZ velocity!
-                    if (__instance.HasDriverAlive)
-                    {
-                        Rigidbody rb = __instance.rb;
-                        if (rb != null && !rb.isKinematic)
-                        {
-                            Vector3 rbVel = rb.velocity;
-                            Vector3 rbVelFlat = new Vector3(rbVel.x, 0f, rbVel.z);
-                            return !TryApplyTriggerRoadkillHit(__instance, soldier, rbVelFlat, false);
-                        }
-                    }
-
-                    if (__instance.PlayerIsDriving())
-                        NotifyVehicleRoadkillHit(__instance, soldier);
-
-                    return true;
                 }
                 catch { }
                 return true;

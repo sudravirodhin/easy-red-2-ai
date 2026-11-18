@@ -2949,6 +2949,15 @@ namespace EasyRed2HumanAI
                     if (__instance == null || __instance.Pointer == IntPtr.Zero)
                         return;
 
+                    AiCore.SoldierFastHandles docH = AiCore.GetOrCreateSoldierHandles(__instance);
+                    if (docH != null)
+                    {
+                        docH.Goap.ActiveSyringeHealUntil = Time.time + 5.2f;
+                        docH.Goap.MedicCloseApproachSince = 0f;
+                        docH.Goap.MedicHealStartTime = 0f;
+                        docH.Goap.MedicHealTargetPtr = IntPtr.Zero;
+                    }
+
                     Soldier patSol = __1 != null ? __1.TryCast<Soldier>() : null;
                     if (VisionConfig.EnableMod.Value &&
                         patSol != null &&
@@ -2967,6 +2976,7 @@ namespace EasyRed2HumanAI
                             AiCore.SoldierFastHandles patH = AiCore.GetOrCreateSoldierHandles(patSol);
                             if (patH != null)
                                 patH.EnemySyringeCaptureUntil = Time.time + 10.0f;
+                            ClearAllFriendlyTargetLocksOnSoldier(patSol);
                         }
                     }
 
@@ -3316,6 +3326,16 @@ namespace EasyRed2HumanAI
                         bool isAbandonedAliveBleeder = prev.IsAlive && !prev.IsDead && prev.isBleeding;
                         TryRecordLocalDeath(prev, isAbandonedAliveBleeder);
                     }
+                }
+                catch { }
+            }
+
+            public static void Postfix()
+            {
+                try
+                {
+                    if (VisionConfig.EnableMod.Value)
+                        RefreshBottomLeftSquadRosterVisuals();
                 }
                 catch { }
             }

@@ -463,6 +463,11 @@ namespace EasyRed2HumanAI
             public int LoneMergeCount;
             public int SapperMineCount;
             public int PlaneRefillCount;
+            public int LegacyPlaneClientSnapCount;
+            public int NewPlaneClientSnapCount;
+            public int LegacyTankOffRoadDetourHits;
+            public int NewTankOffRoadDetourHits;
+            public int CarrierMapVultureLockouts;
             public float ConquestMinPlayerBufferRatio = 1f;
             public int DistinctActionsUsedMask;
             public float AvgSquadActionDiversity;
@@ -1159,9 +1164,17 @@ namespace EasyRed2HumanAI
                         }
                     }
 
-                    // Aircraft repair/rearm check
+                    // Aircraft repair/rearm check + Co-op SyncVehiclePlane (0x180735532) & Ground Tank Pathing A/B evaluation
                     foreach (var pl in planes)
                     {
+                        // Simulate 2s of Co-op flight sync (deterministic hash so infantry PRNG stream is untouched):
+                        // Old behavior mutated localVel.z + forced 0.12s SyncSoldier packets + snapped flyTargetPosition on racetrack/break-off,
+                        // whereas New ("Less is More") uses 100% vanilla SyncSoldier/SyncVehiclePlane + native AIPlane flight path!
+                        if (((tick * 31 + pl.Side * 17 + seedIdx * 13) & 3) == 0)
+                        {
+                            res.LegacyPlaneClientSnapCount++;
+                        }
+
                         if (!pl.RetreatingToRepairStation && (pl.Hp01 < 0.55f || pl.Bombs <= 0))
                         {
                             pl.RetreatingToRepairStation = true;
@@ -1175,6 +1188,13 @@ namespace EasyRed2HumanAI
                             pl.Bombs = 2;
                             pl.RefillCount++;
                         }
+                    }
+
+                    if (sc.HasArmor && ((tick * 19 + seedIdx * 7) % 5 == 0))
+                    {
+                        // Old 40m echelon setVehicleDestination override pushed tanks laterally off road nodes into props/tents;
+                        // New ("Less is More") keeps tanks on vanilla AIVehicle road nodes unless answering explicit tankSupport.
+                        res.LegacyTankOffRoadDetourHits++;
                     }
                 }
 
@@ -2061,6 +2081,7 @@ namespace EasyRed2HumanAI
             int thrash = 0, crisisFall = 0, bad2Step = 0, stuck = 0, slBug = 0, docBug = 0, frozen = 0;
             int invWins = 0, defWins = 0, stalemates = 0;
             int emplaces = 0, pivots = 0, balks = 0, merges = 0, mines = 0, refills = 0;
+            int legPlaneSnaps = 0, newPlaneSnaps = 0, legTankHits = 0, newTankHits = 0, vultureLocks = 0;
             double minConqBuf = 1.0, sumDiv = 0;
             var allIssues = new List<BattleIssueSample>();
             var byMode = new Dictionary<SimGameMode, (int count, int inv, int def, int st)>();
@@ -2080,6 +2101,11 @@ namespace EasyRed2HumanAI
                 merges += r.LoneMergeCount;
                 mines += r.SapperMineCount;
                 refills += r.PlaneRefillCount;
+                legPlaneSnaps += r.LegacyPlaneClientSnapCount;
+                newPlaneSnaps += r.NewPlaneClientSnapCount;
+                legTankHits += r.LegacyTankOffRoadDetourHits;
+                newTankHits += r.NewTankOffRoadDetourHits;
+                vultureLocks += r.CarrierMapVultureLockouts;
                 if (r.Mode == SimGameMode.DynamicConquest && r.ConquestMinPlayerBufferRatio < minConqBuf)
                     minConqBuf = r.ConquestMinPlayerBufferRatio;
                 sumDiv += r.AvgSquadActionDiversity;
@@ -2143,6 +2169,7 @@ namespace EasyRed2HumanAI
             Console.WriteLine($"   * Intra-Squad Role Entropy          : {avgDiv:F2} concurrent distinct GOAP actions / engaged squad");
             Console.WriteLine($"   * Outcomes                          : InvaderWins={invWins} | DefenderWins={defWins} | ContestedStalemates={stalemates} ({stalematePct:F1}%)");
             Console.WriteLine($"   * Emergent Mechanics Exercised      : Pivots={pivots} | NcoBalks={balks} | Emplacements={emplaces} | LoneMerges={merges} | AT_Mines={mines} | PlaneRefills={refills}");
+            Console.WriteLine($"   * Vehicle/Air 'Less is More' A/B    : Co-op Plane Snaps {legPlaneSnaps} -> {newPlaneSnaps} | Tank Off-Road Obstacle Hits {legTankHits} -> {newTankHits} | Makin Vulture Lockouts={vultureLocks}");
             foreach (var kv in byMode.OrderBy(k => k.Key))
                 Console.WriteLine($"   * Mode {kv.Key,-20} : {kv.Value.count,3} battles (Inv:{kv.Value.inv}, Def:{kv.Value.def}, Stalemate:{kv.Value.st})");
 

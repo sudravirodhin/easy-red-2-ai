@@ -251,6 +251,10 @@ namespace EasyRed2HumanAI
             public float NextIndividualFallbackTime;
             public float MedicHealStartTime;
             public IntPtr MedicHealTargetPtr;
+            public float ActiveSyringeHealUntil;
+            public float MedicCloseApproachSince;
+            public IntPtr MedicUnreachablePatientPtr;
+            public float MedicUnreachableUntil;
             public IntPtr RemountTargetVehiclePtr;
             public float RemountAttemptStartedAt;
             public float RemountCooldownUntil;
@@ -327,6 +331,10 @@ namespace EasyRed2HumanAI
             public float LastDamageTime;
             public float EvasiveMoveUntil;
             public Vector3 LastHazardPos;
+            public float BombsDepletedAt;
+            public float FlyingAroundAreaSince;
+            public float RefillStateEnteredAt;
+            public float OffMapRearmReadyTime;
         }
 
         public struct TurretFastTraits
@@ -1023,6 +1031,20 @@ namespace EasyRed2HumanAI
             return h;
         }
 
+        public static bool IsSoldierNonCombatantOrSurrendered(Soldier s, SoldierFastHandles sh = null)
+        {
+            if (ReferenceEquals(s, null) || s == null || s.Pointer == IntPtr.Zero)
+                return true;
+
+            if (!s.IsAlive || s.IsInjured || s.IsDead || s.HasSurrended())
+                return true;
+
+            if (sh == null)
+                _soldierHandlesByPtr.TryGetValue(s.Pointer, out sh);
+
+            return sh != null && Time.time < sh.EnemySyringeCaptureUntil;
+        }
+
         public static bool TryResolveSpottableFast(
             Spottable s,
             out SoldierFastHandles solHandles,
@@ -1039,7 +1061,7 @@ namespace EasyRed2HumanAI
 
             if (_soldierHandlesByPtr.TryGetValue(ptr, out solHandles))
             {
-                if (!ReferenceEquals(solHandles.Ref, null) && solHandles.Ref != null && solHandles.Tr != null && solHandles.Ref.IsAlive)
+                if (!ReferenceEquals(solHandles.Ref, null) && solHandles.Ref != null && solHandles.Tr != null && !IsSoldierNonCombatantOrSurrendered(solHandles.Ref, solHandles))
                     return true;
                 solHandles = null;
                 return false;
@@ -1072,7 +1094,7 @@ namespace EasyRed2HumanAI
                 if (sol != null && sol.Pointer != IntPtr.Zero)
                 {
                     solHandles = GetOrCreateSoldierHandles(sol);
-                    if (solHandles != null && solHandles.Tr != null && sol.IsAlive)
+                    if (solHandles != null && solHandles.Tr != null && !IsSoldierNonCombatantOrSurrendered(sol, solHandles))
                         return true;
                     solHandles = null;
                     return false;

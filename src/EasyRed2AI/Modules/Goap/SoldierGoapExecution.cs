@@ -3512,7 +3512,7 @@ namespace EasyRed2HumanAI
             if (now < _nextLonePlayerRejoinCheckTime && (_nextLonePlayerRejoinCheckTime - now) <= 5.0f)
                 return;
 
-            _nextLonePlayerRejoinCheckTime = now + 1.25f;
+            _nextLonePlayerRejoinCheckTime = now + 0.25f;
             if (_hadMultiMemberPlayerSquads.Count > 128)
                 _hadMultiMemberPlayerSquads.Clear();
             if (_warnedWipedSquadByPlayerSoldier.Count > 32)
@@ -3591,15 +3591,17 @@ namespace EasyRed2HumanAI
             IntPtr oldSqPtr = sq.Pointer;
             float now = Time.time;
 
-            // Always show one-time wiped-squad warning BEFORE allowing auto-linkup (4.5s grace period)
+            // Always show one-time wiped-squad warning before auto-linkup:
+            // If the player is >15m from the nearest friendly squad, allow immediate linkup as soon as they close within 15m!
             if (!_warnedWipedSquadByPlayerSoldier.TryGetValue(player.Pointer, out IntPtr warnedSq) || warnedSq != oldSqPtr)
             {
                 _warnedWipedSquadByPlayerSoldier[player.Pointer] = oldSqPtr;
-                _lonePlayerRejoinEligibleAfterTime[player.Pointer] = now + 4.5f;
+                bool hasNearSq = TryFindNearestOpenFriendlyFootSquad(player.faction, oldSqPtr, pPos, out Squad nearSq, out Vector3 nearPos);
+                float nearDist = hasNearSq ? Vector3.Distance(pPos, nearPos) : 999f;
+                _lonePlayerRejoinEligibleAfterTime[player.Pointer] = nearDist <= 15.0f ? (now + 1.25f) : now;
 
                 string warnMsg;
-                if (player.HasRadio() &&
-                    TryFindNearestOpenFriendlyFootSquad(player.faction, oldSqPtr, pPos, out Squad nearSq, out Vector3 nearPos))
+                if (player.HasRadio() && hasNearSq)
                 {
                     string callsign = AiCore.FormatSquadPhoneticCallsign(nearSq);
                     string bearing = AiCore.FormatRelativeBearingAndDistance(pPos, nearPos);

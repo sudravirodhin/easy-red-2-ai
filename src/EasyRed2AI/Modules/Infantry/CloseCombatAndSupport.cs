@@ -1019,6 +1019,83 @@ namespace EasyRed2HumanAI
         //  4) Soldier.OnRetreat (0x180758650) sets surrended = true (+0x49E = 1) during the 3s despawn
         //     without setting Animator "Surrender", causing liberation / RefreshAnimatorState side effects.
         // =====================================================================
+        internal static void ClearAllFriendlyTargetLocksOnSoldier(Soldier target)
+        {
+            if (ReferenceEquals(target, null) || target == null || target.Pointer == IntPtr.Zero)
+                return;
+
+            IntPtr targetPtr = target.Pointer;
+            AiCore.EnsureWorldSnapshot();
+            int count = AiCore.WorldSoldierCount;
+            var soldiers = AiCore.WorldSoldiers;
+            for (int i = 0; i < count; i++)
+            {
+                ref AiCore.SoldierSnapshot snap = ref soldiers[i];
+                if (snap.Ptr == IntPtr.Zero || snap.Ptr == targetPtr)
+                    continue;
+
+                AiCore.SoldierFastHandles sh = snap.Handles;
+                Soldier s = snap.Ref;
+                SoldierAI ai = sh != null ? sh.Ai : (s != null ? s.aiController : null);
+
+                if (sh != null)
+                {
+                    if (sh.Vision.LastKnownTarget.Target != null &&
+                        sh.Vision.LastKnownTarget.Target.Pointer == targetPtr)
+                    {
+                        sh.Vision.LastKnownTarget = default;
+                    }
+
+                    if (!ReferenceEquals(sh.Combat.CachedMeleeEnemy, null) &&
+                        sh.Combat.CachedMeleeEnemy != null &&
+                        sh.Combat.CachedMeleeEnemy.Pointer == targetPtr)
+                    {
+                        sh.Combat.CachedMeleeEnemy = null;
+                    }
+                }
+
+                if (!ReferenceEquals(ai, null) && ai != null && AiCore.GetRawVisibleTargetPtr(ai) == targetPtr)
+                {
+                    ai.visibleTarget = null;
+                    ai.allowFireAtEnemy = false;
+                    ai.targetInWeaponRange = false;
+                    ai.aimingEnemy = false;
+                    ai.shotFiresEnd = 0f;
+                    if (s != null)
+                    {
+                        s.CurrentVisibleTarget = null;
+                        s.SetGunTriggerPressed(false);
+                    }
+                    if (sh != null)
+                        sh.Combat.RotateFireFrame.Frame = -1;
+                }
+                else if (s != null && s.CurrentVisibleTarget != null && s.CurrentVisibleTarget.Pointer == targetPtr)
+                {
+                    s.CurrentVisibleTarget = null;
+                    s.SetGunTriggerPressed(false);
+                }
+            }
+
+            if (_turretAiByTurretPtr.Count > 0)
+            {
+                foreach (var kvp in _turretAiByTurretPtr)
+                {
+                    TurretAI tAi = kvp.Value;
+                    if (ReferenceEquals(tAi, null) || tAi == null)
+                        continue;
+
+                    Spottable curVis = tAi.CurrentVisibleTarget;
+                    if (!ReferenceEquals(curVis, null) && curVis != null && curVis.Pointer == targetPtr)
+                    {
+                        tAi.CurrentVisibleTarget = null;
+                        tAi.targetInWeaponRange = false;
+                        if (tAi.turret != null)
+                            tAi.turret.SetGunTriggerPressed(false, null);
+                    }
+                }
+            }
+        }
+
         private static bool IsDownedPatientUndergoingEnemySyringeCapture(Soldier patient, AiCore.SoldierFastHandles patH)
         {
             if (patient == null || patient.Pointer == IntPtr.Zero || patient.IsDead)
@@ -1028,13 +1105,32 @@ namespace EasyRed2HumanAI
             if (patH != null && now < patH.EnemySyringeCaptureUntil)
                 return true;
 
-            // Remote Co-op fallback: if a remote player/client sends SyncSurrender RPC while reviving a downed casualty
-            if (AiCore.IsInMultiplayerRoom() && patient.transform != null)
+            if (patient.transform != null)
             {
                 string patFac = patH != null ? AiCore.GetCachedFaction(patH, now) : AiCore.GetCachedFaction(patient);
                 if (!string.IsNullOrEmpty(patFac))
                 {
                     Vector3 patPos = patient.transform.position;
+                    const float maxCaptureDistSq = 6.5f * 6.5f;
+
+                    Soldier localCtrl = Soldier.CurrentControlledSoldierOrNull();
+                    if (localCtrl != null &&
+                        localCtrl.Pointer != IntPtr.Zero &&
+                        localCtrl.Pointer != patient.Pointer &&
+                        localCtrl.IsAlive &&
+                        !localCtrl.IsInjured &&
+                        !localCtrl.HasSurrended() &&
+                        localCtrl.transform != null)
+                    {
+                        string localFac = AiCore.GetCachedFaction(localCtrl);
+                        if (!string.IsNullOrEmpty(localFac) &&
+                            AiCore.AreEnemyFactions(patFac, localFac) &&
+                            (localCtrl.transform.position - patPos).sqrMagnitude <= maxCaptureDistSq)
+                        {
+                            return true;
+                        }
+                    }
+
                     AiCore.EnsureWorldSnapshot();
                     int count = AiCore.WorldSoldierCount;
                     var soldiers = AiCore.WorldSoldiers;
@@ -1051,7 +1147,10 @@ namespace EasyRed2HumanAI
                             continue;
                         }
 
-                        if ((snap.Pos - patPos).sqrMagnitude <= 4.2f * 4.2f)
+                        Vector3 livePos = (snap.Handles != null && snap.Handles.Tr != null)
+                            ? snap.Handles.Tr.position
+                            : snap.Pos;
+                        if ((livePos - patPos).sqrMagnitude <= maxCaptureDistSq)
                             return true;
                     }
                 }
@@ -1078,6 +1177,9 @@ namespace EasyRed2HumanAI
             {
                 ai.actualPose = SoldierPose.Idle;
                 ai.moveDirectlyToward_end = 0f;
+                ai.visibleTarget = null;
+                ai.allowFireAtEnemy = false;
+                ai.shotFiresEnd = 0f;
             }
 
             if (s.m_pose != SoldierPose.Idle && !s.IsOnVehicle())
@@ -1092,6 +1194,8 @@ namespace EasyRed2HumanAI
                 anim.SetBool("Incapacitated", false);
                 anim.SetBool("Surrender", true);
             }
+
+            ClearAllFriendlyTargetLocksOnSoldier(s);
         }
 
         [HarmonyPatch(typeof(Soldier), nameof(Soldier.SurrenderSynched))]
@@ -1114,9 +1218,12 @@ namespace EasyRed2HumanAI
                         {
                             // Revive the patient BEFORE SurrenderSynched -> Surrender runs so Upper Body Layer 1
                             // weight is 1.0f and the subsequent SetIncapacitated(false) in UseSyryngeCR is a no-op!
+                            // Keep EnemySyringeCaptureUntil active so Soldier_Surrender_Patch.Prefix and friendly AI
+                            // target filters continue protecting this unit through revival + surrender!
                             if (h != null)
-                                h.EnemySyringeCaptureUntil = 0f;
+                                h.EnemySyringeCaptureUntil = Mathf.Max(h.EnemySyringeCaptureUntil, Time.time + 3.5f);
                             __instance.SetIncapacitated(false);
+                            ClearAllFriendlyTargetLocksOnSoldier(__instance);
                             return true;
                         }
 
@@ -1148,8 +1255,9 @@ namespace EasyRed2HumanAI
                         if (IsDownedPatientUndergoingEnemySyringeCapture(__instance, h))
                         {
                             if (h != null)
-                                h.EnemySyringeCaptureUntil = 0f;
+                                h.EnemySyringeCaptureUntil = Mathf.Max(h.EnemySyringeCaptureUntil, Time.time + 3.5f);
                             __instance.SetIncapacitated(false);
+                            ClearAllFriendlyTargetLocksOnSoldier(__instance);
                             return true;
                         }
 
@@ -1393,6 +1501,7 @@ namespace EasyRed2HumanAI
                     if (!AiCore.IsLocallyOwnedBot(mh))
                         return true;
 
+                    float now = Time.time;
                     // Match vanilla Squad.MedicRoutine (@ 0x1808079B0): check !hasSyringe FIRST before pruning global medic claims!
                     if (!character.hasSyringe ||
                         !character.IsAlive ||
@@ -1400,6 +1509,7 @@ namespace EasyRed2HumanAI
                         (character.Params != null && (!character.Params.canDoMedic || !character.Params.canMove)) ||
                         character.IsCharging() ||
                         character.isInBodyAnimation ||
+                        now < mh.Goap.ActiveSyringeHealUntil ||
                         character.HasSurrended() ||
                         character.IsOnVehicle() ||
                         character.IsCarryingBody() ||
@@ -1422,12 +1532,13 @@ namespace EasyRed2HumanAI
                             curHeal.soldierToHealUp.IsInjured &&
                             !curHeal.soldierToHealUp.IsCarried())
                         {
+                            DriveMedicHealingApproach(ai, character, mh, curHeal, now);
                             return false;
                         }
                     }
 
                     Vector3 medicPos = mh.Tr.position;
-                    string myFaction = AiCore.GetCachedFaction(mh, Time.time);
+                    string myFaction = AiCore.GetCachedFaction(mh, now);
                     if (string.IsNullOrEmpty(myFaction))
                         return true;
 
@@ -1445,6 +1556,9 @@ namespace EasyRed2HumanAI
                         if (!sSnap.IsInjured || sSnap.Ptr == medicPtr || sSnap.IsOnVehicle || sSnap.Ref == null)
                             continue;
 
+                        if (mh.Goap.MedicUnreachablePatientPtr == sSnap.Ptr && now < mh.Goap.MedicUnreachableUntil)
+                            continue;
+
                         if (!AiCore.AreSameSideFactions(myFaction, sSnap.Faction))
                             continue;
 
@@ -1454,6 +1568,9 @@ namespace EasyRed2HumanAI
 
                         float dSq = (sSnap.Pos - medicPos).sqrMagnitude;
                         if (dSq > 55.0f * 55.0f)
+                            continue;
+
+                        if (Mathf.Abs(sSnap.Pos.y - medicPos.y) > 4.5f && dSq < 12.0f * 12.0f)
                             continue;
 
                         bool isBackupSlot = false;
@@ -1499,7 +1616,8 @@ namespace EasyRed2HumanAI
                         _medicPatientClaims[bestPtr] = claim;
 
                         MedicHealingDestination newHealDest = new MedicHealingDestination(bestPatient, character);
-                        AiCore.AssignBotCoverOrDestination(ai, character, newHealDest.Cast<AiDestination>(), requestImmediatePath: false);
+                        AiCore.AssignBotCoverOrDestination(ai, character, newHealDest.Cast<AiDestination>(), requestImmediatePath: true);
+                        DriveMedicHealingApproach(ai, character, mh, newHealDest, now);
 
                         if (skippedDogpiledNearest)
                         {

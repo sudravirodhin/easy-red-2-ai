@@ -16,7 +16,7 @@ namespace EasyRed2HumanAI
     {
         public const string PluginGuid = "com.antigravity.easyred2.humanai";
         public const string PluginName = "Easy Red 2 - Battle Hardened";
-        public const string PluginVersion = "0.9.6";
+        public const string PluginVersion = "0.9.7";
 
         internal static Plugin Instance;
         internal static new ManualLogSource Log;
@@ -114,20 +114,10 @@ namespace EasyRed2HumanAI
             SafePatch(typeof(VeteranAndTacticsPatches.MovableVehicle_OnDisableVehicle_Patch));
             SafePatch(typeof(VeteranAndTacticsPatches.Vehicle_OnRepaired_Patch));
             SafePatch(typeof(VeteranAndTacticsPatches.AIVehicle_RetreatCrew_Patch));
-            SafePatch(typeof(VeteranAndTacticsPatches.Vehicle_SetPhysicsEnabled_Patch));
             SafePatch(typeof(VeteranAndTacticsPatches.AIVehicle_MovableVehicleRoutine_Patch));
             SafePatch(typeof(VeteranAndTacticsPatches.Vehicle_OnVehicleSuppressed_Patch));
-            SafePatch(typeof(VeteranAndTacticsPatches.SyncSoldier_OnPhotonSerializeView_Patch));
-            SafePatch(typeof(VeteranAndTacticsPatches.SyncVehicle_SyncVehiclePosition_Patch));
-            SafePatch(typeof(VeteranAndTacticsPatches.SyncVehicle_UpdatePosAndRot_Patch));
-            SafePatch(typeof(VeteranAndTacticsPatches.SyncVehiclePlane_OnPhotonSerializeView_Patch));
-            SafePatch(typeof(VeteranAndTacticsPatches.SyncVehiclePlane_UpdatePosAndRot_Patch));
-            SafePatch(typeof(VeteranAndTacticsPatches.VehicleWithWheels_FixedUpdate_Patch));
             SafePatch(typeof(VeteranAndTacticsPatches.VehicleWithWheels_OnTriggerEnter_Patch));
-            SafePatch(typeof(VeteranAndTacticsPatches.AIVehicle_MoveTowardCurrentNodeTank_Patch));
             SafePatch(typeof(VeteranAndTacticsPatches.VehiclePlane_OnSquadSpawnInside_Patch));
-            SafePatch(typeof(VeteranAndTacticsPatches.VehiclePlane_FixedUpdate_Patch));
-            SafePatch(typeof(VeteranAndTacticsPatches.VehicleTank_FixedUpdate_Patch));
             SafePatch(typeof(VeteranAndTacticsPatches.TurretGun_SelectBestAmmo_Patch));
             SafePatch(typeof(VeteranAndTacticsPatches.TurretWeapon_Reload_Patch));
             SafePatch(typeof(VeteranAndTacticsPatches.SoldierAI_UseBestWearedWeaponCheck_Patch));
@@ -167,6 +157,10 @@ namespace EasyRed2HumanAI
             SafePatch(typeof(VeteranAndTacticsPatches.Soldier_SetBleeding_Patch));
             SafePatch(typeof(VeteranAndTacticsPatches.Soldier_SetOnFire_Patch));
             SafePatch(typeof(VeteranAndTacticsPatches.Squad_SetFullySpawned_Patch));
+            SafePatch(typeof(VeteranAndTacticsPatches.Squad_Join_Patch));
+            SafePatch(typeof(VeteranAndTacticsPatches.PlayerGUI_ClearSquadList_Patch));
+            SafePatch(typeof(VeteranAndTacticsPatches.PlayerGUI_ShowSquadList_Patch));
+            SafePatch(typeof(VeteranAndTacticsPatches.PlayerGUI_LayoutSquadEntries_Patch));
             SafePatch(typeof(VeteranAndTacticsPatches.PlayerController_SetPlayer_Patch));
             SafePatch(typeof(VeteranAndTacticsPatches.MiniMapGUI_ShowPlayerList_Patch));
             SafePatch(typeof(VeteranAndTacticsPatches.Soldier_UseSyryngeCR_Patch));
@@ -187,6 +181,9 @@ namespace EasyRed2HumanAI
             SafePatch(typeof(VeteranAndTacticsPatches.ItemGrenade_ExplodeAfter_Patch));
             SafePatch(typeof(VeteranAndTacticsPatches.VehicleDamageableTrackPart_TryDamageWithExplosion_Patch));
             SafePatch(typeof(VeteranAndTacticsPatches.VehicleDamagablePart_TryDamageWithExplosion_Patch));
+            SafePatch(typeof(VeteranAndTacticsPatches.VehicleWithWheels_OnCollisionEnter_Patch));
+            SafePatch(typeof(VeteranAndTacticsPatches.VehicleDamagablePart_OnVehicleCollision_Patch));
+            SafePatch(typeof(VeteranAndTacticsPatches.VehicleDamagablePart_InternalPartToDamageText_Patch));
             SafePatch(typeof(VeteranAndTacticsPatches.VehicleParachute_MoveDown_Patch));
             SafePatch(typeof(VeteranAndTacticsPatches.CinematicCameraGUI_EnableCinematicCamera_Patch));
             SafePatch(typeof(VeteranAndTacticsPatches.MissionStatusGUI_LateUpdate_Patch));

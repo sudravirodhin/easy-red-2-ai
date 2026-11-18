@@ -65,10 +65,52 @@ namespace EasyRed2HumanAI
 
             IntPtr vehPtr = plane.veh.Pointer;
             float now = Time.time;
+            AiCore.VehicleFastHandles planeVh = AiCore.GetOrCreateVehicleHandles(plane.veh);
+            AIPlane.PlaneAIState curPlaneState = plane.planeState;
+
+            if (planeVh != null)
+            {
+                if (curPlaneState == AIPlane.PlaneAIState.goingTorefill ||
+                    curPlaneState == AIPlane.PlaneAIState.doingRefill)
+                {
+                    if (planeVh.RefillStateEnteredAt <= 0f)
+                        planeVh.RefillStateEnteredAt = now;
+                    else if (now - planeVh.RefillStateEnteredAt >= 38.0f || plane.nearestRepairStation == null)
+                    {
+                        // Escape infinite repair-ring circling if the trigger was missed or unreachable
+                        planeVh.RefillStateEnteredAt = 0f;
+                        planeVh.BombsDepletedAt = 0f;
+                        if (plane.veh.CanRefillAmmmo())
+                            plane.veh.RefillAllTurrets();
+                        if (plane.veh.CanRefillBombBay())
+                            plane.veh.RefillBombBaySynched();
+                        plane.ExitDive();
+                        curPlaneState = plane.planeState;
+                    }
+                }
+                else
+                {
+                    planeVh.RefillStateEnteredAt = 0f;
+                }
+
+                bool orbitingWithoutTarget =
+                    curPlaneState == AIPlane.PlaneAIState.flyingAroundArea &&
+                    (plane.targetToAttack == null || plane.targetToAttack.Pointer == IntPtr.Zero);
+                if (orbitingWithoutTarget)
+                {
+                    if (planeVh.FlyingAroundAreaSince <= 0f)
+                        planeVh.FlyingAroundAreaSince = now;
+                }
+                else
+                {
+                    planeVh.FlyingAroundAreaSince = 0f;
+                }
+            }
+
             if (_nextPlaneOrbitSteerTime.TryGetValue(vehPtr, out float nextSteer) && now < nextSteer)
                 return;
 
-            _nextPlaneOrbitSteerTime[vehPtr] = now + 2.5f;
+            _nextPlaneOrbitSteerTime[vehPtr] = now + 2.0f;
 
             string myFaction = GetVehicleCrewFaction(plane.veh);
             if (string.IsNullOrEmpty(myFaction))
@@ -76,10 +118,37 @@ namespace EasyRed2HumanAI
 
             RefreshCombinedArmsIntelIfNeeded();
 
+            // Fix vanilla AIPlane.Update (0x180575BD7) BomberDestination bug:
+            // PlaneType.Bomber aircraft spawned via standard SpawnManagers lack BomberDestination,
+            // causing AIPlane.Update to jump to SetFlyAroundConquerArea (planeState = 7) and circle forever!
+            if (plane.veh.planeType == PlaneType.Bomber &&
+                !plane.veh.BomberDestination.HasValue &&
+                plane.veh.CountBombs() > 0)
+            {
+                var calcDest = plane.veh.CalculateBomberTarget(false);
+                if (calcDest.HasValue)
+                {
+                    plane.veh.BomberDestination = calcDest;
+                }
+                else if (_knownEnemyClusters.Count > 0)
+                {
+                    for (int c = 0; c < _knownEnemyClusters.Count; c++)
+                    {
+                        KnownEnemyCluster cl = _knownEnemyClusters[c];
+                        if (!AiCore.AreSameSideFactions(cl.Faction, myFaction))
+                        {
+                            float bAlt = Mathf.Max(plane.transform.position.y, cl.Position.y + 380.0f);
+                            plane.veh.BomberDestination = new Il2CppSystem.Nullable<Vector3>(
+                                new Vector3(cl.Position.x, bAlt, cl.Position.z));
+                            break;
+                        }
+                    }
+                }
+            }
+
             // Air Superiority First ("Clear Skies Only" Ground Support):
-            // If an enemy aircraft is airborne in the battle airspace, never steer patrol orbits toward ground targets.
-            // Furthermore, if our aircraft has forward pilot gun ammo and is either patrolling or locked into a ground
-            // dive pass (preparingDive / doingDive), immediately break off the ground pass and engage the enemy plane!
+            // Ensure fighter dogfight leash isn't truncated, and if an armed plane is patrolling in flyingAroundArea
+            // with an enemy aircraft in the airspace, hand off the air target via DoAttackTarget.
             Spottable bestEnemyAir = FindBestAirborneEnemyAircraft(plane, myFaction, plane.transform.position, out bool anyEnemyAirborne);
             if (anyEnemyAirborne)
             {
@@ -88,29 +157,20 @@ namespace EasyRed2HumanAI
                     AIPlane.fighterDogfightExtraLeash = 1800.0f;
                 }
 
-                if (bestEnemyAir != null && plane.PilotGunHasAnyAmmo())
+                if (bestEnemyAir != null &&
+                    plane.PilotGunHasAnyAmmo() &&
+                    plane.planeState == AIPlane.PlaneAIState.flyingAroundArea)
                 {
-                    AIPlane.PlaneAIState state = plane.planeState;
-                    Vector3 curPlanePos = plane.transform.position;
-                    Vector3 flyTarget = plane.flyTargetPosition;
-                    bool canSafelyBreakOff =
-                        state == AIPlane.PlaneAIState.flyingAroundArea ||
-                        state == AIPlane.PlaneAIState.preparingDive ||
-                        (state == AIPlane.PlaneAIState.doingDive &&
-                         curPlanePos.y > flyTarget.y + 145.0f &&
-                         (curPlanePos - flyTarget).sqrMagnitude > 220.0f * 220.0f);
-
                     Spottable curAtk = plane.targetToAttack;
                     bool alreadyTargetingAir = curAtk != null && curAtk.Pointer != IntPtr.Zero && curAtk.IsAirVehicle();
-
-                    if (canSafelyBreakOff && !alreadyTargetingAir)
+                    if (!alreadyTargetingAir)
                     {
                         plane.DoAttackTarget(bestEnemyAir);
                         if (TryRecordCombinedArmsAssist(vehPtr, now))
                         {
                             AiCore.LogDebug(
                                 "CombArmsAirSup",
-                                $"{myFaction} aircraft aborted ground pass/patrol to intercept airborne enemy aircraft.");
+                                $"{myFaction} aircraft engaged airborne enemy aircraft from patrol.");
                         }
                     }
                 }
@@ -120,64 +180,22 @@ namespace EasyRed2HumanAI
             if (plane.planeState != AIPlane.PlaneAIState.flyingAroundArea)
                 return;
 
-            Vector3 bestOrbitPos = Vector3.zero;
-            float bestScore = -999f;
-            bool foundSupportZone = false;
-
-            // 1. Highest priority: friendly Explosive Artillery / Support radio requests
-            for (int r = 0; r < _activeRadioRequests.Count; r++)
+            // Break out of "vulture circling": if an armed fighter/CAS plane has been orbiting in flyingAroundArea
+            // for >= 2.5s without acquiring a target (because vanilla's 200m tangential bank keeps the orbit center
+            // 90 degrees off-bore!), directly select a valid ground target and initiate DoAttackTarget!
+            if (plane.veh.planeType == PlaneType.Fighter &&
+                (plane.targetToAttack == null || plane.targetToAttack.Pointer == IntPtr.Zero) &&
+                (plane.PilotGunHasAnyAmmo() || plane.HasBombsToDeliver()) &&
+                planeVh != null &&
+                planeVh.FlyingAroundAreaSince > 0f &&
+                (now - planeVh.FlyingAroundAreaSince) >= 2.5f)
             {
-                ActiveRadioSupportInfo req = _activeRadioRequests[r];
-                if (!AiCore.AreSameSideFactions(req.Faction, myFaction) || req.RequestType == RadioRequest.artillerySmoke)
-                    continue;
-
-                float score = req.RequestType == RadioRequest.artilleryAPHE ? 115.0f : 95.0f;
-                if (score > bestScore)
+                Spottable casTarget = null;
+                TrySelectKnownAircraftTarget(plane, ref casTarget);
+                if (casTarget != null && casTarget.Pointer != IntPtr.Zero)
                 {
-                    bestScore = score;
-                    bestOrbitPos = req.Position;
-                    foundSupportZone = true;
-                }
-            }
-
-            // 2. Next priority: Marked/Known enemy vehicles and squads actively engaging friendly infantry
-            int clusterCount = _knownEnemyClusters.Count;
-            for (int i = 0; i < clusterCount; i++)
-            {
-                KnownEnemyCluster cluster = _knownEnemyClusters[i];
-                if (AiCore.AreSameSideFactions(cluster.Faction, myFaction))
-                    continue;
-
-                if (!cluster.IsMarkedOrPinPoint &&
-                    !cluster.IsHalfMarked &&
-                    !cluster.NearRadioRequest &&
-                    cluster.VehicleTarget == null &&
-                    !cluster.IsEngagingFriendlies)
-                {
-                    continue;
-                }
-
-                if (cluster.BasePriority > bestScore)
-                {
-                    bestScore = cluster.BasePriority;
-                    bestOrbitPos = cluster.Position;
-                    foundSupportZone = true;
-                }
-            }
-
-            if (foundSupportZone)
-            {
-                Vector3 delta = bestOrbitPos - plane.flyTargetPosition;
-                delta.y = 0f;
-                if (delta.sqrMagnitude > 50.0f * 50.0f)
-                {
-                    plane.SetFlyAroundPos(bestOrbitPos);
-                    if (TryRecordCombinedArmsAssist(vehPtr, now))
-                    {
-                        AiCore.LogDebug(
-                            "CombArmsPlaneOrbit",
-                            $"{myFaction} aircraft shifted patrol orbit toward known enemy squad / support request.");
-                    }
+                    planeVh.FlyingAroundAreaSince = 0f;
+                    plane.DoAttackTarget(casTarget);
                 }
             }
         }
@@ -279,13 +297,16 @@ namespace EasyRed2HumanAI
                 return;
             }
 
-            if (_knownEnemyClusters.Count == 0)
-                return;
             Vector3 planeFwd = plane.transform.forward;
             Transform planeRoot = plane.transform.root;
+            IntPtr selfVehPtr = plane.veh.Pointer;
 
-            const float effectiveMaxDist = 850.0f;
-            const float effectiveMaxAngle = 55.0f;
+            const float effectiveMaxDist = 950.0f;
+            // In flyingAroundArea (state 7), vanilla banks -90 degrees tangentially inside 200m of flyTargetPosition
+            // (0x180577001), keeping targets inside the orbit 75-115 degrees off the nose! Because DoAttackTarget
+            // immediately transitions to preparingDive (300m climb-out standoff), allow 135-deg roll-in acquisition.
+            bool isOrbitingArea = plane.planeState == AIPlane.PlaneAIState.flyingAroundArea;
+            float effectiveMaxAngle = isOrbitingArea ? 135.0f : 62.0f;
 
             float curScore = currentResult != null
                 ? EvaluateExistingTargetPriority(currentResult, myFaction, planePos, true)
@@ -295,7 +316,10 @@ namespace EasyRed2HumanAI
             float bestScore = curScore + 15.0f;
 
             bool limitUnmarkedInfantry = VisionConfig.LimitAircraftInfantrySpotting.Value;
-            float unmarkedAwareCap = Mathf.Max(VisionConfig.AircraftUnmarkedInfantryMaxDist.Value * 1.45f, 250.0f);
+            float altitudeCompensation = Mathf.Max(0f, planePos.y) * 1.25f;
+            float unmarkedAwareCap = Mathf.Min(
+                effectiveMaxDist,
+                Mathf.Max(VisionConfig.AircraftUnmarkedInfantryMaxDist.Value * 2.5f + altitudeCompensation, 680.0f));
             bool hasBombs = plane.HasBombsToDeliver() || plane.HasBombBayConfigured();
             bool hasLiveBombsNow = plane.HasBombsToDeliver();
 
@@ -318,7 +342,7 @@ namespace EasyRed2HumanAI
                         continue;
 
                     float allowedDist = (!isVehCand && limitUnmarkedInfantry && !isMarkedOrRadio)
-                        ? Mathf.Min(effectiveMaxDist, unmarkedAwareCap)
+                        ? unmarkedAwareCap
                         : effectiveMaxDist;
 
                     Vector3 candPos = cand.GetCenterOfUnit();
@@ -342,7 +366,9 @@ namespace EasyRed2HumanAI
                         vehBonus = (isArmoredTank && !hasBombs) ? 5.0f : 30.0f;
                     }
 
-                    float candScore = cluster.BasePriority + vehBonus - (dist * 0.06f);
+                    // Per-plane deterministic tie-breaker so multiple CAS aircraft spread attacks across clusters
+                    float spreadBonus = (AiCore.GetDeterministicHash(selfVehPtr, i + 17) & 7) * 2.5f;
+                    float candScore = cluster.BasePriority + vehBonus + spreadBonus - (dist * 0.06f);
                     if (candScore <= bestScore)
                         continue;
 
@@ -353,6 +379,84 @@ namespace EasyRed2HumanAI
                     bestScore = candScore;
                     bestCandidate = cand;
                     break;
+                }
+            }
+
+            // Fallback for island / infantry-defense maps (e.g. Battle of Makin) when orbiting with no target:
+            // scan WorldSquads for any exposed/standing or combat-aware enemy squad or ground vehicle in LOS.
+            if (bestCandidate == null && currentResult == null && isOrbitingArea)
+            {
+                AiCore.EnsureWorldSnapshot();
+                int sqCount = AiCore.WorldSquadCount;
+                var squads = AiCore.WorldSquads;
+                for (int s = 0; s < sqCount; s++)
+                {
+                    ref AiCore.SquadSnapshot sqSnap = ref squads[s];
+                    if (!sqSnap.LeaderIsAlive ||
+                        sqSnap.RefOnPlane ||
+                        string.IsNullOrEmpty(sqSnap.Faction) ||
+                        AiCore.AreSameSideFactions(myFaction, sqSnap.Faction))
+                    {
+                        continue;
+                    }
+
+                    Soldier leader = sqSnap.Leader;
+                    if (leader == null)
+                        continue;
+
+                    Spottable cand = null;
+                    bool isVeh = false;
+                    if (sqSnap.LeaderOnGroundVehicle)
+                    {
+                        Vehicle v = leader.GetCurrentVehicle();
+                        if (v != null && v.CanFight())
+                        {
+                            cand = v.TryCast<Spottable>();
+                            isVeh = true;
+                        }
+                    }
+
+                    if (cand == null)
+                    {
+                        Squad sq = leader.joinedSquad;
+                        bool sqKnownOrEngaged = sq != null &&
+                            (sq.isMarked || sq.isHalfMarked || sq.isMarkedPinPoint || sq.IsEnemyAwareOfThisSquad);
+                        if (limitUnmarkedInfantry &&
+                            !sqKnownOrEngaged &&
+                            leader.m_pose == SoldierPose.Prone)
+                        {
+                            continue;
+                        }
+                        cand = leader.TryCast<Spottable>();
+                    }
+
+                    if (!AiCore.IsValidAliveSpottable(cand))
+                        continue;
+
+                    Vector3 candPos = cand.GetCenterOfUnit();
+                    Vector3 toCand = candPos - planePos;
+                    float dist = toCand.magnitude;
+                    float maxD = isVeh ? effectiveMaxDist : unmarkedAwareCap;
+                    if (dist < 95.0f || dist > maxD)
+                        continue;
+
+                    if (IsAircraftTargetDangerCloseToFriendlySquad(myFaction, candPos, hasLiveBombsNow))
+                        continue;
+
+                    Vector3 dirToCand = toCand / dist;
+                    if (Vector3.Angle(planeFwd, dirToCand) > effectiveMaxAngle)
+                        continue;
+
+                    float spreadBonus = (AiCore.GetDeterministicHash(selfVehPtr, s + 53) & 7) * 3.0f;
+                    float candScore = (isVeh ? 45.0f : 22.0f) + spreadBonus - (dist * 0.05f);
+                    if (candScore <= bestScore)
+                        continue;
+
+                    if (AiCore.RaycastEnvironment(planePos, dirToCand, dist - 4.0f, planeRoot, out _))
+                        continue;
+
+                    bestScore = candScore;
+                    bestCandidate = cand;
                 }
             }
 
@@ -727,178 +831,10 @@ namespace EasyRed2HumanAI
             }
         }
 
-        public static void TryExecuteDogfightAntiChickenBreakOff(AIPlane plane, bool isPostfix)
-        {
-            if (plane == null ||
-                plane.veh == null ||
-                plane.veh.Pointer == IntPtr.Zero ||
-                plane.transform == null ||
-                !AiCore.IsLocallyOwnedVehicle(plane.veh) ||
-                plane.veh.PlayerIsInside() ||
-                !plane.HasAIDriver ||
-                plane.veh.isGrounded ||
-                !plane.veh.CanFight())
-            {
-                return;
-            }
-
-            AIPlane.PlaneAIState aiState = plane.planeState;
-            if (aiState == AIPlane.PlaneAIState.takeOff ||
-                aiState == AIPlane.PlaneAIState.gatheringSpeed ||
-                aiState == AIPlane.PlaneAIState.landing)
-            {
-                return;
-            }
-
-            IntPtr vehPtr = plane.veh.Pointer;
-            float now = Time.time;
-
-            if (_planeDogfightBreakOff.TryGetValue(vehPtr, out DogfightBreakOffState breakState) && now < breakState.ExpireTime)
-            {
-                plane.followTarget = false;
-                if (aiState == AIPlane.PlaneAIState.doingDive || aiState == AIPlane.PlaneAIState.preparingDive)
-                {
-                    plane.ExitDive();
-                }
-                plane.flyTargetPosition = breakState.EscapeTargetPos;
-                if (!isPostfix && plane.nextUpdateCheck < now + 0.30f)
-                {
-                    plane.nextUpdateCheck = now + 0.30f;
-                }
-                return;
-            }
-
-            if (isPostfix || now < breakState.CooldownUntil || now < breakState.NextCheckTime)
-                return;
-
-            breakState.NextCheckTime = now + 0.10f;
-            _planeDogfightBreakOff[vehPtr] = breakState;
-
-            string myFaction = GetVehicleCrewFaction(plane.veh);
-            if (string.IsNullOrEmpty(myFaction))
-                return;
-
-            RefreshCombinedArmsIntelIfNeeded();
-
-            Vector3 myPos = plane.transform.position;
-            Vector3 myFwd = plane.transform.forward;
-            if (myFwd.sqrMagnitude < 0.001f)
-                return;
-            myFwd.Normalize();
-
-            SoldierPersonality pilotPers = GetVehicleCrewPersonality(plane.veh);
-            float headOnBreakDist = 155.0f;
-            if (pilotPers == SoldierPersonality.Pilot_Ace || pilotPers == SoldierPersonality.Pilot_Disciplined)
-                headOnBreakDist = 170.0f;
-            else if (pilotPers == SoldierPersonality.Pilot_Daredevil)
-                headOnBreakDist = 125.0f;
-
-            bool triggerBreak = false;
-
-            // 1. Check current targetToAttack first: break ONLY after firing through the head-on window on a true reciprocal nose-to-nose collision course!
-            Spottable curAtk = plane.targetToAttack;
-            if (curAtk != null && curAtk.Pointer != IntPtr.Zero && curAtk.IsAirVehicle())
-            {
-                VehiclePlane enemyVp = curAtk.TryCast<VehiclePlane>();
-                if (enemyVp != null && !enemyVp.isGrounded && enemyVp.transform != null)
-                {
-                    Vector3 toEnemy = enemyVp.transform.position - myPos;
-                    float dist = toEnemy.magnitude;
-                    if (dist > 1.0f && dist <= headOnBreakDist)
-                    {
-                        Vector3 toEnemyDir = toEnemy / dist;
-                        Vector3 enemyFwd = enemyVp.transform.forward;
-                        float approachDot = Vector3.Dot(toEnemyDir, myFwd);
-                        float mergeDot = Vector3.Dot(myFwd, enemyFwd);
-                        if ((approachDot > 0.84f && mergeDot < -0.65f) ||
-                            (dist <= 48.0f && approachDot > 0.72f && mergeDot < 0.25f))
-                        {
-                            triggerBreak = true;
-                        }
-                    }
-                }
-            }
-
-            // 2. Scan _airborneAircraft for un-targeted reciprocal head-on collision courses
-            if (!triggerBreak)
-            {
-                int airCount = _airborneAircraft.Count;
-                for (int i = 0; i < airCount; i++)
-                {
-                    AirborneAircraftInfo info = _airborneAircraft[i];
-                    if (AiCore.AreSameSideFactions(myFaction, info.Faction) ||
-                        info.Plane == null ||
-                        info.Plane.Pointer == IntPtr.Zero ||
-                        info.Plane.Pointer == vehPtr ||
-                        info.Plane.isGrounded ||
-                        info.Plane.transform == null)
-                    {
-                        continue;
-                    }
-
-                    Vector3 toEnemy = info.Plane.transform.position - myPos;
-                    float dist = toEnemy.magnitude;
-                    if (dist <= 1.0f || dist > headOnBreakDist)
-                        continue;
-
-                    Vector3 toEnemyDir = toEnemy / dist;
-                    Vector3 enemyFwd = info.Plane.transform.forward;
-                    float approachDot = Vector3.Dot(toEnemyDir, myFwd);
-                    float mergeDot = Vector3.Dot(myFwd, enemyFwd);
-                    if ((approachDot > 0.84f && mergeDot < -0.65f) ||
-                        (dist <= 48.0f && approachDot > 0.72f && mergeDot < 0.25f))
-                    {
-                        triggerBreak = true;
-                        break;
-                    }
-                }
-            }
-
-            if (triggerBreak)
-            {
-                // Right-hand break turn with hard altitude ceiling so dogfighting fighters never spiral up into space
-                float groundY = Mathf.Max(0f, ResourcesManager.GetTerrainAltitude(myPos, 0f));
-                float maxSafeAlt = Mathf.Min(plane.veh.maxFlyHeight > 80f ? plane.veh.maxFlyHeight * 0.88f : 420f, groundY + 340f);
-                float climbDelta = myPos.y >= maxSafeAlt - 45.0f ? -28.0f : 38.0f;
-
-                Vector3 rightVec = plane.transform.right;
-                Vector3 escapePos = myPos + myFwd * 195.0f + rightVec * 195.0f;
-                escapePos.y = Mathf.Clamp(myPos.y + climbDelta, groundY + 95.0f, Mathf.Max(groundY + 135.0f, maxSafeAlt));
-
-                breakState.EscapeTargetPos = escapePos;
-                breakState.ExpireTime = now + 2.10f;
-                breakState.CooldownUntil = now + 4.50f;
-                _planeDogfightBreakOff[vehPtr] = breakState;
-
-                plane.followTarget = false;
-                if (aiState == AIPlane.PlaneAIState.doingDive || aiState == AIPlane.PlaneAIState.preparingDive)
-                {
-                    plane.ExitDive();
-                }
-                plane.flyTargetPosition = escapePos;
-                if (plane.nextUpdateCheck < now + 0.30f)
-                {
-                    plane.nextUpdateCheck = now + 0.30f;
-                }
-
-                AiCore.LogDebug("DogfightBreak", $"{myFaction} fighter executed right-hand break turn to avoid head-on collision.");
-            }
-        }
-
-        private static void LiftPlaneExitDiveTargetAboveTerrain(AIPlane plane, Vector3 pos, Vector3 flatFwd, float minTerrainY)
-        {
-            float terrMid = ResourcesManager.GetTerrainAltitude(pos + flatFwd * 220f, 0f);
-            float terrFar = ResourcesManager.GetTerrainAltitude(pos + flatFwd * 480f, 0f);
-            float terrMax = Mathf.Max(minTerrainY, Mathf.Max(terrMid, terrFar));
-
-            Vector3 safeClimb = pos + flatFwd * 650f;
-            safeClimb.y = Mathf.Max(plane.flyTargetPosition.y, Mathf.Max(pos.y + 220f, terrMax + 260f));
-            plane.flyTargetPosition = safeClimb;
-        }
-
         /// <summary>
         /// Prevents AI aircraft from nosediving into steep mountain slopes during CAS runs
-        /// and ensures pilot personalities apply strictly once per state transition instead of 60 Hz drift.
+        /// and ensures pilot personalities apply strictly once per state transition instead of 60 Hz drift,
+        /// without overwriting flyTargetPosition on top of vanilla flight control.
         /// </summary>
         public static void UpdateAircraftDiveTerrainSafetyAndPersonality(AIPlane plane)
         {
@@ -946,13 +882,11 @@ namespace EasyRed2HumanAI
                 }
             }
 
-            // One-shot entry into exitDive (personality tweak + lift climb target clear of mountain ridges)
+            // One-shot entry into exitDive personality duration tweak
             if (st.HasObservedState &&
                 curState == AIPlane.PlaneAIState.exitDive &&
                 st.LastPlaneState != AIPlane.PlaneAIState.exitDive)
             {
-                LiftPlaneExitDiveTargetAboveTerrain(plane, pos, flatFwd, ResourcesManager.GetTerrainAltitude(pos, 0f));
-
                 if (persEnabled)
                 {
                     if (pilotPers == SoldierPersonality.Pilot_Daredevil)
@@ -962,24 +896,9 @@ namespace EasyRed2HumanAI
                 }
             }
 
-            // Prevent overrunning flyTargetPosition mid-pullout (which leaves target behind/below nose)
-            if (curState == AIPlane.PlaneAIState.exitDive)
-            {
-                Vector3 toFly = plane.flyTargetPosition - pos;
-                float flatFlySq = toFly.x * toFly.x + toFly.z * toFly.z;
-                float fwdDot = toFly.x * flatFwd.x + toFly.z * flatFwd.z;
-                if (flatFlySq < 75.0f * 75.0f || fwdDot < 25.0f)
-                {
-                    plane.flyTargetPosition = new Vector3(
-                        pos.x + flatFwd.x * 550.0f,
-                        Mathf.Max(plane.flyTargetPosition.y, pos.y + 200.0f),
-                        pos.z + flatFwd.z * 550.0f);
-                }
-            }
-
             // Flak / AA Self-Preservation Abort: if a non-Kamikaze, non-Daredevil aircraft takes heavy flak/AA damage
             // mid-dive (>= 12 damage spike or >= 50 total damage while taking hits), salvo-drop bombs if near target
-            // (and not danger-close to a friendly squad) and immediately pull out of the dive!
+            // (and not danger-close to a friendly squad) and immediately pull out of the dive via vanilla ExitDive!
             string myFaction = GetVehicleCrewFaction(plane.veh);
             AiCore.VehicleFastHandles planeVh = AiCore.GetOrCreateVehicleHandles(plane.veh);
             if (planeVh != null)
@@ -1005,7 +924,6 @@ namespace EasyRed2HumanAI
                     }
 
                     plane.ExitDive();
-                    LiftPlaneExitDiveTargetAboveTerrain(plane, pos, flatFwd, Mathf.Max(0f, ResourcesManager.GetTerrainAltitude(pos, 0f)));
                     curState = plane.planeState;
                 }
                 planeVh.LastObservedDamage = curPlaneDmg;
@@ -1041,7 +959,6 @@ namespace EasyRed2HumanAI
                         {
                             plane.targetToAttack = null;
                             plane.ExitDive();
-                            LiftPlaneExitDiveTargetAboveTerrain(plane, pos, flatFwd, Mathf.Max(0f, ResourcesManager.GetTerrainAltitude(pos, 0f)));
                             curState = plane.planeState;
                             FriendlyFirePrevented++;
                         }
@@ -1051,46 +968,45 @@ namespace EasyRed2HumanAI
                 if (curState == AIPlane.PlaneAIState.doingDive)
                 {
                     Rigidbody rb = plane.veh.GetRigidbody();
-                Vector3 vel = rb != null ? rb.velocity : fwd * 75.0f;
-                float speed = Mathf.Max(45.0f, vel.magnitude);
-                float sinkRate = Mathf.Max(0f, -vel.y);
-                Vector3 velDir = vel.sqrMagnitude > 1.0f ? vel / vel.magnitude : fwd;
+                    Vector3 vel = rb != null ? rb.velocity : fwd * 75.0f;
+                    float speed = Mathf.Max(45.0f, vel.magnitude);
+                    float sinkRate = Mathf.Max(0f, -vel.y);
+                    Vector3 velDir = vel.sqrMagnitude > 1.0f ? vel / vel.magnitude : fwd;
 
-                float terrHere = ResourcesManager.GetTerrainAltitude(pos, 0f);
-                float terrNear = ResourcesManager.GetTerrainAltitude(pos + flatFwd * (speed * 1.35f), 0f);
-                float terrFar = ResourcesManager.GetTerrainAltitude(pos + flatFwd * (speed * 2.50f), 0f);
-                float maxGroundY = Mathf.Max(terrHere, Mathf.Max(terrNear, terrFar));
-                if (AiCore.TryGetActiveWaterLevel(out float waterY) && waterY > maxGroundY)
-                    maxGroundY = waterY;
+                    float terrHere = ResourcesManager.GetTerrainAltitude(pos, 0f);
+                    float terrNear = ResourcesManager.GetTerrainAltitude(pos + flatFwd * (speed * 1.35f), 0f);
+                    float terrFar = ResourcesManager.GetTerrainAltitude(pos + flatFwd * (speed * 2.50f), 0f);
+                    float maxGroundY = Mathf.Max(terrHere, Mathf.Max(terrNear, terrFar));
+                    if (AiCore.TryGetActiveWaterLevel(out float waterY) && waterY > maxGroundY)
+                        maxGroundY = waterY;
 
-                plane.GetDiveData(out _, out float nativeLimitHeight);
-                float rayDist = Mathf.Clamp(speed * 1.35f, 65.0f, 135.0f);
-                bool rayHitObstacle = Physics.Raycast(
-                    pos,
-                    velDir,
-                    rayDist,
-                    AiCore.GetSolidEnvironmentMask(),
-                    QueryTriggerInteraction.Ignore);
+                    plane.GetDiveData(out _, out float nativeLimitHeight);
+                    float rayDist = Mathf.Clamp(speed * 1.35f, 65.0f, 135.0f);
+                    bool rayHitObstacle = Physics.Raycast(
+                        pos,
+                        velDir,
+                        rayDist,
+                        AiCore.GetSolidEnvironmentMask(),
+                        QueryTriggerInteraction.Ignore);
 
-                float minSafeAlt = maxGroundY + Mathf.Max(nativeLimitHeight, 52.0f + sinkRate * 1.15f);
-                if (pos.y <= minSafeAlt || rayHitObstacle)
-                {
-                    Spottable atkTgt = plane.targetToAttack;
-                    if (plane.HasBombsToDeliver() &&
-                        atkTgt != null &&
-                        atkTgt.Pointer != IntPtr.Zero)
+                    float minSafeAlt = maxGroundY + Mathf.Max(nativeLimitHeight, 52.0f + sinkRate * 1.15f);
+                    if (pos.y <= minSafeAlt || rayHitObstacle)
                     {
-                        Vector3 tgtPos = atkTgt.GetPosition();
-                        Vector3 dTgt = tgtPos - pos;
-                        if (dTgt.x * dTgt.x + dTgt.z * dTgt.z <= 240.0f * 240.0f &&
-                            !IsAircraftTargetDangerCloseToFriendlySquad(myFaction, tgtPos, true))
+                        Spottable atkTgt = plane.targetToAttack;
+                        if (plane.HasBombsToDeliver() &&
+                            atkTgt != null &&
+                            atkTgt.Pointer != IntPtr.Zero)
                         {
-                            plane.veh.DropBombs();
+                            Vector3 tgtPos = atkTgt.GetPosition();
+                            Vector3 dTgt = tgtPos - pos;
+                            if (dTgt.x * dTgt.x + dTgt.z * dTgt.z <= 240.0f * 240.0f &&
+                                !IsAircraftTargetDangerCloseToFriendlySquad(myFaction, tgtPos, true))
+                            {
+                                plane.veh.DropBombs();
+                            }
                         }
-                    }
 
                         plane.ExitDive();
-                        LiftPlaneExitDiveTargetAboveTerrain(plane, pos, flatFwd, maxGroundY);
                         curState = plane.planeState;
                     }
                 }
@@ -1101,18 +1017,6 @@ namespace EasyRed2HumanAI
             _planeAttackReaction[planePtr] = st;
         }
 
-        // =====================================================================
-        // Vanilla Co-op Fix: Mid-Air Plane Spawn Hot-Start & Remote Flight Sync
-        // 1. VehiclePlane.OnSquadSpawnInside (0x180853800) runs ONLY on the Host and fails over
-        //    terrainless ocean/mesh spawners. On remote clients, SyncVehiclePlane does not replicate
-        //    engineStarted, throttle, thrustForce, _trgtThrust, farFromGround, or rb.velocity, and
-        //    rb.isKinematic can stay true on frame 1—causing dead-stick mid-air spawns!
-        // 2. SyncVehiclePlane overrides UpdatePosAndRot (0x180735930) while VehiclePlane.FixedUpdate
-        //    (0x18085011B) skips lift & thrust on non-owners (!OwnDriverOrVehicle) yet leaves
-        //    rb.useGravity = true! Between network packets, PhysX pulls remote planes down at -9.81 m/s^2
-        //    ("falling in columns") until vertical error exceeds 3x outOfSyncDistance and SyncVehiclePosition
-        //    teleports them back up ("jumping planes")!
-        // =====================================================================
         private static float GetPlaneCruiseVelocityMs(VehiclePlane vp)
         {
             if (vp == null)
@@ -1136,50 +1040,24 @@ namespace EasyRed2HumanAI
             }
 
             IntPtr ptr = vp.Pointer;
-            float now = Time.time;
-            bool inWindow = _planeHotStartWindowUntil.TryGetValue(ptr, out float windowUntil);
-
             if (_hotStartedPlayerPlanes.Contains(ptr))
-            {
-                if (!inWindow || now >= windowUntil || vp.isGrounded)
-                    return;
-
-                Rigidbody checkRb = vp.rb;
-                float minMaintainMs = GetPlaneCruiseVelocityMs(vp) * 0.62f;
-                if (vp.engineStarted && (checkRb == null || checkRb.isKinematic || checkRb.velocity.sqrMagnitude >= minMaintainMs * minMaintainMs))
-                    return;
-            }
-
-            if (!inWindow)
-            {
-                vp.RefreshGrounded();
-                bool onGroundOrRunway =
-                    vp.isGrounded ||
-                    (vp.transform.position.y < 45.0f &&
-                     AiCore.RaycastEnvironment(vp.transform.position + Vector3.up * 1.8f, Vector3.down, 11.0f, vp.transform.root, out _));
-
-                if (onGroundOrRunway)
-                {
-                    // Plane is on a runway / carrier deck: mark as seen so manual runway startup works normally
-                    _hotStartedPlayerPlanes.Add(ptr);
-                    return;
-                }
-
-                // Airborne spawn confirmed: hold a 2.5s stabilization window so late kinematic release or RPCs cannot stall it!
-                windowUntil = now + 2.5f;
-                _planeHotStartWindowUntil[ptr] = windowUntil;
-            }
-            else if (now >= windowUntil)
-            {
-                _hotStartedPlayerPlanes.Add(ptr);
                 return;
-            }
+
+            vp.RefreshGrounded();
+            bool onGroundOrRunway =
+                vp.isGrounded ||
+                (vp.transform.position.y < 45.0f &&
+                 AiCore.RaycastEnvironment(vp.transform.position + Vector3.up * 1.8f, Vector3.down, 11.0f, vp.transform.root, out _));
+
+            _hotStartedPlayerPlanes.Add(ptr);
+            if (onGroundOrRunway)
+                return;
 
             vp.SetPhysicsEnabled(true);
             if (!vp.engineStarted)
                 vp.StartEngine();
 
-            vp.engineStartTime = now - 8.0f;
+            vp.engineStartTime = Time.time - 8.0f;
             vp.throttle = 100.0f;
             float maxThrust = Mathf.Max(100.0f, vp.thrustForceMultiplier * 100.0f);
             vp.thrustForce = maxThrust;
@@ -1191,244 +1069,9 @@ namespace EasyRed2HumanAI
 
             float cruiseMs = GetPlaneCruiseVelocityMs(vp);
             Rigidbody rb = vp.rb;
-            if (rb != null)
+            if (rb != null && !rb.isKinematic && rb.velocity.sqrMagnitude < (cruiseMs * 0.72f) * (cruiseMs * 0.72f))
             {
-                if (!rb.useGravity)
-                    rb.useGravity = true;
-
-                if (!rb.isKinematic)
-                {
-                    if (rb.velocity.sqrMagnitude < (cruiseMs * 0.72f) * (cruiseMs * 0.72f))
-                    {
-                        rb.velocity = vp.transform.forward * cruiseMs;
-                    }
-
-                    if (vp.engineStarted && rb.velocity.sqrMagnitude >= (cruiseMs * 0.70f) * (cruiseMs * 0.70f))
-                    {
-                        if (_hotStartedPlayerPlanes.Add(ptr))
-                        {
-                            AiCore.LogDebug("PlaneSpawnFix", $"Hot-started airborne plane '{vp.name}' ({cruiseMs:F0}m/s).");
-                        }
-                    }
-                }
-            }
-        }
-
-        [HarmonyPatch(typeof(Vehicle), nameof(Vehicle.SetPhysicsEnabled))]
-        public static class Vehicle_SetPhysicsEnabled_Patch
-        {
-            public static void Prefix(Vehicle __instance, ref bool __0)
-            {
-                try
-                {
-                    if (!__0 &&
-                        VisionConfig.EnableMod.Value &&
-                        VisionConfig.EnableCoopAirborneSpawnFix.Value &&
-                        __instance != null &&
-                        __instance.IsAirVehicle() &&
-                        !__instance.IsDisabled())
-                    {
-                        VehiclePlane vp = __instance.TryCast<VehiclePlane>();
-                        if (vp != null && (!vp.isGrounded || vp.HasDriverAlive))
-                        {
-                            __0 = true;
-                        }
-                    }
-                }
-                catch { }
-            }
-        }
-
-        // =====================================================================
-        // Host-Side Vanilla-Client Plane Sync Rate & Zero-Speed Guard
-        // 1. When a plane has a live pilot, SyncVehiclePlane.OnPhotonSerializeView (0x1807350AA)
-        //    returns early and SyncSoldier.OnPhotonSerializeView (0x18073176D) sends the plane's
-        //    pos/rot/speed—throttled to `Time.time + 0.40f` (2.5 Hz walking infantry rate!).
-        //    At 100 m/s, 40m gaps + uncompensated client gravity cause vanilla clients to sag
-        //    and snap-teleport ("jumping planes"); and if Host camera LOD ever zeroed rb.velocity,
-        //    sending speed=0 sets allowedOutOfSyncDist=0 on vanilla clients ("falling in columns")!
-        // 2. When pilotless/shot-down, SyncVehiclePlane.OnPhotonSerializeView (0x1807350E9) throttles
-        //    updates to `Time.time + 1.50f` (once every 1.5s!).
-        // Lowering next_position_sync to ~0.08s-0.10s (~10-12 Hz, matching Photon's native tick)
-        // keeps 100% identical vanilla wire format while smoothing planes even for UNMODDED clients!
-        // =====================================================================
-        [HarmonyPatch(typeof(SyncSoldier), nameof(SyncSoldier.OnPhotonSerializeView))]
-        public static class SyncSoldier_OnPhotonSerializeView_Patch
-        {
-            public static void Prefix(SyncSoldier __instance, Photon.Pun.PhotonStream __0)
-            {
-                try
-                {
-                    if (__0 == null ||
-                        !__0.IsWriting ||
-                        !VisionConfig.EnableMod.Value ||
-                        !VisionConfig.EnableCoopAirborneSpawnFix.Value ||
-                        __instance == null)
-                    {
-                        return;
-                    }
-
-                    Soldier s = __instance.soldier;
-                    if (s == null || s.Pointer == IntPtr.Zero || !s.IsOnVehicle())
-                        return;
-
-                    Vehicle veh = s.GetCurrentVehicle();
-                    if (veh == null || veh.Pointer == IntPtr.Zero || !veh.IsAirVehicle() || veh.IsDisabled())
-                        return;
-
-                    VehiclePlane vp = veh.TryCast<VehiclePlane>();
-                    if (vp == null || vp.isGrounded)
-                        return;
-
-                    if (!vp.IsPhysicsEnabled)
-                        vp.SetPhysicsEnabled(true);
-
-                    if (vp.IsOperative() && vp.GetDriver() == s)
-                    {
-                        Rigidbody rb = vp.rb;
-                        if (rb != null && !rb.isKinematic && rb.velocity.sqrMagnitude < 12.0f * 12.0f)
-                        {
-                            TryHotStartAirbornePlane(vp, true);
-                        }
-                    }
-                }
-                catch { }
-            }
-
-            public static void Postfix(SyncSoldier __instance, Photon.Pun.PhotonStream __0)
-            {
-                try
-                {
-                    if (__0 == null ||
-                        !__0.IsWriting ||
-                        !VisionConfig.EnableMod.Value ||
-                        !VisionConfig.EnableCoopAirborneSpawnFix.Value ||
-                        __instance == null)
-                    {
-                        return;
-                    }
-
-                    Soldier s = __instance.soldier;
-                    if (s == null || s.Pointer == IntPtr.Zero || !s.IsOnVehicle())
-                        return;
-
-                    Vehicle veh = s.GetCurrentVehicle();
-                    if (veh == null || veh.Pointer == IntPtr.Zero || !veh.IsAirVehicle() || veh.IsDisabled())
-                        return;
-
-                    VehiclePlane vp = veh.TryCast<VehiclePlane>();
-                    if (vp == null || vp.isGrounded)
-                        return;
-
-                    float targetNextSync = Time.time + 0.08f;
-                    if (__instance.next_position_sync > targetNextSync)
-                    {
-                        __instance.next_position_sync = targetNextSync;
-                    }
-                }
-                catch { }
-            }
-        }
-
-        [HarmonyPatch(typeof(SyncVehiclePlane), nameof(SyncVehiclePlane.OnPhotonSerializeView))]
-        public static class SyncVehiclePlane_OnPhotonSerializeView_Patch
-        {
-            public static void Prefix(SyncVehiclePlane __instance, Photon.Pun.PhotonStream __0)
-            {
-                try
-                {
-                    if (__0 == null ||
-                        !__0.IsWriting ||
-                        !VisionConfig.EnableMod.Value ||
-                        !VisionConfig.EnableCoopAirborneSpawnFix.Value ||
-                        __instance == null)
-                    {
-                        return;
-                    }
-
-                    Vehicle veh = __instance.vehicle;
-                    if (veh == null || veh.Pointer == IntPtr.Zero || veh.IsDisabled())
-                        return;
-
-                    VehiclePlane vp = veh.TryCast<VehiclePlane>();
-                    if (vp != null && !vp.isGrounded && !vp.IsPhysicsEnabled)
-                    {
-                        vp.SetPhysicsEnabled(true);
-                    }
-                }
-                catch { }
-            }
-
-            public static void Postfix(SyncVehiclePlane __instance, Photon.Pun.PhotonStream __0)
-            {
-                try
-                {
-                    if (__0 == null ||
-                        !__0.IsWriting ||
-                        !VisionConfig.EnableMod.Value ||
-                        !VisionConfig.EnableCoopAirborneSpawnFix.Value ||
-                        __instance == null)
-                    {
-                        return;
-                    }
-
-                    Vehicle veh = __instance.vehicle;
-                    if (veh == null || veh.Pointer == IntPtr.Zero)
-                        return;
-
-                    VehiclePlane vp = veh.TryCast<VehiclePlane>();
-                    if (vp == null || vp.isGrounded)
-                        return;
-
-                    float targetNextSync = Time.time + 0.10f;
-                    if (__instance.next_position_sync > targetNextSync)
-                    {
-                        __instance.next_position_sync = targetNextSync;
-                    }
-                }
-                catch { }
-            }
-        }
-
-        [HarmonyPatch(typeof(SyncVehiclePlane), nameof(SyncVehiclePlane.UpdatePosAndRot))]
-        public static class SyncVehiclePlane_UpdatePosAndRot_Patch
-        {
-            public static bool Prefix(SyncVehiclePlane __instance)
-            {
-                try
-                {
-                    if (!VisionConfig.EnableMod.Value ||
-                        !VisionConfig.EnableCoopAirborneSpawnFix.Value ||
-                        __instance == null)
-                    {
-                        return true;
-                    }
-
-                    Vehicle veh = __instance.vehicle;
-                    if (veh == null || veh.Pointer == IntPtr.Zero)
-                        return true;
-
-                    VehiclePlane vp = veh.TryCast<VehiclePlane>();
-                    if (vp == null)
-                        return true;
-
-                    // Prevent stale SyncVehiclePlane interpolation targets from rubber-banding the local pilot's aircraft
-                    if (vp.OwnDriverOrVehicle() && vp.PlayerIsDriving())
-                        return false;
-
-                    if (!vp.OwnDriverOrVehicle())
-                    {
-                        float now = Time.time;
-                        IntPtr ptr = vp.Pointer;
-                        if (!_nextRemotePlaneGroundCheckTime.TryGetValue(ptr, out float nextGrounded) || now >= nextGrounded)
-                        {
-                            _nextRemotePlaneGroundCheckTime[ptr] = now + 0.25f;
-                            vp.RefreshGrounded();
-                        }
-                    }
-                }
-                catch { }
-                return true;
+                rb.velocity = vp.transform.forward * cruiseMs;
             }
         }
 
@@ -1445,135 +1088,6 @@ namespace EasyRed2HumanAI
                     GetVehicleCrewFaction(__instance);
                     RegisterPlaneCrewFromSeats(__instance);
                     if (VisionConfig.EnableCoopAirborneSpawnFix.Value)
-                    {
-                        TryHotStartAirbornePlane(__instance, true);
-                    }
-                }
-                catch { }
-            }
-        }
-
-        [HarmonyPatch(typeof(VehiclePlane), nameof(VehiclePlane.FixedUpdate))]
-        public static class VehiclePlane_FixedUpdate_Patch
-        {
-            public static void Prefix(VehiclePlane __instance)
-            {
-                try
-                {
-                    if (__instance == null ||
-                        __instance.Pointer == IntPtr.Zero ||
-                        !VisionConfig.EnableMod.Value ||
-                        !VisionConfig.EnableCoopAirborneSpawnFix.Value)
-                    {
-                        return;
-                    }
-
-                    IntPtr ptr = __instance.Pointer;
-                    float now = Time.time;
-
-                    if (!__instance.OwnDriverOrVehicle())
-                    {
-                        if (!_nextRemotePlaneGroundCheckTime.TryGetValue(ptr, out float nextGrounded) || now >= nextGrounded)
-                        {
-                            _nextRemotePlaneGroundCheckTime[ptr] = now + 0.25f;
-                            __instance.RefreshGrounded();
-                        }
-
-                        if (!_remotePlaneSpawnSeenTime.TryGetValue(ptr, out float firstSeen))
-                        {
-                            firstSeen = now;
-                            _remotePlaneSpawnSeenTime[ptr] = firstSeen;
-                        }
-
-                        Rigidbody rb = __instance.rb;
-                        if (rb != null)
-                        {
-                            bool activeAirborneRemote = !__instance.IsDisabled() && !__instance.isGrounded && __instance.HasDriverAlive;
-                            if (activeAirborneRemote)
-                            {
-                                // Disable local PhysX gravity on non-owned airborne planes so they don't plummet between
-                                // network packets ("falling in columns") while SyncVehiclePlane.UpdatePosAndRot drives rb.velocity!
-                                if (rb.useGravity)
-                                    rb.useGravity = false;
-
-                                SyncVehicle syncher = __instance.vehicleSyncher;
-                                bool hasSyncTarget = syncher != null && syncher.syncDestPos.HasValue;
-                                if (!rb.isKinematic)
-                                {
-                                    if (hasSyncTarget)
-                                    {
-                                        // NOTE: Do NOT zero rb.velocity here—SyncVehiclePlane.UpdatePosAndRot (0x180735930)
-                                        // moves airborne remote planes exclusively via VehiclePlane.SetSpeed (rb.velocity)!
-                                        if (rb.angularVelocity.sqrMagnitude > 0.001f)
-                                            rb.angularVelocity = Vector3.zero;
-                                    }
-                                    else if (now - firstSeen <= 4.5f && __instance.transform != null)
-                                    {
-                                        float cruiseMs = GetPlaneCruiseVelocityMs(__instance);
-                                        if (rb.velocity.sqrMagnitude < 14.0f * 14.0f)
-                                            rb.velocity = __instance.transform.forward * cruiseMs;
-                                    }
-                                }
-                            }
-                            else if (!rb.useGravity)
-                            {
-                                rb.useGravity = true;
-                            }
-                        }
-                        return;
-                    }
-
-                    if (__instance.rb != null && !__instance.rb.useGravity)
-                    {
-                        __instance.rb.useGravity = true;
-                    }
-
-                    if (__instance.PlayerIsInside() || !_hotStartedPlayerPlanes.Contains(ptr))
-                    {
-                        TryHotStartAirbornePlane(__instance, false);
-                    }
-                }
-                catch { }
-            }
-
-            public static void Postfix(VehiclePlane __instance)
-            {
-                try
-                {
-                    if (__instance == null ||
-                        __instance.Pointer == IntPtr.Zero ||
-                        !VisionConfig.EnableMod.Value ||
-                        !VisionConfig.EnableCoopAirborneSpawnFix.Value)
-                    {
-                        return;
-                    }
-
-                    // Fix vanilla terrainless-ocean bug in VehiclePlane.FixedUpdate (0x180851228):
-                    // GetDistanceFromTerrain returns 0 beyond Terrain bounds over ocean, clearing farFromGround
-                    // once per second (nextSlowCheck) and popping landing gear open in mid-air!
-                    if (!__instance.farFromGround &&
-                        !__instance.isGrounded &&
-                        !__instance.IsDisabled() &&
-                        __instance.HasDriverAlive &&
-                        __instance.rb != null &&
-                        __instance.rb.velocity.sqrMagnitude > 22.0f * 22.0f &&
-                        __instance.transform != null &&
-                        !AiCore.RaycastEnvironment(__instance.transform.position + Vector3.up * 1.8f, Vector3.down, 18.0f, __instance.transform.root, out _))
-                    {
-                        __instance.farFromGround = true;
-                        if (__instance.gear_opened)
-                            __instance.SetGearClosed();
-                    }
-
-                    if (!__instance.OwnDriverOrVehicle())
-                        return;
-
-                    if (__instance.rb != null && !__instance.rb.useGravity)
-                    {
-                        __instance.rb.useGravity = true;
-                    }
-
-                    if (__instance.PlayerIsInside() || _planeHotStartWindowUntil.ContainsKey(__instance.Pointer))
                     {
                         TryHotStartAirbornePlane(__instance, true);
                     }

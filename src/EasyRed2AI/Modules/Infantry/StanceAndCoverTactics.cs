@@ -1357,6 +1357,23 @@ namespace EasyRed2HumanAI
                     Soldier soldier = h.Ref;
                     __state.PrevPointGunEndTime = soldier.pointGunEndTime;
 
+                    IntPtr seqVisPtr = AiCore.GetRawVisibleTargetPtr(__instance);
+                    if (seqVisPtr != IntPtr.Zero &&
+                        AiCore.TryGetSoldierHandles(seqVisPtr, out AiCore.SoldierFastHandles seqVisSolH) &&
+                        AiCore.IsSoldierNonCombatantOrSurrendered(seqVisSolH.Ref, seqVisSolH))
+                    {
+                        __instance.visibleTarget = null;
+                        __instance.allowFireAtEnemy = false;
+                        __instance.targetInWeaponRange = false;
+                        __instance.aimingEnemy = false;
+                        __instance.shotFiresEnd = 0f;
+                        soldier.CurrentVisibleTarget = null;
+                        soldier.SetGunTriggerPressed(false);
+                        h.Combat.RotateFireFrame.Frame = -1;
+                        if (h.Vision.LastKnownTarget.Target != null && h.Vision.LastKnownTarget.Target.Pointer == seqVisPtr)
+                            h.Vision.LastKnownTarget = default;
+                    }
+
                     // Prioritize multiplayer ping & frame-time stability over bot brain cycles:
                     // When hosting a room with elevated frame time, let bots coast/hang for a cycle.
                     if (AiCore.ShouldSkipBotCycleForNetworkPing())
@@ -1800,12 +1817,6 @@ namespace EasyRed2HumanAI
                     bool isHighBipodStanding = Time.time < h.Stance.BipodStandUntil;
                     float dist = __instance.distFromTarget;
 
-                    if (VisionConfig.EnablePointBlankMelee.Value &&
-                        ((__instance.HasEnemyAndCanFireAtHim && dist <= 45f) || soldier.IsCharging() || soldier.isAlerted))
-                    {
-                        TryEnsureBayonetMounted(soldier);
-                    }
-
                     VehicleRepairTask repairTask = null;
                     bool isRepairingVehicle = false;
                     if (VisionConfig.EnableSmartTankCrewRepair.Value && soldier.targetDestination != null)
@@ -1821,7 +1832,20 @@ namespace EasyRed2HumanAI
                         }
                     }
 
-                    bool isHealingTeammate = IsActivelyHealingTeammate(soldier, out _);
+                    bool isHealingTeammate = IsActivelyHealingTeammate(soldier, out MedicHealingDestination activeHealDest);
+                    if (isHealingTeammate && activeHealDest != null)
+                    {
+                        DriveMedicHealingApproach(__instance, soldier, h, activeHealDest, Time.time);
+                    }
+
+                    if (!isHealingTeammate &&
+                        !isRepairingVehicle &&
+                        VisionConfig.EnablePointBlankMelee.Value &&
+                        ((__instance.HasEnemyAndCanFireAtHim && dist <= 45f) || soldier.IsCharging() || soldier.isAlerted))
+                    {
+                        TryEnsureBayonetMounted(soldier);
+                    }
+
                     bool isStaffingEmplacement = IsActivelyHeadingToEmplacement(soldier, Time.time);
                     bool goapHandlesCqb = VisionConfig.EnableTacticalGoapPlanner.Value &&
                                           !isRepairingVehicle &&
@@ -1990,7 +2014,7 @@ namespace EasyRed2HumanAI
                     {
                         __instance.actualPose = soldier.m_pose;
                     }
-                    else if (isRepairingVehicle)
+                    else if (isRepairingVehicle || (isHealingTeammate && !isEffectivelyMoving))
                     {
                         SetBotPose(__instance, soldier, SoldierPose.Crouch);
                     }
@@ -2519,6 +2543,26 @@ namespace EasyRed2HumanAI
                     IntPtr ptr = h.Ptr;
                     int curFrame = Time.frameCount;
                     float now = Time.time;
+
+                    // Immediately abort firing if the current target is a surrendered prisoner, incapacitated casualty,
+                    // or enemy undergoing syringe capture (prevents 1.0s-2.0s stale visibleTarget friendly executions!)
+                    IntPtr curVisPtr = AiCore.GetRawVisibleTargetPtr(__instance);
+                    if (curVisPtr != IntPtr.Zero &&
+                        AiCore.TryGetSoldierHandles(curVisPtr, out AiCore.SoldierFastHandles curVisSolH) &&
+                        AiCore.IsSoldierNonCombatantOrSurrendered(curVisSolH.Ref, curVisSolH))
+                    {
+                        __instance.visibleTarget = null;
+                        __instance.allowFireAtEnemy = false;
+                        __instance.targetInWeaponRange = false;
+                        __instance.aimingEnemy = false;
+                        __instance.shotFiresEnd = 0f;
+                        soldier.CurrentVisibleTarget = null;
+                        soldier.SetGunTriggerPressed(false);
+                        h.Combat.RotateFireFrame.Frame = -1;
+                        if (h.Vision.LastKnownTarget.Target != null && h.Vision.LastKnownTarget.Target.Pointer == curVisPtr)
+                            h.Vision.LastKnownTarget = default;
+                        return false;
+                    }
 
                     // Physics catch-up spiral guard (FixedSteps: 2..5 in the same render frame):
                     // Reuse frame N's fire-permission & aim-point decision without re-running raycasts,

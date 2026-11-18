@@ -1499,7 +1499,9 @@ namespace EasyRed2HumanAI
 
             Squad sq = localPlayer.joinedSquad;
             if (sq == null || sq.Pointer != _pendingPlayerHqOrder.SquadPtr ||
-                sq.Leader == null || sq.Leader.Pointer != localPlayer.Pointer)
+                sq.Leader == null || sq.Leader.Pointer != localPlayer.Pointer ||
+                !IsSquadConnectedToRadioNet(sq) ||
+                (_pendingPlayerHqOrder.Kind == PendingHqOrderKind.TacticalFlank && !HasLiveRadioOrRelayLink(sq)))
             {
                 _pendingPlayerHqOrder = default;
                 return false;
@@ -1563,7 +1565,9 @@ namespace EasyRed2HumanAI
         {
             if (playerSq == null || playerSq.Pointer == IntPtr.Zero ||
                 !AiCore.IsLocalPlayerInSquad(playerSq, out bool isLocalLeader) ||
-                !isLocalLeader)
+                !isLocalLeader ||
+                !IsSquadConnectedToRadioNet(playerSq) ||
+                (kind == PendingHqOrderKind.TacticalFlank && !HasLiveRadioOrRelayLink(playerSq)))
             {
                 return;
             }
@@ -1764,6 +1768,8 @@ namespace EasyRed2HumanAI
             if (hasActiveObjective)
             {
                 ConsumeInitialHqSpawnBriefingIfNoRadio(playerSq);
+                if (!HasLiveRadioOrRelayLink(playerSq))
+                    return;
 
                 // 1. Check for Urgent Undefended Defense: nearby held objective under active threat with no defenders.
                 if (heldObjectives != null && heldObjectives.Count > 0)
@@ -3601,6 +3607,7 @@ namespace EasyRed2HumanAI
                             txt.gameObject.SetActive(hasText);
                         if (hasText && txt.text != __0)
                             txt.text = __0;
+                        txt.color = Color.white;
                     }
                 }
                 catch { }
@@ -3668,24 +3675,49 @@ namespace EasyRed2HumanAI
                     // so GetNextUnitMarker claims the first unused slot while higher slots remain disabled!
                     __instance.usedMarker_index = _lastUsedUnitMarkerIndex;
 
-                    string badge = string.IsNullOrEmpty(pending.MapBadgeText) ? "[HQ]" : pending.MapBadgeText;
+                    string badge = string.IsNullOrEmpty(pending.MapBadgeText) ? "HQ" : pending.MapBadgeText;
                     UnityEngine.UI.Image img = __instance.GetNextUnitMarker(badge, true);
+                    UnityEngine.UI.Text badgeTxt = _lastUnitMarkerTextComp;
+                    _lastUnitMarkerTextComp = null;
                     if (img == null || img.rectTransform == null)
                         return;
 
+                    Sprite orderSprite = null;
+                    if (pending.TargetTask != null)
+                    {
+                        try { orderSprite = pending.TargetTask.GetTaskIcon(); } catch { }
+                    }
+                    if (orderSprite == null && PlayerGUI.instance != null && PlayerGUI.instance.squadOrderPosIcon != null)
+                    {
+                        orderSprite = PlayerGUI.instance.squadOrderPosIcon.sprite;
+                    }
+                    if (orderSprite != null)
+                    {
+                        img.sprite = orderSprite;
+                    }
+
                     RectTransform rt = img.rectTransform;
                     rt.anchoredPosition = __instance.GetPositionInContainer(pending.WorldPos, true);
-                    img.color = new Color(1.0f, 0.82f, 0.18f, 0.96f);
+                    img.color = new Color(1.0f, 0.85f, 0.28f, 0.52f);
+                    if (badgeTxt != null)
+                    {
+                        badgeTxt.color = new Color(1.0f, 0.92f, 0.55f, 0.72f);
+                    }
                     rt.localEulerAngles = new Vector3(0f, 0f, -__instance.northShift);
 
-                    Vector3 baseScale = __instance.unis_marker != null
-                        ? __instance.unis_marker.transform.localScale
-                        : Vector3.one;
-                    if (baseScale.sqrMagnitude < 0.001f)
-                        baseScale = Vector3.one;
+                    // Match vanilla MiniMapGUI.Update (0x1804A6CBD / 0x1804A819D): actual map zoom divisor is
+                    // miniMap.localScale (1 + 30 * zoomValue^2, or rectZoom scale), NOT raw zoomValue (which is 0 when unzoomed!).
+                    float z = MiniMapGUI.zoomValue;
+                    float mapScale = 1.0f + 30.0f * z * z;
+                    if (__instance.miniMap != null)
+                    {
+                        Vector3 mScale = __instance.miniMap.localScale;
+                        float liveMapScale = Mathf.Max(mScale.x, mScale.y);
+                        if (liveMapScale > 0.1f)
+                            mapScale = liveMapScale;
+                    }
 
-                    float invZoom = 1.15f / Mathf.Max(0.25f, MiniMapGUI.zoomValue);
-                    rt.localScale = baseScale * invZoom;
+                    rt.localScale = Vector3.one * (0.78f / Mathf.Max(1.0f, mapScale));
                 }
                 catch { }
             }

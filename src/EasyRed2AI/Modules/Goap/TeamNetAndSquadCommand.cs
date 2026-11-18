@@ -10,19 +10,31 @@ namespace EasyRed2HumanAI
         internal static bool IsActivelyHealingTeammate(Soldier soldier, out MedicHealingDestination healDest)
         {
             healDest = null;
-            if (soldier == null || soldier.targetDestination == null || soldier.targetDestination.Pointer == IntPtr.Zero)
+            if (soldier == null || soldier.Pointer == IntPtr.Zero)
+                return false;
+
+            float now = Time.time;
+            AiCore.SoldierFastHandles medH = AiCore.GetOrCreateSoldierHandles(soldier);
+            if (medH != null &&
+                now < medH.Goap.ActiveSyringeHealUntil &&
+                (soldier.isInBodyAnimation || soldier.isInHandsAnimation))
+            {
+                return true;
+            }
+
+            if (soldier.targetDestination == null || soldier.targetDestination.Pointer == IntPtr.Zero)
                 return false;
 
             healDest = soldier.targetDestination.TryCast<MedicHealingDestination>();
             if (healDest == null)
                 return false;
 
-            AiCore.SoldierFastHandles medH = AiCore.GetOrCreateSoldierHandles(soldier);
             Soldier patient = healDest.soldierToHealUp;
             if (patient == null ||
                 patient.Pointer == IntPtr.Zero ||
                 patient.IsDead ||
                 patient.IsOnVehicle() ||
+                patient.IsCarried() ||
                 patient.HasSurrended() ||
                 healDest.coverReached ||
                 !(patient.IsInjured || patient.isBleeding || patient.GetBleedValue() > 0.01f))
@@ -31,29 +43,11 @@ namespace EasyRed2HumanAI
                 {
                     medH.Goap.MedicHealStartTime = 0f;
                     medH.Goap.MedicHealTargetPtr = IntPtr.Zero;
+                    medH.Goap.MedicCloseApproachSince = 0f;
                 }
                 soldier.CoverPosition(null);
                 healDest = null;
                 return false;
-            }
-
-            // Guard against unreachable patients (e.g. different building floor/roof or 12s pathing timeout)
-            float now = Time.time;
-            if (medH != null)
-            {
-                if (medH.Goap.MedicHealTargetPtr != patient.Pointer || medH.Goap.MedicHealStartTime <= 0f)
-                {
-                    medH.Goap.MedicHealTargetPtr = patient.Pointer;
-                    medH.Goap.MedicHealStartTime = now;
-                }
-                else if (now - medH.Goap.MedicHealStartTime > 12.0f)
-                {
-                    medH.Goap.MedicHealStartTime = 0f;
-                    medH.Goap.MedicHealTargetPtr = IntPtr.Zero;
-                    soldier.CoverPosition(null);
-                    healDest = null;
-                    return false;
-                }
             }
 
             if (soldier.transform != null && patient.transform != null)
@@ -62,20 +56,160 @@ namespace EasyRed2HumanAI
                 Vector3 patPos = patient.transform.position;
                 float vertDelta = Mathf.Abs(patPos.y - myPos.y);
                 Vector2 flatDelta = new Vector2(patPos.x - myPos.x, patPos.z - myPos.z);
-                if (vertDelta > 4.5f && flatDelta.sqrMagnitude < 12f * 12f)
+                float flatDistSq = flatDelta.sqrMagnitude;
+                if (vertDelta > 4.5f && flatDistSq < 12f * 12f)
                 {
                     if (medH != null)
                     {
                         medH.Goap.MedicHealStartTime = 0f;
                         medH.Goap.MedicHealTargetPtr = IntPtr.Zero;
+                        medH.Goap.MedicCloseApproachSince = 0f;
+                        medH.Goap.MedicUnreachablePatientPtr = patient.Pointer;
+                        medH.Goap.MedicUnreachableUntil = now + 12.0f;
                     }
                     soldier.CoverPosition(null);
                     healDest = null;
                     return false;
                 }
+
+                // Guard against unreachable patients while allowing medics within 6m to finish their final step
+                if (medH != null)
+                {
+                    if (medH.Goap.MedicHealTargetPtr != patient.Pointer || medH.Goap.MedicHealStartTime <= 0f)
+                    {
+                        medH.Goap.MedicHealTargetPtr = patient.Pointer;
+                        medH.Goap.MedicHealStartTime = now;
+                        medH.Goap.MedicCloseApproachSince = 0f;
+                    }
+                    else if (now - medH.Goap.MedicHealStartTime > 18.0f && flatDistSq > 6.0f * 6.0f)
+                    {
+                        medH.Goap.MedicHealStartTime = 0f;
+                        medH.Goap.MedicHealTargetPtr = IntPtr.Zero;
+                        medH.Goap.MedicCloseApproachSince = 0f;
+                        medH.Goap.MedicUnreachablePatientPtr = patient.Pointer;
+                        medH.Goap.MedicUnreachableUntil = now + 12.0f;
+                        soldier.CoverPosition(null);
+                        healDest = null;
+                        return false;
+                    }
+                }
             }
 
             return true;
+        }
+
+        internal static void DriveMedicHealingApproach(
+            SoldierAI ai,
+            Soldier medic,
+            AiCore.SoldierFastHandles medH,
+            MedicHealingDestination healDest,
+            float now)
+        {
+            if (ai == null ||
+                medic == null ||
+                healDest == null ||
+                healDest.coverReached ||
+                medic.isInBodyAnimation ||
+                (medH != null && now < medH.Goap.ActiveSyringeHealUntil))
+            {
+                return;
+            }
+
+            Soldier patient = healDest.soldierToHealUp;
+            if (patient == null ||
+                patient.Pointer == IntPtr.Zero ||
+                patient.IsDead ||
+                !patient.IsInjured ||
+                patient.IsCarried() ||
+                patient.IsOnVehicle() ||
+                patient.HasSurrended())
+            {
+                return;
+            }
+
+            Transform medTr = medH != null && medH.Tr != null ? medH.Tr : medic.transform;
+            Transform patTr = patient.transform;
+            if (medTr == null || patTr == null)
+                return;
+
+            if (medH != null && medH.MoveOverride.Kind != AiCore.BotMoveOverrideKind.None)
+            {
+                medH.MoveOverride = default;
+            }
+
+            Vector3 medicPos = medTr.position;
+            Vector3 patPos = patTr.position;
+
+            Vector3 moveDiff = ai.MoveDestination - patPos;
+            if (moveDiff.sqrMagnitude > 0.25f * 0.25f)
+            {
+                ai.MoveDestination = patPos;
+            }
+
+            float dx = patPos.x - medicPos.x;
+            float dy = patPos.y - medicPos.y;
+            float dz = patPos.z - medicPos.z;
+            float flatDistSq = dx * dx + dz * dz;
+            float dist3DSq = flatDistSq + dy * dy;
+            float vertDelta = Mathf.Abs(dy);
+
+            if (flatDistSq <= 3.6f * 3.6f && vertDelta <= 2.4f)
+            {
+                if (medH != null && medH.Goap.MedicCloseApproachSince <= 0f)
+                {
+                    medH.Goap.MedicCloseApproachSince = now;
+                }
+
+                // Clear any concurrent weapon reload or bayonet/hands animation when stepping up to the casualty
+                // so Soldier.UseSyrynge -> CanPlaySpecialAnim() (0x180742920) never aborts the syringe coroutine!
+                if (dist3DSq <= 2.6f * 2.6f)
+                {
+                    if (medic.IsReloading)
+                        medic.IsReloading = false;
+                    if (medic.stopHandsAnim_end > now)
+                        medic.stopHandsAnim_end = now - 0.01f;
+                    if (medic.stopBodyAnim_end > now)
+                        medic.stopBodyAnim_end = now - 0.01f;
+                }
+
+                float closeElapsed = medH != null && medH.Goap.MedicCloseApproachSince > 0f
+                    ? (now - medH.Goap.MedicCloseApproachSince)
+                    : 0f;
+
+                if (dist3DSq <= 1.80f * 1.80f ||
+                    (flatDistSq <= 2.45f * 2.45f && closeElapsed >= 0.70f))
+                {
+                    if (medic.IsReloading)
+                        medic.IsReloading = false;
+                    if (medic.stopHandsAnim_end > now)
+                        medic.stopHandsAnim_end = now - 0.01f;
+                    if (medic.stopBodyAnim_end > now)
+                        medic.stopBodyAnim_end = now - 0.01f;
+
+                    ai.moveDirectlyToward_end = 0f;
+                    ai.Stop(true);
+                    healDest.OnCoverReached(medic);
+                    return;
+                }
+
+                // Bridge the 1.5m-3.6m CPathFinding final-node grid gap so medics never kneel frozen
+                // just outside MedicHealingDestination.IsReached's 1.5m sphere ("stuck when diagnosing")!
+                if (!ai.IsMoving() || closeElapsed >= 0.35f)
+                {
+                    ai.MoveDirectlyToward(patPos, 0.65f);
+                }
+            }
+            else
+            {
+                if (medH != null)
+                    medH.Goap.MedicCloseApproachSince = 0f;
+
+                if (!ai.IsMoving() && !ai.HasPathRequest && AiCore.CanBotMoveAutonomously(medic))
+                {
+                    ai.moveDirectlyToward_end = 0f;
+                    ai.UpdatePath();
+                }
+            }
         }
 
         // =====================================================================
@@ -333,7 +467,7 @@ namespace EasyRed2HumanAI
                 {
                     ReleaseAiSquadExecutionStateIfActive(sq);
                     SquadBlackboard playerBoard = GetOrUpdateSquadBlackboard(sq, leader);
-                    if (playerBoard.IsConnectedToRadioNet && playerBoard.HasActiveThreat)
+                    if (HasLiveRadioOrRelayLink(sq) && playerBoard.HasActiveThreat)
                     {
                         activeVehicleAnvils.Add(sq);
                     }
@@ -518,7 +652,7 @@ namespace EasyRed2HumanAI
                     if (bestHammerSq != null)
                     {
                         IssueHammerFlankDirective(bestHammerSq, vehPos, threatPos, axisDir, perpRight, now, $"Tank/Vehicle Anvil ('{vehSq.squadName}')");
-                        if (vehSq.IsPlayerInSquad())
+                        if (vehSq.IsPlayerInSquad() && HasLiveRadioOrRelayLink(vehSq))
                         {
                             string infLabel = AiCore.FormatInfantrySupportCallsign(bestHammerSq, vehPos);
                             AiCore.TryShowLocalPlayerRadioHint(
@@ -589,7 +723,7 @@ namespace EasyRed2HumanAI
 
                         // Post HAMMER advisory suggestion on Squad B (evaluated by Squad B's Leader)
                         IssueHammerFlankDirective(bestHammerSq, anvilPos, threatPos, axisDir, perpRight, now, $"Infantry Anvil ('{anvilSq.squadName}')");
-                        if (anvilSq.IsPlayerInSquad())
+                        if (anvilSq.IsPlayerInSquad() && HasLiveRadioOrRelayLink(anvilSq))
                         {
                             string infLabel = AiCore.FormatInfantrySupportCallsign(bestHammerSq, anvilPos);
                             AiCore.TryShowLocalPlayerRadioHint(
@@ -780,7 +914,7 @@ namespace EasyRed2HumanAI
             if (playerSq.Leader == null || playerSq.Leader.Pointer != localPlayer.Pointer)
                 return;
 
-            if (!IsSquadConnectedToRadioNet(playerSq) ||
+            if (!HasLiveRadioOrRelayLink(playerSq) ||
                 IsSquadActivelyRetreating(playerSq.Pointer, now) ||
                 IsFlankBalkedByPlayer(threatPos, now))
             {
@@ -2083,6 +2217,7 @@ namespace EasyRed2HumanAI
 
             if (radiomanJustDied)
             {
+                _initialHqSpawnBriefingConsumed.Add(sqPtr);
                 board.PreviouslyHadAliveRadioman = false;
                 board.LastRadiomanLostTime = now;
                 board.NetDirective = SquadNetDirective.Disconnected_Autonomous;
@@ -2095,6 +2230,7 @@ namespace EasyRed2HumanAI
             }
             else if (hasAliveRadNow)
             {
+                _initialHqSpawnBriefingConsumed.Add(sqPtr);
                 board.PreviouslyHadAliveRadioman = true;
                 board.LastRadiomanLostTime = 0f;
             }

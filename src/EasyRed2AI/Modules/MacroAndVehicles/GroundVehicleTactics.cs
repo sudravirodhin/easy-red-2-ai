@@ -1163,10 +1163,12 @@ namespace EasyRed2HumanAI
             if (aiVeh == null || veh == null || veh.Pointer == IntPtr.Zero || veh.transform == null)
                 return;
 
+            // 1. Route damaged or out-of-ammo vehicles to a nearby safe RepairStation
             if (TryRouteVehicleToRepairStation(aiVeh, veh, now))
                 return;
 
-            if (!AiCore.IsLocallyOwnedVehicle(veh) ||
+            if (!VisionConfig.EnableCombinedArmsPrioritySupport.Value ||
+                !AiCore.IsLocallyOwnedVehicle(veh) ||
                 !veh.CanFight() ||
                 veh.IsAirVehicle() ||
                 veh.PlayerIsInside() ||
@@ -1179,8 +1181,10 @@ namespace EasyRed2HumanAI
             if (mv == null)
                 return;
 
-            bool isTank = veh.TryCast<VehicleTank>() != null;
             Turret mainTurret = veh.GetMainTurret(false);
+            if (mainTurret == null)
+                return;
+
             string myFaction = GetVehicleCrewFaction(veh, mainTurret);
             if (string.IsNullOrEmpty(myFaction))
                 return;
@@ -1190,154 +1194,36 @@ namespace EasyRed2HumanAI
             IntPtr vehPtr = veh.Pointer;
             Vector3 vehPos = veh.transform.position;
             Vector3 squadDest = aiVeh.GetCurrentSquadDestination();
-
-            // Self-Preservation Displacement: if a stationary combat vehicle is bracketed by explosions (artillery/mortars/satchels)
-            // or taking blind hull hits without a visible target, shift its destination 26m-32m out of the killzone!
-            if (CheckVehicleDamageAndExplosionThreat(veh, vehPos, myFaction, now, out Vector3 hazardPos, out bool recentHullHit, out bool nearExplosion))
-            {
-                bool hasVisibleTarget = mainTurret != null &&
-                                        mainTurret.GetTurretAI() != null &&
-                                        mainTurret.GetTurretAI().CurrentVisibleTarget != null;
-                if ((nearExplosion || (recentHullHit && !hasVisibleTarget)) &&
-                    (vehPos - aiVeh.setVehicleDestination).sqrMagnitude <= 16.0f * 16.0f)
-                {
-                    Vector3 awayDir = vehPos - hazardPos;
-                    awayDir.y = 0f;
-                    awayDir = awayDir.sqrMagnitude > 0.01f ? awayDir.normalized : -veh.transform.forward;
-                    Vector3 perpDir = new Vector3(-awayDir.z, 0f, awayDir.x);
-                    if (TryValidateVehicleGroundPoint(vehPos + awayDir * 28.0f + perpDir * 10.0f, vehPos.y, squadDest, 65.0f, awayDir, veh.transform.root, out Vector3 evadeDest) ||
-                        TryValidateVehicleGroundPoint(vehPos - awayDir * 26.0f - perpDir * 10.0f, vehPos.y, squadDest, 65.0f, -awayDir, veh.transform.root, out evadeDest))
-                    {
-                        aiVeh.setVehicleDestination = evadeDest;
-                        _claimedVehicleDestinations[vehPtr] = evadeDest;
-                        return;
-                    }
-                }
-            }
-
-            // Count friendly ground vehicles operating on the same objective sector (<= 115m) and compute
-            // a deterministic zero-GC echelon rank by VehPtr order so friendly tanks never stack hull-to-hull
-            // as an easy double-kill for CAS bombing runs!
-            int totalFriendlyNearObj = 1;
-            int myRankAtObj = 0;
-            bool physicallyHuggingPeer = false;
-            long myId = vehPtr.ToInt64();
-
-            for (int i = 0; i < _activeGroundVehicles.Count; i++)
-            {
-                ActiveGroundVehicleInfo other = _activeGroundVehicles[i];
-                if (other.VehPtr == vehPtr || string.IsNullOrEmpty(other.Faction))
-                    continue;
-
-                if (!AiCore.AreSameSideFactions(myFaction, other.Faction))
-                    continue;
-
-                if ((other.Position - vehPos).sqrMagnitude <= 15.0f * 15.0f)
-                {
-                    physicallyHuggingPeer = true;
-                }
-
-                if ((other.TargetDest - squadDest).sqrMagnitude <= 115.0f * 115.0f ||
-                    (other.Position - squadDest).sqrMagnitude <= 115.0f * 115.0f)
-                {
-                    totalFriendlyNearObj++;
-                    if (other.VehPtr.ToInt64() < myId)
-                        myRankAtObj++;
-                }
-            }
-
-            // If the main turret already has a visible target in weapon range & LOS, let Standoff / TurretAI handle it
-            // UNLESS this vehicle is a stacked wingman (myRankAtObj > 0) physically hugging a friendly tank (< 15m)
-            // against a distant target (> 38m), in which case let it compute its anti-bombing flank offset!
-            TurretAI turretAi = mainTurret != null ? mainTurret.GetTurretAI() : null;
-            if (turretAi != null &&
-                turretAi.CurrentVisibleTarget != null &&
-                turretAi.targetInWeaponRange &&
-                (turretAi.CanSee(turretAi.CurrentVisibleTarget) ||
-                 CanTankShellIndoorTargetFacade(mainTurret, veh, turretAi.CurrentVisibleTarget)))
-            {
-                bool shouldPeelOffFromStackedTank = physicallyHuggingPeer &&
-                                                    myRankAtObj > 0 &&
-                                                    (turretAi.CurrentVisibleTarget.GetCenterOfUnit() - vehPos).sqrMagnitude > 38.0f * 38.0f;
-                if (!shouldPeelOffFromStackedTank)
-                    return;
-            }
-
-            // Widen cramped vanilla moveOrderRadius (often 15m-20m) when >= 2 friendly combat vehicles share
-            // the same objective so AIVehicle.DestinationHasChanged permits 32m-42m anti-bombing dispersion!
             Squad crewSq = aiVeh.squadInside;
-            if (totalFriendlyNearObj >= 2 &&
-                crewSq != null &&
-                !crewSq.IsPlayerInSquad() &&
-                crewSq.order != Order.follow)
-            {
-                float desiredMinRadius = isTank ? 46.0f : 34.0f;
-                if (crewSq.moveOrderRadius < desiredMinRadius)
-                    crewSq.moveOrderRadius = desiredMinRadius;
-            }
 
-            float areaSize = aiVeh.GetCurrentSquadDestinationAreaSize();
-            if (areaSize < 12.0f)
-                return;
-
+            // 2. Answer explicit friendly RadioRequest.tankSupport calls when within 320m;
+            //    otherwise let vanilla AIVehicle road/node pathfinding pilot the vehicle naturally!
             Vector3 bestFocusPos = Vector3.zero;
             float bestFocusScore = -999f;
-            bool hasFocus = false;
-            bool focusIsTankSupport = false;
             Squad focusSupportSquad = null;
 
-            if (VisionConfig.EnableCombinedArmsPrioritySupport.Value && mainTurret != null)
+            for (int r = 0; r < _activeRadioRequests.Count; r++)
             {
-                // 1. Check active friendly Tank Support / Artillery radio requests near the objective or vehicle
-                for (int r = 0; r < _activeRadioRequests.Count; r++)
+                ActiveRadioSupportInfo req = _activeRadioRequests[r];
+                if (req.RequestType != RadioRequest.tankSupport || !AiCore.AreSameSideFactions(req.Faction, myFaction))
+                    continue;
+
+                float distToDest = Vector3.Distance(squadDest, req.Position);
+                if (distToDest > 320.0f)
+                    continue;
+
+                float score = 95.0f - (distToDest * 0.15f);
+                if (score > bestFocusScore)
                 {
-                    ActiveRadioSupportInfo req = _activeRadioRequests[r];
-                    if (!AiCore.AreSameSideFactions(req.Faction, myFaction) || req.RequestType == RadioRequest.artillerySmoke)
-                        continue;
-
-                    float distToDest = Vector3.Distance(squadDest, req.Position);
-                    if (distToDest > 320.0f)
-                        continue;
-
-                    float score = (req.RequestType == RadioRequest.tankSupport ? 95.0f : 70.0f) - (distToDest * 0.15f);
-                    if (score > bestFocusScore)
-                    {
-                        bestFocusScore = score;
-                        bestFocusPos = req.Position;
-                        hasFocus = true;
-                        focusIsTankSupport = req.RequestType == RadioRequest.tankSupport;
-                        focusSupportSquad = focusIsTankSupport ? req.SourceSquad : null;
-                    }
-                }
-
-                // 2. Check known/marked enemy squads contesting or near the vehicle's objective sector
-                int clusterCount = _knownEnemyClusters.Count;
-                for (int i = 0; i < clusterCount; i++)
-                {
-                    KnownEnemyCluster cluster = _knownEnemyClusters[i];
-                    if (AiCore.AreSameSideFactions(cluster.Faction, myFaction))
-                        continue;
-
-                    float distToDest = Vector3.Distance(squadDest, cluster.Position);
-                    if (distToDest > 320.0f)
-                        continue;
-
-                    float score = cluster.BasePriority - (distToDest * 0.15f);
-                    if (score > bestFocusScore)
-                    {
-                        bestFocusScore = score;
-                        bestFocusPos = cluster.Position;
-                        hasFocus = true;
-                        focusIsTankSupport = false;
-                        focusSupportSquad = null;
-                    }
+                    bestFocusScore = score;
+                    bestFocusPos = req.Position;
+                    focusSupportSquad = req.SourceSquad;
                 }
             }
 
-            float minPeerSpacing = isTank ? 28.0f : 19.0f;
-            float minPeerSpacingSq = minPeerSpacing * minPeerSpacing;
-
-            if (!hasFocus)
+            float maxAllowedOffset = Mathf.Max(15.0f, aiVeh.GetCurrentSquadDestinationAreaSize() * 0.84f);
+            bool answeringFarTankSupport = focusSupportSquad != null && Vector3.Distance(squadDest, bestFocusPos) > maxAllowedOffset;
+            if (!answeringFarTankSupport)
             {
                 if (_vehiclesAnsweringTankSupport.Remove(vehPtr))
                 {
@@ -1348,201 +1234,36 @@ namespace EasyRed2HumanAI
                     }
                     aiVeh.rerollDestination = true;
                 }
-
-                if (totalFriendlyNearObj < 2)
-                    return;
-
-                // Even before enemy clusters are spotted, check if our current destination crowds a friendly peer!
-                Vector3 curDest = aiVeh.setVehicleDestination;
-                bool isCrowdingPeer = physicallyHuggingPeer;
-                if (!isCrowdingPeer)
-                {
-                    for (int i = 0; i < _activeGroundVehicles.Count; i++)
-                    {
-                        ActiveGroundVehicleInfo other = _activeGroundVehicles[i];
-                        if (other.VehPtr == vehPtr || string.IsNullOrEmpty(other.Faction))
-                            continue;
-                        if (!AiCore.AreSameSideFactions(myFaction, other.Faction))
-                            continue;
-
-                        if ((other.TargetDest - curDest).sqrMagnitude < minPeerSpacingSq ||
-                            (other.Position - curDest).sqrMagnitude < minPeerSpacingSq)
-                        {
-                            isCrowdingPeer = true;
-                            break;
-                        }
-                    }
-                }
-
-                if (!isCrowdingPeer)
-                    return;
+                return;
             }
 
-            float maxAllowedOffset = areaSize * 0.84f;
-            bool answeringFarTankSupport = hasFocus && focusIsTankSupport && Vector3.Distance(squadDest, bestFocusPos) > maxAllowedOffset;
-            if (!answeringFarTankSupport && _vehiclesAnsweringTankSupport.Remove(vehPtr))
+            Vector3 fromFocusToTank = vehPos - bestFocusPos;
+            fromFocusToTank.y = 0f;
+            Vector3 standoffDir = fromFocusToTank.sqrMagnitude > 0.25f ? fromFocusToTank.normalized : -veh.transform.forward;
+            Vector3 desiredDest = bestFocusPos + standoffDir * 38.0f;
+            if (Physics.Raycast(
+                    new Vector3(desiredDest.x, bestFocusPos.y + 22.0f, desiredDest.z),
+                    Vector3.down,
+                    out RaycastHit sHit,
+                    50.0f,
+                    AiCore.GetSolidEnvironmentMask(),
+                    QueryTriggerInteraction.Ignore) &&
+                sHit.normal.y >= 0.70f)
             {
-                if (crewSq != null && !crewSq.IsPlayerInSquad() && crewSq.Leader != null &&
-                    (!Photon.Pun.PhotonNetwork.InRoom || AiCore.TryConsumeBotRpcBudget(0.45f)))
-                {
-                    crewSq.Leader_OrderAttackCurrentTask(crewSq.Leader);
-                }
-                aiVeh.rerollDestination = true;
-            }
-
-            Vector3 fwdAxis;
-            Vector3 baseDest;
-
-            if (hasFocus)
-            {
-                Vector3 toFocusFromDest = bestFocusPos - squadDest;
-                toFocusFromDest.y = 0f;
-                float focusDistFromDest = toFocusFromDest.magnitude;
-                fwdAxis = focusDistFromDest > 0.25f ? (toFocusFromDest / focusDistFromDest) : veh.transform.forward;
-                fwdAxis.y = 0f;
-                fwdAxis = fwdAxis.sqrMagnitude > 0.001f ? fwdAxis.normalized : Vector3.forward;
-
-                if (answeringFarTankSupport)
-                {
-                    Vector3 fromFocusToTank = vehPos - bestFocusPos;
-                    fromFocusToTank.y = 0f;
-                    Vector3 standoffDir = fromFocusToTank.sqrMagnitude > 0.25f ? fromFocusToTank.normalized : -fwdAxis;
-                    baseDest = bestFocusPos + standoffDir * 38.0f;
-                    if (Physics.Raycast(
-                            new Vector3(baseDest.x, bestFocusPos.y + 22.0f, baseDest.z),
-                            Vector3.down,
-                            out RaycastHit sHit,
-                            50.0f,
-                            AiCore.GetSolidEnvironmentMask(),
-                            QueryTriggerInteraction.Ignore) &&
-                        sHit.normal.y >= 0.70f)
-                    {
-                        baseDest = sHit.point;
-                    }
-                    else
-                    {
-                        baseDest.y = bestFocusPos.y;
-                    }
-                }
-                else if (focusDistFromDest <= maxAllowedOffset)
-                {
-                    // Threat is inside the objective area: pull back ~35m toward the approaching tank for standoff
-                    Vector3 fromFocusToTank = vehPos - bestFocusPos;
-                    fromFocusToTank.y = 0f;
-                    Vector3 standoffDir = fromFocusToTank.sqrMagnitude > 0.25f ? fromFocusToTank.normalized : -fwdAxis;
-                    baseDest = bestFocusPos + standoffDir * Mathf.Min(35.0f, maxAllowedOffset * 0.65f);
-
-                    Vector3 offsetFromDest = baseDest - squadDest;
-                    offsetFromDest.y = 0f;
-                    if (offsetFromDest.magnitude > maxAllowedOffset)
-                    {
-                        baseDest = squadDest + offsetFromDest.normalized * maxAllowedOffset;
-                    }
-                }
-                else
-                {
-                    // Threat is outside the objective circle: advance to the perimeter facing the known threat
-                    baseDest = squadDest + fwdAxis * maxAllowedOffset * 0.88f;
-                }
+                desiredDest = sHit.point;
             }
             else
             {
-                Vector3 approachVec = squadDest - vehPos;
-                approachVec.y = 0f;
-                fwdAxis = approachVec.sqrMagnitude > 0.25f ? approachVec.normalized : veh.transform.forward;
-                fwdAxis.y = 0f;
-                fwdAxis = fwdAxis.sqrMagnitude > 0.001f ? fwdAxis.normalized : Vector3.forward;
-                baseDest = squadDest;
-            }
-
-            Vector3 desiredDest = baseDest;
-            if (!answeringFarTankSupport)
-                desiredDest.y = squadDest.y;
-
-            Vector3 clampCenter = answeringFarTankSupport ? bestFocusPos : squadDest;
-            float clampRefY = answeringFarTankSupport ? baseDest.y : squadDest.y;
-            float clampMaxOffset = answeringFarTankSupport ? 60.0f : maxAllowedOffset;
-
-            // Apply WW2 Armored Anti-Bombing Echelon / Breitkeil Wedge Dispersion when >= 2 friendly vehicles share the sector!
-            if (totalFriendlyNearObj >= 2)
-            {
-                Vector3 rightAxis = new Vector3(fwdAxis.z, 0f, -fwdAxis.x);
-                float latOffset;
-                float depthOffset;
-
-                if (totalFriendlyNearObj == 2)
-                {
-                    float flankDist = isTank ? 20.0f : 14.0f;
-                    latOffset = (myRankAtObj == 0) ? -flankDist : flankDist; // 40m lateral tank interval!
-                    depthOffset = (myRankAtObj == 0) ? 3.0f : -4.0f;
-                }
-                else
-                {
-                    if (myRankAtObj == 0)
-                    {
-                        latOffset = 0f;
-                        depthOffset = 6.0f;
-                    }
-                    else
-                    {
-                        int wingPair = (myRankAtObj + 1) / 2;
-                        float sign = (myRankAtObj & 1) == 1 ? 1f : -1f;
-                        float step = isTank ? 31.0f : 21.0f;
-                        latOffset = sign * wingPair * step;
-                        depthOffset = -8.0f * wingPair;
-                    }
-                }
-
-                Transform vehRoot = veh.transform.root;
-                Vector3 candPrimary = baseDest + rightAxis * latOffset + fwdAxis * depthOffset;
-                Vector3 candOpposite = baseDest - rightAxis * latOffset + fwdAxis * depthOffset;
-                Vector3 candHalf = baseDest + rightAxis * (latOffset * 0.55f);
-
-                if (TryValidateVehicleGroundPoint(candPrimary, clampRefY, clampCenter, clampMaxOffset, fwdAxis, vehRoot, out Vector3 valid1))
-                {
-                    desiredDest = valid1;
-                }
-                else if (Mathf.Abs(latOffset) > 1f &&
-                         TryValidateVehicleGroundPoint(candOpposite, clampRefY, clampCenter, clampMaxOffset, fwdAxis, vehRoot, out Vector3 valid2))
-                {
-                    desiredDest = valid2;
-                }
-                else if (Mathf.Abs(latOffset) > 1f &&
-                         TryValidateVehicleGroundPoint(candHalf, clampRefY, clampCenter, clampMaxOffset, fwdAxis, vehRoot, out Vector3 valid3))
-                {
-                    desiredDest = valid3;
-                }
-
-                // Final peer-destination repulsion pass so terrain clamping never folds two tanks back onto the same spot
-                for (int i = 0; i < _activeGroundVehicles.Count; i++)
-                {
-                    ActiveGroundVehicleInfo other = _activeGroundVehicles[i];
-                    if (other.VehPtr == vehPtr || other.VehPtr.ToInt64() > myId || string.IsNullOrEmpty(other.Faction))
-                        continue;
-                    if (!AiCore.AreSameSideFactions(myFaction, other.Faction))
-                        continue;
-
-                    Vector3 diff = desiredDest - other.TargetDest;
-                    diff.y = 0f;
-                    float dSq = diff.sqrMagnitude;
-                    if (dSq < minPeerSpacingSq)
-                    {
-                        Vector3 pushDir = dSq > 0.25f ? diff.normalized : (rightAxis * ((myRankAtObj & 1) == 0 ? -1f : 1f));
-                        Vector3 pushed = other.TargetDest + pushDir * minPeerSpacing;
-                        if (TryValidateVehicleGroundPoint(pushed, clampRefY, clampCenter, clampMaxOffset, fwdAxis, vehRoot, out Vector3 validPushed))
-                        {
-                            desiredDest = validPushed;
-                        }
-                    }
-                }
+                desiredDest.y = bestFocusPos.y;
             }
 
             bool destChanged = (aiVeh.setVehicleDestination - desiredDest).sqrMagnitude > 10.0f * 10.0f;
-            if (answeringFarTankSupport && (destChanged || !_vehiclesAnsweringTankSupport.Contains(vehPtr)))
+            if (destChanged || !_vehiclesAnsweringTankSupport.Contains(vehPtr))
             {
                 _vehiclesAnsweringTankSupport.Add(vehPtr);
                 if (crewSq != null && !crewSq.IsPlayerInSquad())
                 {
+                    bool isTank = veh.TryCast<VehicleTank>() != null;
                     if (crewSq.order == Order.follow)
                         crewSq.order = Order.defend;
                     crewSq.moveOrderPosition = desiredDest;
@@ -1556,39 +1277,21 @@ namespace EasyRed2HumanAI
                 aiVeh.rerollDestination = false;
                 _claimedVehicleDestinations[vehPtr] = desiredDest;
 
-                if (focusIsTankSupport && focusSupportSquad != null)
-                {
-                    Vector3? listenerPos = (focusSupportSquad.Leader != null && focusSupportSquad.Leader.transform != null)
-                        ? focusSupportSquad.Leader.transform.position
-                        : (Vector3?)desiredDest;
-                    string armorLabel = AiCore.FormatVehicleSupportCallsign(veh, crewSq, listenerPos);
-                    AiCore.TryShowLocalPlayerRadioHint(
-                        focusSupportSquad,
-                        $"Radio Net: {armorLabel} moving to support your position",
-                        requireLeader: false,
-                        minInterval: 22.0f);
-                }
+                Vector3? listenerPos = (focusSupportSquad.Leader != null && focusSupportSquad.Leader.transform != null)
+                    ? focusSupportSquad.Leader.transform.position
+                    : (Vector3?)desiredDest;
+                string armorLabel = AiCore.FormatVehicleSupportCallsign(veh, crewSq, listenerPos);
+                AiCore.TryShowLocalPlayerRadioHint(
+                    focusSupportSquad,
+                    $"Radio Net: {armorLabel} moving to support your position",
+                    requireLeader: false,
+                    minInterval: 22.0f);
 
-                if (totalFriendlyNearObj >= 2)
-                {
-                    if (!_nextArmorDispersionCountTime.TryGetValue(vehPtr, out float nextDispCount) || now >= nextDispCount)
-                    {
-                        _nextArmorDispersionCountTime[vehPtr] = now + 8.0f;
-                        ArmoredDispersionAdjustmentsCount++;
-                        if (VisionConfig.DebugLogging.Value)
-                        {
-                            AiCore.LogDebug(
-                                "ArmorDispersion",
-                                $"{myFaction} {(isTank ? "tank" : "combat vehicle")} dispersed to echelon slot #{myRankAtObj + 1}/{totalFriendlyNearObj} (anti-CAS flank spacing).");
-                        }
-                    }
-                }
-
-                if (hasFocus && TryRecordCombinedArmsAssist(vehPtr, now))
+                if (TryRecordCombinedArmsAssist(vehPtr, now))
                 {
                     AiCore.LogDebug(
                         "CombArmsTank",
-                        $"{myFaction} combat vehicle steering toward known enemy squad / support request (slot #{myRankAtObj + 1}/{totalFriendlyNearObj}).");
+                        $"{myFaction} combat vehicle answering friendly tank support radio request.");
                 }
             }
         }
@@ -1687,352 +1390,6 @@ namespace EasyRed2HumanAI
                 if (VisionConfig.DebugLogging.Value)
                 {
                     AiCore.LogDebug("ApcDismount", $"Transport vehicle dismounted infantry passengers under combat threat.");
-                }
-            }
-        }
-
-        private static bool CheckVehicleDamageAndExplosionThreat(
-            Vehicle veh,
-            Vector3 vehPos,
-            string myFaction,
-            float now,
-            out Vector3 hazardPos,
-            out bool recentHullHit,
-            out bool nearExplosion)
-        {
-            hazardPos = vehPos + (veh.transform != null ? veh.transform.forward * 30.0f : Vector3.forward * 30.0f);
-            recentHullHit = false;
-            nearExplosion = VisionPatches.TryGetNearestRecentExplosion(vehPos, 18.5f, 2.4f, out Vector3 blastPos, out _);
-            if (nearExplosion)
-                hazardPos = blastPos;
-
-            AiCore.VehicleFastHandles vh = AiCore.GetOrCreateVehicleHandles(veh);
-            if (vh != null)
-            {
-                short curDmg = veh.GetDamage();
-                if (curDmg > vh.LastObservedDamage)
-                {
-                    vh.LastObservedDamage = curDmg;
-                    vh.LastDamageTime = now;
-                    if (!nearExplosion &&
-                        !string.IsNullOrEmpty(myFaction) &&
-                        VisionPatches.TryGetDominantEnemyGunfireDirection(vehPos, myFaction, 220f, 3.0f, out Vector3 fireDir, out float fireDist, out _))
-                    {
-                        hazardPos = vehPos + fireDir * Mathf.Max(25.0f, fireDist);
-                    }
-                    vh.LastHazardPos = hazardPos;
-                }
-                else if (curDmg < vh.LastObservedDamage)
-                {
-                    vh.LastObservedDamage = curDmg;
-                }
-
-                if (vh.LastDamageTime > 0f && now - vh.LastDamageTime <= 2.6f)
-                {
-                    recentHullHit = true;
-                    if (!nearExplosion && vh.LastHazardPos.sqrMagnitude > 0.01f)
-                        hazardPos = vh.LastHazardPos;
-                }
-            }
-
-            return nearExplosion || recentHullHit;
-        }
-
-        // =====================================================================
-        // Tank Standoff & Reverse Discipline (AIVehicle.MoveTowardCurrentNodeTank)
-        // =====================================================================
-        [HarmonyPatch(typeof(AIVehicle), nameof(AIVehicle.MoveTowardCurrentNodeTank))]
-        public static class AIVehicle_MoveTowardCurrentNodeTank_Patch
-        {
-            public static bool Prefix(AIVehicle __instance)
-            {
-                try
-                {
-                    if (!VisionConfig.EnableMod.Value ||
-                        !VisionConfig.EnableTankStandoffAndReverse.Value ||
-                        __instance == null)
-                    {
-                        return true;
-                    }
-
-                    Vehicle veh = __instance.veh;
-                    if (!AiCore.IsLocallyOwnedVehicle(veh) || veh.PlayerIsDriving() || veh.transform == null)
-                        return true;
-
-                    Vector3 vehPos = veh.transform.position;
-                    IntPtr vehPtr = veh.Pointer;
-                    float now = Time.time;
-
-                    Turret mainTurret = veh.GetMainTurret(false);
-                    TurretAI turretAi = mainTurret != null ? mainTurret.GetTurretAI() : null;
-                    Spottable target = turretAi != null ? turretAi.CurrentVisibleTarget : null;
-                    bool hasValidGroundTarget = target != null &&
-                                                target.Pointer != IntPtr.Zero &&
-                                                turretAi.targetInWeaponRange &&
-                                                !target.IsAirVehicle();
-
-                    string myFaction = GetVehicleCrewFaction(veh, mainTurret);
-                    if (CheckVehicleDamageAndExplosionThreat(veh, vehPos, myFaction, now, out Vector3 hazardPos, out bool recentHullHit, out bool nearExplosion))
-                    {
-                        bool mainGunReloading = false;
-                        TurretGun mainGun = mainTurret != null ? mainTurret.TryCast<TurretGun>() : null;
-                        if (mainGun != null && mainGun.weapons != null && mainGun.selectedWeapon_id >= 0 && mainGun.selectedWeapon_id < mainGun.weapons.Length)
-                        {
-                            TurretWeapon selW = mainGun.weapons[mainGun.selectedWeapon_id];
-                            mainGunReloading = selW != null && selW.nextReloadEnd > now + 0.6f;
-                        }
-
-                        // Evasive Self-Preservation: if bracketed by an explosion (artillery/mortar/satchel <= 18.5m)
-                        // or taking hull damage while unable to return fire (unseen ambusher or main cannon reloading),
-                        // immediately reverse or surge out of the killzone instead of sitting still!
-                        if (nearExplosion || (recentHullHit && (!hasValidGroundTarget || mainGunReloading)))
-                        {
-                            Vector3 toHazard = hazardPos - vehPos;
-                            toHazard.y = 0f;
-                            bool hazardInFront = toHazard.sqrMagnitude < 0.01f || Vector3.Dot(veh.transform.forward, toHazard.normalized) >= -0.15f;
-                            bool rearClear = !AiCore.IsDirectionBlockedByEnvironment(vehPos + Vector3.up * 1.2f, -veh.transform.forward, 7.5f, veh.transform.root) &&
-                                             (!VisionConfig.EnableFriendlyVehicleRightOfWay.Value || !ShouldYieldToFriendlyInfantry(__instance, veh, true));
-                            bool frontClear = !AiCore.IsDirectionBlockedByEnvironment(vehPos + Vector3.up * 1.2f, veh.transform.forward, 7.5f, veh.transform.root) &&
-                                              (!VisionConfig.EnableFriendlyVehicleRightOfWay.Value || !ShouldYieldToFriendlyInfantry(__instance, veh, false));
-
-                            if ((hazardInFront && rearClear) || (!hazardInFront && !frontClear && rearClear))
-                            {
-                                __instance.ForceRetroFor(2.6f, AIVehicle.RetroBehaviour.backward);
-                                __instance.MoveTankRetro();
-                                return false;
-                            }
-                            if ((!hazardInFront && frontClear) || (hazardInFront && !rearClear && frontClear))
-                            {
-                                __instance.ForceRetroFor(2.4f, AIVehicle.RetroBehaviour.forward);
-                                __instance.MoveTankRetro();
-                                return false;
-                            }
-                        }
-                    }
-
-                    if (!hasValidGroundTarget)
-                        return true;
-
-                    Vector3 targetPos = target.GetCenterOfUnit();
-                    Vector3 toTarget = targetPos - vehPos;
-                    float dist = toTarget.magnitude;
-
-                    SoldierPersonality crewPers = GetVehicleCrewPersonality(veh);
-                    float reverseDist = 28.0f;
-                    float maxStandoffDist = 90.0f;
-                    if (crewPers == SoldierPersonality.TankCrew_Sniper)
-                    {
-                        reverseDist = 36.0f;
-                        maxStandoffDist = 140.0f;
-                    }
-                    else if (crewPers == SoldierPersonality.TankCrew_Brawler)
-                    {
-                        reverseDist = 20.0f;
-                        maxStandoffDist = 62.0f;
-                    }
-
-                    if (dist > maxStandoffDist)
-                        return true;
-
-                    // 1. Close-Range Threat Reverse: back up using MoveTankRetro while keeping frontal armor toward the enemy
-                    if (dist < reverseDist && Vector3.Angle(veh.transform.forward, toTarget) <= 75f)
-                    {
-                        if (!AiCore.IsDirectionBlockedByEnvironment(vehPos + Vector3.up * 1.2f, -veh.transform.forward, 7.5f, veh.transform.root) &&
-                            (!VisionConfig.EnableFriendlyVehicleRightOfWay.Value || !ShouldYieldToFriendlyInfantry(__instance, veh, true)))
-                        {
-                            __instance.ForceRetroFor(2.2f, AIVehicle.RetroBehaviour.backward);
-                            __instance.MoveTankRetro();
-                            if (!_nextTankStandoffCountTime.TryGetValue(vehPtr, out float nextRevCount) || now >= nextRevCount)
-                            {
-                                _nextTankStandoffCountTime[vehPtr] = now + 5.0f;
-                                TankStandoffHoldsCount++;
-                                if (VisionConfig.DebugLogging.Value)
-                                {
-                                    AiCore.LogDebug("TankStandoff", $"Tank reversing from close-range threat ({dist:F0}m < {reverseDist:F0}m).");
-                                }
-                            }
-                            return false;
-                        }
-                    }
-
-                    // 2. Standoff Firing Hold: halt and orient frontal hull toward target instead of driving into AT-grenade range
-                    //    (If this tank is a stacked wingman < 13.5m from a higher-priority friendly tank and target is > 42m away,
-                    //    let it roll out to its dispersed flank slot while firing on the move instead of parking hull-to-hull!)
-                    if (turretAi.CanSee(target) || CanTankShellIndoorTargetFacade(mainTurret, veh, target))
-                    {
-                        if (dist > 42.0f && (vehPos - __instance.setVehicleDestination).sqrMagnitude > 14.0f * 14.0f)
-                        {
-                            long myId = vehPtr.ToInt64();
-                            for (int i = 0; i < _activeGroundVehicles.Count; i++)
-                            {
-                                ActiveGroundVehicleInfo other = _activeGroundVehicles[i];
-                                if (other.VehPtr == vehPtr || other.VehPtr.ToInt64() > myId || string.IsNullOrEmpty(other.Faction))
-                                    continue;
-                                if (!string.IsNullOrEmpty(myFaction) &&
-                                    AiCore.AreSameSideFactions(myFaction, other.Faction) &&
-                                    (other.Position - vehPos).sqrMagnitude < 13.5f * 13.5f)
-                                {
-                                    return true;
-                                }
-                            }
-                        }
-
-                        __instance.StopAndRotateTowardTarget();
-                        if (!_nextTankStandoffCountTime.TryGetValue(vehPtr, out float nextHoldCount) || now >= nextHoldCount)
-                        {
-                            _nextTankStandoffCountTime[vehPtr] = now + 6.0f;
-                            TankStandoffHoldsCount++;
-                            if (VisionConfig.DebugLogging.Value)
-                            {
-                                AiCore.LogDebug("TankStandoff", $"Tank holding standoff firing position ({dist:F0}m, personality:{crewPers}).");
-                            }
-                        }
-                        return false;
-                    }
-                }
-                catch { }
-                return true;
-            }
-        }
-
-        // =====================================================================
-        // Vanilla Physics Fix: Tank Sprocket & Rock Unstick Assist (VehicleTank.FixedUpdate)
-        // Easy Red 2 tanks use discrete WheelCollider rays (leftTrack / rightTrack). When a rock,
-        // stump, or trench lip wedges under the belly between roadwheels, the WheelColliders unload
-        // (zero motorTorque traction) while Transform.Rotate spins in place. Apply a smooth
-        // track-bite crawl impulse when throttle is held and upper hull is clear of walls!
-        // =====================================================================
-        [HarmonyPatch(typeof(VehicleTank), nameof(VehicleTank.FixedUpdate))]
-        public static class VehicleTank_FixedUpdate_Patch
-        {
-            public static void Prefix(out long __state)
-            {
-                __state = HitchProfiler.Begin();
-            }
-
-            public static void Postfix(VehicleTank __instance, long __state)
-            {
-                try
-                {
-                    if (!VisionConfig.EnableMod.Value ||
-                        !VisionConfig.EnableTankRockUnstickAssist.Value ||
-                        ReferenceEquals(__instance, null))
-                    {
-                        return;
-                    }
-
-                    IntPtr ptr = __instance.Pointer;
-                    if (ptr == IntPtr.Zero)
-                        return;
-
-                    // Guard against FixedSteps: 5 physics catch-up spirals: evaluate raycasts & IL2CPP damage/input
-                    // state at most ONCE per rendered frame per tank, replaying only cached AddForce on substeps 2..5!
-                    int curFrame = Time.frameCount;
-                    if (_tankUnstickFrameCache.TryGetValue(ptr, out TankUnstickFrameState fState) && fState.Frame == curFrame)
-                    {
-                        if (fState.ApplyForce)
-                        {
-                            Rigidbody cachedRb = __instance.rb;
-                            if (cachedRb != null && !cachedRb.isKinematic)
-                                cachedRb.AddForce(fState.ForceVec, ForceMode.Acceleration);
-                        }
-                        return;
-                    }
-
-                    if (__instance == null ||
-                        !__instance.OwnDriverOrVehicle() ||
-                        !__instance.engineStarted ||
-                        __instance.IsDisabled() ||
-                        __instance.transform == null)
-                    {
-                        _tankUnstickFrameCache[ptr] = new TankUnstickFrameState { Frame = curFrame, ApplyForce = false };
-                        return;
-                    }
-
-                    float throttleY = __instance.GetMovingDir().y;
-                    if (Mathf.Abs(throttleY) <= 0.25f ||
-                        __instance.GetPercentageDamageFor(VehicleInternalPart.tracks) >= 0.98f ||
-                        __instance.GetPercentageDamageFor(VehicleInternalPart.engine) >= 0.98f)
-                    {
-                        _tankHighCenteredDuration.Remove(ptr);
-                        _tankUnstickFrameCache[ptr] = new TankUnstickFrameState { Frame = curFrame, ApplyForce = false };
-                        return;
-                    }
-
-                    Rigidbody rb = __instance.rb;
-                    if (rb == null || rb.isKinematic)
-                    {
-                        _tankUnstickFrameCache[ptr] = new TankUnstickFrameState { Frame = curFrame, ApplyForce = false };
-                        return;
-                    }
-
-                    float speedSq = rb.velocity.sqrMagnitude;
-                    if (speedSq > 2.25f * 2.25f)
-                    {
-                        _tankHighCenteredDuration.Remove(ptr);
-                        _tankUnstickFrameCache[ptr] = new TankUnstickFrameState { Frame = curFrame, ApplyForce = false };
-                        return;
-                    }
-
-                    float stuckTime = _tankHighCenteredDuration.TryGetValue(ptr, out float prev) ? prev : 0f;
-                    if (speedSq < 0.85f * 0.85f)
-                    {
-                        stuckTime += Mathf.Min(Time.deltaTime, 0.10f);
-                        _tankHighCenteredDuration[ptr] = stuckTime;
-                    }
-                    else if (stuckTime < 1.40f)
-                    {
-                        _tankUnstickFrameCache[ptr] = new TankUnstickFrameState { Frame = curFrame, ApplyForce = false };
-                        return;
-                    }
-
-                    if (stuckTime < 1.40f)
-                    {
-                        _tankUnstickFrameCache[ptr] = new TankUnstickFrameState { Frame = curFrame, ApplyForce = false };
-                        return;
-                    }
-
-                    Vector3 tankPos = __instance.transform.position;
-                    Vector3 driveDir = throttleY >= 0f ? __instance.transform.forward : -__instance.transform.forward;
-                    driveDir.y = 0f;
-                    if (driveDir.sqrMagnitude < 0.001f)
-                    {
-                        _tankUnstickFrameCache[ptr] = new TankUnstickFrameState { Frame = curFrame, ApplyForce = false };
-                        return;
-                    }
-                    driveDir.Normalize();
-
-                    // Ensure upper hull (+1.55m) is not pushing into a solid building/cliff wall
-                    if (AiCore.IsDirectionBlockedByEnvironment(tankPos + Vector3.up * 1.55f, driveDir, 4.2f, __instance.transform.root))
-                    {
-                        _tankUnstickFrameCache[ptr] = new TankUnstickFrameState { Frame = curFrame, ApplyForce = false };
-                        return;
-                    }
-
-                    Vector3 forceVec = driveDir * 5.8f + Vector3.up * 1.35f;
-                    _tankUnstickFrameCache[ptr] = new TankUnstickFrameState
-                    {
-                        Frame = curFrame,
-                        ApplyForce = true,
-                        ForceVec = forceVec
-                    };
-                    rb.AddForce(forceVec, ForceMode.Acceleration);
-
-                    float now = Time.time;
-                    if (!_nextTankUnstickCountTime.TryGetValue(ptr, out float nextCount) || now >= nextCount)
-                    {
-                        _nextTankUnstickCountTime[ptr] = now + 5.0f;
-                        TankRockUnsticksCount++;
-                        if (VisionConfig.DebugLogging.Value)
-                        {
-                            AiCore.LogDebug("TankUnstick", $"Applied sprocket/track rock-crawl assist to '{__instance.name}'.");
-                        }
-                    }
-                }
-                catch { }
-                finally
-                {
-                    HitchProfiler.End(HitchBucket.VehFixedUpdate, __state);
                 }
             }
         }

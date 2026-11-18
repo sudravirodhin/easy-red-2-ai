@@ -728,6 +728,13 @@ namespace EasyRed2HumanAI
 
                     float now = Time.time;
                     Spottable curTarget = __instance.CurrentVisibleTarget;
+                    if (!ReferenceEquals(curTarget, null) && curTarget != null && !AiCore.IsValidAliveSpottable(curTarget))
+                    {
+                        __instance.CurrentVisibleTarget = null;
+                        __instance.targetInWeaponRange = false;
+                        curTarget = null;
+                        turret.SetGunTriggerPressed(false, __0);
+                    }
 
                     AiCore.TurretFastTraits traits = AiCore.GetCachedTurretTraits(turret);
                     Vehicle veh = traits.VehHandles != null ? traits.VehHandles.Ref : AiCore.GetCachedTurretVehicle(turret);
@@ -966,13 +973,10 @@ namespace EasyRed2HumanAI
                         return;
                     }
 
-                    // Easter Egg: Imperial Japanese Tokkōtai (Kamikaze) terminal dive when crippled or out of ordnance/ammo
+                    // Easter Egg: Imperial Japanese Tokkōtai (Kamikaze) terminal dive when crippled
                     TryExecuteJapaneseKamikazeDive(__instance, false);
                     if (IsJapaneseKamikazeActive(__instance))
                         return;
-
-                    // Prevent head-on mid-air dogfight collisions (vanilla holds nose-on down to 70m)
-                    TryExecuteDogfightAntiChickenBreakOff(__instance, false);
 
                     if (VisionConfig.EnableCombinedArmsPrioritySupport.Value)
                     {
@@ -994,8 +998,6 @@ namespace EasyRed2HumanAI
                     }
                     else
                     {
-                        TryExecuteDogfightAntiChickenBreakOff(__instance, true);
-
                         // Pilot Attack-Run / Dogfight Sight Alignment Reaction:
                         // Prevent frame-zero laser bursts the instant targetToAttack switches; hold pilot gun trigger
                         // for 0.42s-0.78s while the pilot aligns the reflector gunsight onto the new target!
@@ -1084,48 +1086,74 @@ namespace EasyRed2HumanAI
                         return;
                     }
 
-                    if (__result)
-                        return;
-
                     VehiclePlane vp = __instance.veh;
                     if (vp == null || vp.Pointer == IntPtr.Zero || vp.planeType != PlaneType.Fighter || vp.PlayerIsInside())
                         return;
 
-                    // Only route to a refill station when at least one friendly AircraftRepairStation exists in the scene
-                    var stations = AircraftRepairStation.aircraftRepairStations;
-                    if (stations == null || stations.Count == 0)
-                        return;
+                    AiCore.VehicleFastHandles vh = AiCore.GetOrCreateVehicleHandles(vp);
+                    float now = Time.time;
 
-                    string myFac = vp.GetVehicleFaction();
-                    bool hasFriendlyStation = false;
-                    for (int i = 0; i < stations.Count; i++)
-                    {
-                        AircraftRepairStation st = stations[i];
-                        if (st != null && st.Pointer != IntPtr.Zero && AiCore.AreSameSideFactions(myFac, st.GetFaction()))
-                        {
-                            hasFriendlyStation = true;
-                            break;
-                        }
-                    }
+                    // Check whether a friendly AircraftRepairStation actually exists via vanilla's exact lookup.
+                    // In vanilla AIPlane.Update (0x18057644C), if NeedRefill() is true when GetNearestRepairStation()
+                    // is null, SetGoToRefill() forces SetFlyAroundObjectiveArea() (planeState = 7) and skips
+                    // GetBestAircraftVisibleEnemy() forever — locking the plane into a permanent 200m vulture circle!
+                    bool hasFriendlyStation = __instance.GetNearestRepairStation() != null;
                     if (!hasFriendlyStation)
-                        return;
-
-                    // 1. Flak-damaged airframe (< 55% HP): fly through friendly AircraftRepairStation ring to repair & re-arm
-                    if (vp.Maxlife > 0 && vp.life < vp.Maxlife * 0.55f)
                     {
-                        __result = true;
+                        __result = false;
+                        if (vh != null && AiCore.IsLocallyOwnedVehicle(vp))
+                        {
+                            bool hasAnyOrdnance = __instance.PilotGunHasAnyAmmo() || __instance.HasBombsToDeliver();
+                            if (hasAnyOrdnance)
+                            {
+                                vh.OffMapRearmReadyTime = 0f;
+                            }
+                            else if (vh.OffMapRearmReadyTime <= 0f)
+                            {
+                                vh.OffMapRearmReadyTime = now + 30.0f;
+                            }
+                            else if (now >= vh.OffMapRearmReadyTime)
+                            {
+                                vh.OffMapRearmReadyTime = 0f;
+                                vh.BombsDepletedAt = 0f;
+                                if (vp.CanRefillAmmmo())
+                                    vp.RefillAllTurrets();
+                                if (vp.CanRefillBombBay())
+                                    vp.RefillBombBaySynched();
+                            }
+                        }
                         return;
                     }
 
-                    // 2. Dive-bomber / fighter-bomber ("Winchester" — all bombs/rockets expended):
-                    //    Vanilla AIPlane.NeedRefill (0x180572D95) skips CountBombs() whenever GetPilotTurret() != null!
+                    if (__result)
+                        return;
+
+                    // Dive-bomber / fighter-bomber ("Winchester" — all bombs/rockets expended):
+                    // Vanilla AIPlane.NeedRefill (0x180572D95) skips CountBombs() whenever GetPilotTurret() != null.
+                    // However, if the aircraft still has forward pilot gun ammo, let it strafe ground targets for 40s
+                    // after bomb release before heading back to the repair ring to rearm bombs!
                     var bays = vp.bombBay;
-                    if (bays != null &&
-                        bays.Length > 0 &&
-                        vp.CountBombs() <= 0 &&
-                        (__instance.targetToAttack == null || !__instance.targetToAttack.IsAirVehicle()))
+                    if (bays != null && bays.Length > 0)
                     {
-                        __result = true;
+                        if (vp.CountBombs() > 0)
+                        {
+                            if (vh != null)
+                                vh.BombsDepletedAt = 0f;
+                        }
+                        else if (__instance.targetToAttack == null || !__instance.targetToAttack.IsAirVehicle())
+                        {
+                            if (!__instance.PilotGunHasAnyAmmo())
+                            {
+                                __result = true;
+                            }
+                            else if (vh != null)
+                            {
+                                if (vh.BombsDepletedAt <= 0f)
+                                    vh.BombsDepletedAt = now;
+                                else if (now - vh.BombsDepletedAt >= 40.0f)
+                                    __result = true;
+                            }
+                        }
                     }
                 }
                 catch { }
