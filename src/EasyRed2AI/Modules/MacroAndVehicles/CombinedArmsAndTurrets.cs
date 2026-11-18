@@ -2194,6 +2194,9 @@ namespace EasyRed2HumanAI
                 }
             }
 
+            bool inConcreteBunker = AiCore.HasLowCeilingOverhead(vehPos, 3.8f);
+            bool nearBlast = VisionPatches.TryGetNearestRecentExplosion(vehPos, inConcreteBunker ? 6.5f : 13.5f, 2.5f, out _, out _);
+
             for (int i = 0; i < seatCount; i++)
             {
                 Seats s = seats[i];
@@ -2208,8 +2211,13 @@ namespace EasyRed2HumanAI
                     continue;
                 }
 
+                float occSupp = occ.GetSuppressionValue();
+                bool selfPreservationBail = occ.isBleeding ||
+                                            nearBlast ||
+                                            (!inConcreteBunker && s.showUnitSet && (occSupp >= 62f || (occSupp >= 45f && !hasLiveTarget)));
+
                 bool soldierSquadMovedOn = false;
-                if (!hasLiveTarget && !enemyInFiringSector && !outOfAmmo && !flankedBlindSpot)
+                if (!hasLiveTarget && !enemyInFiringSector && !outOfAmmo && !flankedBlindSpot && !selfPreservationBail)
                 {
                     Squad sq = occ.joinedSquad;
                     Soldier leader = sq != null ? sq.Leader : null;
@@ -2244,6 +2252,7 @@ namespace EasyRed2HumanAI
 
                 if (!outOfAmmo &&
                     !flankedBlindSpot &&
+                    !selfPreservationBail &&
                     (hasLiveTarget || enemyInFiringSector || (anyFriendlySquadNear && !soldierSquadMovedOn)))
                 {
                     continue;
@@ -2251,17 +2260,25 @@ namespace EasyRed2HumanAI
 
                 try
                 {
-                    ClearEmplacementAssignment(occ.Pointer, markUnreachable: true, 90.0f);
+                    ClearEmplacementAssignment(occ.Pointer, markUnreachable: true, selfPreservationBail ? 45.0f : 90.0f);
                     occ.CoverPosition(null);
                     if (occ.IsOnVehicle())
                         veh.GetOffVehicle(occ);
+
+                    if (selfPreservationBail && occ.aiController != null)
+                    {
+                        TrySeekNearbyCover(occ.aiController, occ);
+                        SetBotPose(occ.aiController, occ, SoldierPose.Crouch, true);
+                    }
 
                     if (VisionConfig.DebugLogging.Value)
                     {
                         string reason = outOfAmmo
                             ? "out_of_ammo"
-                            : (flankedBlindSpot ? "flanked_blind_spot" : "front_moved_on");
-                        AiCore.LogDebug("Emplacement", $"{occFaction} soldier dismounted stale static gun ({reason}).", 4.0f);
+                            : (selfPreservationBail
+                                ? "self_preservation"
+                                : (flankedBlindSpot ? "flanked_blind_spot" : "front_moved_on"));
+                        AiCore.LogDebug("Emplacement", $"{occFaction} soldier dismounted static gun ({reason}).", 4.0f);
                     }
                 }
                 catch { }
@@ -4436,6 +4453,40 @@ namespace EasyRed2HumanAI
 
                     // Feed tank cannons, armored cars, and static MG/AT/mortar emplacements (~210m) into the acoustic ring buffer
                     VisionPatches.RecordTurretFired(__instance, rootVeh, gunner);
+                }
+                catch { }
+                return true;
+            }
+        }
+
+        // =====================================================================
+        // PATCH 14C: TurretWeapon.Reload (Empty-Ammo & Out-of-Range Slot Guard)
+        // =====================================================================
+        // Prevents native TurretWeapon.Reload (0x18083FE50) from throwing IndexOutOfRangeException at 0x18083FFEF
+        // when Vehicle.RefillAllTurrets() -> TurretGun.AcquireAmmo(false, 0) reloads an auxiliary/dummy TurretWeapon
+        // whose ammos array is empty, or when a caller passes a negative / out-of-range ammo slot index.
+        [HarmonyPatch(typeof(TurretWeapon), nameof(TurretWeapon.Reload))]
+        public static class TurretWeapon_Reload_Patch
+        {
+            public static bool Prefix(TurretWeapon __instance, ref short __0, ref bool __result)
+            {
+                try
+                {
+                    if (__instance == null || __instance.Pointer == IntPtr.Zero)
+                        return true;
+
+                    var ammos = __instance.ammos;
+                    if (ammos == null || ammos.Length == 0)
+                    {
+                        __result = false;
+                        return false;
+                    }
+
+                    if (__0 < 0 || __0 >= ammos.Length)
+                    {
+                        short fallback = __instance.loadedAmmo_id;
+                        __0 = (short)(fallback >= 0 && fallback < ammos.Length ? fallback : 0);
+                    }
                 }
                 catch { }
                 return true;

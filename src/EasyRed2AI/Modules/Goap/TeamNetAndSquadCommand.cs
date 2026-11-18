@@ -2245,6 +2245,7 @@ namespace EasyRed2HumanAI
                     if (u.HasSurrended())
                     {
                         if (board.SurrenderedComrade == null &&
+                            AiCore.IsTrueSurrenderedPrisoner(u) &&
                             Mathf.Abs(u.transform.position.y - sqCenter.y) <= 2.4f &&
                             !HasArmedEnemyNearPosition(u.transform.position, leader.faction, 16.0f))
                         {

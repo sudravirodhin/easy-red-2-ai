@@ -182,6 +182,61 @@ namespace EasyRed2HumanAI
             }
         }
 
+        /// <summary>
+        /// Zero-allocation squad-level danger-close check for AI aircraft CAS target selection and bomb release.
+        /// Pilots recognize friendly squad formations (>= 2 alive members, friendly ground vehicles, or player squads)
+        /// rather than lone individual stragglers, waving off bomb drops within 38m (or gun strafes within 18m) of a friendly squad.
+        /// </summary>
+        public static bool IsAircraftTargetDangerCloseToFriendlySquad(
+            AIPlane plane,
+            Vector3 targetPos,
+            bool hasBombsToDeliver)
+        {
+            if (plane == null || plane.veh == null)
+                return false;
+            return IsAircraftTargetDangerCloseToFriendlySquad(GetVehicleCrewFaction(plane.veh), targetPos, hasBombsToDeliver);
+        }
+
+        public static bool IsAircraftTargetDangerCloseToFriendlySquad(
+            string myFaction,
+            Vector3 targetPos,
+            bool hasBombsToDeliver)
+        {
+            if (string.IsNullOrEmpty(myFaction))
+                return false;
+
+            AiCore.EnsureWorldSnapshot();
+            int sqCount = AiCore.WorldSquadCount;
+            if (sqCount <= 0)
+                return false;
+
+            float safeRadius = hasBombsToDeliver ? 38.0f : 18.0f;
+            float safeRadiusSq = safeRadius * safeRadius;
+            float maxVertDelta = hasBombsToDeliver ? 28.0f : 20.0f;
+            var squads = AiCore.WorldSquads;
+
+            for (int s = 0; s < sqCount; s++)
+            {
+                ref AiCore.SquadSnapshot sqSnap = ref squads[s];
+                if (sqSnap.RefOnPlane ||
+                    string.IsNullOrEmpty(sqSnap.Faction) ||
+                    !AiCore.AreSameSideFactions(myFaction, sqSnap.Faction))
+                {
+                    continue;
+                }
+
+                // Pilots identify friendly squad formations (>= 2 soldiers), friendly ground vehicles, or player squads
+                if (sqSnap.UnitCount < 2 && !sqSnap.LeaderOnGroundVehicle && !sqSnap.IsPlayerInSquad)
+                    continue;
+
+                Vector3 d = sqSnap.RefPos - targetPos;
+                if (d.x * d.x + d.z * d.z <= safeRadiusSq && Mathf.Abs(d.y) <= maxVertDelta)
+                    return true;
+            }
+
+            return false;
+        }
+
         public static void TrySelectKnownAircraftTarget(AIPlane plane, ref Spottable currentResult)
         {
             if (plane == null || plane.veh == null || plane.transform == null)
@@ -242,6 +297,7 @@ namespace EasyRed2HumanAI
             bool limitUnmarkedInfantry = VisionConfig.LimitAircraftInfantrySpotting.Value;
             float unmarkedAwareCap = Mathf.Max(VisionConfig.AircraftUnmarkedInfantryMaxDist.Value * 1.45f, 250.0f);
             bool hasBombs = plane.HasBombsToDeliver() || plane.HasBombBayConfigured();
+            bool hasLiveBombsNow = plane.HasBombsToDeliver();
 
             int clusterCount = _knownEnemyClusters.Count;
             for (int i = 0; i < clusterCount; i++)
@@ -269,6 +325,10 @@ namespace EasyRed2HumanAI
                     Vector3 toCand = candPos - planePos;
                     float dist = toCand.magnitude;
                     if (dist < 95.0f || dist > allowedDist)
+                        continue;
+
+                    // Avoid danger-close CAS runs on enemy targets that have a friendly squad right on top of them
+                    if (IsAircraftTargetDangerCloseToFriendlySquad(myFaction, candPos, hasLiveBombsNow))
                         continue;
 
                     Vector3 dirToCand = toCand / dist;
@@ -917,11 +977,80 @@ namespace EasyRed2HumanAI
                 }
             }
 
-            // Throttled (~8 Hz) ground-proximity pull-up guard during steep dive-bombing runs
-            if (curState == AIPlane.PlaneAIState.doingDive && now >= st.NextDiveGroundCheckTime)
+            // Flak / AA Self-Preservation Abort: if a non-Kamikaze, non-Daredevil aircraft takes heavy flak/AA damage
+            // mid-dive (>= 12 damage spike or >= 50 total damage while taking hits), salvo-drop bombs if near target
+            // (and not danger-close to a friendly squad) and immediately pull out of the dive!
+            string myFaction = GetVehicleCrewFaction(plane.veh);
+            AiCore.VehicleFastHandles planeVh = AiCore.GetOrCreateVehicleHandles(plane.veh);
+            if (planeVh != null)
+            {
+                short curPlaneDmg = plane.veh.GetDamage();
+                if ((curState == AIPlane.PlaneAIState.doingDive || curState == AIPlane.PlaneAIState.preparingDive) &&
+                    pilotPers != SoldierPersonality.Pilot_Daredevil &&
+                    curPlaneDmg > planeVh.LastObservedDamage &&
+                    (curPlaneDmg - planeVh.LastObservedDamage >= 12 || curPlaneDmg >= 50))
+                {
+                    Spottable atkTgt = plane.targetToAttack;
+                    if (plane.HasBombsToDeliver() &&
+                        atkTgt != null &&
+                        atkTgt.Pointer != IntPtr.Zero)
+                    {
+                        Vector3 tgtPos = atkTgt.GetPosition();
+                        Vector3 dTgt = tgtPos - pos;
+                        if (dTgt.x * dTgt.x + dTgt.z * dTgt.z <= 260.0f * 260.0f &&
+                            !IsAircraftTargetDangerCloseToFriendlySquad(myFaction, tgtPos, true))
+                        {
+                            plane.veh.DropBombs();
+                        }
+                    }
+
+                    plane.ExitDive();
+                    LiftPlaneExitDiveTargetAboveTerrain(plane, pos, flatFwd, Mathf.Max(0f, ResourcesManager.GetTerrainAltitude(pos, 0f)));
+                    curState = plane.planeState;
+                }
+                planeVh.LastObservedDamage = curPlaneDmg;
+            }
+
+            // Throttled (~8 Hz) danger-close wave-off & ground-proximity pull-up guard during dive/bombing runs
+            if ((curState == AIPlane.PlaneAIState.doingDive ||
+                 curState == AIPlane.PlaneAIState.preparingDive ||
+                 curState == AIPlane.PlaneAIState.bomberApproaching) &&
+                now >= st.NextDiveGroundCheckTime)
             {
                 st.NextDiveGroundCheckTime = now + 0.12f;
-                Rigidbody rb = plane.veh.GetRigidbody();
+                bool hasLiveBombs = plane.HasBombsToDeliver();
+                if (curState == AIPlane.PlaneAIState.bomberApproaching)
+                {
+                    Vector3 bDest = plane.flyTargetPosition;
+                    Vector3 dBomb = bDest - pos;
+                    if (dBomb.x * dBomb.x + dBomb.z * dBomb.z <= 165.0f * 165.0f &&
+                        IsAircraftTargetDangerCloseToFriendlySquad(myFaction, bDest, true))
+                    {
+                        plane.SetRetreatBomber();
+                        curState = plane.planeState;
+                        FriendlyFirePrevented++;
+                    }
+                }
+                else
+                {
+                    Spottable atkTgt = plane.targetToAttack;
+                    if (atkTgt != null && atkTgt.Pointer != IntPtr.Zero && !atkTgt.IsAirVehicle())
+                    {
+                        Vector3 tgtPos = atkTgt.GetPosition();
+                        if (IsAircraftTargetDangerCloseToFriendlySquad(myFaction, tgtPos, hasLiveBombs))
+                        {
+                            plane.targetToAttack = null;
+                            plane.ExitDive();
+                            LiftPlaneExitDiveTargetAboveTerrain(plane, pos, flatFwd, Mathf.Max(0f, ResourcesManager.GetTerrainAltitude(pos, 0f)));
+                            curState = plane.planeState;
+                            FriendlyFirePrevented++;
+                        }
+                    }
+                }
+
+                if (curState == AIPlane.PlaneAIState.doingDive)
+                {
+                    Rigidbody rb = plane.veh.GetRigidbody();
                 Vector3 vel = rb != null ? rb.velocity : fwd * 75.0f;
                 float speed = Mathf.Max(45.0f, vel.magnitude);
                 float sinkRate = Mathf.Max(0f, -vel.y);
@@ -951,16 +1080,19 @@ namespace EasyRed2HumanAI
                         atkTgt != null &&
                         atkTgt.Pointer != IntPtr.Zero)
                     {
-                        Vector3 dTgt = atkTgt.GetPosition() - pos;
-                        if (dTgt.x * dTgt.x + dTgt.z * dTgt.z <= 240.0f * 240.0f)
+                        Vector3 tgtPos = atkTgt.GetPosition();
+                        Vector3 dTgt = tgtPos - pos;
+                        if (dTgt.x * dTgt.x + dTgt.z * dTgt.z <= 240.0f * 240.0f &&
+                            !IsAircraftTargetDangerCloseToFriendlySquad(myFaction, tgtPos, true))
                         {
                             plane.veh.DropBombs();
                         }
                     }
 
-                    plane.ExitDive();
-                    LiftPlaneExitDiveTargetAboveTerrain(plane, pos, flatFwd, maxGroundY);
-                    curState = plane.planeState;
+                        plane.ExitDive();
+                        LiftPlaneExitDiveTargetAboveTerrain(plane, pos, flatFwd, maxGroundY);
+                        curState = plane.planeState;
+                    }
                 }
             }
 

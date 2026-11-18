@@ -1428,8 +1428,12 @@ namespace EasyRed2HumanAI
                     if (!multiSl && ((sq.Board.FlankLeftCover != null && !sq.Board.FlankLeftCover.Unreachable) || sq.Board.FlankRightCover != null))
                         ws |= VeteranAndTacticsPatches.GoapStateBits.FlankCoverAvailable;
 
-                    if (sol.NearDroppedRadio || (!sol.HasBandage && sol.IsBleeding) || sol.NearAmmoBox || (sol.NearAtMinePickup && sc.HasArmor))
+                    if ((ws & VeteranAndTacticsPatches.ScavengeForbiddenMask) == 0 &&
+                        sol.Suppression < 5f &&
+                        (sol.NearDroppedRadio || (!sol.HasBandage && sol.IsBleeding) || sol.NearAmmoBox || (sol.NearAtMinePickup && sc.HasArmor)))
+                    {
                         ws |= VeteranAndTacticsPatches.GoapStateBits.NeedAmmoOrMedScavenge;
+                    }
 
                     if (sq.Board.AliveMemberCount <= 1 && !sol.HasClearLof)
                         ws |= VeteranAndTacticsPatches.GoapStateBits.IsEntirelyAlone;
@@ -1899,6 +1903,12 @@ namespace EasyRed2HumanAI
                     {
                         sol.NearAmmoBox = false;
                         sol.HasBandage = true;
+                        if (sol.IsBleeding && sol.InCover && sol.Plan.Step1 == VeteranAndTacticsPatches.GoapActionId.BandageInCover)
+                        {
+                            sol.IsBleeding = false;
+                            sol.HasBandage = false;
+                            sol.Health = MathF.Min(100f, sol.Health + 25f);
+                        }
                         sol.HasAtWeapon = sol.HasAtWeapon || sol.NearDroppedAt;
                         sol.NearDroppedAt = false;
                         return true;

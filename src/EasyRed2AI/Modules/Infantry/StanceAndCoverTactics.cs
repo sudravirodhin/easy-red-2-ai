@@ -529,7 +529,14 @@ namespace EasyRed2HumanAI
                 string myFaction = AiCore.GetCachedFaction(h, now);
                 bool isOnBridge = VisionConfig.EnableBridgeCrossingDiscipline.Value &&
                                   AiCore.IsOnBridgeOrNarrowCrossing(myPos);
-                Vector3 threatDir = GetEffectiveThreatDirection(soldier, soldier.joinedSquad, myPos, h.Tr.forward);
+                Vector3 threatDir = GetEffectiveThreatDirection(
+                    soldier,
+                    soldier.joinedSquad,
+                    myPos,
+                    h.Tr.forward,
+                    out bool isCrossfire,
+                    out bool hasDirectTarget);
+                float curSupp = soldier.GetSuppressionValue();
                 CombatCover bestCover = null;
                 float bestScoreSq = float.MaxValue;
                 float bestRawDistSq = float.MaxValue;
@@ -559,7 +566,7 @@ namespace EasyRed2HumanAI
                                 continue;
 
                             float dSq = (covPos - myPos).sqrMagnitude;
-                            if (dSq * 0.42f >= bestScoreSq)
+                            if (dSq * 0.20f >= bestScoreSq)
                                 continue;
 
                             if (isOnBridge && !AiCore.IsSafeBridgeDeckStep(myPos, covPos, out _))
@@ -568,14 +575,30 @@ namespace EasyRed2HumanAI
                             if (!cc.IsCoverAvailable(threatDir, myFaction))
                                 continue;
 
+                            // When taking fire from multiple sides without a single direct target, do not reject
+                            // cover spots just because another wall is behind them; prefer indoor or multi-sided shelter!
                             if (VisionConfig.EnableSmartWallSideCover.Value &&
+                                !isCrossfire &&
                                 IsPositionOnExposedSideOfWall(covPos, threatDir, null, out _))
                             {
                                 continue;
                             }
 
                             bool isLeewardSheltered = IsPositionShelteredByFrontCover(covPos, threatDir, null);
-                            float scoreSq = isLeewardSheltered ? (dSq * 0.42f) : (dSq * 1.45f);
+                            float scoreMult = isLeewardSheltered ? 0.42f : 1.45f;
+
+                            if (!isOnBridge && (isCrossfire || (!hasDirectTarget && curSupp >= 22f)))
+                            {
+                                if (IsPositionInMultiSidedOrIndoorShelter(covPos, out bool isIndoorCov, out int blockedDirs))
+                                {
+                                    if (isIndoorCov)
+                                        scoreMult = Mathf.Min(scoreMult, 0.22f);
+                                    else if (blockedDirs >= 2)
+                                        scoreMult = Mathf.Min(scoreMult, 0.32f);
+                                }
+                            }
+
+                            float scoreSq = dSq * scoreMult;
                             if (scoreSq >= bestScoreSq)
                                 continue;
 
@@ -847,13 +870,31 @@ namespace EasyRed2HumanAI
         // =====================================================================
         private static Vector3 GetEffectiveThreatDirection(Soldier soldier, Squad squad, Vector3 referencePos, Vector3 fallbackDir)
         {
+            return GetEffectiveThreatDirection(soldier, squad, referencePos, fallbackDir, out _, out _);
+        }
+
+        private static Vector3 GetEffectiveThreatDirection(
+            Soldier soldier,
+            Squad squad,
+            Vector3 referencePos,
+            Vector3 fallbackDir,
+            out bool isCrossfire,
+            out bool hasDirectTarget)
+        {
+            isCrossfire = false;
+            hasDirectTarget = false;
+
+            // 1. Direct personal target always takes priority: keep cover between the soldier and the enemy they are engaging!
             if (soldier != null && soldier.aiController != null &&
                 AiCore.TryGetSpottableCenter(soldier.aiController.visibleTarget, out Vector3 ownTargetPos))
             {
                 Vector3 toTarget = ownTargetPos - referencePos;
                 toTarget.y = 0f;
                 if (toTarget.sqrMagnitude > 0.25f)
+                {
+                    hasDirectTarget = true;
                     return toTarget.normalized;
+                }
             }
 
             string faction = soldier != null
@@ -866,7 +907,31 @@ namespace EasyRed2HumanAI
                 145.0f,
                 3.8f,
                 out Vector3 gunfireDir,
-                out float gunfireDist);
+                out float gunfireDist,
+                out isCrossfire);
+
+            // 2. Fresh personal LastKnownTarget (< 5.0s) keeps cover anchored toward the enemy that just ducked,
+            //    unless another enemy is firing from much closer (< 22m) on a different flank!
+            if (soldier != null &&
+                AiCore.TryGetSoldierHandles(soldier.Pointer, out AiCore.SoldierFastHandles sh) &&
+                sh.Vision.LastKnownTarget.LastSeenTime > 0f &&
+                (Time.time - sh.Vision.LastKnownTarget.LastSeenTime) <= 5.0f)
+            {
+                Vector3 toLk = sh.Vision.LastKnownTarget.LastSeenPos - referencePos;
+                toLk.y = 0f;
+                float lkDistSq = toLk.sqrMagnitude;
+                if (lkDistSq > 0.25f)
+                {
+                    Vector3 lkDir = toLk / Mathf.Sqrt(lkDistSq);
+                    if (hasLiveGunfire && gunfireDist <= 22.0f && Vector3.Dot(lkDir, gunfireDir) < 0.35f)
+                    {
+                        isCrossfire = true;
+                        return gunfireDir;
+                    }
+                    hasDirectTarget = true;
+                    return lkDir;
+                }
+            }
 
             if (squad != null && squad.units != null)
             {
@@ -893,12 +958,18 @@ namespace EasyRed2HumanAI
 
                 if (bestToEnemy.sqrMagnitude > 0.25f)
                 {
+                    Vector3 sqEnemyDir = bestToEnemy.normalized;
+                    if (hasLiveGunfire && gunfireDist <= 65.0f && Vector3.Dot(sqEnemyDir, gunfireDir) < 0.35f)
+                    {
+                        isCrossfire = true;
+                    }
+
                     // If an unseen enemy is actively firing much closer to this soldier (< 48m and < 0.65x squad target dist),
                     // take cover on the leeward side of the live gunfire rather than exposing our back to the shooter!
                     if (hasLiveGunfire && gunfireDist <= 48.0f && (gunfireDist * gunfireDist) < bestDistSq * 0.42f)
                         return gunfireDir;
 
-                    return bestToEnemy.normalized;
+                    return sqEnemyDir;
                 }
             }
 
@@ -932,6 +1003,28 @@ namespace EasyRed2HumanAI
                    AiCore.IsMovementBlockedByObstacle(pos + Vector3.up * 0.85f, threatDir, 1.85f);
         }
 
+        /// <summary>
+        /// Checks whether <paramref name="pos"/> is inside a roofed building/bunker (<c>HasLowCeilingOverhead(6.5m)</c>)
+        /// or surrounded by walls/parapets on multiple sides (trench, crater, or interior corner).
+        /// </summary>
+        internal static bool IsPositionInMultiSidedOrIndoorShelter(Vector3 pos, out bool isIndoorRoofed, out int blockedDirections)
+        {
+            isIndoorRoofed = AiCore.HasLowCeilingOverhead(pos, 6.5f);
+            blockedDirections = 0;
+
+            Vector3 waist = pos + Vector3.up * 0.62f;
+            if (AiCore.IsMovementBlockedByObstacle(waist, Vector3.forward, 2.15f))
+                blockedDirections++;
+            if (AiCore.IsMovementBlockedByObstacle(waist, Vector3.back, 2.15f))
+                blockedDirections++;
+            if (AiCore.IsMovementBlockedByObstacle(waist, Vector3.right, 2.15f))
+                blockedDirections++;
+            if (AiCore.IsMovementBlockedByObstacle(waist, Vector3.left, 2.15f))
+                blockedDirections++;
+
+            return isIndoorRoofed || blockedDirections >= 2;
+        }
+
         private static bool IsPositionOnExposedSideOfWall(Vector3 pos, Vector3 threatDir, Transform ignoreRoot, out RaycastHit rearWallHit)
         {
             rearWallHit = default;
@@ -941,24 +1034,32 @@ namespace EasyRed2HumanAI
             if (IsPositionShelteredByFrontCover(pos, threatDir, ignoreRoot))
                 return false;
 
-            // Never mistake the interior back wall of a room, bunker, or pillbox for an exposed exterior wall face
-            if (AiCore.HasLowCeilingOverhead(pos, 3.5f))
+            // Never mistake the interior back wall of a 1- or 2-story building, bunker, barn, or pillbox (<= 6.5m ceiling)
+            // for an exposed exterior wall face!
+            if (AiCore.HasLowCeilingOverhead(pos, 6.5f))
                 return false;
 
             int obsMask = AiCore.GetMovementObstacleMask();
-            if (Physics.Raycast(pos + Vector3.up * 0.82f, -threatDir, out rearWallHit, 1.95f, obsMask, QueryTriggerInteraction.Ignore) &&
-                Mathf.Abs(rearWallHit.normal.y) < 0.58f)
+            bool hasRearWall =
+                (Physics.Raycast(pos + Vector3.up * 0.82f, -threatDir, out rearWallHit, 1.95f, obsMask, QueryTriggerInteraction.Ignore) &&
+                 Mathf.Abs(rearWallHit.normal.y) < 0.58f) ||
+                (Physics.Raycast(pos + Vector3.up * 0.46f, -threatDir, out rearWallHit, 1.95f, obsMask, QueryTriggerInteraction.Ignore) &&
+                 Mathf.Abs(rearWallHit.normal.y) < 0.58f);
+
+            if (!hasRearWall)
+                return false;
+
+            // If flanked by walls/parapets on the left or right as well (e.g., inside a trench, alcove, or corner),
+            // this is multi-sided cover, NOT an exposed freestanding wall face!
+            Vector3 right = new Vector3(threatDir.z, 0f, -threatDir.x);
+            Vector3 waist = pos + Vector3.up * 0.62f;
+            if (AiCore.IsMovementBlockedByObstacle(waist, right, 2.10f) ||
+                AiCore.IsMovementBlockedByObstacle(waist, -right, 2.10f))
             {
-                return true;
+                return false;
             }
 
-            if (Physics.Raycast(pos + Vector3.up * 0.46f, -threatDir, out rearWallHit, 1.95f, obsMask, QueryTriggerInteraction.Ignore) &&
-                Mathf.Abs(rearWallHit.normal.y) < 0.58f)
-            {
-                return true;
-            }
-
-            return false;
+            return true;
         }
 
         private static bool TryValidateLeewardCandidateGround(
@@ -994,10 +1095,9 @@ namespace EasyRed2HumanAI
                 return false;
             }
 
-            if (currentIsOutdoor && AiCore.IsDirectionBlockedByEnvironment(candidatePos + Vector3.up * 0.85f, Vector3.up, 6.0f, ignoreRoot))
-                return false;
-
-            if (!IsPositionShelteredByFrontCover(candidatePos, threatDir, ignoreRoot))
+            // Allow stepping into an indoor building (HasLowCeilingOverhead) OR behind front cover!
+            if (!IsPositionShelteredByFrontCover(candidatePos, threatDir, ignoreRoot) &&
+                !AiCore.HasLowCeilingOverhead(candidatePos, 6.5f))
                 return false;
 
             validPos = candidatePos;
@@ -1251,7 +1351,7 @@ namespace EasyRed2HumanAI
 
                     AiCore.SoldierFastHandles h = AiCore.GetOrCreateSoldierHandlesByAi(__instance);
                     __state.Handles = h;
-                    if (!AiCore.IsLocallyOwnedBot(h) || h.Ref.IsOnVehicle())
+                    if (!AiCore.IsLocallyOwnedBot(h) || h.Ref.IsOnVehicle() || h.Ref.HasSurrended())
                         return true;
 
                     Soldier soldier = h.Ref;
@@ -1651,8 +1751,12 @@ namespace EasyRed2HumanAI
                             else if (!hasStowedAtReady)
                             {
                                 // Switch any rifleman, MG gunner, or dry AT unit away from an invulnerable tank
-                                // to visible enemy infantry or bailed crewmen advancing behind or beside the tank!
-                                if (TryFindVisibleFootEnemy(soldier, out Spottable altEnemy, out float altDist))
+                                // to visible enemy infantry advancing with the tank — BUT if the enemy tank is close (<= 52m),
+                                // only engage close-quarters infantry (<= 22m) so rifle muzzle flash and gunshot noise don't
+                                // immediately attract the tank Commander's periscope onto our position!
+                                float maxSafeInfDistNearTank = __instance.distFromTarget <= 52.0f ? 22.0f : 185.0f;
+                                if (TryFindVisibleFootEnemy(soldier, out Spottable altEnemy, out float altDist) &&
+                                    altDist <= maxSafeInfDistNearTank)
                                 {
                                     __instance.visibleTarget = altEnemy;
                                     soldier.CurrentVisibleTarget = altEnemy;

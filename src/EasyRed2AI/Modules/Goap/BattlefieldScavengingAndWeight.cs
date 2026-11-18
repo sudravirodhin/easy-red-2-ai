@@ -1662,6 +1662,38 @@ namespace EasyRed2HumanAI
             return false;
         }
 
+        private static bool IsScavengePositionSafeFromThreat(
+            Vector3 myPos,
+            Vector3 targetPos,
+            bool hasBoard,
+            ref SquadBlackboard board,
+            float now)
+        {
+            if (!hasBoard)
+                return true;
+
+            // 1. Fresh Casualty Kill-Zone Guard: never walk onto a spot where a squadmate was killed in the last 16s!
+            if (board.LastCasualtyTime > 0f &&
+                (now - board.LastCasualtyTime) <= 16.0f &&
+                (targetPos - board.LastCasualtyPos).sqrMagnitude <= 14.0f * 14.0f)
+            {
+                return false;
+            }
+
+            // 2. Active Threat Standoff & Exposure Guard: never walk within 28m of the enemy threat or forward in front of our cover line!
+            if (board.HasActiveThreat)
+            {
+                if ((targetPos - board.ThreatPosition).sqrMagnitude < 28.0f * 28.0f)
+                    return false;
+
+                float dFromMeSq = (targetPos - myPos).sqrMagnitude;
+                if (dFromMeSq > 3.3f * 3.3f && Vector3.Dot(targetPos - myPos, board.ThreatDirection) > 1.5f)
+                    return false;
+            }
+
+            return true;
+        }
+
         private static bool TryGetNearbyScavengeTarget(
             Soldier soldier,
             Vector3 myPos,
@@ -1688,6 +1720,9 @@ namespace EasyRed2HumanAI
         {
             IntPtr ptr = soldier.Pointer;
             AiCore.SoldierFastHandles scH = AiCore.GetOrCreateSoldierHandles(soldier);
+            IntPtr mySqPtrRadio = (soldier.joinedSquad != null) ? soldier.joinedSquad.Pointer : IntPtr.Zero;
+            SquadBlackboard scBoard = default;
+            bool hasBoard = mySqPtrRadio != IntPtr.Zero && _squadBlackboards.TryGetValue(mySqPtrRadio, out scBoard);
             bool onlyUrgentAt = needAtWeapon && !needAmmo && !needBandage && !wantFragGrenade && !wantSmokeGrenade && !needUrgentPrimary && !wantSquadMg && !wantRoleUpgrade && !wantRadioPack && !wantMedicSyringe && !wantHelmet && !canFeedNeedyAlly;
             bool onlyUrgentBandage = needBandage && !needAmmo && !wantFragGrenade && !wantSmokeGrenade && !needAtWeapon && !needUrgentPrimary && !wantSquadMg && !wantRoleUpgrade && !wantRadioPack && !wantMedicSyringe && !wantHelmet && !canFeedNeedyAlly;
             result = scH != null ? scH.Goap.Scavenge : default;
@@ -1704,28 +1739,40 @@ namespace EasyRed2HumanAI
                     !result.TargetBuddyDonor.IsInjured &&
                     result.TargetBuddyDonor.transform != null)
                 {
-                    result.TargetPosition = result.TargetBuddyDonor.transform.position;
-                    return true;
+                    Vector3 donorPos = result.TargetBuddyDonor.transform.position;
+                    if (IsScavengePositionSafeFromThreat(myPos, donorPos, hasBoard, ref scBoard, now))
+                    {
+                        result.TargetPosition = donorPos;
+                        return true;
+                    }
                 }
-                if (result.IsFeedingNeedyAlly &&
-                    result.TargetNeedyAllyToFeed != null &&
-                    result.TargetNeedyAllyToFeed.Pointer != IntPtr.Zero &&
-                    result.TargetNeedyAllyToFeed.IsAlive &&
-                    !result.TargetNeedyAllyToFeed.IsInjured &&
-                    result.TargetNeedyAllyToFeed.transform != null)
+                else if (result.IsFeedingNeedyAlly &&
+                         result.TargetNeedyAllyToFeed != null &&
+                         result.TargetNeedyAllyToFeed.Pointer != IntPtr.Zero &&
+                         result.TargetNeedyAllyToFeed.IsAlive &&
+                         !result.TargetNeedyAllyToFeed.IsInjured &&
+                         result.TargetNeedyAllyToFeed.transform != null)
                 {
-                    result.TargetPosition = result.TargetNeedyAllyToFeed.transform.position;
-                    return true;
+                    Vector3 allyPos = result.TargetNeedyAllyToFeed.transform.position;
+                    if (IsScavengePositionSafeFromThreat(myPos, allyPos, hasBoard, ref scBoard, now))
+                    {
+                        result.TargetPosition = allyPos;
+                        return true;
+                    }
                 }
-                if (result.TargetFloorItem != null)
+                else if (result.TargetFloorItem != null)
                 {
                     if (IsFloorItemFreeToPickUp(result.TargetFloorItem) &&
                         !IsScavengeTargetClaimedByOtherBot(ptr, result.TargetFloorItem.Pointer, now))
                     {
-                        result.TargetPosition = result.TargetFloorItem.transform.position;
-                        return true;
+                        Vector3 fPos = result.TargetFloorItem.transform.position;
+                        if (IsScavengePositionSafeFromThreat(myPos, fPos, hasBoard, ref scBoard, now))
+                        {
+                            result.TargetPosition = fPos;
+                            return true;
+                        }
                     }
-                    // Someone else already picked up or claimed the floor item while we were walking toward it; rescan immediately!
+                    // Someone else already picked up/claimed the floor item or it is now in a kill-zone; rescan!
                 }
                 else if (result.TargetRefillCrate != null)
                 {
@@ -1735,16 +1782,24 @@ namespace EasyRed2HumanAI
                         result.TargetRefillCrate.transform != null &&
                         !IsScavengeTargetClaimedByOtherBot(ptr, result.TargetRefillCrate.Pointer, now))
                     {
-                        result.TargetPosition = result.TargetRefillCrate.transform.position;
-                        return true;
+                        Vector3 crPos = result.TargetRefillCrate.transform.position;
+                        if (IsScavengePositionSafeFromThreat(myPos, crPos, hasBoard, ref scBoard, now))
+                        {
+                            result.TargetPosition = crPos;
+                            return true;
+                        }
                     }
                 }
                 else if (result.TargetInventory != null &&
                          IsInventoryValidCorpseOrCrate(result.TargetInventory, soldier.faction, result.NeedAmmo || result.NeedFragGrenade || result.NeedSmokeGrenade, result.NeedBandage || result.IsMedicSyringePickup, out _, out _) &&
                          !IsScavengeTargetClaimedByOtherBot(ptr, result.TargetInventory.Pointer, now))
                 {
-                    result.TargetPosition = result.TargetInventory.InventoryPosition;
-                    return true;
+                    Vector3 invPos = result.TargetInventory.InventoryPosition;
+                    if (IsScavengePositionSafeFromThreat(myPos, invPos, hasBoard, ref scBoard, now))
+                    {
+                        result.TargetPosition = invPos;
+                        return true;
+                    }
                 }
                 else if (result.TargetBuddyDonor == null && result.TargetNeedyAllyToFeed == null)
                 {
@@ -1778,13 +1833,12 @@ namespace EasyRed2HumanAI
                 maxSearchRadius = Mathf.Min(maxSearchRadius, needAmmo ? 12.0f : 10.0f);
             }
             float bestDistSq = maxSearchRadius * maxSearchRadius;
-            IntPtr mySqPtrRadio = (soldier.joinedSquad != null) ? soldier.joinedSquad.Pointer : IntPtr.Zero;
             float lastRadLostTime = 0f;
             float soldierSuppForRadio = 0f;
             if (wantRadioPack)
             {
-                if (mySqPtrRadio != IntPtr.Zero && _squadBlackboards.TryGetValue(mySqPtrRadio, out SquadBlackboard radBoard))
-                    lastRadLostTime = radBoard.LastRadiomanLostTime;
+                if (hasBoard)
+                    lastRadLostTime = scBoard.LastRadiomanLostTime;
                 soldierSuppForRadio = soldier.GetSuppressionValue();
             }
             float nextWepT = scH != null ? scH.Goap.NextWeaponUpgradeAllowedTime : 0f;
@@ -1820,7 +1874,8 @@ namespace EasyRed2HumanAI
                         if (dSq >= bestDistSq || dSq > 14.0f * 14.0f)
                             continue;
 
-                        if (IsScavengeTargetClaimedByOtherBot(ptr, sSnap.Ptr, now))
+                        if (!IsScavengePositionSafeFromThreat(myPos, sSnap.Pos, hasBoard, ref scBoard, now) ||
+                            IsScavengeTargetClaimedByOtherBot(ptr, sSnap.Ptr, now))
                             continue;
 
                         if (canRefillBandageFromMedic && sSnap.IsMedic)
@@ -1893,7 +1948,9 @@ namespace EasyRed2HumanAI
                     continue;
 
                 ItemObject item = fEntry.Item;
-                if (!IsFloorItemFreeToPickUp(item) || IsScavengeTargetClaimedByOtherBot(ptr, item.Pointer, now))
+                if (!IsScavengePositionSafeFromThreat(myPos, itemPos, hasBoard, ref scBoard, now) ||
+                    !IsFloorItemFreeToPickUp(item) ||
+                    IsScavengeTargetClaimedByOtherBot(ptr, item.Pointer, now))
                     continue;
 
                 switch (fEntry.Kind)
@@ -2216,7 +2273,9 @@ namespace EasyRed2HumanAI
                         continue;
 
                     float dSq = (cPos - myPos).sqrMagnitude;
-                    if (dSq >= bestDistSq || IsScavengeTargetClaimedByOtherBot(ptr, crate.Pointer, now))
+                    if (dSq >= bestDistSq ||
+                        !IsScavengePositionSafeFromThreat(myPos, cPos, hasBoard, ref scBoard, now) ||
+                        IsScavengeTargetClaimedByOtherBot(ptr, crate.Pointer, now))
                         continue;
 
                     CachedBoxOverrideInfo ov = GetCachedBoxOverrideInfo(crate.Pointer, crate.overrideContent, crate.allowTakeWeaponIntoInventory);
@@ -2262,7 +2321,8 @@ namespace EasyRed2HumanAI
                     if (dSq >= bestDistSq)
                         continue;
 
-                    if (IsScavengeTargetClaimedByOtherBot(ptr, sEntry.Ptr, now))
+                    if (!IsScavengePositionSafeFromThreat(myPos, invPos, hasBoard, ref scBoard, now) ||
+                        IsScavengeTargetClaimedByOtherBot(ptr, sEntry.Ptr, now))
                         continue;
 
                     InventoryManager inv = sEntry.Inv;

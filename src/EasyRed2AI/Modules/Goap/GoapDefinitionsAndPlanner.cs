@@ -91,6 +91,29 @@ namespace EasyRed2HumanAI
             TacticalFallbackRetreat = 16
         }
 
+        internal const GoapStateBits ScavengeForbiddenMask =
+            GoapStateBits.IsSuppressed |
+            GoapStateBits.IsHeavilySuppressed |
+            GoapStateBits.NearFreshCasualty |
+            GoapStateBits.HasVisibleEnemy |
+            GoapStateBits.CanFireAtVisibleEnemy |
+            GoapStateBits.ExposedSideOfWall |
+            GoapStateBits.OverwhelmedNeedFallback |
+            GoapStateBits.InPointBlankRange |
+            GoapStateBits.OnBridgeOrNarrow;
+
+        internal const GoapStateBits LiberateForbiddenMask =
+            GoapStateBits.IsBleeding |
+            GoapStateBits.IsSuppressed |
+            GoapStateBits.IsHeavilySuppressed |
+            GoapStateBits.NearFreshCasualty |
+            GoapStateBits.HasVisibleEnemy |
+            GoapStateBits.CanFireAtVisibleEnemy |
+            GoapStateBits.ExposedSideOfWall |
+            GoapStateBits.OverwhelmedNeedFallback |
+            GoapStateBits.IsRadioman |
+            GoapStateBits.InPointBlankRange;
+
         private struct GoapActionDef
         {
             public GoapActionId Id;
@@ -163,7 +186,7 @@ namespace EasyRed2HumanAI
             {
                 Id = GoapActionId.MoveToFlankCover,
                 Required = GoapStateBits.SquadHasActiveThreat | GoapStateBits.AllyPinningThreat | GoapStateBits.FlankCoverAvailable,
-                Forbidden = GoapStateBits.IsBleeding | GoapStateBits.IsMachineGunner | GoapStateBits.IsRadioman | GoapStateBits.OnBridgeOrNarrow,
+                Forbidden = GoapStateBits.IsBleeding | GoapStateBits.IsHeavilySuppressed | GoapStateBits.IsMachineGunner | GoapStateBits.IsRadioman | GoapStateBits.OnBridgeOrNarrow,
                 Add = GoapStateBits.InCover | GoapStateBits.InGrenadeRange | GoapStateBits.TargetLostBehindCover | GoapStateBits.TargetEliminated,
                 Remove = GoapStateBits.None,
                 BaseCost = 1.6f
@@ -208,7 +231,7 @@ namespace EasyRed2HumanAI
             {
                 Id = GoapActionId.RescueSurrenderedComrade,
                 Required = GoapStateBits.ComradeNeedsLiberation,
-                Forbidden = GoapStateBits.IsBleeding | GoapStateBits.IsHeavilySuppressed | GoapStateBits.IsRadioman | GoapStateBits.InPointBlankRange,
+                Forbidden = LiberateForbiddenMask,
                 Add = GoapStateBits.SquadSupported,
                 Remove = GoapStateBits.ComradeNeedsLiberation,
                 BaseCost = 2.1f
@@ -235,16 +258,16 @@ namespace EasyRed2HumanAI
             {
                 Id = GoapActionId.ScavengeSupplyFromCorpse,
                 Required = GoapStateBits.NeedAmmoOrMedScavenge,
-                Forbidden = GoapStateBits.IsHeavilySuppressed | GoapStateBits.InPointBlankRange | GoapStateBits.OnBridgeOrNarrow,
-                Add = GoapStateBits.HasBandage | GoapStateBits.SurvivedCrisis | GoapStateBits.SquadSupported,
+                Forbidden = ScavengeForbiddenMask,
+                Add = GoapStateBits.HasBandage | GoapStateBits.SquadSupported,
                 Remove = GoapStateBits.NeedAmmoOrMedScavenge,
-                BaseCost = 1.15f
+                BaseCost = 2.25f
             },
             new GoapActionDef
             {
                 Id = GoapActionId.TacticalFallbackRetreat,
                 Required = GoapStateBits.OverwhelmedNeedFallback,
-                Forbidden = GoapStateBits.IsBleeding | GoapStateBits.InPointBlankRange | GoapStateBits.OnBridgeOrNarrow,
+                Forbidden = GoapStateBits.InPointBlankRange | GoapStateBits.OnBridgeOrNarrow,
                 Add = GoapStateBits.InCover | GoapStateBits.SurvivedCrisis | GoapStateBits.SquadSupported,
                 Remove = GoapStateBits.OverwhelmedNeedFallback | GoapStateBits.ArmorThreatClose | GoapStateBits.ExposedSideOfWall,
                 BaseCost = 0.88f
@@ -1079,7 +1102,7 @@ namespace EasyRed2HumanAI
             AiCore.SoldierFastHandles h = AiCore.GetOrCreateSoldierHandles(soldier);
             GoapStateBits ws = GoapStateBits.None;
             Vector3 myPos = soldier.transform.position;
-            Vector3 localThreatDir = GetEffectiveThreatDirection(soldier, sq, myPos, board.ThreatDirection);
+            Vector3 localThreatDir = GetEffectiveThreatDirection(soldier, sq, myPos, board.ThreatDirection, out bool isCrossfire, out bool hasDirectTarget);
             bool isRad = soldier.IsRadioman();
 
             // Never classify a crewman as "bailed out" while he is actively repairing OR walking to remount his vehicle!
@@ -1093,7 +1116,9 @@ namespace EasyRed2HumanAI
                     ws |= GoapStateBits.BandageUnsafeUnderFire;
             }
             if ((ws & GoapStateBits.BandageUnsafeUnderFire) == 0 &&
-                (soldier.IsOnCover() || IsPositionShelteredByFrontCover(myPos, localThreatDir, soldier.transform.root)))
+                (soldier.IsOnCover() ||
+                 (!isCrossfire && IsPositionShelteredByFrontCover(myPos, localThreatDir, soldier.transform.root)) ||
+                 (isCrossfire && IsPositionInMultiSidedOrIndoorShelter(myPos, out _, out _))))
             {
                 ws |= GoapStateBits.InCover;
             }
@@ -1231,6 +1256,8 @@ namespace EasyRed2HumanAI
             }
 
             if (VisionConfig.EnableSmartWallSideCover.Value &&
+                !isCrossfire &&
+                (h == null || now >= h.Stance.NextWallSideCheckTime) &&
                 !isBailedVehicleCrew &&
                 !ai.IsMoving() &&
                 !IsAsyncPathRefreshPending(ai, soldier, myPos, now) &&
@@ -1324,21 +1351,30 @@ namespace EasyRed2HumanAI
             // 4) Emergent Field Radio / Fallen Medic Syringe Inheritance & Knocked-Off / Player-Gifted Helmet Recovery!
             // 5) Support Ammo-Bearer proactively feeding a dry MG or AT squadmate!
             bool urgentBandageWhileBleeding = soldier.isBleeding && !hasBandage;
-            if ((!soldier.isBleeding || urgentBandageWhileBleeding) && suppression < 28f && !isOnBridge)
+            bool canConsiderAnyScavenge =
+                (!soldier.isBleeding || urgentBandageWhileBleeding) &&
+                (ws & ScavengeForbiddenMask) == 0 &&
+                suppression < 5.0f;
+            if (canConsiderAnyScavenge)
             {
                 GenericGun gun0 = soldier.GetHeldGun(0);
                 GenericGun gun1 = soldier.GetHeldGun(1);
                 GenericGun gun2 = soldier.GetHeldGun(2);
                 bool recentFootContact = h != null &&
                                          h.Vision.LastKnownTarget.LastSeenTime > 0f &&
-                                         (now - h.Vision.LastKnownTarget.LastSeenTime) < 4.5f;
+                                         (now - h.Vision.LastKnownTarget.LastSeenTime) < 10.0f;
+                bool recentCloseGunfire = VisionPatches.TryGetNearestEnemyGunfire(myPos, soldier.faction, 55f, 3.5f, out _);
+                bool inActiveFirefight = board.HasActiveThreat || recentFootContact || recentCloseGunfire || suppression >= 2.0f;
                 bool casualScavengeAllowed = !urgentBandageWhileBleeding && !isEvadingArmor && !isBailedVehicleCrew;
-                bool nonUrgentScavengeAllowed = casualScavengeAllowed && !recentFootContact;
+                bool nonUrgentScavengeAllowed = casualScavengeAllowed && !inActiveFirefight;
+                bool primaryCompletelyDry = gun0 != null && gun0.GetCurrentAmmoCount() <= 0 && soldier.IsOutOfAmmosFor(gun0);
                 bool outOfAmmo = casualScavengeAllowed &&
-                                 ((gun0 != null && soldier.IsOutOfAmmosFor(gun0)) ||
-                                  (gun1 != null && gun1.IsAtWeapon() && !string.IsNullOrEmpty(gun1.compatibleAmmo) && soldier.IsOutOfAmmosFor(gun1)) ||
-                                  (gun2 != null && !gun2.IsPistol() && !gun2.IsAtWeapon() && soldier.IsOutOfAmmosFor(gun2)));
-                bool outOfBandage = (urgentBandageWhileBleeding || !recentFootContact) &&
+                                 (primaryCompletelyDry ||
+                                  (!inActiveFirefight &&
+                                   ((gun0 != null && soldier.IsOutOfAmmosFor(gun0)) ||
+                                    (gun1 != null && gun1.IsAtWeapon() && !string.IsNullOrEmpty(gun1.compatibleAmmo) && soldier.IsOutOfAmmosFor(gun1)) ||
+                                    (gun2 != null && !gun2.IsPistol() && !gun2.IsAtWeapon() && soldier.IsOutOfAmmosFor(gun2)))));
+                bool outOfBandage = (urgentBandageWhileBleeding || !inActiveFirefight) &&
                                     !isEvadingArmor &&
                                     !isBailedVehicleCrew &&
                                     !hasBandage;
@@ -1351,7 +1387,7 @@ namespace EasyRed2HumanAI
                 bool isMedicRole = AiCore.IsMedicSoldierOrPersonality(null, pers);
                 bool needAtWeapon = false;
                 if (!urgentBandageWhileBleeding &&
-                    (armorThreatPresent || isAtRole) &&
+                    (armorThreatPresent || (isAtRole && !inActiveFirefight)) &&
                     !onRetreatTask && !soldier.IsSquadLeader() && !soldier.IsRadioman() && !isMedicRole)
                 {
                     bool hasUsableAtGun = (gun0 != null && gun0.IsAtWeapon() && (gun0.GetCurrentAmmoCount() > 0 || !soldier.IsOutOfAmmosFor(gun0))) ||
@@ -1377,7 +1413,7 @@ namespace EasyRed2HumanAI
                         out needUrgentPrimary,
                         out wantSquadMg,
                         out wantRoleUpgrade);
-                    if (recentFootContact)
+                    if (inActiveFirefight)
                     {
                         wantSquadMg = false;
                         wantRoleUpgrade = false;
@@ -1510,6 +1546,10 @@ namespace EasyRed2HumanAI
                 {
                     ws |= GoapStateBits.NeedAmmoOrMedScavenge;
                 }
+            }
+            else if (h != null)
+            {
+                h.Goap.Scavenge = default;
             }
 
             // Win-Condition Urgency: Defenders contest objectives being back-capped or outnumbered inside the circle,
@@ -1653,9 +1693,45 @@ namespace EasyRed2HumanAI
                 (GoapStateBits.IsBleeding | GoapStateBits.BandageUnsafeUnderFire | GoapStateBits.InCover) &&
                 (ws & (GoapStateBits.CanFireAtVisibleEnemy | GoapStateBits.InPointBlankRange)) != 0;
 
-            bool actionableBleedCrisis = (ws & GoapStateBits.IsBleeding) != 0 &&
-                                         ((ws & GoapStateBits.InCover) == 0 ||
-                                          (ws & (GoapStateBits.HasBandage | GoapStateBits.NeedAmmoOrMedScavenge)) != 0);
+            bool canScavengeNow =
+                canMove &&
+                (ws & GoapStateBits.NeedAmmoOrMedScavenge) != 0 &&
+                (ws & ScavengeForbiddenMask) == 0;
+
+            bool canBandageInCoverNow =
+                (ws & (GoapStateBits.InPointBlankRange | GoapStateBits.ExposedSideOfWall | GoapStateBits.ArmorThreatClose | GoapStateBits.BandageUnsafeUnderFire)) == 0 &&
+                ((ws & GoapStateBits.HasBandage) != 0 || canScavengeNow);
+
+            bool actionableBleedCrisis =
+                (ws & GoapStateBits.IsBleeding) != 0 &&
+                ((canMove && (ws & GoapStateBits.InCover) == 0) ||
+                 ((ws & GoapStateBits.InCover) != 0 && canBandageInCoverNow));
+
+            bool actionableFallbackCrisis =
+                canMove &&
+                (ws & GoapStateBits.OverwhelmedNeedFallback) != 0 &&
+                (ws & (GoapStateBits.InPointBlankRange | GoapStateBits.OnBridgeOrNarrow)) == 0 &&
+                ((ws & GoapStateBits.IsBleeding) == 0 || !canBandageInCoverNow);
+
+            bool actionableWallCrisis =
+                canMove &&
+                (ws & GoapStateBits.ExposedSideOfWall) != 0 &&
+                (ws & (GoapStateBits.InPointBlankRange | GoapStateBits.OnBridgeOrNarrow)) == 0;
+
+            bool actionableOpenCoverCrisis =
+                canMove &&
+                (ws & GoapStateBits.InCover) == 0 &&
+                (ws & (GoapStateBits.IsSuppressed | GoapStateBits.IsHeavilySuppressed | GoapStateBits.NearFreshCasualty | GoapStateBits.ArmorThreatClose)) != 0;
+
+            bool canLoneWolfNow =
+                canMove &&
+                (ws & GoapStateBits.IsEntirelyAlone) != 0 &&
+                (ws & (GoapStateBits.IsBleeding | GoapStateBits.InPointBlankRange | GoapStateBits.CanFireAtVisibleEnemy)) == 0;
+
+            bool canLiberateNow =
+                canMove &&
+                (ws & GoapStateBits.ComradeNeedsLiberation) != 0 &&
+                (ws & LiberateForbiddenMask) == 0;
 
             GoapStateBits desiredGoalBit;
             if (nonBleedingBailedCrew)
@@ -1671,13 +1747,13 @@ namespace EasyRed2HumanAI
                 desiredGoalBit = GoapStateBits.TargetEliminated;
             }
             else if (actionableBleedCrisis ||
-                     (ws & (GoapStateBits.OverwhelmedNeedFallback | GoapStateBits.ArmorThreatClose | GoapStateBits.ExposedSideOfWall)) != 0 ||
-                     ((ws & (GoapStateBits.IsSuppressed | GoapStateBits.IsHeavilySuppressed | GoapStateBits.NearFreshCasualty)) != 0 &&
-                      (ws & GoapStateBits.InCover) == 0))
+                     actionableFallbackCrisis ||
+                     actionableWallCrisis ||
+                     actionableOpenCoverCrisis)
             {
                 desiredGoalBit = GoapStateBits.SurvivedCrisis;
             }
-            else if ((ws & GoapStateBits.RadioLinkDrifting) != 0)
+            else if (canMove && (ws & GoapStateBits.RadioLinkDrifting) != 0 && (ws & (GoapStateBits.IsBleeding | GoapStateBits.InPointBlankRange)) == 0)
             {
                 desiredGoalBit = GoapStateBits.RadioLinkPreserved;
             }
@@ -1685,15 +1761,16 @@ namespace EasyRed2HumanAI
             {
                 desiredGoalBit = GoapStateBits.TargetEliminated;
             }
-            else if ((ws & GoapStateBits.NeedAmmoOrMedScavenge) != 0)
+            else if (canLoneWolfNow)
             {
                 desiredGoalBit = GoapStateBits.SquadSupported;
             }
-            else if ((ws & GoapStateBits.IsEntirelyAlone) != 0 && (ws & GoapStateBits.CanFireAtVisibleEnemy) == 0)
+            else if (canScavengeNow &&
+                     (ws & (GoapStateBits.CanFireAtVisibleEnemy | GoapStateBits.CanProvideOverwatch | GoapStateBits.CanBlindSuppressThreat)) == 0)
             {
                 desiredGoalBit = GoapStateBits.SquadSupported;
             }
-            else if ((ws & GoapStateBits.ComradeNeedsLiberation) != 0 && (ws & GoapStateBits.HasVisibleEnemy) == 0)
+            else if (canLiberateNow)
             {
                 desiredGoalBit = GoapStateBits.SquadSupported;
             }
@@ -1703,13 +1780,17 @@ namespace EasyRed2HumanAI
                 // EVERY soldier prioritizes neutralizing the close attacker directly rather than area suppression!
                 bool closeCqbDirectFire = (ws & GoapStateBits.CanFireAtVisibleEnemy) != 0 &&
                                           (ws & GoapStateBits.CanProvideOverwatch) == 0;
-                bool canFirePinNow = (ws & (GoapStateBits.CanProvideOverwatch | GoapStateBits.CanBlindSuppressThreat)) != 0;
+                bool canFirePinNow = (ws & GoapStateBits.IsBleeding) == 0 &&
+                                     (ws & (GoapStateBits.CanProvideOverwatch | GoapStateBits.CanBlindSuppressThreat)) != 0;
                 bool canExecutePinNow = canFirePinNow ||
                                         ((ws & GoapStateBits.HasSmokeGrenade) != 0 && (ws & GoapStateBits.AllyPinningThreat) == 0);
                 bool canExecuteSupportNow = canExecutePinNow ||
-                                            (ws & (GoapStateBits.NeedAmmoOrMedScavenge | GoapStateBits.ComradeNeedsLiberation | GoapStateBits.IsEntirelyAlone)) != 0 ||
+                                            canScavengeNow ||
+                                            canLiberateNow ||
+                                            canLoneWolfNow ||
                                             ((ws & (GoapStateBits.HasFragGrenade | GoapStateBits.InGrenadeRange | GoapStateBits.TargetLostBehindCover)) ==
-                                             (GoapStateBits.HasFragGrenade | GoapStateBits.InGrenadeRange | GoapStateBits.TargetLostBehindCover));
+                                             (GoapStateBits.HasFragGrenade | GoapStateBits.InGrenadeRange | GoapStateBits.TargetLostBehindCover) &&
+                                             (ws & (GoapStateBits.IsBleeding | GoapStateBits.IsRadioman | GoapStateBits.InPointBlankRange)) == 0);
                 bool isDedicatedSupportRole =
                     !closeCqbDirectFire &&
                     canExecuteSupportNow &&
@@ -1872,7 +1953,7 @@ namespace EasyRed2HumanAI
 
             // Fallback Goal Bridge: if TargetEliminated/SurvivedCrisis had no valid path during an active firefight
             // (e.g. on a narrow bridge, pinned without flank cover, or bleeding in cover with a close shooter right around
-            // the corner blocking bandaging), fall back to DirectFire / Overwatch / Suppress so a soldier never stalls!
+            // the corner or out of bandages blocking bandaging), fall back to DirectFire / Overwatch / Suppress so a soldier never stalls!
             if (bestStep0 == GoapActionId.None)
             {
                 if ((ws & GoapStateBits.CanFireAtVisibleEnemy) != 0)
@@ -1880,7 +1961,7 @@ namespace EasyRed2HumanAI
                     bestStep0 = GoapActionId.DirectFireEngagement;
                 }
                 else if ((ws & GoapStateBits.SquadHasActiveThreat) != 0 &&
-                         ((ws & GoapStateBits.IsBleeding) == 0 || (ws & GoapStateBits.BandageUnsafeUnderFire) != 0))
+                         (!actionableBleedCrisis || (ws & GoapStateBits.BandageUnsafeUnderFire) != 0))
                 {
                     if ((ws & GoapStateBits.CanProvideOverwatch) != 0)
                         bestStep0 = GoapActionId.HoldOverwatchFire;
@@ -1908,6 +1989,38 @@ namespace EasyRed2HumanAI
                 DesiredPose = SoldierPose.Crouch,
                 LockUnitCoverChange = false
             };
+        }
+
+        internal static bool IsGoapActionCurrentlyLegal(
+            GoapActionId action,
+            GoapStateBits ws,
+            IntPtr soldierPtr,
+            ref SquadBlackboard board,
+            float now)
+        {
+            if (action == GoapActionId.None)
+                return false;
+
+            int count = _goapActions.Length;
+            for (int i = 0; i < count; i++)
+            {
+                GoapActionDef def = _goapActions[i];
+                if (def.Id != action)
+                    continue;
+
+                if ((ws & def.Required) != def.Required || (ws & def.Forbidden) != 0)
+                    return false;
+
+                if (action == GoapActionId.BoundWithOverwatch &&
+                    !CanExecuteBoundWithOverwatch(ws, soldierPtr, ref board, now, countSelfPreservationBalk: false))
+                {
+                    return false;
+                }
+
+                return true;
+            }
+
+            return false;
         }
 
         private static bool CanExecuteBoundWithOverwatch(
@@ -2130,13 +2243,21 @@ namespace EasyRed2HumanAI
                     cost *= factionProfile.ScavengeAndResupplyMult * micro.CautionCostMult;
                     if (lowTicketConservation)
                         cost -= 0.40f;
+                    bool isAtPickup = AiCore.TryGetSoldierHandles(soldierPtr, out AiCore.SoldierFastHandles scH) &&
+                                      scH.Goap.Scavenge.IsAtWeaponPickup;
                     // Urgently prioritize grabbing a nearby fallen Bazooka/Panzerfaust/AT grenade when enemy armor is closing in,
                     // while heavily penalizing any non-AT scavenging until out of immediate armor danger!
                     if ((ws & GoapStateBits.ArmorThreatClose) != 0)
                     {
-                        bool isAtPickup = AiCore.TryGetSoldierHandles(soldierPtr, out AiCore.SoldierFastHandles scH) &&
-                                          scH.Goap.Scavenge.IsAtWeaponPickup;
                         cost += isAtPickup ? -0.70f : 1.50f;
+                    }
+                    // Self-Preservation: penalize abandoning existing cover during an active squad firefight unless grabbing AT vs armor or bleeding without a bandage!
+                    if ((ws & GoapStateBits.SquadHasActiveThreat) != 0 &&
+                        (ws & GoapStateBits.InCover) != 0 &&
+                        (ws & GoapStateBits.IsBleeding) == 0 &&
+                        !isAtPickup)
+                    {
+                        cost += 1.15f;
                     }
                     // Prioritize inheriting a fallen radio pack when the squad is cut off from its Radioman!
                     if (!board.PreviouslyHadAliveRadioman && !factionProfile.AllowDisconnectedLocalFlank)

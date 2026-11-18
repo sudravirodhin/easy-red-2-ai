@@ -729,15 +729,39 @@ namespace EasyRed2HumanAI
                     float now = Time.time;
                     Spottable curTarget = __instance.CurrentVisibleTarget;
 
+                    AiCore.TurretFastTraits traits = AiCore.GetCachedTurretTraits(turret);
+                    Vehicle veh = traits.VehHandles != null ? traits.VehHandles.Ref : AiCore.GetCachedTurretVehicle(turret);
+                    bool owned = (__0 != null && AiCore.IsLocallyOwnedBot(__0)) || AiCore.IsLocallyOwnedVehicle(veh);
+
+                    // Active 360-Degree Tank Commander Periscope / Cupola Horizon Scan:
+                    // Native TurretAI.AutoPilot (0x180830802) returns immediately when CurrentVisibleTarget == null without
+                    // ever calling TurretCommander.RotateToward, leaving the Commander's periscope frozen dead ahead!
+                    // When unengaged, orient toward recent enemy gunfire or continuously pan 360 degrees around the tank.
+                    if (owned && traits.IsCommanderTurret && (curTarget == null || curTarget.Pointer == IntPtr.Zero))
+                    {
+                        string cmdFac = (__0 != null && !string.IsNullOrEmpty(__0.faction))
+                            ? __0.faction
+                            : GetVehicleCrewFaction(veh, turret);
+                        Vector3 scanDir;
+                        if (!string.IsNullOrEmpty(cmdFac) &&
+                            VisionPatches.TryGetDominantEnemyGunfireDirection(turret.GetFirePos(), cmdFac, 185f, 3.5f, out Vector3 gunDir, out _, out _))
+                        {
+                            scanDir = gunDir;
+                        }
+                        else
+                        {
+                            float phaseRad = (now * 55.0f + ((turretPtr.ToInt64() & 15L) * 24.0f)) * Mathf.Deg2Rad;
+                            scanDir = new Vector3(Mathf.Sin(phaseRad), 0f, Mathf.Cos(phaseRad));
+                        }
+                        turret.RotateToward(scanDir, 0f);
+                    }
+
                     // Dynamic Human Turret / Emplacement Sight-Lay & Trail-Shift Reaction Time:
                     // Native TurretAI.AutoPilot rotates toward CurrentVisibleTarget while holding trigger pull until
                     // Time.time > nextFireCheckTime (0x180830E26). Pre-sighted lanes react quickly (0.22s-0.38s),
                     // whereas flanked static AT/HMG emplacements and off-bore tank turrets require human sight-lay settle!
                     if (VisionConfig.EnableDynamicHumanReactionTime.Value)
                     {
-                        AiCore.TurretFastTraits traits = AiCore.GetCachedTurretTraits(turret);
-                        Vehicle veh = traits.VehHandles != null ? traits.VehHandles.Ref : AiCore.GetCachedTurretVehicle(turret);
-                        bool owned = (__0 != null && AiCore.IsLocallyOwnedBot(__0)) || AiCore.IsLocallyOwnedVehicle(veh);
                         if (owned && !traits.IsCommanderTurret && curTarget != null && curTarget.Pointer != IntPtr.Zero)
                         {
                             _turretSightReaction.TryGetValue(turretPtr, out TurretSightReactionState rState);

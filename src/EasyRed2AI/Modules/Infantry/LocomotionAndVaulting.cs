@@ -453,10 +453,10 @@ namespace EasyRed2HumanAI
                     return false;
                 }
             }
-            else if (Mathf.Abs(frontHit.normal.y) > 0.60f)
+            else if (Mathf.Abs(frontHit.normal.y) > (vaultLandingRise >= 0.45f ? 0.68f : 0.60f))
             {
-                // Allow vertical walls AND battered wooden trench revetment planks / sandbags (|normal.y| <= 0.60f),
-                // while rejecting walkable <= 45 deg sloped ramps (|normal.y| >= 0.707f).
+                // Allow vertical walls AND battered wooden/earth trench revetment walls (|normal.y| <= 0.68f when stepping
+                // up >= 0.45m onto a parapet lip), while rejecting walkable <= 45 deg sloped ramps (|normal.y| >= 0.707f).
                 vaultOrRejectReason = "sloped_surface";
                 return false;
             }
@@ -576,7 +576,8 @@ namespace EasyRed2HumanAI
 
                 bool farIsElevatedTerrain = AiCore.IsTerrainCollider(farHit.collider) &&
                                             farHit.point.y > myPos.y + 0.35f;
-                if (frontIsTerrain || farIsElevatedTerrain)
+                bool isBatteredTrenchRevetment = !frontIsTerrain && Mathf.Abs(frontHit.normal.y) > 0.58f;
+                if (frontIsTerrain || farIsElevatedTerrain || isBatteredTrenchRevetment)
                 {
                     if (farHit.normal.y < 0.80f)
                     {
@@ -597,6 +598,99 @@ namespace EasyRed2HumanAI
                 }
             }
 
+            return true;
+        }
+
+        /// <summary>
+        /// Allows grounded dry foot bots on a trench rim to step directly off the side into a trench
+        /// (<c>0.65m..2.65m</c> drop onto a walkable trench floor) when native <c>CPathFinding</c>
+        /// (which symmetrically rejects <c>|slope| &gt;= 58°</c> in both directions) either fails or routes
+        /// them <c>20m–40m</c> around the exposed parapet to a trench entrance.
+        /// </summary>
+        private static bool TryStepOffIntoTrench(SoldierAI ai, Soldier soldier, AiCore.SoldierFastHandles h, float now)
+        {
+            if (ai.moveDirectlyToward_end > now || h.Tr == null)
+                return false;
+
+            Vector3 myPos = h.Tr.position;
+            if (AiCore.IsOnBridgeOrNarrowCrossing(myPos))
+                return false;
+
+            if (AiCore.TryGetActiveWaterLevel(out float waterY) && myPos.y <= waterY + 0.35f)
+                return false;
+
+            Vector3 dest = ai.MoveDestination;
+            Vector3 toDestFlat = new Vector3(dest.x - myPos.x, 0f, dest.z - myPos.z);
+            float flatDistSq = toDestFlat.sqrMagnitude;
+            if (flatDistSq < 0.49f)
+                return false;
+
+            float flatDist = Mathf.Sqrt(flatDistSq);
+            Vector3 toDestDir = toDestFlat / flatDist;
+            Vector3 curDirFlat = new Vector3(ai.dir.x, 0f, ai.dir.z);
+            float dirAlignment = curDirFlat.sqrMagnitude > 0.01f
+                ? Vector3.Dot(curDirFlat.normalized, toDestDir)
+                : -1f;
+
+            float destDropY = myPos.y - dest.y;
+            bool destIsInsideTrench = flatDist <= 7.5f && destDropY >= 0.65f && destDropY <= 2.65f;
+            bool pathDetouringOrFailed =
+                ai.pathCreationFails > 0 ||
+                (destIsInsideTrench ? dirAlignment < 0.60f : dirAlignment < 0.25f);
+
+            if (!pathDetouringOrFailed)
+                return false;
+
+            float stepDist = Mathf.Clamp(flatDist, 1.35f, 2.35f);
+            Vector3 rawStepTarget = new Vector3(
+                myPos.x + toDestDir.x * stepDist,
+                myPos.y - 1.35f,
+                myPos.z + toDestDir.z * stepDist);
+
+            if (!AiCore.TryValidateAndSnapDirectMicroStep(
+                    myPos,
+                    rawStepTarget,
+                    out Vector3 snappedDropPos,
+                    out _,
+                    maxFlatDist: 2.8f,
+                    maxStepDeltaY: 0.45f,
+                    maxStepDownDeltaY: 2.65f))
+            {
+                return false;
+            }
+
+            float actualDrop = myPos.y - snappedDropPos.y;
+            if (actualDrop < 0.65f || actualDrop > 2.65f)
+                return false;
+
+            if (destIsInsideTrench)
+            {
+                // Destination itself is at trench depth: ensure the step-off lands near the destination's floor level.
+                if (Mathf.Abs(snappedDropPos.y - dest.y) > 1.10f)
+                    return false;
+            }
+            else
+            {
+                // Crossing a trench toward a high-ground destination: only drop in if the trench is shallow enough
+                // (<= 1.58m) to vault out the far side, and verify the floor doesn't keep plunging down a cliff/ravine.
+                if (actualDrop > 1.58f || dest.y < snappedDropPos.y - 0.50f)
+                    return false;
+
+                int groundMask = AiCore.GetSolidEnvironmentMask();
+                Vector3 aheadProbe = new Vector3(
+                    snappedDropPos.x + toDestDir.x * 1.15f,
+                    snappedDropPos.y + 1.20f,
+                    snappedDropPos.z + toDestDir.z * 1.15f);
+                if (!Physics.Raycast(aheadProbe, Vector3.down, out RaycastHit aheadHit, 2.00f, groundMask, QueryTriggerInteraction.Ignore) ||
+                    aheadHit.point.y < snappedDropPos.y - 0.55f)
+                {
+                    return false;
+                }
+            }
+
+            float stepDuration = Mathf.Clamp(stepDist / 2.2f, 0.55f, 1.10f);
+            ai.MoveDirectlyToward(snappedDropPos, stepDuration);
+            h.Combat.NextVaultCheckTime = now + stepDuration + 0.35f;
             return true;
         }
 
@@ -657,7 +751,10 @@ namespace EasyRed2HumanAI
                             WallsVaulted++;
                             BotActionTrace.RecordEvent(soldier, BotTraceEventKind.Vault, vaultOrRejectReason);
                         }
+                        return;
                     }
+
+                    TryStepOffIntoTrench(__instance, soldier, h, now);
                 }
                 catch { }
                 finally
@@ -1174,15 +1271,16 @@ namespace EasyRed2HumanAI
             bool isUnstickRecovery =
                 (h.MoveOverride.Kind == AiCore.BotMoveOverrideKind.UnstickSidestep && now < h.MoveOverride.ExpireTime) ||
                 now < h.Goap.FootStuck.UnstickOverrideUntil;
+            bool isTrenchOrLedgeStepDown = targetPos.y < myPos.y - 0.65f;
 
             if (AiCore.TryValidateAndSnapDirectMicroStep(
                     myPos,
                     targetPos,
                     out Vector3 snappedPos,
                     out _,
-                    isUnstickRecovery ? 4.8f : 2.8f,
+                    isUnstickRecovery ? 4.8f : (isTrenchOrLedgeStepDown ? 3.6f : 2.8f),
                     0.75f,
-                    isUnstickRecovery ? 2.90f : 0.75f))
+                    isUnstickRecovery ? 2.95f : 2.65f))
             {
                 targetPos = snappedPos;
                 return true;

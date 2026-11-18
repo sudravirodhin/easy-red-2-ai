@@ -2946,16 +2946,37 @@ namespace EasyRed2HumanAI
             {
                 try
                 {
+                    if (__instance == null || __instance.Pointer == IntPtr.Zero)
+                        return;
+
+                    Soldier patSol = __1 != null ? __1.TryCast<Soldier>() : null;
+                    if (VisionConfig.EnableMod.Value &&
+                        patSol != null &&
+                        patSol.Pointer != IntPtr.Zero &&
+                        !patSol.IsDead)
+                    {
+                        string docFacEarly = AiCore.GetCachedFaction(__instance);
+                        string patFacEarly = AiCore.GetCachedFaction(patSol);
+                        if (!string.IsNullOrEmpty(docFacEarly) &&
+                            !string.IsNullOrEmpty(patFacEarly) &&
+                            AiCore.AreEnemyFactions(docFacEarly, patFacEarly))
+                        {
+                            // Mark this patient as actively undergoing an enemy syringe capture so Soldier.Surrender
+                            // revives them (SetIncapacitated(false) -> IsAlive = true, LayerWeight(1) = 1f) BEFORE
+                            // Surrender() sets m_Animator.SetBool("Surrender", true)!
+                            AiCore.SoldierFastHandles patH = AiCore.GetOrCreateSoldierHandles(patSol);
+                            if (patH != null)
+                                patH.EnemySyringeCaptureUntil = Time.time + 10.0f;
+                        }
+                    }
+
                     if (!IsOnlinePtfoScoringActive() ||
-                        __instance == null ||
-                        __instance.Pointer == IntPtr.Zero ||
                         !IsPlayerCharacter(__instance))
                     {
                         return;
                     }
 
                     _pendingLocalFriendlySyringePatientPtr = IntPtr.Zero;
-                    Soldier patSol = __1 != null ? __1.TryCast<Soldier>() : null;
                     if (patSol == null ||
                         patSol.Pointer == IntPtr.Zero ||
                         patSol.Pointer == __instance.Pointer ||

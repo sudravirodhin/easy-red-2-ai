@@ -117,6 +117,8 @@ namespace EasyRed2HumanAI
             public float LastSpawnOrientTime;
             public float NextEnclosedSeatCheckTime;
             public bool CachedIsButtonedArmoredCrew;
+            public float EnemySyringeCaptureUntil;
+            public bool IsRetreatDespawning;
 
             internal BotMoveOverrideState MoveOverride;
             internal SoldierVeterancyState Veterancy;
@@ -321,6 +323,10 @@ namespace EasyRed2HumanAI
             public Spottable CommanderSpottedTarget;
             public float CommanderSpotTime;
             public float LastTurretFiredTime;
+            public short LastObservedDamage;
+            public float LastDamageTime;
+            public float EvasiveMoveUntil;
+            public Vector3 LastHazardPos;
         }
 
         public struct TurretFastTraits
@@ -2233,6 +2239,23 @@ namespace EasyRed2HumanAI
         public static string GetVanillaObjectiveDisplayName(MissionObjective obj, Vector3? listenerPos = null)
         {
             return GetVanillaObjectiveDisplayName(obj, listenerPos, out _);
+        }
+
+        /// <summary>
+        /// Returns true only when <paramref name="s"/> is a living, non-incapacitated prisoner who has
+        /// genuinely surrendered (not a downed <c>IsInjured</c> casualty or a retreating soldier in their
+        /// 3-second <see cref="Soldier.OnRetreat"/> despawn window).
+        /// </summary>
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        public static bool IsTrueSurrenderedPrisoner(Soldier s, SoldierFastHandles h = null)
+        {
+            if (ReferenceEquals(s, null) || s.Pointer == IntPtr.Zero || !s.IsAlive || s.IsInjured || s.IsDead || !s.HasSurrended())
+                return false;
+
+            if (h == null)
+                _soldierHandlesByPtr.TryGetValue(s.Pointer, out h);
+
+            return h == null || !h.IsRetreatDespawning;
         }
 
         [MethodImpl(MethodImplOptions.AggressiveInlining)]

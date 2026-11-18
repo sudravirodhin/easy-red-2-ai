@@ -115,17 +115,27 @@ while ($true) {
 
 $pluginsDir = Join-Path $gameDir 'BepInEx\plugins'
 $dllPath = Join-Path $pluginsDir 'EasyRed2HumanAI.dll'
+$installedVer = $null
+$installedLen = 0
+$installedSha256 = $null
 if (Test-Path $dllPath) {
     $curItem = Get-Item $dllPath
+    $installedLen = $curItem.Length
     $fvi = [Diagnostics.FileVersionInfo]::GetVersionInfo($dllPath)
-    $verStr = if (-not [string]::IsNullOrWhiteSpace($fvi.ProductVersion)) { $fvi.ProductVersion } elseif (-not [string]::IsNullOrWhiteSpace($fvi.FileVersion)) { $fvi.FileVersion } else { $curItem.LastWriteTime.ToString('yyyy-MM-dd HH:mm') }
-    Write-Host "  Installed   : $verStr ($($curItem.Length) bytes)"
+    $installedVer = if (-not [string]::IsNullOrWhiteSpace($fvi.ProductVersion)) { $fvi.ProductVersion.Trim() } elseif (-not [string]::IsNullOrWhiteSpace($fvi.FileVersion)) { $fvi.FileVersion.Trim() } else { $null }
+    try {
+        $installedSha256 = (Get-FileHash -Path $dllPath -Algorithm SHA256).Hash.ToLowerInvariant()
+    } catch {}
+    $verStr = if ($installedVer) { "v$($installedVer.TrimStart('v'))" } else { $curItem.LastWriteTime.ToString('yyyy-MM-dd HH:mm') }
+    Write-Host "  Installed   : $verStr ($installedLen bytes)"
 } else {
     Write-Host '  Installed   : (not yet installed)'
 }
 
 $latestTag = 'latest'
 $dllUrl = 'https://github.com/sudravirodhin/easy-red-2-ai/releases/latest/download/EasyRed2HumanAI.dll'
+$dllExpectedSize = 0
+$dllExpectedSha256 = $null
 $fullZipUrl = $null
 
 Write-Host ''
@@ -137,6 +147,10 @@ try {
         foreach ($asset in $rel.assets) {
             if ($asset.name -eq 'EasyRed2HumanAI.dll') {
                 $dllUrl = [string]$asset.browser_download_url
+                if ($asset.size) { $dllExpectedSize = [long]$asset.size }
+                if ($asset.digest -and ([string]$asset.digest).StartsWith('sha256:')) {
+                    $dllExpectedSha256 = ([string]$asset.digest).Substring(7).ToLowerInvariant()
+                }
             } elseif ($asset.name -like '*-with-BepInEx.zip') {
                 $fullZipUrl = [string]$asset.browser_download_url
             }

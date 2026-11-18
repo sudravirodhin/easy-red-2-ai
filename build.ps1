@@ -185,6 +185,12 @@ if (Test-Path $verifySrc) {
 
 if (Test-Path (Join-Path $workspace "tools\bepinex\extracted")) {
     Copy-Item "$buildDir\EasyRed2HumanAI.dll" "$pluginsDir\EasyRed2HumanAI.dll" -Force
+    foreach ($batName in @("Launch-BattleHardened.bat", "Update-BattleHardened.bat", "Uninstall-BepInEx-Mod.bat")) {
+        $batSrc = Join-Path $workspace $batName
+        if (Test-Path $batSrc) {
+            Copy-Item $batSrc (Join-Path $workspace "tools\bepinex\extracted\$batName") -Force
+        }
+    }
 }
 Write-Host "  -> Built $buildDir\EasyRed2HumanAI.dll" -ForegroundColor Green
 
@@ -221,5 +227,11 @@ if ($Deploy) {
         New-Item -ItemType Directory -Force -Path "$resolvedGameDir\BepInEx\plugins" | Out-Null
         Copy-Item "$buildDir\EasyRed2HumanAI.dll" "$resolvedGameDir\BepInEx\plugins\EasyRed2HumanAI.dll" -Force
         Write-Host "  -> Updated $resolvedGameDir\BepInEx\plugins\EasyRed2HumanAI.dll" -ForegroundColor Green
+    }
+    foreach ($batName in @("Launch-BattleHardened.bat", "Update-BattleHardened.bat", "Uninstall-BepInEx-Mod.bat")) {
+        $batSrc = Join-Path $workspace $batName
+        if (Test-Path $batSrc) {
+            Copy-Item $batSrc (Join-Path $resolvedGameDir $batName) -Force
+        }
     }
 }

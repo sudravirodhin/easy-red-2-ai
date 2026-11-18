@@ -1114,15 +1114,23 @@ namespace EasyRed2HumanAI
 
             Vector3 dir = flatDist > 1e-4f ? (flatDelta / flatDist) : Vector3.forward;
 
-            // When intentionally stepping down off a >0.45m elevated ledge/rubble/wreck/hull onto lower ground,
-            // validate horizontal chest-height exit clearance and destination landing capsule instead of casting a
-            // diagonal +0.34m chord straight into the ledge corner the bot is currently perched on.
+            // When intentionally stepping down off a >0.45m elevated ledge/trench rim/rubble/wreck/hull onto lower ground,
+            // validate horizontal chest-height exit clearance, vertical drop-shaft clearance (blocking upper-floor slab penetration),
+            // dry landing surface, and destination landing capsule instead of casting a diagonal +0.34m chord into the ledge lip.
             if (snappedDeltaY < -0.45f && (steppingOffVehicleHull || effectiveMaxDownY > 0.85f))
             {
+                if (floorHit.collider.gameObject.layer == 4 ||
+                    (TryGetActiveWaterLevel(out float dropWaterY) && floorHit.point.y <= dropWaterY + 0.15f))
+                {
+                    return false;
+                }
+
+                Vector3 chestStart = fromFeetPos + Vector3.up * 0.90f;
+                Vector3 chestEnd = new Vector3(snappedTargetPos.x, chestStart.y, snappedTargetPos.z);
+                Vector3 dropShaftBottom = snappedTargetPos + Vector3.up * 0.35f;
+
                 if (flatDist > 0.12f)
                 {
-                    Vector3 chestStart = fromFeetPos + Vector3.up * 0.90f;
-                    Vector3 chestEnd = new Vector3(snappedTargetPos.x, chestStart.y, snappedTargetPos.z);
                     if ((Physics.Linecast(chestStart, chestEnd, out RaycastHit chestFwdHit, solidMask, QueryTriggerInteraction.Ignore) &&
                          (!steppingOffVehicleHull || !IsVehicleCollider(chestFwdHit.collider))) ||
                         (Physics.Linecast(chestEnd, chestStart, out RaycastHit chestRevHit, solidMask, QueryTriggerInteraction.Ignore) &&
@@ -1131,6 +1139,16 @@ namespace EasyRed2HumanAI
                     {
                         return false;
                     }
+                }
+
+                // Bidirectional vertical shaft check above the landing spot: guarantees bots on a 2nd-floor building slab
+                // never step downward through an intermediate floor/ceiling mesh (regardless of mesh winding order).
+                if ((Physics.Linecast(chestEnd, dropShaftBottom, out RaycastHit shaftDownHit, solidMask, QueryTriggerInteraction.Ignore) &&
+                     (!steppingOffVehicleHull || !IsVehicleCollider(shaftDownHit.collider))) ||
+                    (Physics.Linecast(dropShaftBottom, chestEnd, out RaycastHit shaftUpHit, solidMask, QueryTriggerInteraction.Ignore) &&
+                     (!steppingOffVehicleHull || !IsVehicleCollider(shaftUpHit.collider))))
+                {
+                    return false;
                 }
 
                 if (Physics.CheckCapsule(
@@ -2235,7 +2253,7 @@ namespace EasyRed2HumanAI
                             }
 
                             Vector3 uPos = uHandles.Tr.position;
-                            bool uSurr = u.HasSurrended();
+                            bool uSurr = IsTrueSurrenderedPrisoner(u, uHandles);
                             if (radioNetEnabled && !hasAliveRadiomanNear && u.IsRadioman() && !uSurr)
                             {
                                 if (!leaderAlive || (uPos - leaderPos).sqrMagnitude <= maxRadDistSq)
@@ -2433,7 +2451,7 @@ namespace EasyRed2HumanAI
                             IsPlayer = u.IsPlayer(),
                             IsOnVehicle = u.IsOnVehicle(),
                             IsSquadLeader = false,
-                            HasSurrendered = u.HasSurrended(),
+                            HasSurrendered = IsTrueSurrenderedPrisoner(u, dh),
                             IsSpotted = u.IsSpotted,
                             IsInjured = u.IsInjured,
                             IsMedic = u.IsMedic(),

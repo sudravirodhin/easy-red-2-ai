@@ -1,8 +1,13 @@
 using System;
+using System.Reflection;
 using BepInEx;
 using BepInEx.Logging;
 using BepInEx.Unity.IL2CPP;
 using HarmonyLib;
+
+[assembly: AssemblyVersion(EasyRed2HumanAI.Plugin.PluginVersion + ".0")]
+[assembly: AssemblyFileVersion(EasyRed2HumanAI.Plugin.PluginVersion + ".0")]
+[assembly: AssemblyInformationalVersion(EasyRed2HumanAI.Plugin.PluginVersion)]
 
 namespace EasyRed2HumanAI
 {
@@ -11,7 +16,7 @@ namespace EasyRed2HumanAI
     {
         public const string PluginGuid = "com.antigravity.easyred2.humanai";
         public const string PluginName = "Easy Red 2 - Battle Hardened";
-        public const string PluginVersion = "0.9.5";
+        public const string PluginVersion = "0.9.6";
 
         internal static Plugin Instance;
         internal static new ManualLogSource Log;
@@ -124,8 +129,15 @@ namespace EasyRed2HumanAI
             SafePatch(typeof(VeteranAndTacticsPatches.VehiclePlane_FixedUpdate_Patch));
             SafePatch(typeof(VeteranAndTacticsPatches.VehicleTank_FixedUpdate_Patch));
             SafePatch(typeof(VeteranAndTacticsPatches.TurretGun_SelectBestAmmo_Patch));
+            SafePatch(typeof(VeteranAndTacticsPatches.TurretWeapon_Reload_Patch));
             SafePatch(typeof(VeteranAndTacticsPatches.SoldierAI_UseBestWearedWeaponCheck_Patch));
             SafePatch(typeof(VeteranAndTacticsPatches.Squad_MedicRoutine_Patch));
+            SafePatch(typeof(VeteranAndTacticsPatches.Soldier_SurrenderSynched_Patch));
+            SafePatch(typeof(VeteranAndTacticsPatches.Soldier_Surrender_Patch));
+            SafePatch(typeof(VeteranAndTacticsPatches.Soldier_SetIncapacitated_Patch));
+            SafePatch(typeof(VeteranAndTacticsPatches.Soldier_RefreshAnimatorState_Patch));
+            SafePatch(typeof(VeteranAndTacticsPatches.Soldier_OnRetreat_Patch));
+            SafePatch(typeof(VeteranAndTacticsPatches.Soldier_UnSurrender_Patch));
             SafePatch(typeof(VeteranAndTacticsPatches.ResourcesManager_TrySpotSquad_Patch));
             SafePatch(typeof(VeteranAndTacticsPatches.SpawnManager_CanSpawn_Patch));
             SafePatch(typeof(VeteranAndTacticsPatches.SpawnManager_SpawnAISquadMoveNext_Patch));

@@ -764,7 +764,7 @@ namespace EasyRed2HumanAI
                     continue;
 
                 float dSq = (sol.Pos - myPos).sqrMagnitude;
-                if (dSq < bestDistSq && sol.Ref != null && sol.Ref.IsAlive && sol.Ref.HasSurrended())
+                if (dSq < bestDistSq && AiCore.IsTrueSurrenderedPrisoner(sol.Ref, sol.Handles))
                 {
                     bestDistSq = dSq;
                     bestSurrendered = sol.Ref;
@@ -999,6 +999,282 @@ namespace EasyRed2HumanAI
             }
 
             return true;
+        }
+
+        // =====================================================================
+        // Downed Casualty vs Surrender Animator State Fix
+        // Native Root Causes (GameAssembly.dll):
+        //  1) Soldier.SetIncapacitated(true) (0x180765290) sets life_total = 0 (IsAlive == false,
+        //     IsInjured == true), triggers Base Layer 0 "Incapacitated", and disables Upper Body
+        //     Layer 1 (m_Animator.SetLayerWeight(1, 0f) @ 0x180765A64) without clearing suppressionValue.
+        //  2) BattleManager.SurrenderUnitsOnMissionAreas (0x1805961A0 on phase advance) and
+        //     BattleManager.OnWin (0x1805937CB) call SurrenderSynched() on downed IsInjured casualties,
+        //     and Soldier.Surrender() (0x18076A500) permits !IsAlive && IsInjured! Setting
+        //     m_Animator.SetBool("Surrender", true) transitions Base Layer 0 out of "Incapacitated"
+        //     into standing upright "Surrender" while LayerWeight(1) remains 0f and IsAlive remains false,
+        //     leaving downed bots standing upright with arms down staring blankly into the distance!
+        //  3) In Soldier+<UseSyryngeCR>d__571.MoveNext (0x1807A5466), enemy syringe capture calls
+        //     patient.SurrenderSynched() BEFORE patient.SetIncapacitated(false) (0x1807A548B), which
+        //     then overwrites m_pose to Crouch and calls SetAlertedFor(5.0f).
+        //  4) Soldier.OnRetreat (0x180758650) sets surrended = true (+0x49E = 1) during the 3s despawn
+        //     without setting Animator "Surrender", causing liberation / RefreshAnimatorState side effects.
+        // =====================================================================
+        private static bool IsDownedPatientUndergoingEnemySyringeCapture(Soldier patient, AiCore.SoldierFastHandles patH)
+        {
+            if (patient == null || patient.Pointer == IntPtr.Zero || patient.IsDead)
+                return false;
+
+            float now = Time.time;
+            if (patH != null && now < patH.EnemySyringeCaptureUntil)
+                return true;
+
+            // Remote Co-op fallback: if a remote player/client sends SyncSurrender RPC while reviving a downed casualty
+            if (AiCore.IsInMultiplayerRoom() && patient.transform != null)
+            {
+                string patFac = patH != null ? AiCore.GetCachedFaction(patH, now) : AiCore.GetCachedFaction(patient);
+                if (!string.IsNullOrEmpty(patFac))
+                {
+                    Vector3 patPos = patient.transform.position;
+                    AiCore.EnsureWorldSnapshot();
+                    int count = AiCore.WorldSoldierCount;
+                    var soldiers = AiCore.WorldSoldiers;
+                    for (int i = 0; i < count; i++)
+                    {
+                        ref AiCore.SoldierSnapshot snap = ref soldiers[i];
+                        if (snap.Ptr == IntPtr.Zero ||
+                            snap.Ptr == patient.Pointer ||
+                            snap.IsInjured ||
+                            snap.HasSurrendered ||
+                            string.IsNullOrEmpty(snap.Faction) ||
+                            !AiCore.AreEnemyFactions(patFac, snap.Faction))
+                        {
+                            continue;
+                        }
+
+                        if ((snap.Pos - patPos).sqrMagnitude <= 4.2f * 4.2f)
+                            return true;
+                    }
+                }
+            }
+
+            return false;
+        }
+
+        private static void EnsureSurrenderedPrisonerAnimatorAndPose(Soldier s)
+        {
+            if (s == null || s.Pointer == IntPtr.Zero || !s.IsAlive || s.IsInjured || s.IsDead || !s.HasSurrended())
+                return;
+
+            AiCore.SoldierFastHandles h = AiCore.GetOrCreateSoldierHandles(s);
+            if (h != null && h.IsRetreatDespawning)
+                return;
+
+            s.SetGunTriggerPressed(false);
+            s.pointGunEndTime = 0f;
+            s.alertEndTime = 0f;
+
+            SoldierAI ai = h != null ? h.Ai : s.aiController;
+            if (!ReferenceEquals(ai, null) && ai != null)
+            {
+                ai.actualPose = SoldierPose.Idle;
+                ai.moveDirectlyToward_end = 0f;
+            }
+
+            if (s.m_pose != SoldierPose.Idle && !s.IsOnVehicle())
+            {
+                s.SetPose(SoldierPose.Idle, true, false, -1f);
+            }
+
+            Animator anim = s.m_Animator;
+            if (anim != null)
+            {
+                anim.SetLayerWeight(1, 1.0f);
+                anim.SetBool("Incapacitated", false);
+                anim.SetBool("Surrender", true);
+            }
+        }
+
+        [HarmonyPatch(typeof(Soldier), nameof(Soldier.SurrenderSynched))]
+        public static class Soldier_SurrenderSynched_Patch
+        {
+            public static bool Prefix(Soldier __instance)
+            {
+                try
+                {
+                    if (!VisionConfig.EnableMod.Value || __instance == null || __instance.Pointer == IntPtr.Zero)
+                        return true;
+
+                    if (__instance.IsDead)
+                        return false;
+
+                    if (!__instance.IsAlive || __instance.IsInjured)
+                    {
+                        AiCore.SoldierFastHandles h = AiCore.GetOrCreateSoldierHandles(__instance);
+                        if (IsDownedPatientUndergoingEnemySyringeCapture(__instance, h))
+                        {
+                            // Revive the patient BEFORE SurrenderSynched -> Surrender runs so Upper Body Layer 1
+                            // weight is 1.0f and the subsequent SetIncapacitated(false) in UseSyryngeCR is a no-op!
+                            if (h != null)
+                                h.EnemySyringeCaptureUntil = 0f;
+                            __instance.SetIncapacitated(false);
+                            return true;
+                        }
+
+                        // Block BattleManager.SurrenderUnitsOnMissionAreas / OnWin from surrendering downed casualties!
+                        return false;
+                    }
+                }
+                catch { }
+                return true;
+            }
+        }
+
+        [HarmonyPatch(typeof(Soldier), nameof(Soldier.Surrender))]
+        public static class Soldier_Surrender_Patch
+        {
+            public static bool Prefix(Soldier __instance)
+            {
+                try
+                {
+                    if (!VisionConfig.EnableMod.Value || __instance == null || __instance.Pointer == IntPtr.Zero)
+                        return true;
+
+                    if (__instance.IsDead)
+                        return false;
+
+                    if (!__instance.IsAlive || __instance.IsInjured)
+                    {
+                        AiCore.SoldierFastHandles h = AiCore.GetOrCreateSoldierHandles(__instance);
+                        if (IsDownedPatientUndergoingEnemySyringeCapture(__instance, h))
+                        {
+                            if (h != null)
+                                h.EnemySyringeCaptureUntil = 0f;
+                            __instance.SetIncapacitated(false);
+                            return true;
+                        }
+
+                        return false;
+                    }
+                }
+                catch { }
+                return true;
+            }
+
+            public static void Postfix(Soldier __instance)
+            {
+                try
+                {
+                    if (!VisionConfig.EnableMod.Value || __instance == null || __instance.Pointer == IntPtr.Zero)
+                        return;
+
+                    EnsureSurrenderedPrisonerAnimatorAndPose(__instance);
+                }
+                catch { }
+            }
+        }
+
+        [HarmonyPatch(typeof(Soldier), nameof(Soldier.SetIncapacitated))]
+        public static class Soldier_SetIncapacitated_Patch
+        {
+            public static void Postfix(Soldier __instance, bool __0)
+            {
+                try
+                {
+                    if (!VisionConfig.EnableMod.Value || __instance == null || __instance.Pointer == IntPtr.Zero)
+                        return;
+
+                    if (__0)
+                    {
+                        // Clear suppressionValue when downed so BattleManager.SurrenderUnitsOnMissionAreas skips this casualty,
+                        // and clear Animator "Surrender" so an already-surrendered prisoner who gets downed stays lying on the
+                        // ground in "Incapacitated" instead of popping upright with LayerWeight(1) == 0f!
+                        __instance.suppressionValue = 0;
+                        if (__instance.m_Animator != null)
+                        {
+                            __instance.m_Animator.SetBool("Surrender", false);
+                        }
+                    }
+                    else if (__instance.IsAlive && !__instance.IsInjured && __instance.HasSurrended())
+                    {
+                        EnsureSurrenderedPrisonerAnimatorAndPose(__instance);
+                    }
+                }
+                catch { }
+            }
+        }
+
+        [HarmonyPatch(typeof(Soldier), nameof(Soldier.RefreshAnimatorState))]
+        public static class Soldier_RefreshAnimatorState_Patch
+        {
+            public static void Postfix(Soldier __instance)
+            {
+                try
+                {
+                    if (!VisionConfig.EnableMod.Value || __instance == null || __instance.Pointer == IntPtr.Zero)
+                        return;
+
+                    Animator anim = __instance.m_Animator;
+                    if (anim == null)
+                        return;
+
+                    if ((__instance.IsInjured || !__instance.IsAlive) && !__instance.IsDead)
+                    {
+                        anim.SetBool("Surrender", false);
+                    }
+                    else if (__instance.IsAlive && __instance.HasSurrended())
+                    {
+                        AiCore.SoldierFastHandles h = AiCore.GetOrCreateSoldierHandles(__instance);
+                        if (h != null && h.IsRetreatDespawning)
+                        {
+                            anim.SetBool("Surrender", false);
+                        }
+                        else
+                        {
+                            anim.SetLayerWeight(1, 1.0f);
+                        }
+                    }
+                }
+                catch { }
+            }
+        }
+
+        [HarmonyPatch(typeof(Soldier), nameof(Soldier.OnRetreat))]
+        public static class Soldier_OnRetreat_Patch
+        {
+            public static void Prefix(Soldier __instance)
+            {
+                try
+                {
+                    if (__instance == null || __instance.Pointer == IntPtr.Zero)
+                        return;
+
+                    AiCore.SoldierFastHandles h = AiCore.GetOrCreateSoldierHandles(__instance);
+                    if (h != null)
+                        h.IsRetreatDespawning = true;
+                }
+                catch { }
+            }
+        }
+
+        [HarmonyPatch(typeof(Soldier), nameof(Soldier.UnSurrender))]
+        public static class Soldier_UnSurrender_Patch
+        {
+            public static void Postfix(Soldier __instance)
+            {
+                try
+                {
+                    if (__instance == null || __instance.Pointer == IntPtr.Zero)
+                        return;
+
+                    AiCore.SoldierFastHandles h = AiCore.GetOrCreateSoldierHandles(__instance);
+                    if (h != null)
+                    {
+                        h.IsRetreatDespawning = false;
+                        h.EnemySyringeCaptureUntil = 0f;
+                    }
+                }
+                catch { }
+            }
         }
 
         // =====================================================================

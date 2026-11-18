@@ -584,8 +584,8 @@ namespace EasyRed2HumanAI
                     return true;
             }
 
-            // 3. Unbuttoned commander / open-top / periscope spotter within 52m with unobstructed LOS
-            if (dist3D <= 52.0f)
+            // 3. Unbuttoned / open-top spotter within 14m ear/peripheral range with unobstructed LOS
+            if (dist3D <= 14.0f)
             {
                 AiCore.VehicleFastHandles vh = AiCore.GetOrCreateVehicleHandles(tankVeh);
                 string tankFaction = GetVehicleCrewFaction(tankVeh);
@@ -597,7 +597,7 @@ namespace EasyRed2HumanAI
                 }
             }
 
-            // 4. Staffed turret/hull-MG firing arcs or active target lock near the observer
+            // 4. Staffed turret/hull-MG firing arcs, Commander periscope look cone, or active target lock near the observer
             var seats = tankVeh.seats;
             if (seats != null)
             {
@@ -623,9 +623,82 @@ namespace EasyRed2HumanAI
                     Vector3 fireDirFlat = new Vector3(fireDir.x, 0f, fireDir.z);
                     if (fireDirFlat.sqrMagnitude > 0.001f)
                     {
-                        float halfCone = (mainTurret != null && turret.Pointer == mainTurret.Pointer) ? 48f : 38f;
+                        AiCore.TurretFastTraits tTraits = AiCore.GetCachedTurretTraits(turret);
+                        float halfCone = tTraits.IsCommanderTurret
+                            ? (dist3D <= 52.0f ? 62f : 42f)
+                            : ((mainTurret != null && turret.Pointer == mainTurret.Pointer) ? 45f : 36f);
                         if (Vector3.Angle(fireDirFlat.normalized, dirToObsFlat) <= halfCone)
                             return true;
+                    }
+                }
+            }
+
+            return false;
+        }
+
+        private static bool TryStalkTankBlindFlank(SoldierAI ai, Soldier soldier, Vehicle targetVeh, Vector3 myPos, float dist, float now)
+        {
+            if (ai == null || soldier == null || targetVeh == null || targetVeh.transform == null)
+                return false;
+
+            // If already holding a ranged AT rocket launcher (Bazooka/Panzerschreck/Panzerfaust/PIAT) in Slot 0,
+            // crouch in place or fire from cover rather than running closer!
+            GenericGun g0 = soldier.GetHeldGun(0);
+            if (g0 != null && g0.IsAtWeapon() && dist <= Mathf.Max(35f, g0.DamageRange()))
+            {
+                if (!ai.IsMoving())
+                    SetBotPose(ai, soldier, SoldierPose.Crouch);
+                return false;
+            }
+
+            bool tankLookingAtMe = IsTankThreateningPosition(targetVeh, myPos, 52f);
+            if (dist <= 12.5f)
+            {
+                // Inside the tank hull's 11.5m dead-angle depression blind zone: stay crouched while closing for the throw/plant!
+                if (soldier.m_pose == SoldierPose.Idle)
+                    SetBotPose(ai, soldier, SoldierPose.Crouch, true);
+                return false;
+            }
+
+            if (tankLookingAtMe)
+            {
+                // Tank turret or Commander periscope is sweeping over us: drop to Crouch (or Prone if stationary in cover)
+                // so we don't sprint upright through the tank's optics!
+                if (!ai.IsMoving() && soldier.IsOnCover() && dist > 18.0f)
+                    SetBotPose(ai, soldier, SoldierPose.Prone);
+                else if (soldier.m_pose == SoldierPose.Idle)
+                    SetBotPose(ai, soldier, SoldierPose.Crouch, true);
+            }
+
+            // When closing from 15m-42m with close-assault AT grenades/satchels/mines, arc 55 degrees off the main turret's
+            // sightline toward the tank's blind flank/rear instead of running straight down the cannon barrel!
+            Turret mainTurret = targetVeh.GetMainTurret(false);
+            Vector3 turretLook = mainTurret != null ? mainTurret.GetFireDir() : targetVeh.transform.forward;
+            turretLook.y = 0f;
+            if (turretLook.sqrMagnitude < 0.01f)
+                turretLook = Vector3.forward;
+            else
+                turretLook.Normalize();
+
+            Vector3 tankPos = targetVeh.transform.position;
+            Vector3 fromTankToMe = myPos - tankPos;
+            fromTankToMe.y = 0f;
+            if (fromTankToMe.sqrMagnitude > 0.25f && Vector3.Angle(turretLook, fromTankToMe.normalized) < 52.0f)
+            {
+                AiCore.SoldierFastHandles sh = AiCore.GetOrCreateSoldierHandles(soldier);
+                if (sh != null && now >= sh.Stance.NextLocalCoverSeekTime)
+                {
+                    sh.Stance.NextLocalCoverSeekTime = now + 2.4f;
+                    Vector3 right = new Vector3(turretLook.z, 0f, -turretLook.x);
+                    float side = Vector3.Dot(fromTankToMe, right) >= 0f ? 1f : -1f;
+                    Vector3 blindFlankDir = (-turretLook * 0.45f + right * (0.89f * side)).normalized;
+                    Vector3 flankPoint = tankPos + blindFlankDir * Mathf.Clamp(dist * 0.72f, 11.0f, 22.0f);
+                    bool hasWater = AiCore.TryGetActiveWaterLevel(out float waterY);
+                    if (AiCore.TrySnapWalkableGroundProbe(myPos, flankPoint, 10.0f, 22.0f, 0.55f, 2.5f, hasWater, waterY, out Vector3 snappedFlank))
+                    {
+                        SetBotPose(ai, soldier, tankLookingAtMe ? SoldierPose.Crouch : SoldierPose.Idle, true);
+                        AiCore.MoveBotTowardPosition(ai, soldier, snappedFlank, 1.5f, 2.4f);
+                        return true;
                     }
                 }
             }
@@ -652,13 +725,25 @@ namespace EasyRed2HumanAI
                 return false;
             }
 
-            // If the soldier carries any usable AT capability (launcher, AT grenade, satchel, Molotov, Gammon) within assault range, close & engage!
+            // If the soldier carries any usable AT capability (launcher, AT grenade, satchel, Molotov, Gammon) within assault range,
+            // stalk the tank's blind flank / low-crawl in its dead zone rather than fleeing!
             if (dist <= 42f && HasUsableAntiTankCapability(soldier))
+            {
+                TryStalkTankBlindFlank(ai, soldier, targetVeh, myPos, dist, now);
                 return false;
+            }
 
-            // Only panic-evade when the tank is actually threatening our position (turret/MG cone, open commander LOS, or closing hull)
-            if (!IsTankThreateningPosition(targetVeh, myPos, 85f))
+            bool tankThreatening = IsTankThreateningPosition(targetVeh, myPos, 85f);
+            if (!tankThreatening)
+            {
+                // Tank & Commander are currently looking away: stay low and quiet in cover/concealment so we aren't spotted!
+                if (dist <= 52f && !ai.IsMoving())
+                {
+                    SetBotPose(ai, soldier, (dist <= 36f && !soldier.IsOnCover()) ? SoldierPose.Prone : SoldierPose.Crouch);
+                }
                 return false;
+            }
+
             Vector3 toTank = targetVeh.transform.position - myPos;
             toTank.y = 0f;
             Vector3 threatDir = toTank.sqrMagnitude > 0.01f ? toTank.normalized : soldier.transform.forward;
@@ -668,7 +753,14 @@ namespace EasyRed2HumanAI
             if (IsPositionShelteredByFrontCover(myPos, threatDir, ignoreRoot))
             {
                 if (!ai.IsMoving())
-                    SetBotPose(ai, soldier, SoldierPose.Crouch);
+                    SetBotPose(ai, soldier, dist <= 34f ? SoldierPose.Prone : SoldierPose.Crouch);
+                return false;
+            }
+
+            // If already in cover (trench, crater, building) when the tank is looking our way, drop Prone to stay hidden!
+            if (soldier.IsOnCover() && !ai.IsMoving())
+            {
+                SetBotPose(ai, soldier, dist <= 48f ? SoldierPose.Prone : SoldierPose.Crouch);
                 return false;
             }
 
@@ -1098,6 +1190,30 @@ namespace EasyRed2HumanAI
             IntPtr vehPtr = veh.Pointer;
             Vector3 vehPos = veh.transform.position;
             Vector3 squadDest = aiVeh.GetCurrentSquadDestination();
+
+            // Self-Preservation Displacement: if a stationary combat vehicle is bracketed by explosions (artillery/mortars/satchels)
+            // or taking blind hull hits without a visible target, shift its destination 26m-32m out of the killzone!
+            if (CheckVehicleDamageAndExplosionThreat(veh, vehPos, myFaction, now, out Vector3 hazardPos, out bool recentHullHit, out bool nearExplosion))
+            {
+                bool hasVisibleTarget = mainTurret != null &&
+                                        mainTurret.GetTurretAI() != null &&
+                                        mainTurret.GetTurretAI().CurrentVisibleTarget != null;
+                if ((nearExplosion || (recentHullHit && !hasVisibleTarget)) &&
+                    (vehPos - aiVeh.setVehicleDestination).sqrMagnitude <= 16.0f * 16.0f)
+                {
+                    Vector3 awayDir = vehPos - hazardPos;
+                    awayDir.y = 0f;
+                    awayDir = awayDir.sqrMagnitude > 0.01f ? awayDir.normalized : -veh.transform.forward;
+                    Vector3 perpDir = new Vector3(-awayDir.z, 0f, awayDir.x);
+                    if (TryValidateVehicleGroundPoint(vehPos + awayDir * 28.0f + perpDir * 10.0f, vehPos.y, squadDest, 65.0f, awayDir, veh.transform.root, out Vector3 evadeDest) ||
+                        TryValidateVehicleGroundPoint(vehPos - awayDir * 26.0f - perpDir * 10.0f, vehPos.y, squadDest, 65.0f, -awayDir, veh.transform.root, out evadeDest))
+                    {
+                        aiVeh.setVehicleDestination = evadeDest;
+                        _claimedVehicleDestinations[vehPtr] = evadeDest;
+                        return;
+                    }
+                }
+            }
 
             // Count friendly ground vehicles operating on the same objective sector (<= 115m) and compute
             // a deterministic zero-GC echelon rank by VehPtr order so friendly tanks never stack hull-to-hull
@@ -1575,6 +1691,53 @@ namespace EasyRed2HumanAI
             }
         }
 
+        private static bool CheckVehicleDamageAndExplosionThreat(
+            Vehicle veh,
+            Vector3 vehPos,
+            string myFaction,
+            float now,
+            out Vector3 hazardPos,
+            out bool recentHullHit,
+            out bool nearExplosion)
+        {
+            hazardPos = vehPos + (veh.transform != null ? veh.transform.forward * 30.0f : Vector3.forward * 30.0f);
+            recentHullHit = false;
+            nearExplosion = VisionPatches.TryGetNearestRecentExplosion(vehPos, 18.5f, 2.4f, out Vector3 blastPos, out _);
+            if (nearExplosion)
+                hazardPos = blastPos;
+
+            AiCore.VehicleFastHandles vh = AiCore.GetOrCreateVehicleHandles(veh);
+            if (vh != null)
+            {
+                short curDmg = veh.GetDamage();
+                if (curDmg > vh.LastObservedDamage)
+                {
+                    vh.LastObservedDamage = curDmg;
+                    vh.LastDamageTime = now;
+                    if (!nearExplosion &&
+                        !string.IsNullOrEmpty(myFaction) &&
+                        VisionPatches.TryGetDominantEnemyGunfireDirection(vehPos, myFaction, 220f, 3.0f, out Vector3 fireDir, out float fireDist, out _))
+                    {
+                        hazardPos = vehPos + fireDir * Mathf.Max(25.0f, fireDist);
+                    }
+                    vh.LastHazardPos = hazardPos;
+                }
+                else if (curDmg < vh.LastObservedDamage)
+                {
+                    vh.LastObservedDamage = curDmg;
+                }
+
+                if (vh.LastDamageTime > 0f && now - vh.LastDamageTime <= 2.6f)
+                {
+                    recentHullHit = true;
+                    if (!nearExplosion && vh.LastHazardPos.sqrMagnitude > 0.01f)
+                        hazardPos = vh.LastHazardPos;
+                }
+            }
+
+            return nearExplosion || recentHullHit;
+        }
+
         // =====================================================================
         // Tank Standoff & Reverse Discipline (AIVehicle.MoveTowardCurrentNodeTank)
         // =====================================================================
@@ -1596,16 +1759,60 @@ namespace EasyRed2HumanAI
                     if (!AiCore.IsLocallyOwnedVehicle(veh) || veh.PlayerIsDriving() || veh.transform == null)
                         return true;
 
+                    Vector3 vehPos = veh.transform.position;
+                    IntPtr vehPtr = veh.Pointer;
+                    float now = Time.time;
+
                     Turret mainTurret = veh.GetMainTurret(false);
                     TurretAI turretAi = mainTurret != null ? mainTurret.GetTurretAI() : null;
                     Spottable target = turretAi != null ? turretAi.CurrentVisibleTarget : null;
-                    if (target == null || target.Pointer == IntPtr.Zero || !turretAi.targetInWeaponRange)
+                    bool hasValidGroundTarget = target != null &&
+                                                target.Pointer != IntPtr.Zero &&
+                                                turretAi.targetInWeaponRange &&
+                                                !target.IsAirVehicle();
+
+                    string myFaction = GetVehicleCrewFaction(veh, mainTurret);
+                    if (CheckVehicleDamageAndExplosionThreat(veh, vehPos, myFaction, now, out Vector3 hazardPos, out bool recentHullHit, out bool nearExplosion))
+                    {
+                        bool mainGunReloading = false;
+                        TurretGun mainGun = mainTurret != null ? mainTurret.TryCast<TurretGun>() : null;
+                        if (mainGun != null && mainGun.weapons != null && mainGun.selectedWeapon_id >= 0 && mainGun.selectedWeapon_id < mainGun.weapons.Length)
+                        {
+                            TurretWeapon selW = mainGun.weapons[mainGun.selectedWeapon_id];
+                            mainGunReloading = selW != null && selW.nextReloadEnd > now + 0.6f;
+                        }
+
+                        // Evasive Self-Preservation: if bracketed by an explosion (artillery/mortar/satchel <= 18.5m)
+                        // or taking hull damage while unable to return fire (unseen ambusher or main cannon reloading),
+                        // immediately reverse or surge out of the killzone instead of sitting still!
+                        if (nearExplosion || (recentHullHit && (!hasValidGroundTarget || mainGunReloading)))
+                        {
+                            Vector3 toHazard = hazardPos - vehPos;
+                            toHazard.y = 0f;
+                            bool hazardInFront = toHazard.sqrMagnitude < 0.01f || Vector3.Dot(veh.transform.forward, toHazard.normalized) >= -0.15f;
+                            bool rearClear = !AiCore.IsDirectionBlockedByEnvironment(vehPos + Vector3.up * 1.2f, -veh.transform.forward, 7.5f, veh.transform.root) &&
+                                             (!VisionConfig.EnableFriendlyVehicleRightOfWay.Value || !ShouldYieldToFriendlyInfantry(__instance, veh, true));
+                            bool frontClear = !AiCore.IsDirectionBlockedByEnvironment(vehPos + Vector3.up * 1.2f, veh.transform.forward, 7.5f, veh.transform.root) &&
+                                              (!VisionConfig.EnableFriendlyVehicleRightOfWay.Value || !ShouldYieldToFriendlyInfantry(__instance, veh, false));
+
+                            if ((hazardInFront && rearClear) || (!hazardInFront && !frontClear && rearClear))
+                            {
+                                __instance.ForceRetroFor(2.6f, AIVehicle.RetroBehaviour.backward);
+                                __instance.MoveTankRetro();
+                                return false;
+                            }
+                            if ((!hazardInFront && frontClear) || (hazardInFront && !rearClear && frontClear))
+                            {
+                                __instance.ForceRetroFor(2.4f, AIVehicle.RetroBehaviour.forward);
+                                __instance.MoveTankRetro();
+                                return false;
+                            }
+                        }
+                    }
+
+                    if (!hasValidGroundTarget)
                         return true;
 
-                    if (target.IsAirVehicle())
-                        return true;
-
-                    Vector3 vehPos = veh.transform.position;
                     Vector3 targetPos = target.GetCenterOfUnit();
                     Vector3 toTarget = targetPos - vehPos;
                     float dist = toTarget.magnitude;
@@ -1626,9 +1833,6 @@ namespace EasyRed2HumanAI
 
                     if (dist > maxStandoffDist)
                         return true;
-
-                    IntPtr vehPtr = veh.Pointer;
-                    float now = Time.time;
 
                     // 1. Close-Range Threat Reverse: back up using MoveTankRetro while keeping frontal armor toward the enemy
                     if (dist < reverseDist && Vector3.Angle(veh.transform.forward, toTarget) <= 75f)
@@ -1658,7 +1862,6 @@ namespace EasyRed2HumanAI
                     {
                         if (dist > 42.0f && (vehPos - __instance.setVehicleDestination).sqrMagnitude > 14.0f * 14.0f)
                         {
-                            string myFaction = GetVehicleCrewFaction(veh, mainTurret);
                             long myId = vehPtr.ToInt64();
                             for (int i = 0; i < _activeGroundVehicles.Count; i++)
                             {

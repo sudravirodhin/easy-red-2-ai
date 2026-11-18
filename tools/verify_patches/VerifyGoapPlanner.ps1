@@ -809,6 +809,86 @@ $partC
                     $"Suppressed 2-man skirmisher with Smoke expected ThrowSmokeScreen -> BoundWithOverwatch (got {planSmoke2.Step0} -> {planSmoke2.Step1})!");
             }
 
+            // 11. Scavenging Survival Instincts & Instant Danger Preemption Regressions:
+            {
+                var scavBoard = new VeteranAndTacticsPatches.SquadBlackboard
+                {
+                    AliveMemberCount = 5,
+                    HasActiveThreat = true,
+                    ThreatPosition = new Vector3(0f, 0f, 40f),
+                    NetDirective = VeteranAndTacticsPatches.SquadNetDirective.Connected_StandardObjective
+                };
+
+                // 11a. Suppressed or near fresh casualty out of cover with NeedAmmoOrMedScavenge MUST pick SeekEmergencyCover (NEVER ScavengeSupplyFromCorpse!)
+                var wsSuppOpenScav = VeteranAndTacticsPatches.GoapStateBits.NeedAmmoOrMedScavenge |
+                                     VeteranAndTacticsPatches.GoapStateBits.IsSuppressed |
+                                     VeteranAndTacticsPatches.GoapStateBits.SquadHasActiveThreat;
+                var planSuppOpen = VeteranAndTacticsPatches.PlanBestGoapActionChainCore(
+                    wsSuppOpenScav, new IntPtr(9601), "Finland", true, false, false, ref scavBoard,
+                    VeteranAndTacticsPatches.SoldierPersonality.Rifleman_Regular, 0.5f, 100f, VeteranAndTacticsPatches.GoapActionId.ScavengeSupplyFromCorpse);
+                Assert(planSuppOpen.Step0 == VeteranAndTacticsPatches.GoapActionId.SeekEmergencyCover &&
+                       planSuppOpen.Step1 != VeteranAndTacticsPatches.GoapActionId.ScavengeSupplyFromCorpse,
+                    $"Suppressed open soldier with NeedAmmoOrMedScavenge picked {planSuppOpen.Step0} -> {planSuppOpen.Step1} instead of SeekEmergencyCover!");
+
+                var wsCasualtyOpenScav = VeteranAndTacticsPatches.GoapStateBits.NeedAmmoOrMedScavenge |
+                                         VeteranAndTacticsPatches.GoapStateBits.NearFreshCasualty |
+                                         VeteranAndTacticsPatches.GoapStateBits.SquadHasActiveThreat;
+                var planCasOpen = VeteranAndTacticsPatches.PlanBestGoapActionChainCore(
+                    wsCasualtyOpenScav, new IntPtr(9602), "Finland", true, false, false, ref scavBoard,
+                    VeteranAndTacticsPatches.SoldierPersonality.Rifleman_Regular, 0.5f, 100f, VeteranAndTacticsPatches.GoapActionId.ScavengeSupplyFromCorpse);
+                Assert(planCasOpen.Step0 == VeteranAndTacticsPatches.GoapActionId.SeekEmergencyCover,
+                    $"Soldier near fresh casualty with NeedAmmoOrMedScavenge picked {planCasOpen.Step0} instead of SeekEmergencyCover!");
+
+                // 11b. Visible enemy / clear LOF with NeedAmmoOrMedScavenge MUST fight (DirectFire / HoldOverwatch), NEVER scavenge!
+                var wsVisEnemyScav = VeteranAndTacticsPatches.GoapStateBits.NeedAmmoOrMedScavenge |
+                                     VeteranAndTacticsPatches.GoapStateBits.HasVisibleEnemy |
+                                     VeteranAndTacticsPatches.GoapStateBits.CanFireAtVisibleEnemy |
+                                     VeteranAndTacticsPatches.GoapStateBits.InCover |
+                                     VeteranAndTacticsPatches.GoapStateBits.SquadHasActiveThreat;
+                var planVisEnemy = VeteranAndTacticsPatches.PlanBestGoapActionChainCore(
+                    wsVisEnemyScav, new IntPtr(9603), "Germany", true, false, false, ref scavBoard,
+                    VeteranAndTacticsPatches.SoldierPersonality.Rifleman_Regular, 0.4f, 100f, VeteranAndTacticsPatches.GoapActionId.ScavengeSupplyFromCorpse);
+                Assert(planVisEnemy.Step0 == VeteranAndTacticsPatches.GoapActionId.DirectFireEngagement,
+                    $"Soldier with visible enemy + NeedAmmoOrMedScavenge picked {planVisEnemy.Step0} instead of DirectFireEngagement!");
+
+                // 11c. Bleeding without bandage in the open MUST SeekEmergencyCover first (NEVER run to a corpse while bleeding in the open!)
+                var wsBleedNoBandageOpen = VeteranAndTacticsPatches.GoapStateBits.IsBleeding |
+                                           VeteranAndTacticsPatches.GoapStateBits.NeedAmmoOrMedScavenge;
+                var planBleedOpen = VeteranAndTacticsPatches.PlanBestGoapActionChainCore(
+                    wsBleedNoBandageOpen, new IntPtr(9604), "UnitedStates", true, false, false, ref scavBoard,
+                    VeteranAndTacticsPatches.SoldierPersonality.Rifleman_Regular, 0.3f, 100f, VeteranAndTacticsPatches.GoapActionId.None);
+                Assert(planBleedOpen.Step0 == VeteranAndTacticsPatches.GoapActionId.SeekEmergencyCover,
+                    $"Bleeding soldier without bandage in open picked {planBleedOpen.Step0} instead of SeekEmergencyCover!");
+
+                // 11d. Bleeding without bandage already safe in cover chains ScavengeSupplyFromCorpse -> BandageInCover when calm
+                var wsBleedNoBandageCover = VeteranAndTacticsPatches.GoapStateBits.IsBleeding |
+                                            VeteranAndTacticsPatches.GoapStateBits.InCover |
+                                            VeteranAndTacticsPatches.GoapStateBits.NeedAmmoOrMedScavenge;
+                var planBleedCover = VeteranAndTacticsPatches.PlanBestGoapActionChainCore(
+                    wsBleedNoBandageCover, new IntPtr(9605), "UnitedStates", true, false, false, ref scavBoard,
+                    VeteranAndTacticsPatches.SoldierPersonality.Rifleman_Regular, 0.3f, 100f, VeteranAndTacticsPatches.GoapActionId.None);
+                Assert(planBleedCover.Step0 == VeteranAndTacticsPatches.GoapActionId.ScavengeSupplyFromCorpse &&
+                       planBleedCover.Step1 == VeteranAndTacticsPatches.GoapActionId.BandageInCover,
+                    $"Safe bleeding soldier in cover without bandage expected ScavengeSupplyFromCorpse -> BandageInCover, got {planBleedCover.Step0} -> {planBleedCover.Step1}!");
+
+                // 11e. IsGoapActionCurrentlyLegal immediately revokes ScavengeSupplyFromCorpse on any danger bit
+                Assert(VeteranAndTacticsPatches.IsGoapActionCurrentlyLegal(
+                    VeteranAndTacticsPatches.GoapActionId.ScavengeSupplyFromCorpse,
+                    VeteranAndTacticsPatches.GoapStateBits.NeedAmmoOrMedScavenge | VeteranAndTacticsPatches.GoapStateBits.InCover,
+                    new IntPtr(9606), ref scavBoard, 100f),
+                    "Calm ScavengeSupplyFromCorpse should be legal!");
+                Assert(!VeteranAndTacticsPatches.IsGoapActionCurrentlyLegal(
+                    VeteranAndTacticsPatches.GoapActionId.ScavengeSupplyFromCorpse,
+                    VeteranAndTacticsPatches.GoapStateBits.NeedAmmoOrMedScavenge | VeteranAndTacticsPatches.GoapStateBits.IsSuppressed,
+                    new IntPtr(9606), ref scavBoard, 100f),
+                    "Suppressed ScavengeSupplyFromCorpse MUST be illegal (instant preemption)!");
+                Assert(!VeteranAndTacticsPatches.IsGoapActionCurrentlyLegal(
+                    VeteranAndTacticsPatches.GoapActionId.ScavengeSupplyFromCorpse,
+                    VeteranAndTacticsPatches.GoapStateBits.NeedAmmoOrMedScavenge | VeteranAndTacticsPatches.GoapStateBits.HasVisibleEnemy,
+                    new IntPtr(9606), ref scavBoard, 100f),
+                    "Visible-enemy ScavengeSupplyFromCorpse MUST be illegal (instant preemption)!");
+            }
+
             Console.WriteLine($"  -> Verified GOAP Planner, Acoustic Ring & Ground Probe Suite: {_passed} assertions passed across {sweepCount} combinatoric states ({holdOverwatchWins} HoldOverwatch wins, 0 failures)");
             return 0;
         }

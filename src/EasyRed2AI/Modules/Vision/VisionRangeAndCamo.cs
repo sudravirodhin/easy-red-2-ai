@@ -245,8 +245,35 @@ namespace EasyRed2HumanAI
             out Vector3 fireDir,
             out float nearestDist)
         {
+            return TryGetDominantEnemyGunfireDirection(
+                observerPos,
+                observerFaction,
+                maxRadius,
+                maxAgeSeconds,
+                out fireDir,
+                out nearestDist,
+                out _);
+        }
+
+        /// <summary>
+        /// Zero-allocation scan over the 64-entry live acoustic ring buffer to compute the dominant
+        /// incoming enemy weapon/shellfire direction weighted by proximity and recency, plus circular
+        /// resultant coherence to detect multi-directional crossfire (&gt; 70 deg spread).
+        /// When in crossfire, returns the single highest-threat shooter direction rather than an
+        /// averaged bisector pointing between shooters!
+        /// </summary>
+        public static bool TryGetDominantEnemyGunfireDirection(
+            Vector3 observerPos,
+            string observerFaction,
+            float maxRadius,
+            float maxAgeSeconds,
+            out Vector3 fireDir,
+            out float nearestDist,
+            out bool isCrossfire)
+        {
             fireDir = Vector3.zero;
             nearestDist = -1f;
+            isCrossfire = false;
             if (string.IsNullOrEmpty(observerFaction) || maxRadius <= 0f || maxAgeSeconds <= 0f)
                 return false;
 
@@ -254,6 +281,10 @@ namespace EasyRed2HumanAI
             float maxDistSq = maxRadius * maxRadius;
             float bestDistSq = maxDistSq + 1f;
             Vector3 weightedSum = Vector3.zero;
+            float totalWeight = 0f;
+            float bestSingleWeight = -1f;
+            Vector3 bestSingleDir = Vector3.zero;
+            int shooterCount = 0;
 
             for (int i = 0; i < GunfireRingSize; i++)
             {
@@ -287,19 +318,86 @@ namespace EasyRed2HumanAI
                 if (horizLen < 0.25f)
                     continue;
 
+                float invHoriz = 1.0f / horizLen;
+                float ux = dx * invHoriz;
+                float uz = dz * invHoriz;
+
                 float freshness = 1.25f - 0.75f * (age / maxAgeSeconds);
                 float weight = freshness / (12.0f + distSq);
-                weightedSum.x += (dx / horizLen) * weight;
-                weightedSum.z += (dz / horizLen) * weight;
+                weightedSum.x += ux * weight;
+                weightedSum.z += uz * weight;
+                totalWeight += weight;
+                shooterCount++;
+
+                if (weight > bestSingleWeight)
+                {
+                    bestSingleWeight = weight;
+                    bestSingleDir = new Vector3(ux, 0f, uz);
+                }
             }
 
-            if (weightedSum.sqrMagnitude > 1e-10f && bestDistSq <= maxDistSq)
+            if (totalWeight > 1e-10f && bestDistSq <= maxDistSq)
             {
-                fireDir = weightedSum.normalized;
+                float resultantMag = Mathf.Sqrt(weightedSum.sqrMagnitude);
+                float coherence = resultantMag / totalWeight;
+                isCrossfire = shooterCount >= 2 && coherence < 0.82f;
+                fireDir = (isCrossfire || resultantMag <= 1e-6f) ? bestSingleDir : weightedSum.normalized;
                 nearestDist = Mathf.Sqrt(bestDistSq);
                 return true;
             }
 
+            return false;
+        }
+
+        /// <summary>
+        /// Zero-allocation L1-cache scan over the 64-entry acoustic ring buffer for recent explosion impacts
+        /// (artillery shells, tank HE, mortars, grenades, satchel charges) near <paramref name="observerPos"/>.
+        /// Used so tanks, combat vehicles, and exposed emplacement gunners can evade active shelling/explosions.
+        /// </summary>
+        public static bool TryGetNearestRecentExplosion(
+            Vector3 observerPos,
+            float maxRadius,
+            float maxAgeSeconds,
+            out Vector3 blastPos,
+            out float nearestDist)
+        {
+            blastPos = Vector3.zero;
+            nearestDist = -1f;
+            if (maxRadius <= 0f || maxAgeSeconds <= 0f)
+                return false;
+
+            float now = Time.time;
+            float maxDistSq = maxRadius * maxRadius;
+            float bestDistSq = maxDistSq + 1f;
+            bool found = false;
+
+            for (int i = 0; i < GunfireRingSize; i++)
+            {
+                ref RecentGunfireEntry e = ref _gunfireRing[i];
+                if (!e.IsExplosionImpact || e.ShooterPtr == IntPtr.Zero)
+                    continue;
+
+                float age = now - e.FiredTime;
+                if (age < 0f || age > maxAgeSeconds)
+                    continue;
+
+                float dx = e.Pos.x - observerPos.x;
+                float dy = e.Pos.y - observerPos.y;
+                float dz = e.Pos.z - observerPos.z;
+                float distSq = dx * dx + dy * dy + dz * dz;
+                if (distSq >= bestDistSq || distSq > maxDistSq)
+                    continue;
+
+                bestDistSq = distSq;
+                blastPos = e.Pos;
+                found = true;
+            }
+
+            if (found)
+            {
+                nearestDist = Mathf.Sqrt(bestDistSq);
+                return true;
+            }
             return false;
         }
 
@@ -849,13 +947,14 @@ namespace EasyRed2HumanAI
                         if (traits.IsCommanderTurret)
                         {
                             // 1. Tank Commander Cupola / Periscope / Binoculars:
-                            //    Wide all-around observation up close (unbuttoned cupola vs periscope blocks), squinting with distance.
-                            if (dist <= 13.0f)
-                                allowedTurretHalfFov = traits.IsExposedCrewSeat ? 180.0f : 132.0f;
-                            else if (dist <= 65.0f)
-                                allowedTurretHalfFov = Mathf.Lerp(120.0f, 76.0f, (dist - 13.0f) / 52.0f);
+                            //    Directional periscope/vision-block cone aligned with TurretCommander.GetFireDir() as the
+                            //    Commander actively pans 360 degrees (only unbuttoned cupolas get <= 7.5m ear awareness).
+                            if (traits.IsExposedCrewSeat && dist <= 7.5f)
+                                allowedTurretHalfFov = 180.0f;
+                            else if (dist <= 55.0f)
+                                allowedTurretHalfFov = Mathf.Lerp(78.0f, 62.0f, Mathf.Clamp01((dist - 7.5f) / 47.5f));
                             else
-                                allowedTurretHalfFov = Mathf.Lerp(76.0f, 44.0f, Mathf.Clamp01((dist - 65.0f) / 155.0f));
+                                allowedTurretHalfFov = Mathf.Lerp(62.0f, 42.0f, Mathf.Clamp01((dist - 55.0f) / 155.0f));
                         }
                         else if (obsVehH != null && obsVehH.IsAir)
                         {
@@ -907,6 +1006,30 @@ namespace EasyRed2HumanAI
                                 allowedTurretHalfFov = Mathf.Lerp(traits.IsExposedCrewSeat ? 68.0f : 52.0f, 48.0f, Mathf.Clamp01((dist - 8.5f) / 26.5f));
                             else
                                 allowedTurretHalfFov = Mathf.Lerp(48.0f, 30.0f, Mathf.Clamp01((dist - 35.0f) / 150.0f));
+                        }
+
+                        // Tank Hull Dead-Zone & Low-Profile Stealth:
+                        // Buttoned-up tanks/armored vehicles cannot see silent crouching/prone infantry hugging within 11.5m
+                        // below their cupola/gun-depression line (outside the dead-ahead 20-deg bore), and silent prone
+                        // infantry in craters/tall grass within 38m require a direct narrow sight sweep to spot!
+                        if (isInfantryTarget &&
+                            targetSoldier != null &&
+                            obsVehH != null &&
+                            obsVehH.IsWheeledOrTank &&
+                            !traits.IsExposedCrewSeat &&
+                            targetSoldier.m_pose >= SoldierPose.Crouch &&
+                            !HasFiredRecently(targetSoldier, 3.2f))
+                        {
+                            if (dist <= 11.5f && angle > 20.0f)
+                            {
+                                BlockedByFOV++;
+                                __result = false;
+                                return false;
+                            }
+                            if (targetSoldier.m_pose == SoldierPose.Prone && dist <= 38.0f)
+                            {
+                                allowedTurretHalfFov *= 0.55f;
+                            }
                         }
 
                         if (angle > allowedTurretHalfFov)
@@ -993,6 +1116,18 @@ namespace EasyRed2HumanAI
                     float night01 = (VisionConfig.EnableRealisticNightDarkness != null && VisionConfig.EnableRealisticNightDarkness.Value)
                         ? AiCore.NightDarkness01
                         : 0f;
+
+                    if (__result != null && !__result.IsAirVehicle())
+                    {
+                        if (VeteranAndTacticsPatches.IsAircraftTargetDangerCloseToFriendlySquad(
+                                __instance,
+                                __result.GetPosition(),
+                                __instance.HasBombsToDeliver()))
+                        {
+                            BlockedPlaneSpot++;
+                            __result = null;
+                        }
+                    }
 
                     if (__result != null && !__result.IsAirVehicle())
                     {
