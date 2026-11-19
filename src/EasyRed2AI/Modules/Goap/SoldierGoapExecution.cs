@@ -244,8 +244,42 @@ namespace EasyRed2HumanAI
 
             // Build 32-Bit WorldState in O(1)
             AiCore.SoldierFastHandles goapH = AiCore.GetOrCreateSoldierHandles(soldier);
+            if (goapH != null)
+            {
+                if (soldier.IsOnCover() && soldier.targetDestination != null && soldier.targetDestination.Pointer != IntPtr.Zero)
+                {
+                    IntPtr covPtr = soldier.targetDestination.Pointer;
+                    if (goapH.Stance.LastSettledCoverPtr != covPtr)
+                    {
+                        goapH.Stance.LastSettledCoverPtr = covPtr;
+                        float dwell = 7.5f + ((AiCore.GetDeterministicHash(ptr, 311) & 15) * 0.25f);
+                        if (personality == SoldierPersonality.Gunner_Anchor ||
+                            personality == SoldierPersonality.Gunner_Overwatch ||
+                            personality == SoldierPersonality.Rifleman_Cautious ||
+                            personality == SoldierPersonality.Leader_OldGuard ||
+                            personality == SoldierPersonality.Medic_Triage ||
+                            personality == SoldierPersonality.Medic_Combat)
+                        {
+                            dwell += 2.5f;
+                        }
+                        else if (personality == SoldierPersonality.Assaulter_Shock ||
+                                 personality == SoldierPersonality.Assaulter_Breacher ||
+                                 personality == SoldierPersonality.Assaulter_Skirmisher ||
+                                 personality == SoldierPersonality.Leader_Spearhead)
+                        {
+                            dwell -= 2.0f;
+                        }
+                        goapH.Stance.CoverSettledUntil = now + dwell;
+                    }
+                }
+                else if (!soldier.IsOnCover())
+                {
+                    goapH.Stance.LastSettledCoverPtr = IntPtr.Zero;
+                    goapH.Stance.CoverSettledUntil = 0f;
+                }
+            }
 
-            // Release stale post-combat covers when a calm unengaged bot's squad moved away or shifted sector (> 75 deg)
+            // Release stale post-combat covers when a calm unengaged bot's squad moved away or shifted sector (> 110 deg)
             if (canMoveAutonomously &&
                 soldier.IsOnCover() &&
                 !soldier.isBleeding &&
@@ -262,6 +296,7 @@ namespace EasyRed2HumanAI
                 bool squadMovedAway = !sq.IsInsideMoveOrderArea(curBotPos);
                 bool coverFacingWrongSector = false;
                 if (!squadMovedAway &&
+                    now >= goapH.Stance.CoverSettledUntil &&
                     AiCore.ResolveTargetDestination(goapH) == AiCore.CachedDestKind.CombatCover &&
                     goapH.CachedCover != null &&
                     goapH.CachedCover.localLookAngleWideness < 165f)
@@ -271,7 +306,7 @@ namespace EasyRed2HumanAI
                     Vector3 covFwd = goapH.CachedCover.GetLookRotation() * Vector3.forward;
                     covFwd.y = 0f;
                     if (sqDir.sqrMagnitude > 0.01f && covFwd.sqrMagnitude > 0.01f &&
-                        Vector3.Angle(covFwd, sqDir) > 75.0f)
+                        Vector3.Angle(covFwd, sqDir) > 110.0f)
                     {
                         coverFacingWrongSector = true;
                     }
@@ -398,7 +433,35 @@ namespace EasyRed2HumanAI
                 {
                     if (soldier.HasDestinationAssigned && soldier.targetDestination != null)
                     {
-                        AiCore.SetBotMoveDestinationAndRefreshPath(ai, soldier.targetDestination.GetCoverPosition());
+                        Vector3 abortBotPos = (goapH != null && goapH.Tr != null) ? goapH.Tr.position : soldier.transform.position;
+                        Vector3 oldDestPos = soldier.targetDestination.GetCoverPosition();
+                        bool interruptedUnderFire =
+                            (activeStep == GoapActionId.ScavengeSupplyFromCorpse ||
+                             activeStep == GoapActionId.RescueSurrenderedComrade) &&
+                            (suppression >= 4.0f || board.HasActiveThreat || soldier.isAlerted) &&
+                            (oldDestPos - abortBotPos).sqrMagnitude > 36.0f;
+
+                        if (interruptedUnderFire && AiCore.CanBotMoveAutonomously(soldier))
+                        {
+                            if (!TrySeekNearbyCover(ai, soldier))
+                            {
+                                if (sq != null && sq.IsInsideMoveOrderArea(abortBotPos))
+                                {
+                                    DestinationWithoutCover holdDest = new DestinationWithoutCover(abortBotPos, SoldierPose.Crouch);
+                                    if (goapH != null)
+                                        goapH.Stance.LocalCoverProtectedUntil = now + 4.5f;
+                                    AiCore.AssignBotCoverOrDestination(ai, soldier, holdDest.Cast<AiDestination>());
+                                }
+                                else
+                                {
+                                    AiCore.SetBotMoveDestinationAndRefreshPath(ai, oldDestPos);
+                                }
+                            }
+                        }
+                        else
+                        {
+                            AiCore.SetBotMoveDestinationAndRefreshPath(ai, oldDestPos);
+                        }
                     }
                     else
                     {
@@ -1316,6 +1379,15 @@ namespace EasyRed2HumanAI
                         if (soldier.m_pose == SoldierPose.Prone && bndRemSq > 1.8f * 1.8f)
                             SetBotPose(ai, soldier, SoldierPose.Crouch, true);
                         ApplyDesiredMovingPose(ai, soldier, bndRemSq, suppression);
+                    }
+                    else if ((ws & GoapStateBits.ObjectiveCapContestUrgent) == 0 &&
+                             soldier.IsOnCover() &&
+                             shGoap != null &&
+                             (now < shGoap.Stance.CoverSettledUntil ||
+                              (shGoap.Vision.LastKnownTarget.LastSeenTime > 0f && (now - shGoap.Vision.LastKnownTarget.LastSeenTime) <= 3.0f)))
+                    {
+                        plan.LockUnitCoverChange = true;
+                        plan.PlanExpireTime = Mathf.Min(plan.PlanExpireTime, now + 1.5f);
                     }
                     else if ((ws & GoapStateBits.ObjectiveCapContestUrgent) != 0 && board.HasActiveObjectiveTask)
                     {
@@ -2399,6 +2471,12 @@ namespace EasyRed2HumanAI
                         GoapPlansExecutedCount++;
                         if (plan.StepCount > 1 && plan.StepIndex == 0)
                             plan.StepIndex = 1;
+                        if (!soldier.IsOnCover() &&
+                            AiCore.CanBotMoveAutonomously(soldier) &&
+                            (soldier.targetDestination == null || (soldier.targetDestination.GetCoverPosition() - myPos).sqrMagnitude > 5.5f * 5.5f))
+                        {
+                            TrySeekNearbyCover(ai, soldier);
+                        }
                         if (VisionConfig.DebugLogging.Value)
                         {
                             AiCore.LogDebug(
@@ -2682,6 +2760,9 @@ namespace EasyRed2HumanAI
                 return false;
             }
 
+            if (soldier.IsOnCover() && h != null && now < h.Stance.CoverSettledUntil)
+                return false;
+
             if (h != null && h.MoveOverride.Kind != AiCore.BotMoveOverrideKind.None && now < h.MoveOverride.ExpireTime)
                 return false;
 
@@ -2715,10 +2796,14 @@ namespace EasyRed2HumanAI
             board.AcousticInvestigatorPtr = soldier.Pointer;
             board.AcousticInvestigateUntil = now + 6.0f;
 
+            DestinationWithoutCover peekDest = new DestinationWithoutCover(peekPos, SoldierPose.Crouch);
             if (h != null)
+            {
+                h.Stance.LocalCoverProtectedUntil = now + 5.5f;
                 AiCore.SetBotMoveOverride(h, AiCore.BotMoveOverrideKind.GoapAction, peekPos, now + 4.5f);
+            }
 
-            AiCore.SetBotMoveDestinationAndRefreshPath(ai, peekPos, 0.25f);
+            AiCore.AssignBotCoverOrDestination(ai, soldier, peekDest.Cast<AiDestination>());
             SetBotPose(ai, soldier, SoldierPose.Crouch, true);
             soldier.SetAlertedFor(5.0f);
             return true;

@@ -5,6 +5,21 @@ For pre-compiled downloads, see **[GitHub Releases](https://github.com/sudraviro
 
 ---
 
+## `v0.9.10` — Human Inertia & Anti-Second-Guessing Combat Rhythm (Instant Reflexes Preserved)
+* **Personality-Scaled Cover Dwell & Post-Contact Angle Hold (`AiCore.cs`, `SoldierGoapExecution.cs`, `GoapDefinitionsAndPlanner.cs`)**:
+  * Added `LastSettledCoverPtr` and `CoverSettledUntil` to `AiCore.SoldierStanceState`, giving soldiers who reach valid cover a `5.5s–13.75s` dwell window (longer for Anchor/Overwatch gunners, Cautious riflemen, Old Guard NCOs & Medics; shorter for Shock/Breacher/Skirmisher assaulters) plus a `3.0s` post-contact angle-hold beat after `LastKnownTarget` disappears behind cover.
+  * During calm cover dwell (outside genuine emergencies or urgent cap contests), bots hold their firing lane instead of immediately vacating good cover for non-urgent spare loot, casual `<= 105°` formation twists, calm close-footstep investigations (`< 20m` snap-turn still triggers instantaneously!), or unpinned micro-bounds.
+* **Stronger Commitment Hysteresis & Deliberate Non-Emergency Replans (`GoapDefinitionsAndPlanner.cs`)**:
+  * Raised `PlanBestGoapActionChainCore` active-action inertia bonus from `0.35f` to **`0.75f`** for in-progress movement actions (`0.45f` non-movement) and lengthened non-emergency replan intervals from `1.35s` -> **`2.15s–2.45s`** (`PlanExpireTime` `4.8s–5.8s`).
+  * **100% Instant Danger Reflexes Preserved**: All `emergencyPreempt` triggers (explosions/grenades, sudden heavy gunfire/suppression out of cover, bleeding wounds, close armor, exposed wall side, point-blank threats, and immediate cap-circle emergencies) still override dwell and replan on the very next tick.
+* **Anti-Yo-Yo Local Re-Anchoring (`SoldierGoapExecution.cs`)**:
+  * When `ScavengeSupplyFromCorpse` or `RescueSurrenderedComrade` completes far (`> 5.5m`) from the soldier's previous cover or aborts under incoming fire (`> 6.0m` away), soldiers seek or anchor cover locally instead of turning 180° to sprint back to their old `targetDestination`.
+  * `TryExecuteCloseAcousticInvestigate` now anchors its `DestinationWithoutCover` peek point (`LocalCoverProtectedUntil` `5.5s`) so investigators don't snap backwards mid-peek.
+* **Single-Authority Wall-Side Cover, Relaxed Cover-Angle Churn & Duck-First Player Crosshair Yield (`StanceAndCoverTactics.cs`, `CombinedArmsAndTurrets.cs`, `FriendlyFireAndYield.cs`)**:
+  * Gated `StanceAndCoverTactics.cs`'s legacy `DestinationWithoutCover` wall-side shifter behind `!VisionConfig.EnableTacticalGoapPlanner.Value` so GOAP's crossfire-aware `10s`-cooldown `RepositionBehindWall` acts as the single authority.
+  * Relaxed calm cover-angle release thresholds from `55°`/`75°` -> **`105°–110°`** (gated on `CoverSettledUntil`) while keeping `squadMovedAway` immediate.
+  * Tightened `FriendlyFireAndYield.cs`'s cover-vacating distance from `8.5m` -> **`4.8m`**, so friendly squadmates crouch first when you sweep your crosshair past them rather than crab-walking out of cover.
+
 ## `v0.9.9` — Staggered Tank Crew Bailout Reaction & Moonwalk Fix, 4 Resurrected Vanilla Voice Lines (492 Clips), Close-Range Footstep Hearing, Co-op HUD/Squad/MOTD/Emplacement Polish & Zero-Hitch Optimizations
 * **Tank Crew Staggered Bailout ("Oh Shit" Shock Reaction) & Backward-Slide ("Moonwalk") Fix (`CombinedArmsAndTurrets.cs`, `SoldierGoapExecution.cs`, `GoapDefinitionsAndPlanner.cs`, `ThreatMemoryAndWatchSectors.cs`, `MacroObjectiveDirector.cs`, `AiCore.cs`)**:
   * **Staggered Hatch Exit & `2.1s–4.0s` Shock/Scramble Phase**: Instead of the entire crew teleporting out simultaneously and immediately sprinting away, crippled/burning tank crews now exit in a staggered hatch queue (`0.15s–0.45s` between crewmen, ticking in `MacroObjectiveDirector`), drop into crouch/prone shock for `2.1s–4.0s` (`BailoutShockUntil`) while scrambling `~6.5m` clear of the burning wreck, call out under fire, and retain `32m` self-defense reflex before switching to full rear evacuation.

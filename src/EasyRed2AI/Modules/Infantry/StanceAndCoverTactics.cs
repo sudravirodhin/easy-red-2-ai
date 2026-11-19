@@ -1916,7 +1916,8 @@ namespace EasyRed2HumanAI
                             isStaffingEmplacement);
                     }
 
-                    if (VisionConfig.EnableSmartWallSideCover.Value &&
+                    if (!VisionConfig.EnableTacticalGoapPlanner.Value &&
+                        VisionConfig.EnableSmartWallSideCover.Value &&
                         !isOnBridge &&
                         !isEvadingArmor &&
                         !isRepairingVehicle &&
@@ -1947,8 +1948,7 @@ namespace EasyRed2HumanAI
                                     h.Stance.NextWallSideCheckTime = Time.time + 3.5f;
                                     WallSideRepositionsCount++;
                                 }
-                                else if (!VisionConfig.EnableTacticalGoapPlanner.Value &&
-                                         !__instance.IsMoving() &&
+                                else if (!__instance.IsMoving() &&
                                          !IsAsyncPathRefreshPending(__instance, soldier, soldier.transform.position, Time.time) &&
                                          !IsInCommittedFiringHalt(ptr, Time.time) &&
                                          IsPositionOnExposedSideOfWall(soldier.transform.position, threatDir, soldier.transform.root, out _))

@@ -615,7 +615,7 @@ namespace EasyRed2HumanAI
                                     {
                                         bool canVacateCover = !bot.IsOnCover() ||
                                                               (lane.IsAdsOrFiring &&
-                                                               fwd <= 8.5f &&
+                                                               fwd <= 4.8f &&
                                                                !HasActiveGoapCoverLock(botPtr, now) &&
                                                                !IsActivelyHeadingToEmplacement(bot, now));
                                         if (canVacateCover)

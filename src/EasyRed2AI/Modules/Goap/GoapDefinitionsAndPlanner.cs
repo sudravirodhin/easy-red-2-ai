@@ -1377,7 +1377,17 @@ namespace EasyRed2HumanAI
                 bool recentCloseGunfire = VisionPatches.TryGetNearestEnemyGunfire(myPos, soldier.faction, 55f, 3.5f, out _);
                 bool inActiveFirefight = board.HasActiveThreat || recentFootContact || recentCloseGunfire || suppression >= 2.0f;
                 bool casualScavengeAllowed = !urgentBandageWhileBleeding && !isEvadingArmor && !isBailedVehicleCrew;
-                bool nonUrgentScavengeAllowed = casualScavengeAllowed && !inActiveFirefight;
+                bool inCoverDwellForCalmLoot =
+                    soldier.IsOnCover() &&
+                    h != null &&
+                    (now < h.Stance.CoverSettledUntil ||
+                     (h.Vision.LastKnownTarget.LastSeenTime > 0f && (now - h.Vision.LastKnownTarget.LastSeenTime) <= 3.0f)) &&
+                    (ws & (GoapStateBits.IsBleeding |
+                           GoapStateBits.ExposedSideOfWall |
+                           GoapStateBits.ArmorThreatClose |
+                           GoapStateBits.InPointBlankRange)) == 0 &&
+                    (sq == null || sq.IsInsideMoveOrderArea(myPos));
+                bool nonUrgentScavengeAllowed = casualScavengeAllowed && !inActiveFirefight && !inCoverDwellForCalmLoot;
                 bool primaryCompletelyDry = gun0 != null && gun0.GetCurrentAmmoCount() <= 0 && soldier.IsOutOfAmmosFor(gun0);
                 bool outOfAmmo = casualScavengeAllowed &&
                                  (primaryCompletelyDry ||
@@ -1644,6 +1654,24 @@ namespace EasyRed2HumanAI
                 }
             }
 
+            bool hasCoverDwellOrRecentAngle =
+                soldier.IsOnCover() &&
+                h != null &&
+                (now < h.Stance.CoverSettledUntil ||
+                 (h.Vision.LastKnownTarget.LastSeenTime > 0f && (now - h.Vision.LastKnownTarget.LastSeenTime) <= 3.0f)) &&
+                (ws & (GoapStateBits.IsBleeding |
+                       GoapStateBits.ExposedSideOfWall |
+                       GoapStateBits.ArmorThreatClose |
+                       GoapStateBits.OverwhelmedNeedFallback |
+                       GoapStateBits.InPointBlankRange |
+                       GoapStateBits.ObjectiveCapContestUrgent)) == 0 &&
+                (sq == null || sq.IsInsideMoveOrderArea(myPos));
+            if (hasCoverDwellOrRecentAngle &&
+                !(board.NetDirective == SquadNetDirective.Hammer_WideFlankEnvelopment && (ws & GoapStateBits.AllyPinningThreat) != 0))
+            {
+                ws &= ~GoapStateBits.FlankCoverAvailable;
+            }
+
             return ws;
         }
 
@@ -1882,9 +1910,12 @@ namespace EasyRed2HumanAI
                 }
 
                 float cost0 = GetPersonalityAndDirectiveAdjustedCost(a0, ws, soldierPtr, ref board, personality, vet01, now, ref factionProfile, ref micro);
-                // Plan Commitment Hysteresis (-0.35f inertia bonus) prevents stuttering/flip-flopping between nearly-tied actions
+                // Plan Commitment Hysteresis prevents stuttering/flip-flopping between nearly-tied actions mid-stride
                 if (a0.Id == prevActiveAction)
-                    cost0 = Mathf.Max(0.05f, cost0 - 0.35f);
+                {
+                    float inertiaBonus = IsMovementGoapAction(a0.Id) ? 0.75f : 0.45f;
+                    cost0 = Mathf.Max(0.05f, cost0 - inertiaBonus);
+                }
 
                 GoapStateBits wsAfter0 = (ws | a0.Add) & ~a0.Remove;
                 // A soldier cannot pin the threat for HIMSELF while simultaneously bounding/flanking in Step 1!
@@ -2011,6 +2042,7 @@ namespace EasyRed2HumanAI
                 }
             }
 
+            bool isMoveStep0 = IsMovementGoapAction(bestStep0);
             return new BotGoapPlan
             {
                 LastGoalBit = desiredGoalBit,
@@ -2018,8 +2050,8 @@ namespace EasyRed2HumanAI
                 Step1 = bestStep1,
                 StepIndex = 0,
                 StepCount = (byte)(bestStep1 != GoapActionId.None ? 2 : (bestStep0 != GoapActionId.None ? 1 : 0)),
-                PlanExpireTime = now + 4.3f + micro.ReactionJitterSeconds,
-                NextReplanTime = now + 1.35f + micro.ReactionJitterSeconds,
+                PlanExpireTime = now + (isMoveStep0 ? 5.8f : 4.8f) + micro.ReactionJitterSeconds,
+                NextReplanTime = now + (isMoveStep0 ? 2.45f : 2.15f) + micro.ReactionJitterSeconds,
                 DesiredPose = SoldierPose.Crouch,
                 LockUnitCoverChange = false
             };

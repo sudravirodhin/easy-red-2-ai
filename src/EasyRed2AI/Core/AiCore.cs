@@ -198,6 +198,8 @@ namespace EasyRed2HumanAI
             public float BleedCoverDeadline;
             public float LocalCoverProtectedUntil;
             public float NextLocalCoverSeekTime;
+            public IntPtr LastSettledCoverPtr;
+            public float CoverSettledUntil;
             public float NextStandCrouchLofCheckTime;
             public float NextIndoorCeilingCountTime;
             public int LastBandageEvalFrame;

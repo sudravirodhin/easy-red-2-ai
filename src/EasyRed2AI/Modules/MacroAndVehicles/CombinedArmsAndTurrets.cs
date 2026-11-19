@@ -1556,6 +1556,7 @@ namespace EasyRed2HumanAI
                             bool outsideOrderArea = !sq.IsInsideMoveOrderArea(coverHandles.Tr.position);
                             bool staleCoverAngle = false;
                             if (!outsideOrderArea &&
+                                now >= coverHandles.Stance.CoverSettledUntil &&
                                 AiCore.ResolveTargetDestination(coverHandles) == AiCore.CachedDestKind.CombatCover &&
                                 coverHandles.CachedCover != null &&
                                 coverHandles.CachedCover.localLookAngleWideness < 165f)
@@ -1565,7 +1566,7 @@ namespace EasyRed2HumanAI
                                 Vector3 covFwd = coverHandles.CachedCover.GetLookRotation() * Vector3.forward;
                                 covFwd.y = 0f;
                                 if (sqDir.sqrMagnitude > 0.01f && covFwd.sqrMagnitude > 0.01f &&
-                                    Vector3.Angle(covFwd, sqDir) > 55.0f)
+                                    Vector3.Angle(covFwd, sqDir) > 105.0f)
                                 {
                                     staleCoverAngle = true;
                                 }
@@ -1592,7 +1593,8 @@ namespace EasyRed2HumanAI
                         }
                     }
 
-                    if (coverHandles != null && now < coverHandles.Stance.LocalCoverProtectedUntil)
+                    if (coverHandles != null &&
+                        (now < coverHandles.Stance.LocalCoverProtectedUntil || now < coverHandles.Stance.CoverSettledUntil))
                     {
                         __result = false;
                         return;
