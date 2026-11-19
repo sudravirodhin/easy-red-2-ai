@@ -2700,11 +2700,95 @@ namespace EasyRed2HumanAI
             public Photon.Realtime.Player PlayerRef;
             public int ActorNumber;
             public string DedupKey;
+            public float EnqueuedAtUnscaledTime;
+            public float ReadyAtUnscaledTime;
             public float SendAtUnscaledTime;
         }
 
+        private static readonly Il2CppSystem.Object _propKeyFactionObj = (Il2CppSystem.String)"faction";
         private static readonly List<PendingJoinMotdEntry> _pendingJoinMotdQueue = new List<PendingJoinMotdEntry>(8);
         private static readonly HashSet<string> _welcomedMotdPlayerKeys = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+        private static bool TryGetPhotonPlayerFaction(Photon.Realtime.Player p, out string faction)
+        {
+            faction = null;
+            if (p == null)
+                return false;
+
+            try
+            {
+                ExitGames.Client.Photon.Hashtable props = p.CustomProperties;
+                if (props != null && props.ContainsKey(_propKeyFactionObj))
+                {
+                    Il2CppSystem.Object raw = props[_propKeyFactionObj];
+                    string s = raw != null ? raw.ToString() : null;
+                    if (!string.IsNullOrWhiteSpace(s))
+                    {
+                        faction = s.Trim();
+                        return true;
+                    }
+                }
+            }
+            catch { }
+
+            try
+            {
+                AiCore.EnsureWorldSnapshot();
+                int count = AiCore.WorldSoldierCount;
+                var soldiers = AiCore.WorldSoldiers;
+                int targetActor = p.ActorNumber;
+                for (int i = 0; i < count; i++)
+                {
+                    ref AiCore.SoldierSnapshot ss = ref soldiers[i];
+                    if (!ss.IsPlayer || ss.Ref == null || string.IsNullOrEmpty(ss.Faction))
+                        continue;
+
+                    SyncSoldier syn = ss.Ref.soldierSyncher;
+                    if (syn == null)
+                        continue;
+
+                    Photon.Realtime.Player owner = syn.Controller ?? syn.Owner;
+                    if (owner != null && owner.ActorNumber == targetActor)
+                    {
+                        faction = ss.Faction;
+                        return true;
+                    }
+                }
+            }
+            catch { }
+
+            return false;
+        }
+
+        private static string GetFactionMotdGreeting(string faction)
+        {
+            if (string.IsNullOrWhiteSpace(faction))
+                return "Welcome to the front, soldier!";
+
+            string f = faction.Trim().ToLowerInvariant();
+            if (f.Contains("germany") || f.Contains("ger") || f.Contains("wehrmacht") || f.Contains("_ss"))
+                return "Willkommen an der Front, Kamerad!";
+            if (f.Contains("italy") || f.Contains("ita"))
+                return "Benvenuto al fronte, commilitone!";
+            if (f.Contains("france") || f.StartsWith("fr") || f.Contains("_fr"))
+                return "Bienvenue au front, camarade!";
+            if (f.Contains("poland") || f.Contains("pol"))
+                return "Witamy na froncie, towarzyszu!";
+            if (f.Contains("ussr") || f.Contains("soviet") || f.Contains("rus"))
+                return "Dobro pozhalovat na front, tovarishch!";
+            if (f.Contains("japan") || f.Contains("jap") || f.Contains("ijn") || f.Contains("ija"))
+                return "Sensen e yokoso, senyu!";
+            if (f.Contains("china") || f.Contains("chn"))
+                return "Huan ying lai dao qian xian, zhan you!";
+            if (f.Contains("hungary") || f.Contains("hun"))
+                return "Udvozoljuk a fronton, bajtars!";
+            if (f.Contains("romania") || f.Contains("rom"))
+                return "Bine ai venit pe front, camarade!";
+            if (f.Contains("uk") || f.Contains("brit") || f.Contains("eng") || f.Contains("aus") || f.Contains("can") || f.Contains("ind") || f.Contains("commonwealth"))
+                return "Welcome to the front, mate!";
+
+            return "Welcome to the front, soldier!";
+        }
 
         private static string GetJoinerMotdDedupKey(Photon.Realtime.Player p)
         {
@@ -2765,12 +2849,15 @@ namespace EasyRed2HumanAI
 
                     if (_pendingJoinMotdQueue.Count < 16)
                     {
+                        float nowUnscaled = Time.unscaledTime;
                         _pendingJoinMotdQueue.Add(new PendingJoinMotdEntry
                         {
                             PlayerRef = __0,
                             ActorNumber = actorNum,
                             DedupKey = dedupKey,
-                            SendAtUnscaledTime = Time.unscaledTime + 3.5f
+                            EnqueuedAtUnscaledTime = nowUnscaled,
+                            ReadyAtUnscaledTime = 0f,
+                            SendAtUnscaledTime = nowUnscaled + 1.5f
                         });
                     }
                 }
@@ -2799,10 +2886,12 @@ namespace EasyRed2HumanAI
                 if (now < entry.SendAtUnscaledTime)
                     continue;
 
-                _pendingJoinMotdQueue.RemoveAt(i);
                 Photon.Realtime.Player target = entry.PlayerRef;
                 if (target == null || target.IsLocal)
+                {
+                    _pendingJoinMotdQueue.RemoveAt(i);
                     continue;
+                }
 
                 // Confirm player is still connected in the current room
                 bool stillInRoom = false;
@@ -2814,23 +2903,61 @@ namespace EasyRed2HumanAI
                 }
                 catch { }
                 if (!stillInRoom)
+                {
+                    _pendingJoinMotdQueue.RemoveAt(i);
                     continue;
+                }
 
                 if (!string.IsNullOrEmpty(entry.DedupKey) && _welcomedMotdPlayerKeys.Contains(entry.DedupKey))
+                {
+                    _pendingJoinMotdQueue.RemoveAt(i);
                     continue;
+                }
+
+                bool hasFaction = TryGetPhotonPlayerFaction(target, out string joinerFaction);
+                if (entry.ReadyAtUnscaledTime <= 0f)
+                {
+                    if (hasFaction)
+                    {
+                        entry.ReadyAtUnscaledTime = now + 1.5f;
+                        _pendingJoinMotdQueue[i] = entry;
+                        continue;
+                    }
+                    if (now - entry.EnqueuedAtUnscaledTime < 45.0f)
+                        continue;
+                    entry.ReadyAtUnscaledTime = now;
+                }
+
+                if (now < entry.ReadyAtUnscaledTime)
+                    continue;
+
+                _pendingJoinMotdQueue.RemoveAt(i);
 
                 AiCore.InvalidatePlayerModdedCache(entry.ActorNumber);
                 bool isModdedJoiner = AiCore.IsPhotonPlayerConfirmedModded(target);
+                string greetingLine = GetFactionMotdGreeting(joinerFaction);
                 string motd = isModdedJoiner
-                    ? $"[Battle Hardened v{Plugin.PluginVersion} Lobby] Host AI active.\n" +
+                    ? $"{greetingLine}\n" +
+                      $"[Battle Hardened v{Plugin.PluginVersion} Lobby] Host AI active.\n" +
                       "\u2022 Squad Leaders: Open [Radial] or [Map] to Accept / Balk incoming HQ radio orders."
-                    : "[Battle Hardened AI \u2014 Host Mod Active | No Download Needed]\n" +
+                    : $"{greetingLine}\n" +
+                      "[Battle Hardened AI \u2014 Host Mod Active | No Download Needed]\n" +
                       "\u2022 Smarter AI: Bots use human sight cones (no 360\u00B0 eyes), flank, smoke, scavenge gear & crew weapons.\n" +
                       "\u2022 Cover & Night: Rifles/MGs pierce thin wood; stance/camo matter, and night is dark\u2014watch muzzle flashes!\n" +
                       "\u2022 Squad Radio: Keep your Radioman alive so your squad stays linked to HQ orders & armor/flank support.";
 
                 if (AiCore.SendTargetedVanillaChatMessage(target, motd, minPlayerInterval: 0f, bypassRpcBudget: true))
                 {
+                    try
+                    {
+                        if (PlayerGUI.instance != null && Photon.Pun.PhotonNetwork.LocalPlayer != null)
+                        {
+                            string joinerNick = !string.IsNullOrEmpty(target.NickName) ? target.NickName : $"Player#{entry.ActorNumber}";
+                            ChatMessage.NewChatMessage(Photon.Pun.PhotonNetwork.LocalPlayer, $"[MOTD -> {joinerNick}] {motd}");
+                        }
+                    }
+                    catch { }
+
                     if (!string.IsNullOrEmpty(entry.DedupKey))
                     {
                         if (_welcomedMotdPlayerKeys.Count > 128)

@@ -1516,7 +1516,10 @@ namespace EasyRed2HumanAI
                 if (pc == null)
                     return;
 
-                if (pc.IsAiming && !pc.IsLimitedAiming)
+                if (Pause.isPaused || InventoryPanel.isOpen || MiniMapGUI.MiniMapOpened || Corvostudio.GUI.RadioMenu.isOpened)
+                    return;
+
+                if (pc.IsAiming || pc.IsLimitedAiming)
                     return;
 
                 Soldier player = pc.ControlledCharacter;
@@ -1538,10 +1541,12 @@ namespace EasyRed2HumanAI
                 IntPtr playerPtr = player.Pointer;
                 IntPtr playerSquadPtr = playerSquad.Pointer;
                 bool playerOnVehicle = player.IsOnVehicle();
+                Vehicle controlledVeh = pc.ControlledVehicle;
+                IntPtr controlledVehPtr = controlledVeh != null ? controlledVeh.Pointer : IntPtr.Zero;
                 Vector2 screenCenter = pc.screenCenter;
-                float maxHoverRadius = Screen.height * 0.20f;
+                float maxHoverRadius = Screen.height * 0.40f;
 
-                // Pass 1: Identify the single center-hovered AI friendly that vanilla PlayerController.OnGUI (0x1807CBD20)
+                // Pass 1: Identify the single center-hovered unit that vanilla PlayerController.OnGUI (0x1807CBD20)
                 // is already drawing so we never double-render on top of the hovered soldier.
                 IntPtr vanillaHoveredPtr = IntPtr.Zero;
                 float bestVanillaAlpha = 0f;
@@ -1553,10 +1558,15 @@ namespace EasyRed2HumanAI
                         CursorSoldierData csd = cursorSoldiers[i];
                         if (csd == null) continue;
                         Soldier s = csd.soldier;
-                        if (s == null || !s.IsAlive || s.Pointer == playerPtr || s.IsPlayer())
+                        if (s == null || !s.IsAlive || s.Pointer == playerPtr)
                             continue;
-                        if (playerOnVehicle && s.IsOnVehicle())
+                        if (controlledVehPtr != IntPtr.Zero &&
+                            s.IsOnVehicle() &&
+                            s.GetCurrentVehicle() != null &&
+                            s.GetCurrentVehicle().Pointer == controlledVehPtr)
+                        {
                             continue;
+                        }
 
                         Vector3 uiPos = s.UINamePos();
                         if (Marker3DGUI.IsOccluded(s, 2, uiPos))
@@ -1567,7 +1577,7 @@ namespace EasyRed2HumanAI
                             continue;
 
                         float distToCursor = Vector2.Distance(new Vector2(sp.x, sp.y), screenCenter);
-                        float alpha = (1.0f - (distToCursor / maxHoverRadius)) * 2.0f;
+                        float alpha = (1.0f - (distToCursor / maxHoverRadius)) * 3.0f;
                         if (alpha > bestVanillaAlpha)
                         {
                             bestVanillaAlpha = alpha;
@@ -2045,6 +2055,27 @@ namespace EasyRed2HumanAI
         [HarmonyPatch(typeof(PlayerGUI), nameof(PlayerGUI.ShowSquadList))]
         public static class PlayerGUI_ShowSquadList_Patch
         {
+            public static void Prefix(ref Squad __0)
+            {
+                try
+                {
+                    if (!VisionConfig.EnableMod.Value)
+                        return;
+
+                    Soldier lp = Soldier.CurrentControlledSoldierOrNull();
+                    if (lp != null &&
+                        lp.IsAlive &&
+                        lp.joinedSquad != null &&
+                        lp.joinedSquad.Pointer != IntPtr.Zero &&
+                        __0 != null &&
+                        __0.Pointer != lp.joinedSquad.Pointer)
+                    {
+                        __0 = lp.joinedSquad;
+                    }
+                }
+                catch { }
+            }
+
             public static void Postfix()
             {
                 RefreshSquadHeaderLabel();
@@ -2060,6 +2091,16 @@ namespace EasyRed2HumanAI
             }
         }
 
+        [ThreadStatic]
+        internal static bool InsideIncomingSyncSquadRpc;
+
+        [HarmonyPatch(typeof(SyncSoldier), nameof(SyncSoldier.SyncSquad))]
+        public static class SyncSoldier_SyncSquad_Patch
+        {
+            public static void Prefix() => InsideIncomingSyncSquadRpc = true;
+            public static void Finalizer() => InsideIncomingSyncSquadRpc = false;
+        }
+
         [HarmonyPatch(typeof(Squad), nameof(Squad.Join))]
         public static class Squad_Join_Patch
         {
@@ -2068,6 +2109,9 @@ namespace EasyRed2HumanAI
                 __state = false;
                 try
                 {
+                    if (InsideIncomingSyncSquadRpc)
+                        return true;
+
                     if (__instance == null ||
                         __instance.Pointer == IntPtr.Zero ||
                         __0 == null ||
@@ -2089,8 +2133,13 @@ namespace EasyRed2HumanAI
                     if (VisionConfig.EnableMod.Value)
                     {
                         Soldier targetLeader = __instance.Leader;
-                        if (targetLeader == null || !targetLeader.IsAlive)
+                        if (targetLeader == null ||
+                            !targetLeader.IsAlive ||
+                            targetLeader.IsInjured ||
+                            targetLeader.HasSurrended())
+                        {
                             return false;
+                        }
 
                         if (targetLeader.IsOnVehicle())
                         {

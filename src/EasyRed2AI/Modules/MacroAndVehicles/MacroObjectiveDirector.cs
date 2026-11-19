@@ -16,6 +16,7 @@ namespace EasyRed2HumanAI
                 return;
 
             float now = Time.time;
+            ProcessPendingStaggeredBailouts(now);
             DrainOnePendingMacroSquadOrderIfReady(now);
 
             if (now < _nextMacroDirectorTime && _nextMacroDirectorTime - now <= 10.0f)
@@ -3055,6 +3056,7 @@ namespace EasyRed2HumanAI
                         !VisionConfig.EnableMod.Value ||
                         !VisionConfig.EnableMapSquadLabels.Value ||
                         __instance == null ||
+                        !IsFriendlySquadToLocalPlayer(__instance) ||
                         txt == null ||
                         txt.gameObject == null)
                     {
@@ -3076,6 +3078,42 @@ namespace EasyRed2HumanAI
             }
         }
 
+        internal static bool IsFriendlySquadToLocalPlayer(Squad sq)
+        {
+            if (sq == null || sq.Pointer == IntPtr.Zero)
+                return false;
+
+            Soldier localPlayer = Soldier.CurrentControlledSoldierOrNull();
+            if (localPlayer == null || string.IsNullOrEmpty(localPlayer.faction))
+                return true;
+
+            string sqFac = null;
+            Soldier leader = sq.Leader;
+            if (leader != null && !string.IsNullOrEmpty(leader.faction))
+            {
+                sqFac = leader.faction;
+            }
+            else if (sq.units != null)
+            {
+                var units = sq.units;
+                int cnt = units.Count;
+                for (int i = 0; i < cnt; i++)
+                {
+                    Soldier u = units[i];
+                    if (u != null && !string.IsNullOrEmpty(u.faction))
+                    {
+                        sqFac = u.faction;
+                        break;
+                    }
+                }
+            }
+
+            if (string.IsNullOrEmpty(sqFac))
+                return false;
+
+            return AiCore.AreSameSideFactions(localPlayer.faction, sqFac);
+        }
+
         internal static Color GetSquadLetterColor(Squad sq, float alpha = 0.96f)
         {
             Soldier localPlayer = Soldier.CurrentControlledSoldierOrNull();
@@ -3092,6 +3130,8 @@ namespace EasyRed2HumanAI
         internal static Marker3DGUI.Entry _lastPooledMarker3DEntry;
         internal static readonly Dictionary<IntPtr, Marker3DGUI.Entry> _squad3DMarkerEntries =
             new Dictionary<IntPtr, Marker3DGUI.Entry>(32);
+        internal static readonly Dictionary<IntPtr, IntPtr> _marker3DEntryOwnerByEntryPtr =
+            new Dictionary<IntPtr, IntPtr>(64);
         internal static readonly Dictionary<IntPtr, UnityEngine.UI.Text> _marker3DEntryTexts =
             new Dictionary<IntPtr, UnityEngine.UI.Text>(64);
         internal static readonly Dictionary<IntPtr, (Marker3DGUI.Entry Entry, UnityEngine.UI.Text Txt)> _activeSquad3DLabels =
@@ -3188,17 +3228,29 @@ namespace EasyRed2HumanAI
                 try
                 {
                     _lastPooledMarker3DEntry = __result;
-                    if (__result != null &&
-                        _marker3DEntryTexts.TryGetValue(__result.Pointer, out UnityEngine.UI.Text existing) &&
-                        !ReferenceEquals(existing, null) &&
-                        existing != null &&
-                        existing.gameObject != null &&
-                        existing.gameObject.activeSelf)
-                    {
-                        existing.gameObject.SetActive(false);
-                    }
                     if (__result != null)
-                        _activeSquad3DLabels.Remove(__result.Pointer);
+                    {
+                        IntPtr entryPtr = __result.Pointer;
+                        if (_marker3DEntryTexts.TryGetValue(entryPtr, out UnityEngine.UI.Text existing) &&
+                            !ReferenceEquals(existing, null) &&
+                            existing != null &&
+                            existing.gameObject != null &&
+                            existing.gameObject.activeSelf)
+                        {
+                            existing.gameObject.SetActive(false);
+                        }
+                        if (_marker3DEntryOwnerByEntryPtr.TryGetValue(entryPtr, out IntPtr prevOwner))
+                        {
+                            _marker3DEntryOwnerByEntryPtr.Remove(entryPtr);
+                            if (_squad3DMarkerEntries.TryGetValue(prevOwner, out Marker3DGUI.Entry prevEntry) &&
+                                prevEntry != null &&
+                                prevEntry.Pointer == entryPtr)
+                            {
+                                _squad3DMarkerEntries.Remove(prevOwner);
+                            }
+                        }
+                        _activeSquad3DLabels.Remove(entryPtr);
+                    }
                 }
                 catch { }
             }
@@ -3220,25 +3272,45 @@ namespace EasyRed2HumanAI
                     if (__1 != 0 || __0 == null || __0.Pointer == IntPtr.Zero)
                         return;
 
+                    IntPtr keyPtr = __0.Pointer;
                     if (_lastPooledMarker3DEntry != null)
                     {
                         if (_squad3DMarkerEntries.Count > 128)
+                        {
                             _squad3DMarkerEntries.Clear();
-                        _squad3DMarkerEntries[__0.Pointer] = _lastPooledMarker3DEntry;
+                            _marker3DEntryOwnerByEntryPtr.Clear();
+                        }
+                        IntPtr pooledPtr = _lastPooledMarker3DEntry.Pointer;
+                        if (_marker3DEntryOwnerByEntryPtr.TryGetValue(pooledPtr, out IntPtr oldOwner) &&
+                            oldOwner != keyPtr &&
+                            _squad3DMarkerEntries.TryGetValue(oldOwner, out Marker3DGUI.Entry oldEntry) &&
+                            oldEntry != null &&
+                            oldEntry.Pointer == pooledPtr)
+                        {
+                            _squad3DMarkerEntries.Remove(oldOwner);
+                        }
+                        _squad3DMarkerEntries[keyPtr] = _lastPooledMarker3DEntry;
+                        _marker3DEntryOwnerByEntryPtr[pooledPtr] = keyPtr;
                         _lastPooledMarker3DEntry = null;
                     }
 
-                    if (!_squad3DMarkerEntries.TryGetValue(__0.Pointer, out Marker3DGUI.Entry entry) ||
+                    if (!_squad3DMarkerEntries.TryGetValue(keyPtr, out Marker3DGUI.Entry entry) ||
                         entry == null ||
                         entry.img == null ||
                         entry.img.gameObject == null ||
-                        !entry.img.gameObject.activeInHierarchy)
+                        !entry.img.gameObject.activeInHierarchy ||
+                        !_marker3DEntryOwnerByEntryPtr.TryGetValue(entry.Pointer, out IntPtr ownerPtr) ||
+                        ownerPtr != keyPtr ||
+                        entry.lastFrame != Time.frameCount)
                     {
                         return;
                     }
 
                     Squad sq = __0.TryCast<Squad>();
-                    if (sq == null || !VisionConfig.EnableMod.Value || !VisionConfig.EnableMapSquadLabels.Value)
+                    if (sq == null ||
+                        !VisionConfig.EnableMod.Value ||
+                        !VisionConfig.EnableMapSquadLabels.Value ||
+                        !IsFriendlySquadToLocalPlayer(sq))
                     {
                         if (_marker3DEntryTexts.TryGetValue(entry.Pointer, out UnityEngine.UI.Text existing) &&
                             existing != null &&

@@ -385,6 +385,12 @@ namespace EasyRed2HumanAI
                     AiCore.TryConsumeBotRpcBudget(0.45f))
                 {
                     soldier.Throw(grenadeItem, targetVeh.Cast<Spottable>());
+                    bool isTank = targetVeh.TryCast<VehicleTank>() != null;
+                    TrySayTacticalVoice(
+                        soldier,
+                        soldier.joinedSquad,
+                        isTank ? VoiceManager.VoiceClip.attackThatTank : VoiceManager.VoiceClip.attackThatVehicle,
+                        0.08f);
                 }
             }
         }

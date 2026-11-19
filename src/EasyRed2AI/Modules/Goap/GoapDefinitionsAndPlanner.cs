@@ -361,6 +361,9 @@ namespace EasyRed2HumanAI
             public float NextSquadUnstallTime;
             public int ConsecutiveStallCount;
 
+            public IntPtr AcousticInvestigatorPtr;
+            public float AcousticInvestigateUntil;
+
             public bool IsThreatBeingPinned(float now)
             {
                 return now < SuppressHoldUntil && (Suppressor0Ptr != IntPtr.Zero || Suppressor1Ptr != IntPtr.Zero);
@@ -1151,8 +1154,9 @@ namespace EasyRed2HumanAI
 
             if (ai.visibleTarget != null)
                 ws |= GoapStateBits.HasVisibleEnemy;
-            // Bailed vehicle crews only block evacuation for close-quarters self-defense (<= 24m), never to plink at distant riflemen!
-            if (ai.HasEnemyAndCanFireAtHim && (!isBailedVehicleCrew || dist <= 24.0f))
+            // Bailed vehicle crews only block evacuation for close-quarters self-defense (<= 24m, or <= 32m during initial bailout shock), never to plink at distant riflemen!
+            float bailedSelfDefDist = (h != null && now < h.Goap.BailoutShockUntil) ? 32.0f : 24.0f;
+            if (ai.HasEnemyAndCanFireAtHim && (!isBailedVehicleCrew || dist <= bailedSelfDefDist))
                 ws |= GoapStateBits.CanFireAtVisibleEnemy;
             if (isGunner)
                 ws |= GoapStateBits.IsMachineGunner;

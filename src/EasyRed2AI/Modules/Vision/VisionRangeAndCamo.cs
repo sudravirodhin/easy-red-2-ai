@@ -41,11 +41,172 @@ namespace EasyRed2HumanAI
             public bool IsExplosionImpact;
         }
 
+        private struct FootstepEntry
+        {
+            public IntPtr SoldierPtr;
+            public Vector3 Pos;
+            public string Faction;
+            public float StepTime;
+            public float AudibleRadius;
+        }
+
         private const int GunfireRingSize = 64;
         private const int GunfireRingMask = GunfireRingSize - 1;
         private static readonly RecentGunfireEntry[] _gunfireRing = new RecentGunfireEntry[GunfireRingSize];
         private static int _gunfireRingHead;
         private static int _explosionSeqCounter = 1;
+
+        private const int FootstepRingSize = 32;
+        private const int FootstepRingMask = FootstepRingSize - 1;
+        private static readonly FootstepEntry[] _footstepRing = new FootstepEntry[FootstepRingSize];
+        private static int _footstepRingHead;
+
+        private static void RecordSoldierFootstep(Soldier s)
+        {
+            if (s == null || s.Pointer == IntPtr.Zero || s.transform == null)
+                return;
+
+            // Standing movement only: crouched and prone movement remain stealthy at close range.
+            if (s.m_pose != SoldierPose.Idle)
+                return;
+
+            float now = Time.time;
+            IntPtr ptr = s.Pointer;
+            Vector3 pos = s.transform.position;
+            string fac = AiCore.GetCachedFaction(s);
+            if (string.IsNullOrEmpty(fac))
+                return;
+
+            float radius = s.isSprinting ? 17.0f : 9.5f;
+            for (int i = 0; i < FootstepRingSize; i++)
+            {
+                if (_footstepRing[i].SoldierPtr == ptr)
+                {
+                    _footstepRing[i].Pos = pos;
+                    _footstepRing[i].Faction = fac;
+                    _footstepRing[i].StepTime = now;
+                    _footstepRing[i].AudibleRadius = radius;
+                    return;
+                }
+            }
+
+            int slot = _footstepRingHead & FootstepRingMask;
+            _footstepRingHead = (slot + 1) & FootstepRingMask;
+            _footstepRing[slot] = new FootstepEntry
+            {
+                SoldierPtr = ptr,
+                Pos = pos,
+                Faction = fac,
+                StepTime = now,
+                AudibleRadius = radius
+            };
+        }
+
+        private static bool HasAnyLoudEventNear(Vector3 observerPos, float maxRadius, float maxAgeSeconds, float now)
+        {
+            float maxDistSq = maxRadius * maxRadius;
+            for (int i = 0; i < GunfireRingSize; i++)
+            {
+                ref RecentGunfireEntry e = ref _gunfireRing[i];
+                if (e.ShooterPtr == IntPtr.Zero)
+                    continue;
+
+                float age = now - e.FiredTime;
+                if (age < 0f || age > maxAgeSeconds)
+                    continue;
+
+                float dx = e.Pos.x - observerPos.x;
+                float dy = e.Pos.y - observerPos.y;
+                float dz = e.Pos.z - observerPos.z;
+                if (dx * dx + dy * dy + dz * dz <= maxDistSq)
+                    return true;
+            }
+            return false;
+        }
+
+        public static bool TryGetNearestCloseAcousticThreat(
+            Vector3 observerPos,
+            string observerFaction,
+            float now,
+            out Vector3 soundPos,
+            out float soundDist,
+            out bool isGunfire)
+        {
+            soundPos = Vector3.zero;
+            soundDist = -1f;
+            isGunfire = false;
+            if (string.IsNullOrEmpty(observerFaction))
+                return false;
+
+            float bestDistSq = 20.0f * 20.0f + 1.0f;
+            bool found = false;
+
+            for (int i = 0; i < GunfireRingSize; i++)
+            {
+                ref RecentGunfireEntry e = ref _gunfireRing[i];
+                if (e.ShooterPtr == IntPtr.Zero || e.IsExplosionImpact)
+                    continue;
+
+                float age = now - e.FiredTime;
+                if (age < 0f || age > 2.2f)
+                    continue;
+
+                float dy = e.Pos.y - observerPos.y;
+                if (Mathf.Abs(dy) > 6.0f)
+                    continue;
+
+                float dx = e.Pos.x - observerPos.x;
+                float dz = e.Pos.z - observerPos.z;
+                float distSq = dx * dx + dy * dy + dz * dz;
+                if (distSq > 20.0f * 20.0f || distSq >= bestDistSq)
+                    continue;
+
+                if (!AiCore.AreEnemyFactions(observerFaction, e.Faction))
+                    continue;
+
+                bestDistSq = distSq;
+                soundPos = e.Pos;
+                isGunfire = true;
+                found = true;
+            }
+
+            float stepMaskMult = HasAnyLoudEventNear(observerPos, 35.0f, 3.0f, now) ? 0.50f : 1.0f;
+            for (int i = 0; i < FootstepRingSize; i++)
+            {
+                ref FootstepEntry fe = ref _footstepRing[i];
+                if (fe.SoldierPtr == IntPtr.Zero)
+                    continue;
+
+                float age = now - fe.StepTime;
+                if (age < 0f || age > 1.8f)
+                    continue;
+
+                float dy = fe.Pos.y - observerPos.y;
+                if (Mathf.Abs(dy) > 4.5f)
+                    continue;
+
+                float maxR = Mathf.Min(20.0f, fe.AudibleRadius * stepMaskMult);
+                float dx = fe.Pos.x - observerPos.x;
+                float dz = fe.Pos.z - observerPos.z;
+                float distSq = dx * dx + dy * dy + dz * dz;
+                if (distSq > maxR * maxR || distSq >= bestDistSq)
+                    continue;
+
+                if (!AiCore.AreEnemyFactions(observerFaction, fe.Faction))
+                    continue;
+
+                bestDistSq = distSq;
+                soundPos = fe.Pos;
+                isGunfire = false;
+                found = true;
+            }
+
+            if (!found)
+                return false;
+
+            soundDist = Mathf.Sqrt(bestDistSq);
+            return true;
+        }
 
         public static void RecordSoldierFired(Soldier s)
         {
@@ -529,6 +690,8 @@ namespace EasyRed2HumanAI
         {
             Array.Clear(_gunfireRing, 0, GunfireRingSize);
             _gunfireRingHead = 0;
+            Array.Clear(_footstepRing, 0, FootstepRingSize);
+            _footstepRingHead = 0;
             _nextCleanupTime = 0f;
         }
 
@@ -564,6 +727,30 @@ namespace EasyRed2HumanAI
                     if (!VisionConfig.EnableMod.Value || __instance == null) return;
                     RecordSoldierFired(__instance);
                     VeteranAndTacticsPatches.AddCombatExperienceBonus(__instance, 0.75f);
+                }
+                catch { }
+            }
+        }
+
+        [HarmonyPatch(typeof(Soldier), nameof(Soldier.TryPlayStepSound))]
+        public static class Soldier_TryPlayStepSound_Patch
+        {
+            public static void Postfix(Soldier __instance, bool __result)
+            {
+                try
+                {
+                    if (!__result ||
+                        !VisionConfig.EnableMod.Value ||
+                        __instance == null ||
+                        !__instance.IsAlive ||
+                        __instance.IsOnVehicle() ||
+                        __instance.HasSurrended() ||
+                        __instance.transform == null)
+                    {
+                        return;
+                    }
+
+                    RecordSoldierFootstep(__instance);
                 }
                 catch { }
             }

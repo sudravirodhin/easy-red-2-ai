@@ -559,6 +559,12 @@ namespace EasyRed2HumanAI
             GenericGun heldGun = soldier.GetHeldGun();
             bool isPistol = heldGun != null && heldGun.IsPistol();
             bool gunEmptyOrReloading = AiCore.IsHeldGunEmptyOrReloading(soldier, heldGun);
+            if (meleeEvalH != null && now < meleeEvalH.Combat.MeleeWhiffFallbackUntil && !gunEmptyOrReloading && !holdsMelee)
+            {
+                if (ai.knifeCharge)
+                    ai.knifeCharge = false;
+                return false;
+            }
             // When facing an exposed static-emplacement gunner while holding a loaded firearm
             // (and not charging or holding a melee weapon), shoot point-blank instead of lunging into the tripod!
             if (isExposedEmplacementGunner && !gunEmptyOrReloading && !holdsMelee && !isChargingOrder)
@@ -735,13 +741,17 @@ namespace EasyRed2HumanAI
                 meleeH.Combat.ConsecutiveMeleeSwingsOnTarget = 1;
             }
             meleeH.Combat.LastMeleeSwingTime = swingNow;
-            if (meleeH.Combat.ConsecutiveMeleeSwingsOnTarget >= 4 &&
+            if (meleeH.Combat.ConsecutiveMeleeSwingsOnTarget >= 3 &&
                 enemy.IsAlive &&
-                !enemy.IsInjured &&
-                swingNow >= meleeH.NextAnomalyAlertTime)
+                !enemy.IsInjured)
             {
-                meleeH.NextAnomalyAlertTime = swingNow + 8.0f;
-                BotActionTrace.RecordEvent(soldier, BotTraceEventKind.AnomalyAlert, "melee_whiff_loop", Mathf.Sqrt(toEnemy.sqrMagnitude), meleeH.Combat.ConsecutiveMeleeSwingsOnTarget);
+                meleeH.Combat.MeleeWhiffFallbackUntil = swingNow + 4.0f;
+                meleeH.Combat.ConsecutiveMeleeSwingsOnTarget = 0;
+                if (swingNow >= meleeH.NextAnomalyAlertTime)
+                {
+                    meleeH.NextAnomalyAlertTime = swingNow + 8.0f;
+                    BotActionTrace.RecordEvent(soldier, BotTraceEventKind.AnomalyAlert, "melee_whiff_loop", Mathf.Sqrt(toEnemy.sqrMagnitude), 3f);
+                }
             }
         }
 

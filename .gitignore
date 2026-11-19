@@ -22,6 +22,7 @@ tools/verify_patches/*.pdb
 tools/verify_patches/*.gen.cs
 
 # Build Outputs & IDE Artifacts
+scratch/
 build/
 releases/
 bin/

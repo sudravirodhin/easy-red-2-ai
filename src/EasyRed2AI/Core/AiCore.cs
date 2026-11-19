@@ -237,6 +237,9 @@ namespace EasyRed2HumanAI
             public IntPtr LastMeleeSwingTargetPtr;
             public float LastMeleeSwingTime;
             public byte ConsecutiveMeleeSwingsOnTarget;
+            public float MeleeWhiffFallbackUntil;
+            public float NextAtCapCheckTime;
+            public bool CachedHasUsableAt;
             public VeteranAndTacticsPatches.FireAndMovementState FireAndMovement;
             public VeteranAndTacticsPatches.RotateAndFireFrameState RotateFireFrame;
             public VeteranAndTacticsPatches.InfantrySightReactionState SightReaction;
@@ -268,6 +271,8 @@ namespace EasyRed2HumanAI
             public IntPtr RemountTargetVehiclePtr;
             public float RemountAttemptStartedAt;
             public float RemountCooldownUntil;
+            public float BailoutShockUntil;
+            public Vector3 BailoutWreckPos;
         }
 
         internal static void SetBotMoveOverride(SoldierFastHandles h, BotMoveOverrideKind kind, Vector3 dest, float expireTime)
@@ -1195,6 +1200,7 @@ namespace EasyRed2HumanAI
         private static float _nextWindowFocusPollUnscaledTime;
         private static bool _isGameWindowFocused = true;
         private static bool _backgroundFpsCapActive;
+        private static int _backgroundFpsCapTarget = 30;
         private static int _savedVSyncCountBeforeUnfocus = 1;
         private static int _savedTargetFpsBeforeUnfocus = -1;
 
@@ -1258,13 +1264,20 @@ namespace EasyRed2HumanAI
 
                 if (!_isGameWindowFocused)
                 {
+                    int desiredBgFps = IsMultiplayerWithRemotePlayers() ? 45 : 30;
                     if (!_backgroundFpsCapActive)
                     {
                         _savedVSyncCountBeforeUnfocus = QualitySettings.vSyncCount;
                         _savedTargetFpsBeforeUnfocus = Application.targetFrameRate;
                         QualitySettings.vSyncCount = 0;
-                        Application.targetFrameRate = 30;
+                        Application.targetFrameRate = desiredBgFps;
+                        _backgroundFpsCapTarget = desiredBgFps;
                         _backgroundFpsCapActive = true;
+                    }
+                    else if (_backgroundFpsCapTarget != desiredBgFps)
+                    {
+                        Application.targetFrameRate = desiredBgFps;
+                        _backgroundFpsCapTarget = desiredBgFps;
                     }
                 }
                 else
@@ -1596,6 +1609,12 @@ namespace EasyRed2HumanAI
             // Keep thresholds safely above normal 60Hz VSync jitter (16.67ms-17.4ms) so locked 60 FPS lobbies
             // never false-trigger PingSkip or starve global squad/macro directors.
             float threshold = players >= 6 ? 0.0208f : (players > 1 ? 0.0222f : 0.0265f);
+            if (_backgroundFpsCapActive)
+            {
+                float bgFrameBudget = (1.0f / Mathf.Max(20, _backgroundFpsCapTarget)) + 0.008f;
+                if (threshold < bgFrameBudget)
+                    threshold = bgFrameBudget;
+            }
             if (dt > threshold)
             {
                 TotalPingGovernorSkippedCycles++;
@@ -2744,6 +2763,36 @@ namespace EasyRed2HumanAI
         /// reserves <see cref="SoldierAI.MoveDirectlyToward"/> strictly for unobstructed level
         /// micro-steps (&lt;= 2.5m).
         /// </summary>
+        public static VoiceManager.VoiceClip ResolveSafeVoiceClip(
+            Soldier s,
+            VoiceManager.VoiceClip clip,
+            bool allowYesVariation = true)
+        {
+            if (ReferenceEquals(s, null) || s == null || s.Pointer == IntPtr.Zero)
+                return clip;
+
+            if (clip == VoiceManager.VoiceClip.keepYourHeadDown)
+            {
+                try
+                {
+                    VoiceManager vm = s._voice;
+                    if (vm == null || vm.keepYourHeadDown == null || vm.keepYourHeadDown.Length == 0)
+                        return VoiceManager.VoiceClip.imUnderFire;
+                }
+                catch
+                {
+                    return VoiceManager.VoiceClip.imUnderFire;
+                }
+            }
+            else if (allowYesVariation && clip == VoiceManager.VoiceClip.yesSir && s.IsAI())
+            {
+                if ((GetDeterministicHash(s.Pointer, (int)(Time.time * 2.0f)) & 15) < 7)
+                    return VoiceManager.VoiceClip.yes;
+            }
+
+            return clip;
+        }
+
         public static void MoveBotTowardPosition(
             SoldierAI ai,
             Soldier soldier,

@@ -16,7 +16,7 @@ namespace EasyRed2HumanAI
     {
         public const string PluginGuid = "com.antigravity.easyred2.humanai";
         public const string PluginName = "Easy Red 2 - Battle Hardened";
-        public const string PluginVersion = "0.9.8";
+        public const string PluginVersion = "0.9.9";
 
         internal static Plugin Instance;
         internal static new ManualLogSource Log;
@@ -161,7 +161,9 @@ namespace EasyRed2HumanAI
             SafePatch(typeof(VeteranAndTacticsPatches.Soldier_SetBleeding_Patch));
             SafePatch(typeof(VeteranAndTacticsPatches.Soldier_SetOnFire_Patch));
             SafePatch(typeof(VeteranAndTacticsPatches.Squad_SetFullySpawned_Patch));
+            SafePatch(typeof(VeteranAndTacticsPatches.SyncSoldier_SyncSquad_Patch));
             SafePatch(typeof(VeteranAndTacticsPatches.Squad_Join_Patch));
+            SafePatch(typeof(VisionPatches.Soldier_TryPlayStepSound_Patch));
             SafePatch(typeof(VeteranAndTacticsPatches.PlayerGUI_ClearSquadList_Patch));
             SafePatch(typeof(VeteranAndTacticsPatches.PlayerGUI_ShowSquadList_Patch));
             SafePatch(typeof(VeteranAndTacticsPatches.PlayerGUI_LayoutSquadEntries_Patch));

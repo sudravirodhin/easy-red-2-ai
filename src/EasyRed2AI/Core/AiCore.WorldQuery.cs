@@ -2492,7 +2492,7 @@ namespace EasyRed2HumanAI
                 if (ReferenceEquals(u, null) || u == null || u.Pointer == IntPtr.Zero || h == null)
                     continue;
 
-                if (now < h.NextAnomalyAlertTime && (now + 5.0f) < h.NextAnomalyAlertTime)
+                if (now < h.NextAnomalyAlertTime && (now + 60.0f) < h.NextAnomalyAlertTime)
                     h.NextAnomalyAlertTime = 0f;
 
                 if (ws.HasSurrendered)
@@ -2576,8 +2576,22 @@ namespace EasyRed2HumanAI
                     h.SurrenderedSinceTime = 0f;
                     h.UnliberatedWithNearbyAllySince = 0f;
 
-                    // Detector 3: Idle-in-open zombie bot while destination is > 20m away (only when trace logging is active)
-                    if (traceEnabled && !ws.IsPlayer && !ws.IsOnVehicle && !ws.IsInjured && !ws.IsSquadLeader)
+                    // Detector 3: Idle-in-open zombie bot while actual endpoint is > 20m away (only when trace logging is active)
+                    bool eligibleZombieAudit = traceEnabled &&
+                                               !ws.IsPlayer &&
+                                               !ws.IsOnVehicle &&
+                                               !ws.IsInjured &&
+                                               !ws.IsSquadLeader &&
+                                               IsLocallyOwnedBot(u) &&
+                                               (u.Params == null || u.Params.canMove);
+                    if (eligibleZombieAudit)
+                    {
+                        Squad wdSq = GetCachedSquad(h, now);
+                        if (wdSq != null && wdSq.IsPlayerInSquad())
+                            eligibleZombieAudit = false;
+                    }
+
+                    if (eligibleZombieAudit)
                     {
                         if (h.WatchdogStationarySince <= 0f ||
                             now < h.WatchdogStationarySince ||
@@ -2593,9 +2607,10 @@ namespace EasyRed2HumanAI
                                  !IsSoldierInVehicleOrTransition(u))
                         {
                             SoldierAI ai = h.Ai != null ? h.Ai : u.aiController;
-                            if (ai != null && !ai.HasEnemyAndCanFireAtHim)
+                            if (ai != null && !ai.HasEnemyAndCanFireAtHim && !ai.IsMoving())
                             {
-                                float destDistSq = (ai.MoveDestination - ws.Pos).sqrMagnitude;
+                                Vector3 effDest = VeteranAndTacticsPatches.GetCachedMoveEndpoint(h, ai, u, out _);
+                                float destDistSq = (effDest - ws.Pos).sqrMagnitude;
                                 if (destDistSq > 20.0f * 20.0f)
                                 {
                                     h.NextAnomalyAlertTime = now + 15.0f;
@@ -2608,6 +2623,10 @@ namespace EasyRed2HumanAI
                                 }
                             }
                         }
+                    }
+                    else
+                    {
+                        h.WatchdogStationarySince = 0f;
                     }
                 }
             }
@@ -2796,7 +2815,10 @@ namespace EasyRed2HumanAI
                         return vi;
                     if (findAtGrenade && fallbackAt == null &&
                         TryGetThrowablePrefabInfo(vi, out ThrowablePrefabInfo info) &&
-                        (info.Type == GrenadeType.ATGrenade || info.MaxPenetration >= 16.0f || info.IsSatchelOrHeavyDemo))
+                        (info.Type == GrenadeType.ATGrenade ||
+                         info.Type == GrenadeType.phosporusGrenade ||
+                         info.MaxPenetration >= 16.0f ||
+                         info.IsSatchelOrHeavyDemo))
                     {
                         fallbackAt = vi;
                     }

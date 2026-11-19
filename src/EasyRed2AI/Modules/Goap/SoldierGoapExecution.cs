@@ -410,7 +410,21 @@ namespace EasyRed2HumanAI
 
             if (currentAction == GoapActionId.None)
             {
-                AiCore.ClearBotMoveOverride(goapH, AiCore.BotMoveOverrideKind.GoapAction);
+                bool keepAcousticOverride = sq != null &&
+                                            goapH != null &&
+                                            now < board.AcousticInvestigateUntil &&
+                                            board.AcousticInvestigatorPtr == ptr &&
+                                            goapH.MoveOverride.Kind == AiCore.BotMoveOverrideKind.GoapAction &&
+                                            now < goapH.MoveOverride.ExpireTime;
+                if (!keepAcousticOverride &&
+                    TryExecuteCloseAcousticInvestigate(ai, soldier, goapH, sq, ref board, ws, suppression, personality, now))
+                {
+                    if (sq != null && sq.Pointer != IntPtr.Zero)
+                        _squadBlackboards[sq.Pointer] = board;
+                    return;
+                }
+                if (!keepAcousticOverride)
+                    AiCore.ClearBotMoveOverride(goapH, AiCore.BotMoveOverrideKind.GoapAction);
                 return;
             }
 
@@ -2361,6 +2375,41 @@ namespace EasyRed2HumanAI
                                 break;
                             }
 
+                            if (shGoap != null && now < shGoap.Goap.BailoutShockUntil)
+                            {
+                                if (AiCore.IsSoldierInVehicleOrTransition(soldier))
+                                    break;
+
+                                SetBotPose(ai, soldier, suppression >= 45f ? SoldierPose.Prone : SoldierPose.Crouch, true);
+                                Vector3 toWreck = myPos - shGoap.Goap.BailoutWreckPos;
+                                toWreck.y = 0f;
+                                if (toWreck.sqrMagnitude < 6.5f * 6.5f && !ai.IsMoving())
+                                {
+                                    Vector3 awayDir;
+                                    if (toWreck.sqrMagnitude > 0.25f)
+                                    {
+                                        awayDir = toWreck.normalized;
+                                    }
+                                    else
+                                    {
+                                        Vector3 fallbackAway = board.HasActiveThreat ? (myPos - board.ThreatPosition) : soldier.transform.forward;
+                                        fallbackAway.y = 0f;
+                                        awayDir = fallbackAway.sqrMagnitude > 0.04f ? fallbackAway.normalized : soldier.transform.forward;
+                                    }
+                                    float jitterDeg = ((AiCore.GetDeterministicHash(ptr, 53) & 15) - 7) * 6.0f;
+                                    Vector3 lat = Quaternion.Euler(0f, jitterDeg, 0f) * awayDir;
+                                    Vector3 scramblePos = shGoap.Goap.BailoutWreckPos + lat * 6.5f;
+                                    float terrY = ResourcesManager.GetTerrainAltitude(scramblePos, myPos.y);
+                                    scramblePos.y = Mathf.Abs(terrY - myPos.y) <= 4.0f ? terrY : myPos.y;
+                                    AiCore.SetBotMoveDestinationAndRefreshPath(ai, scramblePos, 0.25f);
+                                    plan.HasMoveOverride = true;
+                                    plan.MoveOverrideDest = scramblePos;
+                                }
+                                plan.LockUnitCoverChange = true;
+                                plan.IsEvacuatingBailedCrew = true;
+                                break;
+                            }
+
                             if (ShouldBailedCrewRetreatOverJoinSquad(soldier, sq, myPos))
                             {
                                 if (TryRetreatBailedCrewTowardFriendlySpawn(ai, soldier, sq, myPos, out Vector3 spawnOverride, out bool hasSpawnOverride))
@@ -2525,6 +2574,22 @@ namespace EasyRed2HumanAI
 
                 case GoapActionId.DirectFireEngagement:
                     {
+                        if (ai.visibleTarget != null)
+                        {
+                            Vehicle targetVeh = ai.visibleTarget.TryCast<Vehicle>();
+                            if (targetVeh != null &&
+                                targetVeh.TryCast<VehiclePlane>() == null &&
+                                (board.SquadHasAntiTank || HasUsableAntiTankCapability(soldier)))
+                            {
+                                bool isTank = targetVeh.TryCast<VehicleTank>() != null;
+                                TrySayTacticalVoice(
+                                    soldier,
+                                    sq,
+                                    isTank ? VoiceManager.VoiceClip.attackThatTank : VoiceManager.VoiceClip.attackThatVehicle,
+                                    0.08f);
+                            }
+                        }
+
                         if ((ws & GoapStateBits.InCover) == 0 &&
                             (suppression >= 8.0f || (ws & GoapStateBits.NearFreshCasualty) != 0) &&
                             AiCore.CanBotMoveAutonomously(soldier) &&
@@ -2543,6 +2608,95 @@ namespace EasyRed2HumanAI
                     }
                     break;
             }
+        }
+
+        private static bool TryExecuteCloseAcousticInvestigate(
+            SoldierAI ai,
+            Soldier soldier,
+            AiCore.SoldierFastHandles h,
+            Squad sq,
+            ref SquadBlackboard board,
+            GoapStateBits ws,
+            float suppression,
+            SoldierPersonality personality,
+            float now)
+        {
+            const GoapStateBits AcousticBusyMask =
+                GoapStateBits.IsBleeding |
+                GoapStateBits.IsSuppressed |
+                GoapStateBits.IsHeavilySuppressed |
+                GoapStateBits.NearFreshCasualty |
+                GoapStateBits.HasVisibleEnemy |
+                GoapStateBits.CanFireAtVisibleEnemy |
+                GoapStateBits.InPointBlankRange |
+                GoapStateBits.ArmorThreatClose |
+                GoapStateBits.ExposedSideOfWall |
+                GoapStateBits.OverwhelmedNeedFallback |
+                GoapStateBits.RadioLinkDrifting;
+
+            if ((ws & AcousticBusyMask) != 0 ||
+                ai == null ||
+                soldier == null ||
+                soldier.transform == null ||
+                sq == null ||
+                sq.Pointer == IntPtr.Zero ||
+                ai.HasEnemyAndCanFireAtHim ||
+                soldier.isBleeding ||
+                suppression >= 15f ||
+                soldier.IsRadioman() ||
+                soldier.hasSyringe ||
+                soldier.IsSquadLeader() ||
+                soldier.UsingBipod() ||
+                soldier.IsBipodTransitioning() ||
+                sq.IsPlayerInSquad() ||
+                IsSoldierBailedOutVehicleCrew(soldier, sq) ||
+                IsPilotOrVehicleCrewPersonality(personality) ||
+                IsActivelyHeadingToEmplacement(soldier, now) ||
+                !AiCore.CanBotMoveAutonomously(soldier))
+            {
+                return false;
+            }
+
+            if (h != null && h.MoveOverride.Kind != AiCore.BotMoveOverrideKind.None && now < h.MoveOverride.ExpireTime)
+                return false;
+
+            if (board.AcousticInvestigatorPtr != IntPtr.Zero &&
+                board.AcousticInvestigatorPtr != soldier.Pointer &&
+                now < board.AcousticInvestigateUntil)
+            {
+                return false;
+            }
+
+            Vector3 myPos = soldier.transform.position;
+            string fac = AiCore.GetCachedFaction(soldier);
+            if (!VisionPatches.TryGetNearestCloseAcousticThreat(myPos, fac, now, out Vector3 soundPos, out float soundDist, out _))
+                return false;
+
+            if (soundDist <= 3.5f || soundDist > 20.0f)
+                return false;
+
+            Vector3 toSound = soundPos - myPos;
+            toSound.y = 0f;
+            float flatMag = toSound.magnitude;
+            if (flatMag <= 3.5f)
+                return false;
+
+            Vector3 stepDir = toSound / flatMag;
+            float peekDist = Mathf.Max(1.0f, flatMag - 3.5f);
+            Vector3 peekPos = myPos + stepDir * peekDist;
+            float terrY = ResourcesManager.GetTerrainAltitude(peekPos, myPos.y);
+            peekPos.y = Mathf.Abs(terrY - myPos.y) <= 4.0f ? terrY : myPos.y;
+
+            board.AcousticInvestigatorPtr = soldier.Pointer;
+            board.AcousticInvestigateUntil = now + 6.0f;
+
+            if (h != null)
+                AiCore.SetBotMoveOverride(h, AiCore.BotMoveOverrideKind.GoapAction, peekPos, now + 4.5f);
+
+            AiCore.SetBotMoveDestinationAndRefreshPath(ai, peekPos, 0.25f);
+            SetBotPose(ai, soldier, SoldierPose.Crouch, true);
+            soldier.SetAlertedFor(5.0f);
+            return true;
         }
 
         private static bool IsMovementGoapAction(GoapActionId id)

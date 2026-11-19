@@ -196,13 +196,16 @@ namespace EasyRed2HumanAI
         {
             private const int DeathVoiceClipId = 4; // Soldier.Kill (0x180751D35) / <KillDelayed> (0x18077DB41)
 
-            public static bool Prefix(Soldier __instance, VoiceManager.VoiceClip __0)
+            public static bool Prefix(Soldier __instance, ref VoiceManager.VoiceClip __0)
             {
                 if (ReferenceEquals(__instance, null) || __instance == null || __instance.Pointer == IntPtr.Zero)
                     return false;
 
                 if (__instance.IsDead && (int)__0 != DeathVoiceClipId)
                     return false;
+
+                if (VisionConfig.EnableMod.Value)
+                    __0 = AiCore.ResolveSafeVoiceClip(__instance, __0, allowYesVariation: true);
 
                 return true;
             }
@@ -213,7 +216,7 @@ namespace EasyRed2HumanAI
         {
             private const int DeathVoiceClipId = 4;
 
-            public static bool Prefix(Soldier __instance, VoiceManager.VoiceClip __0)
+            public static bool Prefix(Soldier __instance, ref VoiceManager.VoiceClip __0)
             {
                 if (ReferenceEquals(__instance, null) || __instance == null || __instance.Pointer == IntPtr.Zero)
                     return false;
@@ -224,6 +227,9 @@ namespace EasyRed2HumanAI
                 SyncSoldier syncher = __instance.GetSyncher();
                 if (ReferenceEquals(syncher, null) || syncher == null || syncher.Pointer == IntPtr.Zero)
                     return false;
+
+                if (VisionConfig.EnableMod.Value)
+                    __0 = AiCore.ResolveSafeVoiceClip(__instance, __0, allowYesVariation: false);
 
                 return true;
             }
@@ -885,10 +891,20 @@ namespace EasyRed2HumanAI
                 {
                     if (!ReferenceEquals(__instance, null) &&
                         __instance != null &&
-                        __instance.Pointer != IntPtr.Zero &&
-                        !__instance.IsAlive)
+                        __instance.Pointer != IntPtr.Zero)
                     {
-                        NotifySquadMemberKilled(__instance);
+                        if (!__instance.IsAlive)
+                        {
+                            NotifySquadMemberKilled(__instance);
+                        }
+                        else if (!__instance.IsInjured &&
+                                 !__instance.IsDead &&
+                                 __instance.IsAI() &&
+                                 AiCore.IsLocallyOwnedBot(__instance) &&
+                                 (AiCore.GetDeterministicHash(__instance.Pointer, (int)(Time.time * 4.0f)) & 7) < 5)
+                        {
+                            VeteranAndTacticsPatches.TrySayTacticalVoice(__instance, __instance.joinedSquad, VoiceManager.VoiceClip.iVeBeenHit, 0.05f);
+                        }
                     }
                 }
                 catch { }

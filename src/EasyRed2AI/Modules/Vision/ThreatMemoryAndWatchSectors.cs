@@ -1285,7 +1285,7 @@ namespace EasyRed2HumanAI
                 }
 
                 float bendAngle = Vector3.Angle(seg0, checkSeg1.normalized);
-                if (bendAngle < 28f || bendAngle > 158f)
+                if (bendAngle < 28f || bendAngle > 115f)
                 {
                     h.Vision.CornerPie = new CornerPieState { NextRefreshTime = now + 0.30f, IsPieing = false, HasVerifiedCorner = true, CachedNode0 = node0, CachedNode1 = node1 };
                     return false;
@@ -1418,7 +1418,7 @@ namespace EasyRed2HumanAI
 
                     float now = Time.time;
                     if (soldier.IsCarried() ||
-                        soldier.IsOnVehicle() ||
+                        AiCore.IsSoldierInVehicleOrTransition(soldier) ||
                         AiCore.HasHeldMortarCached(h, __instance, now) ||
                         soldier.HasSurrended())
                     {
@@ -1513,12 +1513,18 @@ namespace EasyRed2HumanAI
                         }
                     }
 
+                    // Clear stale moveLookingTarget when moving away from enemies so TPS animator never slides backward.
+                    if (__instance.moveLookingTarget)
+                        __instance.moveLookingTarget = false;
+
                     if (VisionConfig.EnableThreatSectorConcentration.Value &&
                         !__instance.HasEnemyAndCanFireAtHim &&
                         !soldier.IsCharging() &&
                         !soldier.IsCarryingBody() &&
                         !soldier.isTowardWallTps &&
                         soldier.m_pose != SoldierPose.Prone &&
+                        !h.Goap.Plan.IsEvacuatingBailedCrew &&
+                        !IsInIndividualOrGoapFallback(h.Ptr, now) &&
                         TryGetActiveCornerPieDirection(__instance, h, out Vector3 pieDir, out bool raiseRifle) &&
                         raiseRifle)
                     {
@@ -1566,7 +1572,7 @@ namespace EasyRed2HumanAI
                         __instance.IsMoving() ||
                         __instance.HasEnemyAndCanFireAtHim ||
                         AiCore.HasHeldMortarCached(h, __instance, now) ||
-                        soldier.IsOnVehicle() ||
+                        AiCore.IsSoldierInVehicleOrTransition(soldier) ||
                         soldier.isInBodyAnimation ||
                         soldier.isInHandsAnimation ||
                         soldier.HasSurrended() ||
@@ -1594,8 +1600,8 @@ namespace EasyRed2HumanAI
                         return;
                     }
 
-                    Vector3 watchDir;
-                    bool hasWatchDir;
+                    Vector3 watchDir = Vector3.zero;
+                    bool hasWatchDir = false;
 
                     StationaryWatchState wState = h.Vision.StationaryWatch;
                     if (now < wState.NextEvalTime)
@@ -1605,7 +1611,31 @@ namespace EasyRed2HumanAI
                     }
                     else
                     {
-                        hasWatchDir = TryGetKnownThreatSectorDirection(soldier, out watchDir, out bool hasActiveWatchContact) && watchDir.sqrMagnitude > 0.01f;
+                        bool hasActiveWatchContact = false;
+                        Vector3 obsPos = h.Tr != null ? h.Tr.position : Vector3.zero;
+                        string obsFac = AiCore.GetCachedFaction(h, now);
+                        Vector3 acousticPos = Vector3.zero;
+                        bool heardCloseAcoustic = !string.IsNullOrEmpty(obsFac) &&
+                                                  VisionPatches.TryGetNearestCloseAcousticThreat(obsPos, obsFac, now, out acousticPos, out _, out _);
+                        if (heardCloseAcoustic)
+                        {
+                            Vector3 toSound = acousticPos - obsPos;
+                            toSound.y = 0f;
+                            if (toSound.sqrMagnitude > 0.04f)
+                            {
+                                watchDir = toSound.normalized;
+                                hasWatchDir = true;
+                                hasActiveWatchContact = true;
+                                if (now >= soldier.alertEndTime - 1.0f)
+                                    soldier.SetAlertedFor(4.0f);
+                            }
+                        }
+
+                        if (!hasWatchDir)
+                        {
+                            hasWatchDir = TryGetKnownThreatSectorDirection(soldier, out watchDir, out hasActiveWatchContact) && watchDir.sqrMagnitude > 0.01f;
+                        }
+
                         if (hasWatchDir &&
                             __state.DestKind == AiCore.CachedDestKind.CombatCover &&
                             h.CachedCover != null &&

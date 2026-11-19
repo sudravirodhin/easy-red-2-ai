@@ -251,6 +251,8 @@ namespace EasyRed2HumanAI
 
             try
             {
+                clip = AiCore.ResolveSafeVoiceClip(soldier, clip, allowYesVariation: true);
+
                 // Local 3D spatialized audio: native Soldier.Say (0x18076144C) automatically checks Creature.IsLodded2()
                 // against the active rendering camera—so first-person, vehicle, and Free/Spectator Camera (F) all hear
                 // nearby bots naturally anywhere on the map with zero RPC cost!
@@ -447,6 +449,7 @@ namespace EasyRed2HumanAI
             activeVehicleAnvils.Clear();
             aiFootSquads.Clear();
             bool issuedSquadCoverOrderThisTick = false;
+            int refreshedBoardsThisTick = 0;
 
             var squads = AiCore.WorldSquads;
             for (int sIdx = 0; sIdx < sqCount; sIdx++)
@@ -466,7 +469,7 @@ namespace EasyRed2HumanAI
                 if (leader.IsPlayer())
                 {
                     ReleaseAiSquadExecutionStateIfActive(sq);
-                    SquadBlackboard playerBoard = GetOrUpdateSquadBlackboard(sq, leader);
+                    SquadBlackboard playerBoard = GetOrUpdateSquadBlackboardBudgeted(sq, leader, now, ref refreshedBoardsThisTick);
                     if (HasLiveRadioOrRelayLink(sq) && playerBoard.HasActiveThreat)
                     {
                         activeVehicleAnvils.Add(sq);
@@ -483,7 +486,7 @@ namespace EasyRed2HumanAI
                     ReleaseAiSquadExecutionStateIfActive(sq);
                     if (IsMountedOnGroundVehicle(leader))
                     {
-                        SquadBlackboard vehBoard = GetOrUpdateSquadBlackboard(sq, leader);
+                        SquadBlackboard vehBoard = GetOrUpdateSquadBlackboardBudgeted(sq, leader, now, ref refreshedBoardsThisTick);
                         if (vehBoard.HasActiveThreat)
                         {
                             activeVehicleAnvils.Add(sq);
@@ -493,7 +496,7 @@ namespace EasyRed2HumanAI
                 }
 
                 aiFootSquads.Add(sq);
-                SquadBlackboard board = GetOrUpdateSquadBlackboard(sq, leader);
+                SquadBlackboard board = GetOrUpdateSquadBlackboardBudgeted(sq, leader, now, ref refreshedBoardsThisTick);
                 if (!board.IsConnectedToRadioNet)
                 {
                     // Allow a squad that received a one-time spawn command (or a 45m relay command) to finish executing
@@ -542,7 +545,11 @@ namespace EasyRed2HumanAI
                                     catch { }
                                 }
 
-                                TrySayTacticalVoice(leader, sq, VoiceManager.VoiceClip.attackThere, 0.2f);
+                                TrySayTacticalVoice(
+                                    leader,
+                                    sq,
+                                    board.ThreatIsArmor ? VoiceManager.VoiceClip.attackThatTank : VoiceManager.VoiceClip.attackThere,
+                                    0.2f);
                                 TeamNetAnvilHammerCount++;
                                 GoapPlansExecutedCount++;
                                 continue;
@@ -1686,28 +1693,36 @@ namespace EasyRed2HumanAI
             if (u == null || !u.IsAlive)
                 return false;
 
+            float now = Time.time;
+            AiCore.SoldierFastHandles h = AiCore.GetOrCreateSoldierHandles(u);
+            if (h != null && now < h.Combat.NextAtCapCheckTime && (now + 10.0f) >= h.Combat.NextAtCapCheckTime)
+                return h.Combat.CachedHasUsableAt;
+
+            bool hasAt = false;
             try
             {
                 for (int slot = 0; slot <= 2; slot++)
                 {
                     GenericGun g = u.GetHeldGun(slot);
                     if (g != null && g.IsAtWeapon() && (g.GetCurrentAmmoCount() > 0 || !u.IsOutOfAmmosFor(g)))
-                        return true;
+                    {
+                        hasAt = true;
+                        break;
+                    }
                 }
 
-                if (AiCore.FindThrowableGrenadeInInventory(u, findAtGrenade: true, findFragGrenade: false) != null)
-                    return true;
-
-                VirtualItem vGren = AiCore.FindThrowableGrenadeInInventory(u, findAtGrenade: false, findFragGrenade: true);
-                if (vGren != null && AiCore.TryGetThrowablePrefabInfo(vGren, out AiCore.ThrowablePrefabInfo gInfo) &&
-                    (gInfo.Type == GrenadeType.ATGrenade || gInfo.Type == GrenadeType.phosporusGrenade || gInfo.MaxPenetration >= 16.0f || gInfo.IsSatchelOrHeavyDemo))
-                {
-                    return true;
-                }
+                if (!hasAt && AiCore.FindThrowableGrenadeInInventory(u, findAtGrenade: true, findFragGrenade: false) != null)
+                    hasAt = true;
             }
             catch { }
 
-            return false;
+            if (h != null)
+            {
+                h.Combat.CachedHasUsableAt = hasAt;
+                h.Combat.NextAtCapCheckTime = now + 4.5f + (AiCore.GetDeterministicHash(h.Ptr, 73) & 15) * 0.10f;
+            }
+
+            return hasAt;
         }
 
         private static bool AreMajorityOfSquadFollowersNearLeader(Squad sq, Soldier leader, Vector3 leaderPos, float maxDist)
@@ -2166,7 +2181,26 @@ namespace EasyRed2HumanAI
         // =====================================================================
         // Tier 2: Squad Tactical Blackboard (Computed 1x per Squad per 0.6s)
         // =====================================================================
-        internal static SquadBlackboard GetOrUpdateSquadBlackboard(Squad sq, Soldier fallbackSoldier)
+        private static SquadBlackboard GetOrUpdateSquadBlackboardBudgeted(
+            Squad sq,
+            Soldier fallbackSoldier,
+            float now,
+            ref int refreshedBoardsThisTick,
+            int maxRefreshPerTick = 3)
+        {
+            if (sq == null || sq.Pointer == IntPtr.Zero)
+                return default;
+
+            bool hadCached = _squadBlackboards.TryGetValue(sq.Pointer, out SquadBlackboard prevBoard);
+            bool needsRefresh = !hadCached || now >= prevBoard.NextRefreshTime;
+            bool allowRefresh = refreshedBoardsThisTick < maxRefreshPerTick;
+            SquadBlackboard result = GetOrUpdateSquadBlackboard(sq, fallbackSoldier, allowRefresh);
+            if (needsRefresh && (!hadCached || allowRefresh))
+                refreshedBoardsThisTick++;
+            return result;
+        }
+
+        internal static SquadBlackboard GetOrUpdateSquadBlackboard(Squad sq, Soldier fallbackSoldier, bool allowRefresh = true)
         {
             if (sq == null || sq.Pointer == IntPtr.Zero)
             {
@@ -2175,7 +2209,8 @@ namespace EasyRed2HumanAI
 
             IntPtr sqPtr = sq.Pointer;
             float now = Time.time;
-            if (_squadBlackboards.TryGetValue(sqPtr, out SquadBlackboard board) && now < board.NextRefreshTime)
+            if (_squadBlackboards.TryGetValue(sqPtr, out SquadBlackboard board) &&
+                (now < board.NextRefreshTime || !allowRefresh))
             {
                 return board;
             }
@@ -2183,7 +2218,7 @@ namespace EasyRed2HumanAI
             long profBoardStart = HitchProfiler.Begin();
             try
             {
-            board.NextRefreshTime = now + 0.60f;
+            board.NextRefreshTime = now + 0.60f + (AiCore.GetDeterministicHash(sqPtr, 19) & 15) * 0.03f;
             if (board.LastDeathDecayUpdateTime > 0f)
             {
                 float deathDt = Mathf.Max(0f, now - board.LastDeathDecayUpdateTime);
