@@ -1,29 +1,24 @@
 # Easy Red 2: Battle Hardened (`v0.9.9`)
-*F.E.A.R.-Style 3-Tier GOAP, Humanized Vision & Self-Preservation, Radioman Intel Nets, 15-Minute Veterancy, 30 Personalities & Combined-Arms Overhaul*
+*F.E.A.R.-Style 3-Tier GOAP, Humanized Vision & Footstep Hearing, Radioman Intel Nets, 15-Minute Veterancy, 30 Personalities & Combined-Arms Overhaul*
 
-**[Why Battle Hardened?](#why-vanilla-easy-red-2-needed-that-extra-push)** · **[What Is GOAP?](#background-what-is-goap-fear--ww2-combined-arms)** · **[What Changes In-Game](#what-changes-on-the-battlefield)** · **[Installation](#installation-two-release-options--linux--proton)** · **[Multiplayer Matrix](#multiplayer-compatibility-matrix--client-side-vs-hostsynced-features)** · **[Hotkeys & Build](#in-game-controls-menu-f6-map-picker-f5--hotkeys)** · **[Engineering Deep-Dive](docs/design-and-justifications.md)** · **[Changelog](CHANGELOG.md)**
-
-> [!IMPORTANT]
-> **Disclosure — Vibecoded Project:**
-> This mod was **vibecoded** (designed, reverse-engineered, and written collaboratively with an AI coding agent). If you are averse to AI-assisted or AI-generated software/mods, please be aware of this upfront before downloading or using this repository.
->
-> **Credit & Inspiration:**
-> Special credit and thanks to **[AtlasActual (`Easy-Red-2-Realism-Overhaul`)](https://github.com/AtlasActual/Easy-Red-2-Realism-Overhaul)** for pioneering several of the combined-arms, objective-coordination, and tactical realism concepts that inspired parts of this project's roadmap and feature sets.
+**[What Is Battle Hardened](#what-is-battle-hardened)** · **[Why Vanilla Needed That Push](#why-vanilla-easy-red-2-needed-that-extra-push)** · **[Install & Mod Compatibility](#installation-and-mod-compatibility)** · **[Multiplayer Matrix](#multiplayer-compatibility-matrix)** · **[What Changes In-Game](#what-changes-on-the-battlefield)** · **[3-Tier GOAP & Personalities](#3-tier-goap-architecture-and-personalities)** · **[Hotkeys](#in-game-hotkeys-and-menus)** · **[Verification & Performance](#automated-verification-and-performance-profiling)** · **[Engineering Deep-Dive](docs/design-and-justifications.md)** · **[Changelog](CHANGELOG.md)**
 
 ---
 
-## What Is *Battle Hardened*?
+## What Is Battle Hardened
 
 ***Battle Hardened*** is a **zero-cheat tactical AI, Co-op, and combat immersion overhaul** for *Easy Red 2* (BepInEx 6 IL2CPP).
 
-**Zero aimbots. Zero X-ray wallhacks. Zero artificial HP buffs.**
-Instead of making bots cheat, *Battle Hardened* makes every soldier, NCO, medic, radioman, tanker, and pilot **actually want to survive**—turning chaotic bot waves into reactive WW2 firefights where you feel like **one cog in a combined-arms battle** rather than the lone babysitter carrying your entire team.
+**Zero aimbots. Zero X-ray wallhacks. Zero artificial HP buffs.**  
+Instead of making bots cheat, *Battle Hardened* makes every soldier, NCO, medic, radioman, tanker, and pilot **actually want to survive**—turning chaotic bot waves into reactive WW2 firefights where you feel like **one cog in a combined-arms battle** rather than the lone babysitter carrying your team.
 
-> **100% Live-Configurable (`F6`) & Toggleable (`F8`):** Almost every system in *Battle Hardened* can be toggled ON/OFF live mid-match from the **5-Tab `F6` Feature Menu** (`BepInEx\config\com.antigravity.easyred2.humanai.cfg`), and **`F8`** switches the entire mod cleanly back to vanilla behavior at any time.
+* **Co-op Host-Only Friendly**: Host for **unmodded vanilla friends** (they experience the upgraded AI, resurrected vanilla voice lines, Host-Assist wood/top-attack penetration, and targeted radio/welcome briefings with zero install) or play **100% client-side** on vanilla servers.
+* **Built for `140+` Bot Battles (`60 FPS` Target)**: Zero-allocation bitmask planning, chunked world/inventory snapshots, hardware-timer flight recording, and automatic `< 40 FPS` brain-tick backoff.
+* **100% Live-Configurable (`F6`) & Toggleable (`F8`)**: Tune or disable **`106` options** across **5 tabs** mid-match from the `F6` menu (`BepInEx\config\com.antigravity.easyred2.humanai.cfg`), or press **`F8`** at any moment to switch cleanly back to 100% vanilla behavior without restarting.
 
 ---
 
-## Why Vanilla *Easy Red 2* Needed That Extra Push
+## Why Vanilla Easy Red 2 Needed That Extra Push
 
 Vanilla *Easy Red 2* is already a remarkable technical achievement: Marco built a sandbox capable of putting **140+ infantry, tanks, halftracks, artillery, and aircraft** onto huge destructible battlefields at 60 FPS.
 
@@ -31,116 +26,21 @@ To make battles that large run smoothly, however, vanilla's AI relied on lightwe
 
 | Area | What Vanilla Does Under the Hood | How *Battle Hardened* Fixes It |
 | :--- | :--- | :--- |
-| **Reaction & Brain Ticks** | `Creature.ProcessSequentialUpdates` ticks **only 1 unit per frame** (even dead or passenger slots) — leaving bots waiting **`~2.0–2.5s`** between brain updates in 140-bot battles, or frozen behind a flat `2.5s` `alertStartTime` delay. | **Adaptive Brain Scheduler (`~0.6s` latency)** skips wasted slots cleanly and adds **Dynamic Human Reaction ("Watching vs. Caught Out")**: `0.18s–0.32s` if pre-aimed downrange vs. `0.38s–0.65s+` when caught sprinting or flanked. |
-| **Sight Cones & Stealth** | When hidden, prone visibility is `37m`. The instant *any* squadmate fires (`IsEnemyAwareOfThisSquad`), every member jumps to **`300m` detection** and alerted bots skip FOV checks completely (**360° eyes in the back of their head**, even inside buttoned tanks!). | Preserves stance stealth (`150m` Standing / `80m` Crouched / `40m` Prone), reveals **only the soldier who fired** for `4.0s`, applies a continuous human **"Squint" cone** (`12m` close awareness narrowing smoothly to `±32°` long range), and gives enclosed tank gunners narrow optical slits fed by a **`0.65s–1.48s` Commander Intercom handoff**. |
-| **Self-Preservation** | Bots holster rifles to bandage in front of shooters, stand on the *enemy-facing side* of walls, walk upright or `prone`-roll randomly in open fields, ignore `Layer 14` walls when vaulting, and mag-dump rifles & frag grenades at Tiger armor. | **Survival comes first**: gunfire-driven leeward walls, cover-before-bandaging (`CanSafelyBandageNow`), `Layer 14` parapet/trench vaulting, threat-arc Tank Fear evasion, smoke-screened retreats, and isolated shell-shock surrender & liberation. |
+| **Reaction & Brain Ticks** | `Creature.ProcessSequentialUpdates` ticks **only 1 unit per frame** (even dead or passenger slots) — leaving bots waiting **`~2.0–2.5s`** between brain updates in 140-bot battles, or frozen behind a flat `2.5s` `alertStartTime` delay. | **Adaptive Brain Scheduler (`~0.6s` latency)** skips wasted slots cleanly (backing off automatically if frame time exceeds `25ms`) and adds **Dynamic Human Reaction ("Watching vs. Caught Out")**: `0.18s–0.32s` if pre-aimed downrange vs. `0.38s–0.65s+` when caught sprinting or flanked. |
+| **Sight Cones, Footsteps & Stealth** | When hidden, prone visibility is `37m`. The instant *any* squadmate fires (`IsEnemyAwareOfThisSquad`), every member jumps to **`300m` detection** and alerted bots skip FOV checks completely (**360° eyes in the back of their head**, even inside buttoned tanks!). | Preserves stance stealth (`150m` Standing / `80m` Crouched / `40m` Prone), reveals **only the soldier who fired** for `4.0s`, applies a continuous human **"Squint" cone** (`12m` close awareness narrowing smoothly to `±32°` long range), adds **`<= 20m` footstep & gunfire hearing** (crouch/prone silent, masked by explosions), and gives enclosed tank gunners narrow optical slits fed by a **`0.65s–1.48s` Commander Intercom handoff**. |
+| **Self-Preservation** | Bots holster rifles to bandage in front of shooters, stand on the *enemy-facing side* of walls, walk upright or `prone`-roll randomly in open fields, ignore `Layer 14` walls when vaulting, and mag-dump rifles & frag grenades at Tiger armor. | **Survival comes first**: gunfire-driven leeward walls, cover-before-bandaging (`CanSafelyBandageNow`), `Layer 14` parapet/trench vaulting + direct trench drop-in, threat-arc Tank Fear evasion, smoke-screened retreats, and isolated shell-shock surrender & liberation. |
 | **Teamwork & Macro Play** | Squads fight with static distance checks, abandon flags the second they're captured, camp *outside* capture circles, charge blindly into fatal funnels, and never depend on a Radioman to talk to HQ or tanks. | **3-Tier GOAP Chain of Command** where Radiomen carry the team's intel link, squads fight *inside* cap circles and garrison rear flags, NCOs balk at suicidal orders, and tank/air/artillery support actively screens for **you**. |
 
 ---
 
-## Background: What Is GOAP (*F.E.A.R.* $\rightarrow$ WW2 Combined Arms)?
-
-Most shooter mods rely on **static rule trees** (*"if HP < 50 -> bandage; else if enemy visible -> shoot"*). Rule trees break the moment two edge cases overlap—leaving bots paralyzed, oscillating poses, or walking straight into ambushes.
-
-**GOAP (Goal-Oriented Action Planning)**—originally pioneered by Jeff Orkin for *F.E.A.R.* (2005)—flips that around. Instead of hardcoding *every situation*, each soldier is given:
-* **Goals** *(Stay Alive, Stop Bleeding Safely, Break Suppression, Flank Pinned Enemy, Counter Armor, Restore Squad Radio)*
-* **Actions with Preconditions & Effects** — e.g.:
-  * *Pop Smoke Screen* (`hasSmoke`) $\rightarrow$ *Threat Concealed* $\rightarrow$ unlocks *Move to Flank Cover* or *Break Contact*
-  * *MG Suppressor Pins Cover Edge* $\rightarrow$ `AllyPinningThreat` $\rightarrow$ unlocks a squadmate's *Lateral Flank* or *Frag Cover Flush*
-  * *Enemy Armor Approaching & No AT Weapon* $\rightarrow$ urgently unlocks *Scavenge Dropped Bazooka / Panzerfaust / AT Grenade*
-  * *Squad Cut Off Without Radioman* $\rightarrow$ unlocks *Scavenge Friendly or Retuned Enemy Radio Pack & Strap It On*
-
-*Battle Hardened* scales *F.E.A.R.*'s small-squad planner up to **140+ WW2 combined-arms combatants** using a zero-allocation **32-bit bitmask planner** organized as a realistic **3-Tier Chain of Command ("HQ Suggests $\rightarrow$ NCO Decides $\rightarrow$ Soldier Survives")**:
-
-```mermaid
-flowchart TD
-    T3["Tier 3: HQ and Radioman Team Net (Suggests)"]
-    NET{"Squad Has Live Radio Link or Vehicle Relay?"}
-    CUT["Autonomous Cut-Off Mode (Local Flank or Seek Radio)"]
-    T2["Tier 2: Squad Leader and NCO Blackboard (Decides)"]
-    BALK{"Casualties or Suppression Too High?"}
-    T1["Tier 1: Individual 32-Bit GOAP Brain (Survives)"]
-    MOD["Role, 30 Personalities, 20 Doctrines, 15-Min Veterancy and Micro-Variance"]
-
-    T3 -->|Advisory Objectives and Pincers| NET
-    NET -->|Connected| T2
-    NET -->|Cut Off| CUT
-    CUT --> T2
-    T2 -->|Assign Suppressor, Flanker, Breacher, Medic| BALK
-    BALK -->|Hold and Adapt| T1
-    BALK -->|NCO Balks or Pops Smoke Pivot| T1
-    MOD -.-> T1
-```
-
-Notice that **no two soldiers of the same nation fight identically**: zero-allocation MurmurHash3 bit-mixing gives every individual bot continuous **Micro-Variance** (`AggressionCostMult`, `CautionCostMult`, reaction jitter, and suppression jitter) on top of their **Role**, **30 Archetype Personalities**, **20 National Doctrines**, and **15-Minute Veterancy**—so a squad under fire naturally splits between an MG gunner anchoring overwatch and two Assaulters bounding forward, rather than moving in robotic lockstep.
-
----
-
-## What Changes on the Battlefield
-
-### 1. Infantry Self-Preservation, Cover Intelligence & CQB ([`Modules/Infantry/`](src/EasyRed2AI/Modules/Infantry/))
-* **Committed Fire-and-Movement**: Replaces vanilla's stuttery `crouch -> 1-step run -> crouch` shuffling and `50%` open-field `Prone` rolls with hysteresis-locked **upright sprints (`4.8s–6.8s`)** alternated with **deliberate kneeling firing halts (`3.7s–5.35s`)**, instant `"Shot-At"` startle drops to cover when fired on, and blind-corner **pieing** around doorways and trench bends.
-* **Gunfire-Driven Leeward Cover & Barrel Clearance**: Computes live dominant enemy gunfire vectors so bots stand **behind** walls—never on the enemy-facing side—keep low inside interiors instead of lying prone under windowsills, **pop up** smoothly over waist-high sandbags only during firing bursts, sidestep door/pillbox jambs cleanly without standing into concrete lintels, and cross spans using **bridge parapets, tank hulls, and bipods** without jumping off into rivers (`SoldierAI.GetSpacingFromSquad` fix).
-* **True Obstacle Vaulting & Door/Shutter Discipline**: Fixes Layer 14 `InvisibleTrepassableWall` and thin-fence probes so bots reliably **vault low walls, sandbags, and trench parapets** (without climbing sloped hills or barbed wire unless wedged), open doors strictly along their travel/firing lane, close trailing doors behind their squad, and pull window shutters shut when pinned or reloading.
-* **Decisive Melee & Shell-Shock Surrender**: Fixes integrated bayonet mounting (zero RPC bursts), stops CQB melee spinning with `±52°` 2-man pincers and crouch/prone stance matching, suppresses silly melee charges into `<= 15m` gunfire when holding a loaded firearm, and allows isolated Skittish/Rookie troops without an officer nearby to dynamically **surrender** (`SurrenderSynched`)—and later be liberated back into combat.
-
-### 2. Squad Teamwork, Emergent Field Radios & Combat Triage ([`Modules/Goap/`](src/EasyRed2AI/Modules/Goap/))
-* ***F.E.A.R.* Pin-and-Flank & 3-Tier Balking**: Squad Blackboards (`0.60s`) coordinate Suppressors, `20°–75°` Flanking teams, Breachers, and Medics while calling out contextual faction voice lines (*"Covering fire!"*, *"Grenade!"*, *"Thank you!"*). Both NCOs and individual soldiers track fresh squadmate casualty zones (`20m` / `18s` hazard memory) and can **refuse or abort** suicidal charges into meatgrinders (`Balk:` telemetry).
-* **Emergent Field Radio & Medic Inheritance**: When a squad loses its Radioman or Medic, surviving squadmates scavenge **fallen friendly or captured enemy field radios** (explicitly strapping them on via `Soldier.SetWerable` and retuning enemy frequencies onto your net!) or recover **atomic 3-of-3 syringe kits** from dead Medics (protecting dead Medics near human players), alongside picking up knocked-off or **player-gifted helmets**, **AT launchers**, and ammo from floors, corpses, and `AmmoRefillCrate`s.
-* **Anti-Dogpile Medics, Casualty Dragging & Leader Cohesion**: Caps wounded casualties to 1 primary medic with instant claim release, lets riflemen carry downed buddies out of killzones (dropping immediately when a friendly Medic closes within `11m`, under fire, or on arrival), locks AI Squad Leaders with followers onto shared objectives (`FollowLeader`), steers grounded/bailed tank crews back to safety, lets soldiers borrow ammo/bandages from living Medics & Ammo Carriers at a `2.5m` standoff, and cleanly merges lone survivors into nearby squads via `Squad.Join`.
-* **Sapper Special Munitions & Mine Avoidance**: Engineers/AT Sappers deploy AT/AP pressure mines with strict friendly/spawn/cap-zone safety buffers, hurl heavy satchel/demo charges against fortifications and armor (`9m` clear step-back), and build deployable tripods—while allied infantry and vehicles steer/brake around placed mines.
-
-### 3. Relentless Objective Play, Radio Intel Nets & Dynamic Operations ([`Modules/MacroAndVehicles/`](src/EasyRed2AI/Modules/MacroAndVehicles/))
-* **Both Armies Play to Win**: Clamps cover searches inside capture circles (`0.80 * radius`), maintains a doctrinal **rear-guard garrison (`16%–28%`)** with instant **Back-Cap Alarms** across all 216 vanilla maps (`ME_*`, `sp_ME_` V2, Dynamic Conquest, Wave Defense, Lua `#retreat`, Workshop missions), and triggers smoke-screened **multi-squad attrition pivots** (`CountAlliedGroundSquadsOnObjective` + 1-per-frame RPC-paced order queue) rather than throwing infinite waves into an entrenched meatgrinder.
-* **Anvil & Hammer Supporting the Human Player**: Radio-connected squads and tanks automatically pair up to pin and flank enemy strongpoints—and when **your Human Player squad** is connected to the Radio Net and pinned down, the Team Net treats you as the **Anvil** and dispatches an AI **Hammer** squad to flank the enemy pinning you (or suggests your next priority target if you have no active order).
-* **`ConquestEconomy` Net Quartermaster & Coastal Spawn-Drown Rescue**: MasterClient charges Dynamic Operations spawn costs (`ConquestEconomy.Charge`) across AI armor and air waves while protecting a **human player ticket buffer (`135` base + `75`/extra Co-op player)** so AI bots never starve human players of spawns, and `SpawnManager._SpawnUnit_d__37` guards offshore/underwater spawns and boat-capacity overflows by relocating unseated units cleanly onto nearby walkable shoreline or friendly dry spawners (`SpawnSaved:`).
-
-### 4. Fair Human Vision, Tank Intercoms & Realistic Ballistics ([`Modules/Vision/`](src/EasyRed2AI/Modules/Vision/) & [`Modules/ImmersionAndQoL/`](src/EasyRed2AI/Modules/ImmersionAndQoL/))
-* **Fair Vision & Window-Aperture Alignment**: `150m` Standing / `80m` Crouched / `40m` Prone stealth with `4.0s` individual shooter reveals, continuous human "squint" cones (`<= 12m` close awareness narrowing smoothly to `±32°`), `0.18s–0.65s+` human reaction curves, optic zoom scaling (`<= 2.25x`), native `AngleToDirection` `90°` gaze fix, window-opening centering for indoor defenders, `15m` vocal threat-sector callouts, and last-known suppressive fire / frag flushes.
-* **Realistic Armor, Aircraft & Ballistics**: Narrow `±15°–34°` enclosed tank gunner slits paired with **`0.65s–1.48s` Tank Commander cupola & escort-infantry intercom callouts**; enclosed crew protection against external frag grenades and collider-clipping small arms; Molotov fire immunity for steel tank tracks with upper-hull engine/fuel seepage; diving aircraft **top-attack AP roof normalization** (with automatic **Host-Assist for unmodded Co-op clients!**); armored airplane belly/floor protection against rifle-caliber ground fire; thin-cover **wood bullet penetration**; and underwater/through-smoke **ghost blood occlusion**.
-
-### 5. Combined Arms: Armor, Emplacements, Air Superiority & Crew Survival ([`Modules/MacroAndVehicles/`](src/EasyRed2AI/Modules/MacroAndVehicles/) & [`VeterancyAndPersonalities.cs`](src/EasyRed2AI/Modules/ImmersionAndQoL/VeterancyAndPersonalities.cs))
-* **Smarter Tanks, Emplacements & Anti-Armor Munitions**: Tanks hold personality-scaled standoff distances (`50m–95m`), reverse out of AT-grenade range (`< 35m`), spread into `40m+` anti-bombing echelons, prioritize **Known / Marked / Radio-Requested** enemy squads, shell building facades housing spotted enemies, pause cleanly for friendly infantry right-of-way, route leeward for repairs, and return to `RepairStation`s when dry or damaged. Emplacements (`Pak 40`, `ZiS-3`, `88mm`, howitzers, AA mounts), tanks, and planes dynamically select and reload the right munition (`TurretGun.SelectBestAmmo` + `TurretWeapon.Reload`: true `ShellType.HE`/`Flak` vs. infantry, emplacements & soft trucks; Coaxial/Wing MGs while main cannons reload; distance-adjusted `APHE` vs. `APCR`/`HEAT` against armor; and `Flak`/rapid-fire AA vs. aircraft), while static-gun crews bail out into nearby cover within `< 0.5s` if flanked within `18m` outside their traverse arc, rushed inside `8.5m` off-bore/reloading, or suppressed. Meanwhile infantry aim small arms at exposed crew & tires, aim AT rifles at tracks, keep stowed AT launchers out against armored cars/halftracks (`SoldierAI.UseBestWearedWeaponCheck`), obey threat-arc **Tank Fear**, stop wasting `< 12mm` frags on buttoned tanks, and point-shoot or swing cleanly (`1.45m` reach) across static-gun tripods instead of whiffing melee.
-* **Clear-Skies-First Air Combat, 2-Seat Emplacements & Grounded Crew `"Retreat"`**: Restores `2200m`/`4000m` air detection so fighters chase enemy planes first in **on-nose dogfights** (`125m–170m` reciprocal merges + altitude ceiling); raises airborne Multiplayer plane sync to **`~10–12 Hz` even for unmodded vanilla clients**; proactively crews both seats of empty static guns; dismounts APCs before driving into AT traps; restricts Japanese *Tokkōtai* dives strictly to severely crippled (`>= 80` damage / missing wing) planes targeting enemy armor/aircraft; and gives ejected/crash-landed **Pilots, 6–10 seat Bomber Crews, and Tank Crews** working on-foot `"Retreat"` objectives (including ocean ditching zones).
-
-### 6. Emergent WW2 Storytelling, QoL & 60 FPS Co-op Polish ([`Modules/ImmersionAndQoL/`](src/EasyRed2AI/Modules/ImmersionAndQoL/) & [`UI/`](src/EasyRed2AI/UI/))
-* **15-Minute Veterancy (`Pvt.` $\rightarrow$ `1st Sgt.`) & 30 Personalities across 20 National Doctrines**: Survivors sharpen steadily up to a realistic `20%` dispersion cap, earn visible **3D shoulder rank promotions**, and fight according to 30 distinct archetypes and 20 historical doctrines.
-* **Obituary, Squad Roster/Map/3D Letters, Tactical Reload Cancel, `F5` Playlists & Zero-Hitch 60 FPS**: Instant full-opacity **Death Screen Obituary** with weapon/ordnance caliber (`APHE`/`HEAT`/`AP`/`HE`/`Flak`), hit zone, distance, and soldier **Age (`1925 - 1944 (Age 19)`)**; always-visible **Bottom-Left Squad Roster Names**, optional **Own-Squad-Only 3D Overhead Names** (`<= 65m`), and **Map & 3D World Squad Letters (`A`, `B`, `C`...)** highlighting your own squad in Gold (`#FFE040`) and all other friendly squads in crisp White; **Tactical Reload & Bipod Animation Canceling** (`EnableTacticalReloadAndBipodCancel`) letting players interrupt reloads or dismount bipods on weapon switch, melee/knife, throw, vault, `0.18s` sprint-hold, or single-bullet fire without fast-reload exploits; Client-side **Plane Engine Loop De-Throbber**; Quick-Tap **`Tab`** spotting & **64-character** room names; Host-authoritative **Multiplayer Casualties/Prisoners/Lost Vehicles** stat sync; **4K UI Scaling**; Spectator **`F`** view cycling + **Top-Center Bot GOAP Inspector**; standalone **`F5` Campaign, Multi-Map Playlist & Unit-Scale Picker** (background pre-loading, vanilla `CampaignsTree.ExploreBranch` mission ordering, `[★ATK|☆DEF]` per-side faction completion badges, `[+]`/`[#N]` playlists, **`Campaign From Here`**, and `25%–300%` per-mission Allies/Axis bot scaling); and chunked zero-GC `WorldSnapshot` + **Multiplayer Host Ping Governor** engineered for sustained 60 FPS in `140+` bot Co-op battles.
-
-<details>
-<summary><b>Click to expand the 30 Role-Based AI Personalities reference table</b></summary>
-
-| Role | Personality 1 | Personality 2 | Personality 3 |
-| :--- | :--- | :--- | :--- |
-| **1. Squad Leader** | **`[Spearhead]`**: Grants nearby squadmates (`< 22m`) `+12` suppression grit and leads aggressive pushes. | **`[Tactician]`**: Faster artillery/radio support checks and tight cover discipline. | **`[Old Guard]`**: Defensive anchor; prioritizes squad survival and rescues pinned comrades. |
-| **2. Assaulter / SMG** | **`[Shock]`**: Resists dropping `Prone` until extreme suppression (`>= 68`) and bounds aggressively. | **`[Breacher]`**: Rapid `2.0s` peek cooldown (`<= 38` suppression) and eagerly tosses frag grenades. | **`[Skirmisher]`**: Expands lateral spacing (`1.45x`) to flank wide into CQB. |
-| **3. Rifleman** | **`[Regular]`**: Balanced baseline fire-and-maneuver (`35` suppression threshold). | **`[Cautious]`**: Drops low at light suppression (`>= 18`), stays ducked longer, sheds jitter as `[Composed]` Vet. | **`[Grenadier]`**: Prioritizes rifle-grenades and hand grenades within throwing range. |
-| **4. Machine Gunner** | **`[Anchor]`**: Prioritizes wall/parapet bipods and holds under heavy fire (`>= 60` suppression). | **`[Assault MG]`**: Advances with the rifle squad and deploys ground bipods in `Crouch`/`Prone`. | **`[Overwatch]`**: Holds medium-long range (`50m–160m`) overwatch cover to pin threats. |
-| **5. Marksman / Sniper** | **`[Deadeye]`**: `12%` tighter accuracy when firing from `Crouch` or `Prone`. | **`[Stalker]`**: `35%` shorter firing-reveal duration from concealed cover. | **`[Spotter]`**: `+5°` wider scoped optic cone for counter-sniping. |
-| **6. Anti-Tank / Sapper** | **`[Tank Hunter]`**: Stalks armor in crouch stealth and aims for tracks/weak spots. | **`[Ambusher]`**: Holds fire behind cover until armor enters kill range (`< 68m`). | **`[Demo]`**: High suppression grit (`>= 60`) when closing for AT/satchel/grenade attacks. |
-| **7. Field Medic** | **`[Heroic]`**: Braver under fire (`<= 52` suppression) and searches `1.5x` wider (`45m`) to rescue/liberate. | **`[Combat Medic]`**: Balanced combat-first medic (`35` suppression); clears close threats before treating. | **`[Triage]`**: High self-preservation (`20` suppression, longer cover-seek) to stay alive for the squad. |
-| **8. Tank / Armor Crew** | **`[Brawler Crew]`**: `20%` faster turret target switching and `50m` close-support standoff. | **`[Sniper Crew]`**: `+5°` wider long-range turret optic cone and `95m` armor-duel standoff. | **`[Support Crew]`**: Prioritizes infantry support (`72m` standoff) and fast radio-request response. |
-| **9. Light Vehicle / AA** | **`[Outrider]`**: Fast-reacting mobile gunner/driver (`20%` faster turret refresh). | **`[Escort]`**: Cautious standoff support and higher self-preservation when repairing. | **`[Flak Watch]`**: `+12°` wider scan sector in `TurretAI.CanSee` for tracking aircraft. |
-| **10. Aircraft Pilot** | **`[Ace]`**: Extended dogfight pursuit leash (`fighterDogfightExtraLeash = 450m`). | **`[Daredevil]`**: Commits closer on CAS dive-bombing runs (`0.90x diveAlignDistance`). | **`[Disciplined]`**: Pulls out of dives earlier (`1.08x diveAlignDistance`) for safer bomb releases. |
-
-</details>
-
-> Want the full technical breakdown—including exact `GameAssembly.dll` disassembly addresses and why each vanilla system behaved the way it did? Read **[`docs/design-and-justifications.md`](docs/design-and-justifications.md)** and the full version history in **[`CHANGELOG.md`](CHANGELOG.md)**.
-
----
-
-## Compatibility & Tested Version
+## Installation and Mod Compatibility
 
 | Property | Details |
 | :--- | :--- |
 | **Target Branch** | Steam `public` (Default Branch) |
 | **Confirmed Game Version** | **Easy Red 2 — Game Build `921`** (Steam Build ID `26375879`, Unity `2022.3.62f3` IL2CPP x64) |
 | **Mod Loader** | **[BepInEx 6 Bleeding Edge (`BepInEx-Unity.IL2CPP-win-x64`, build `#791`+)](https://builds.bepinex.dev/projects/bepinex_be)** *(Windows & Linux/Steam Deck via Proton)* |
-| **Last Confirmed Test Date** | **November 18, 2026** (`2026-11-18`) |
-
----
-
-## Installation (1-Click Launcher, Auto-Updater, Release ZIPs & Linux / Proton)
+| **Last Confirmed Build & Suite Date** | **November 19, 2026** (`2026-11-19`) |
 
 Download your preferred package from the **[Releases](https://github.com/sudravirodhin/easy-red-2-ai/releases)** page:
 
@@ -186,47 +86,171 @@ Included in `EasyRed2HumanAI-v0.9.9-with-BepInEx.zip` (and in the root of this r
 * **`[3] Uninstall Completely`**: Permanently deletes BepInEx and installed files.
 *(Tip: Press **`F8`** in-game to disable the AI mod mid-match without restarting!)*
 
+### Stacking With Other BepInEx Mods
+* **Do not stack other full AI / movement overhauls** (e.g., *UngodlyAI*, *Advanced Combat Movement*)—multiple mods patching `SoldierAI`, `Creature.CanSee`, and `Squad` simultaneously will fight over bot locomotion and target selection.
+* **Pairing with ballistics, gunplay, or visual mods** (e.g., *Realism Overhaul*, *Gunplay Overhaul*, *Better Scopes*): *Battle Hardened* includes optional armor/ballistics and QoL modules ([`BallisticsAndArmorRealism.cs`](src/EasyRed2AI/Modules/ImmersionAndQoL/BallisticsAndArmorRealism.cs), `TurretGun.SelectBestAmmo`). Every realism and QoL hook is independently toggleable live under **`F6 -> 3. Vision & Realism`** and **`F6 -> 5. Optimizations & QoL`**, so you can disable any overlapping ballistics/armor option without giving up the GOAP AI.
+
 ---
 
-## Multiplayer Compatibility Matrix — Client-Side vs. Host/Synced Features
+## Multiplayer Compatibility Matrix
 
 Whether you are **joining a 100% vanilla server as a modded client**, **hosting a server for vanilla friends**, or running the mod on **both Host and Clients**, here is how every feature behaves over Photon (`PUN2`):
 
 | Feature / System | Category | Joining a Vanilla Server (Client-Only Mod) | Hosting for Vanilla Friends (Host-Only Mod) | Host + Clients Both Modded |
 | :--- | :--- | :--- | :--- | :--- |
 | **Plane Engine Loop De-Throbber** (`EnablePlaneAudioSmoothing`) | **100% Client-Side** | **Works 100%** for you | Host hears smoothed plane audio; vanilla clients hear vanilla audio | **Everyone** hears smoothed plane audio |
-| **Death Screen Kill Attribution + Age** (`EnableDeathScreenAttribution`) | **100% Client-Side** | **Works 100%** for you | Host sees full obituary; vanilla clients see vanilla death screen | **Everyone** sees full obituary |
+| **Death Screen Kill Attribution + Age & `F7` Dogtag Archive** | **100% Client-Side** | **Works 100%** for you | Host sees full obituary & archive; vanilla clients see vanilla death screen | **Everyone** sees full obituary & archive |
 | **Quick-Tap `Tab` Spotting & 64-Char Room Names** | **Client UI / Host Room Name** | **Works 100%** for you | Vanilla clients see your full 64-char server name! | **Works 100%** for everyone |
-| **3D Veteran Badges, Roster Tags, Spectator HUD (`F`), 4K UI Scale, Objective Factions & `F5`/`F6`/`F8`/`F9`/`F10`** | **100% Client-Side UI** | **Works 100%** on your HUD | Host only (vanilla clients see **3D uniform shoulder rank decals** synced by Host) | **Everyone** sees HUD tags, 3D badges & decals |
-| **Macro Objective Director, Garrisons, Attrition Pivots, Conquest Quartermaster, Emplacements & Smart APCs** | **Host-Driven (Synced to All)** | Inactive (Host controls autonomous squads) | **Vanilla clients experience 100%!** Host assigns squad tasks and Photon syncs movements & dismounts to vanilla players. | **Works 100%** for everyone |
-| **All Autonomous Enemy & Friendly AI Squads (Vision, GOAP, Radios, Cover, CQB, Anti-Armor, Tank Crew Intercom)** | **Host-Driven (Synced to All)** | Inactive for host-owned bots | **Vanilla clients experience 100%!** Even a vanilla client's **own on-foot AI squadmates** remain simulated by the Host (`0x180A71EE2`)! | **Works 100%** for everyone |
-| **10–12 Hz Multiplayer Plane Sync** | **Host Wire-Compatible + Client Smooth** | Host sends default rate | **Vanilla clients get smoother planes too!** Eliminates Host LOD velocity zeroing & raises stream sync cleanly. | **100% smooth** (plus disabled non-owned gravity) |
+| **3D Veteran Badges, Roster Tags, Spectator HUD (`F`), 4K UI Scale, Objective Factions & `F5`/`F6`/`F7`/`F8`/`F9`/`F10`** | **100% Client-Side UI** | **Works 100%** on your HUD | Host only (vanilla clients see **3D uniform shoulder rank decals** synced by Host) | **Everyone** sees HUD tags, 3D badges & decals |
+| **Macro Objective Director, Garrisons, Attrition Pivots, Emplacements & Smart APCs** | **Host-Driven (Synced to All)** | Inactive (Host controls autonomous squads) | **Vanilla clients experience 100%!** Host assigns squad tasks and Photon syncs movements & dismounts to vanilla players. | **Works 100%** for everyone |
+| **All Autonomous Enemy & Friendly AI Squads (Vision, Footstep Hearing, GOAP, Radios, Resurrected Vanilla Voice Lines, Cover, CQB, Anti-Armor, Tank Intercom & Staggered Bailout)** | **Host-Driven (Synced to All)** | Inactive for host-owned bots | **Vanilla clients experience 100%!** Even a vanilla client's **own on-foot AI squadmates** remain simulated by the Host (`0x180A71EE2`) and emit native Photon `SyncSay` voice lines! | **Works 100%** for everyone |
+| **Vehicle & Aircraft Physics / Flight & Photon Sync** | **100% Pure Vanilla Sync** | Pure vanilla network sync | **100% wire-compatible vanilla flight & driving sync!** No custom vehicle/plane Photon overrides that cause client snap-teleports. | **100% pure vanilla physics & sync** |
 | **AI Crewmates Inside a Client-Driven Tank/Vehicle** | **Client-Owned Vehicle Crew** | **Works 100%** for your vehicle's AI gunners/repair crew! | Vanilla client's own tank crew uses vanilla AI while that client drives | **Works 100%** for everyone |
 | **Thin-Cover Wood Bullet Penetration (`"bh_ver"` Host-Assist)** | **Per-Shooter + Host-Assist** | Works for you & locally owned units | **Vanilla clients experience 100%!** Host applies thin-wood bullet penetrations for unmodded teammates without double-damage. | **Works 100%** for everyone |
-| **Multiplayer Scoreboard (`Kills`/`Deaths`/`Score`), Client Roadkills & Casualties/Prisoners/Vehicles Stat Sync** | **Host-Authoritative / Synced** | Scoreboard fix works for your kills/deaths; Roadkills & match stats sync when Host runs mod | **Vanilla clients experience 100%!** Unmodded friends can roadkill enemy bots, see sorted scoreboards, and receive targeted WWII Phonetic radio chat & welcome briefing. | **100% synchronized** on Host & Clients |
+| **Multiplayer Scoreboard (`Kills`/`Deaths`/`Score`), Client Roadkills, Targeted Host MOTD & Battle Stat Sync** | **Host-Authoritative / Synced** | Scoreboard fix works for your kills/deaths; Roadkills & match stats sync when Host runs mod | **Vanilla clients experience 100%!** Unmodded friends can roadkill enemy bots, see sorted scoreboards, and receive faction-language welcome briefings & targeted WWII radio chat. | **100% synchronized** on Host & Clients |
 | **Aircraft Top-Attack AP (`"bh_ver"` Host-Assist)** | **Per-Shooter + Host-Assist** | Works for your own aircraft AP passes | **Vanilla clients experience 100%!** Host applies top-attack roof penetrations for unmodded teammates without double-damage. | **Works 100%** for everyone |
 | **Enclosed Tank Crew Blast & Airplane Canopy/Belly Armor** | **Per-Victim Owner** | Protects you & locally owned crew | Protects Host + **all Host-owned AI tank crews & pilots** | **Works 100%** for all players and AI |
 
 ---
 
-## In-Game Controls: Menu (`F6`), Map Picker (`F5`) & Hotkeys
+## What Changes on the Battlefield
 
-Every feature in this mod is organized into **5 Concept Tabs** (`1. GOAP & Bot Behaviors`, `2. Vanilla Fixes`, `3. Vision & Realism`, `4. Vets & Roles`, `5. Optimizations & QoL`) with one-click **`[ALL]` / `[OFF]`** section buttons in the **in-game `F6` GUI menu** (`BepInEx\config\com.antigravity.easyred2.humanai.cfg`):
+### 1. Infantry Self-Preservation, Cover, Trench Drop-In & CQB ([`Modules/Infantry/`](src/EasyRed2AI/Modules/Infantry/))
+* **Committed Fire-and-Movement**: Replaces vanilla's stuttery `crouch -> 1-step run -> crouch` shuffling and `50%` open-field `Prone` rolls with hysteresis-locked **upright sprints (`4.8s–6.8s`)** alternated with **deliberate kneeling firing halts (`3.7s–5.35s`)**, instant `"Shot-At"` startle drops to cover when fired on, and blind-corner **pieing** (`<= 115°` cap, disabled when evacuating so retreating troops never moonwalk backward) around doorways and trench bends.
+* **Gunfire-Driven Leeward Cover, Crossfire & Barrel Clearance**: Computes live dominant enemy gunfire vectors and circular crossfire coherence (`R < 0.82f`) so bots stand **behind** walls—never on the enemy-facing side without ping-ponging—step into roofed interiors or trenches for `Prone` shelter under crossfire while staying low (`Crouch`) under windowsills, **pop up** smoothly over waist-high sandbags only during firing bursts, sidestep door/pillbox jambs cleanly without standing into concrete lintels, and cross spans using **bridge parapets, tank hulls, and bipods** without jumping off into rivers (`SoldierAI.GetSpacingFromSquad` fix).
+* **True Obstacle Vaulting, Trench Drop-In & Door/Shutter Discipline**: Fixes Layer 14 `InvisibleTrepassableWall` and thin-fence probes so bots reliably **vault low walls, sandbags, and trench parapets**, adds direct **trench drop-in** steps (`TryStepOffIntoTrench`) overcoming `CPathFinding`'s `1.12m` drop rejection without teleporting or climbing sloped hills (`TerrainCollider`) or barbed wire unless wedged, rejects `Vehicle` hull colliders from foot pathing/vaulting, opens doors strictly along travel/firing lanes, closes trailing doors behind squads, and pulls window shutters shut when pinned or reloading.
+* **Decisive Melee, Un-Bayoneted Reach & Shell-Shock Surrender**: Fixes integrated bayonet mounting (zero RPC bursts), extends AI un-bayoneted `MeleeDamageCR` capsule reach (`0.37m -> 0.95m`, `1.45m` across static-gun tripods) so pistol-whips/buttstrokes/knives don't whiff, stops CQB melee spinning with `±52°` 2-man pincers and crouch/prone stance matching, suppresses melee charges into `<= 15m` gunfire when holding loaded firearms (keeping loaded pistols firing down to `0.72m` and breaking `melee_whiff_loop` stalemates after `3` whiffs), fixes downed-casualty vs. surrender standing-zombie bugs (`IsInjured` + `SetAnimatorController`), and allows isolated Skittish/Rookie troops without an officer nearby to dynamically **surrender** (`SurrenderSynched`)—and later be liberated back into combat.
+
+### 2. Squad Teamwork, Emergent Field Radios, Hearing & Combat Triage ([`Modules/Goap/`](src/EasyRed2AI/Modules/Goap/))
+* ***F.E.A.R.* Pin-and-Flank & 3-Tier Balking**: Squad Blackboards (`0.60s–1.05s` staggered, `<= 3` refreshes/tick) coordinate Suppressors, `20°–75°` Flanking teams, Breachers, and Medics. Both NCOs and individual soldiers track fresh squadmate casualty zones (`20m` / `18s` hazard memory), **refuse or abort** suicidal pushes (`Balk:` telemetry), and prioritize survival preemption (`ScavengeForbiddenMask` + `suppression >= 5.0f` cutoff) over mid-firefight looting.
+* **Close-Range Footstep & Gunfire Hearing (`<= 20m`) + 4 Resurrected Vanilla Voice Lines**: Zero-allocation footstep ring buffer detects enemy standing sprints (`<= 17m`) and walks (`<= 9.5m`) while keeping crouched and prone movement silent—masked by `50%` during nearby gunfire/explosions (`<= 35m`, `3s`), triggering alert snap-turns and at most **one cautious squad investigator** rather than breaking whole-squad formation. Also wires **4 unused universally populated vanilla voice clips (`492` clips across all `48/48` voice sets)** (`iVeBeenHit`, `attackThatTank`, `attackThatVehicle`, `yes` + safe `keepYourHeadDown` fallback) over native `Soldier.SyncSay` so unmodded Co-op friends hear them too.
+* **Emergent Field Radio & Medic Inheritance**: When a squad loses its Radioman or Medic, surviving squadmates scavenge **fallen friendly or captured enemy field radios** (explicitly strapping them on via `Soldier.SetWerable` and retuning enemy frequencies onto your net, while Radiomen prioritize combat safety over rubber-banding back to the leader) or recover **atomic 3-of-3 syringe kits** from dead Medics (protecting dead Medics near human players), alongside picking up knocked-off or **player-gifted helmets**, **AT launchers**, and ammo from floors, corpses, and `AmmoRefillCrate`s.
+* **Anti-Dogpile Medics, Casualty Dragging & `"Less is More"` Squad Merges**: Caps wounded casualties to 1 primary medic (`DriveMedicHealingApproach` fixes `MedicHealingDestination` freezes), lets riflemen carry downed buddies out of killzones, locks AI Squad Leaders with followers onto shared objectives (`FollowLeader`), steers grounded/bailed tank crews back to safety, lets soldiers borrow ammo/bandages from living Medics & Ammo Carriers at a `2.5m` standoff, and cleanly merges lone survivors into nearby healthy leaders (`!IsInjured`) via vanilla `Squad.Join` (`<= 18m` SL cohesion guard).
+* **Sapper Special Munitions & Mine Avoidance**: Engineers/AT Sappers deploy AT/AP pressure mines with strict friendly/spawn/cap-zone safety buffers, hurl heavy satchel/demo charges against fortifications and armor (`9m` clear step-back), and build deployable tripods—while allied infantry and vehicles steer/brake around placed mines.
+
+### 3. Relentless Objective Play, Radio Intel Nets & Spawn Safety ([`Modules/MacroAndVehicles/`](src/EasyRed2AI/Modules/MacroAndVehicles/))
+* **Both Armies Play to Win**: Clamps cover searches inside capture circles (`0.80 * radius`), maintains a doctrinal **rear-guard garrison (`16%–28%`)** with instant **Back-Cap Alarms** across all 215+ vanilla campaign missions (`ME_*`, `sp_ME_` V2, Dynamic Conquest, Wave Defense, Lua `#retreat`, Workshop missions), and triggers smoke-screened **multi-squad attrition pivots** (`CountAlliedGroundSquadsOnObjective` + 1-per-frame RPC-paced order queue) rather than throwing infinite waves into an entrenched meatgrinder.
+* **Anvil & Hammer Supporting the Human Player**: Radio-connected squads and tanks automatically pair up to pin and flank enemy strongpoints—and when **your Human Player squad** is connected to the Radio Net and pinned down, the Team Net treats you as the **Anvil** and dispatches an AI **Hammer** squad to flank the enemy pinning you (or suggests your next priority target if you have no active order).
+* **Pure Player `ConquestEconomy` & Coastal Spawn-Drown Rescue**: Keeps `ConquestEconomy` strictly as the **human-player requisition wallet** (matching vanilla's `if (isPlayer)` gate at `0x1806AB133` so AI bots use free wave timers/slots and never starve players of armor/air spawns), while `SpawnManager._SpawnUnit_d__37` rescues offshore/underwater spawns and boat-capacity overflows onto nearby walkable shoreline or dry friendly spawners (`SpawnSaved:`).
+
+### 4. Fair Human Vision, Tank Commander Periscope & Realistic Ballistics ([`Modules/Vision/`](src/EasyRed2AI/Modules/Vision/) & [`Modules/ImmersionAndQoL/`](src/EasyRed2AI/Modules/ImmersionAndQoL/))
+* **Fair Vision & Window-Aperture Alignment**: `150m` Standing / `80m` Crouched / `40m` Prone stealth with `4.0s` individual shooter reveals, continuous human "squint" cones (`<= 12m` close awareness narrowing smoothly to `±32°`), `0.18s–0.65s+` human reaction curves, optic zoom scaling (`<= 2.25x`), native `AngleToDirection` `90°` gaze fix, window-opening centering for indoor defenders, `15m` vocal threat-sector callouts, and last-known suppressive fire / frag flushes.
+* **Active 360° Tank Periscope, Intercoms & Armor Realism**: `TurretCommander` actively rotates (`55°/s` or toward `<= 185m` gunfire) with directional periscope optics (`78° -> 62° -> 42°`) and an `11.5m` hull-depression dead zone paired with **`0.65s–1.48s` Commander & escort-infantry intercom callouts** into narrow `±15°–34°` enclosed gunner slits; enclosed crew protection against external frag grenades and collider-clipping small arms; tent/soft-prop `0`-armor tank collision immunity; Molotov fire immunity for steel tank tracks with upper-hull engine/fuel seepage; diving aircraft **top-attack AP roof normalization** (with automatic **Host-Assist for unmodded Co-op clients!**); armored airplane belly/floor protection against rifle-caliber ground fire; thin-cover **wood bullet penetration**; and underwater/through-smoke **ghost blood occlusion**.
+
+### 5. Combined Arms: Armor, Emplacements, Air Superiority & Staggered Bailouts ([`Modules/MacroAndVehicles/`](src/EasyRed2AI/Modules/MacroAndVehicles/) & [`VeterancyAndPersonalities.cs`](src/EasyRed2AI/Modules/ImmersionAndQoL/VeterancyAndPersonalities.cs))
+* **"Less is More" Pure Vanilla Driving, Flight & Network Sync + Tactical Layer**: Vehicle driving (`UpdatePath`/waypoints), aircraft flight physics (`FlightModel`), and vehicle/plane Photon synchronization run **100% pure vanilla** on Host and Clients (zero client snap-teleports or off-road tank path collisions). On top of pure vanilla locomotion, *Battle Hardened* layers personality-scaled standoff (`50m–95m`), `<= 35m` AT reverse/blast displacement, **Known / Marked / Radio-Requested** target priority, building-facade shelling for spotted indoor enemies, friendly infantry corridor right-of-way, leeward repair positioning & `RepairStation` resupply, and true **`ShellType.APHE` vs. `HE`/Coax MG/`Flak` munition selection** (`TurretGun.SelectBestAmmo` + `TurretWeapon.Reload`, fixing vanilla `BulletData.IsHe()` treating `APHE` as `HE`).
+* **Emplacements, Anti-Armor Infantry, Air Rearm Rescue & Staggered Tank Crew Bailouts**: Proactively crews 2-seat static guns (`<= 32m` player squadmates automatically assist on open loader/traverse seats and `"Get In"` orders stay protected), bails gunners out when flanked within `18m` outside arc or rushed inside `8.5m` off-bore/reloading, keeps stowed AT launchers out against armored cars/halftracks (`SoldierAI.UseBestWearedWeaponCheck`), enforces threat-arc **Tank Fear** + blind-side AT stalking, blocks `< 12mm` frags on buttoned tanks, restores `2200m`/`4000m` air detection + carrier/island `NeedRefill` rearming rescue, restricts Japanese *Tokkōtai* dives strictly to severely crippled (`>= 80` damage / missing wing) planes, staggers crippled tank crew exits (**`0.15s–0.45s` hatch queue + `2.1s–4.0s` crouch/prone shock scramble** with `32m` self-defense before evacuating), and gives ejected **Pilots, 6–10 seat Bomber Crews, and Tank Crews** working on-foot `"Retreat"` objectives (including ocean ditching zones).
+
+### 6. Emergent WW2 Storytelling, QoL & 60 FPS Co-op Polish ([`Modules/ImmersionAndQoL/`](src/EasyRed2AI/Modules/ImmersionAndQoL/) & [`UI/`](src/EasyRed2AI/UI/))
+* **15-Minute Veterancy (`Pvt.` $\rightarrow$ `1st Sgt.`) & 30 Personalities across 20+ Doctrines**: Survivors sharpen steadily up to a realistic `20%` dispersion cap, earn visible **3D shoulder rank promotions**, and fight according to 30 distinct archetypes and historical doctrines.
+* **Obituary, `F7` Dogtags, Squad Roster/Map/3D Letters, Reload Cancel, `F5` Playlists & Co-op Polish**: Instant full-opacity **Death Screen Obituary** with weapon/ordnance caliber (`APHE`/`HEAT`/`AP`/`HE`/`Flak`), hit zone, distance, and soldier **Age (`1925 - 1944 (Age 19)`)**; searchable **`F7` Dogtag Collection Archive**; **Bottom-Left Squad Roster Header & Names**, optional **Own-Squad-Only 3D Overhead Names** (`<= 65m` with 1:1 native hover deduplication), and friendly-only **Map & 3D World Squad Letters (`A`, `B`, `C`...)** (Gold `#FFE040` own squad, crisp White allies, pooled recycling fixed); **Tactical Reload & Bipod Animation Canceling** without fast-reload exploits; Client-side **Plane Engine Loop De-Throbber**; Quick-Tap **`Tab`** spotting, **64-char** room names & **targeted faction-language Host MOTD**; Host-authoritative **Multiplayer Casualties/Prisoners/Lost Vehicles** stat sync; **4K UI Scaling**; Spectator **`F`** view cycling + **Top-Center Bot GOAP Inspector**; standalone **`F5` Campaign, Multi-Map Playlist & Unit-Scale Picker** (background catalog pre-loading, `[★ATK|☆DEF]` per-side completion badges, `CampaignsTree.ExploreBranch` mission ordering, **`Campaign From Here`**, and `25%–300%` Allies/Axis bot scaling); plus **Co-op Host Alt-Tab stability (`45 FPS` unfocused cap)** and chunked zero-GC `WorldSnapshot` + **Host Ping Governor**.
+
+---
+
+## 3-Tier GOAP Architecture and Personalities
+
+Most shooter mods rely on **static rule trees** (*"if HP < 50 -> bandage; else if enemy visible -> shoot"*). Rule trees break the moment two edge cases overlap—leaving bots paralyzed, oscillating poses, or walking straight into ambushes.
+
+**GOAP (Goal-Oriented Action Planning)**—pioneered by Jeff Orkin for *F.E.A.R.* (2005)—flips that around. Each soldier evaluates **Goals** (*Stay Alive, Stop Bleeding Safely, Break Suppression, Flank Pinned Enemy, Counter Armor, Restore Squad Radio*) against **Actions with Preconditions & Effects** using a zero-allocation **32-bit bitmask planner** organized as a **3-Tier Chain of Command ("HQ Suggests -> NCO Decides -> Soldier Survives")**:
+
+```mermaid
+flowchart TD
+    T3["Tier 3: HQ and Radioman Team Net (Suggests)"]
+    NET{"Squad Has Live Radio Link or Vehicle Relay?"}
+    CUT["Autonomous Cut-Off Mode (Local Flank or Seek Radio)"]
+    T2["Tier 2: Squad Leader and NCO Blackboard (Decides)"]
+    BALK{"Casualties or Suppression Too High?"}
+    T1["Tier 1: Individual 32-Bit GOAP Brain (Survives)"]
+    MOD["Role, 30 Personalities, Historical Doctrines, 15-Min Veterancy and Micro-Variance"]
+
+    T3 -->|Advisory Objectives and Pincers| NET
+    NET -->|Connected| T2
+    NET -->|Cut Off| CUT
+    CUT --> T2
+    T2 -->|Assign Suppressor, Flanker, Breacher, Medic| BALK
+    BALK -->|Hold and Adapt| T1
+    BALK -->|NCO Balks or Pops Smoke Pivot| T1
+    MOD -.-> T1
+```
+
+No two soldiers of the same nation fight identically: zero-allocation MurmurHash3 bit-mixing gives every individual bot continuous **Micro-Variance** (`AggressionCostMult`, `CautionCostMult`, reaction jitter, and suppression jitter) on top of their **Role**, **30 Archetype Personalities**, **Historical Doctrines**, and **15-Minute Veterancy**.
+
+<details>
+<summary><b>Click to expand the 30 Role-Based AI Personalities reference table</b></summary>
+
+| Role | Personality 1 | Personality 2 | Personality 3 |
+| :--- | :--- | :--- | :--- |
+| **1. Squad Leader** | **`[Spearhead]`**: Grants nearby squadmates (`< 22m`) `+12` suppression grit and leads aggressive pushes. | **`[Tactician]`**: Faster artillery/radio support checks and tight cover discipline. | **`[Old Guard]`**: Defensive anchor; prioritizes squad survival and rescues pinned comrades. |
+| **2. Assaulter / SMG** | **`[Shock]`**: Resists dropping `Prone` until extreme suppression (`>= 68`) and bounds aggressively. | **`[Breacher]`**: Rapid `2.0s` peek cooldown (`<= 38` suppression) and eagerly tosses frag grenades. | **`[Skirmisher]`**: Expands lateral spacing (`1.45x`) to flank wide into CQB. |
+| **3. Rifleman** | **`[Regular]`**: Balanced baseline fire-and-maneuver (`35` suppression threshold). | **`[Cautious]`**: Drops low at light suppression (`>= 18`), stays ducked longer, sheds jitter as `[Composed]` Vet. | **`[Grenadier]`**: Prioritizes rifle-grenades and hand grenades within throwing range. |
+| **4. Machine Gunner** | **`[Anchor]`**: Prioritizes wall/parapet bipods and holds under heavy fire (`>= 60` suppression). | **`[Assault MG]`**: Advances with the rifle squad and deploys ground bipods in `Crouch`/`Prone`. | **`[Overwatch]`**: Holds medium-long range (`50m–160m`) overwatch cover to pin threats. |
+| **5. Marksman / Sniper** | **`[Deadeye]`**: `12%` tighter accuracy when firing from `Crouch` or `Prone`. | **`[Stalker]`**: `35%` shorter firing-reveal duration from concealed cover. | **`[Spotter]`**: `+5°` wider scoped optic cone for counter-sniping. |
+| **6. Anti-Tank / Sapper** | **`[Tank Hunter]`**: Stalks armor in crouch stealth and aims for tracks/weak spots. | **`[Ambusher]`**: Holds fire behind cover until armor enters kill range (`< 68m`). | **`[Demo]`**: High suppression grit (`>= 60`) when closing for AT/satchel/grenade attacks. |
+| **7. Field Medic** | **`[Heroic]`**: Braver under fire (`<= 52` suppression) and searches `1.5x` wider (`45m`) to rescue/liberate. | **`[Combat Medic]`**: Balanced combat-first medic (`35` suppression); clears close threats before treating. | **`[Triage]`**: High self-preservation (`20` suppression, longer cover-seek) to stay alive for the squad. |
+| **8. Tank / Armor Crew** | **`[Brawler Crew]`**: `20%` faster turret target switching and `50m` close-support standoff. | **`[Sniper Crew]`**: `+5°` wider long-range turret optic cone and `95m` armor-duel standoff. | **`[Support Crew]`**: Prioritizes infantry support (`72m` standoff) and fast radio-request response. |
+| **9. Light Vehicle / AA** | **`[Outrider]`**: Fast-reacting mobile gunner/driver (`20%` faster turret refresh). | **`[Escort]`**: Cautious standoff support and higher self-preservation when repairing. | **`[Flak Watch]`**: `+12°` wider scan sector in `TurretAI.CanSee` for tracking aircraft. |
+| **10. Aircraft Pilot** | **`[Ace]`**: Extended dogfight pursuit leash (`fighterDogfightExtraLeash = 450m`). | **`[Daredevil]`**: Commits closer on CAS dive-bombing runs (`0.90x diveAlignDistance`). | **`[Disciplined]`**: Pulls out of dives earlier (`1.08x diveAlignDistance`) for safer bomb releases. |
+
+</details>
+
+For the native `GameAssembly.dll` root causes and system architecture behind all **28 C# modules**, see **[`docs/design-and-justifications.md`](docs/design-and-justifications.md)** and **[`CHANGELOG.md`](CHANGELOG.md)**.
+
+---
+
+## In-Game Hotkeys and Menus
+
+Every feature is organized into **5 Concept Tabs** (`1. GOAP & Bot Behaviors`, `2. Vanilla Fixes`, `3. Vision & Realism`, `4. Vets & Roles`, `5. Optimizations & QoL`) with one-click **`[ALL]` / `[OFF]`** section buttons in the **`F6`** menu (`BepInEx\config\com.antigravity.easyred2.humanai.cfg`):
 
 * **`F` (in Free Camera / Auto-Spectator)**: Cycle Spectator Tactical View (**`Full Tactical`** $\rightarrow$ **`Objectives Only`** $\rightarrow$ **`Clean Cinema`**), completely independent of Photo Mode's camera UI toggle.
 * **`F5`**: Open/Close the standalone **In-Game Campaign, Playlist & Mission Picker** (Singleplayer & Multiplayer Host: build `[+]`/`[#N]` multi-map playlists, launch or queue **`Campaign From Here`**, tune next-map Allies/Axis **Bot Scale (`25%–300%`)**, and switch/queue across all campaigns with `???` unlock masking).
-* **`F6`**: Open/Close the **5-Tab Modular Feature Menu** (toggle features/categories live mid-match and scale UI size for 1440p/4K).
+* **`F6`**: Open/Close the **5-Tab Modular Feature Menu** (toggle all `106` config options live mid-match and scale UI size for 1440p/4K).
 * **`F7`**: Open/Close the **Searchable Dogtag Collection Archive** (`Brought Home` vs. `Enemy Trophy`, `My Kills`, birth–death age, rarity, and battle filter).
 * **`F8`**: Master Toggle Mod **ENABLED / DISABLED** live in-game.
 * **`F9`**: **Hot-Reload** `.cfg` from disk without restarting.
-* **`F10`**: Display the **5-Line Live Tactical Telemetry Card** (`Vet`, `GOAP`, `Balk`, `RadioLoot`, `Anvil`, `FragBlk`, `Intercom`, `Hitches`, etc.). Optional zero-overhead **`EnableBotActionTrace`** (`BepInEx/BotActionTrace.jsonl`) and **`EnableHitchFlightRecorder`** toggles live under `F6 -> 5. Optimizations & QoL -> Developer Diagnostics` (default `OFF`).
+* **`F10`**: Display the **5-Line Live Tactical Telemetry Card** (`Vet`, `GOAP`, `Balk`, `RadioLoot`, `Anvil`, `FragBlk`, `Intercom`, `Hitches`, etc.). Zero-overhead opt-in **`EnableBotActionTrace`** (`BepInEx/BotActionTrace.jsonl`) and **`EnableHitchFlightRecorder`** toggles live under `F6 -> 5. Optimizations & QoL -> Developer Diagnostics` (default `OFF`).
+
+---
+
+## Automated Verification and Performance Profiling
+
+Every change compiles through an automated verification pipeline and has been profiled in live `120–145` bot Co-op stress tests:
+
+### 1. Static Signature Checks & Headless Simulations (`.\build.ps1 -Test`)
+| Verification Stage | Scope | Verified Result |
+| :--- | :--- | :--- |
+| **IL2CPP Harmony & Animator Verifier** ([`VerifyPatches.cs`](tools/verify_patches/VerifyPatches.cs)) | All `[HarmonyPatch]` classes, `Plugin.Load` `SafePatch` registration CIL audit, and Animator state/parameter strings vs. native `Soldier.asm` | **`155` HarmonyPatch signatures verified (`0` mismatches)**; **`14` Animator string literals verified (`0` mismatches)** |
+| **GOAP, Acoustic & Ground Probe Suite** ([`VerifyGoapPlanner.ps1`](tools/verify_patches/VerifyGoapPlanner.ps1)) | Combinatoric GOAP state space, footstep/acoustic ring buffer & noise masking, slope/capsule probes, CQB standoff invariants | **`24,601` assertions passed across `9,920` combinatoric states (`0` failures)** |
+| **Deterministic Battle Loss & Emergence Model** ([`Run-BattleLossModel.ps1`](tools/verify_patches/Run-BattleLossModel.ps1)) | **`687` battles** (`229` scenarios × `3` seeds covering **`215` real campaign missions**, Dynamic Conquest, Wave Defense, Demolition, Breakout/Retreat, **`21/21` doctrine profiles**) | **`8,802,845` GOAP plans in `5.48s`**; **`0` across all `8` zero-tolerance loss counters** (incl. `16,484` prisoner/bailed-crew zombie audits); **`8/8` determinism**; **`229/229` cross-seed divergence**; `3.12` concurrent distinct GOAP actions / engaged squad |
+
+### 2. In-Game Flight Recorder Telemetry (`HitchAutopsy` & `AnomalyWatchdog`)
+Measured across live `24.5-minute` (`117,266` frames) and `41.5-minute` Co-op matches (`120–145` active bots, `0` mod exceptions):
+* **Sustained `60 FPS`**: `16.66ms–16.72ms` average frame time across `117,266` recorded frames (with `DebugLogging` active during the 24.5-minute trace).
+* **Single-Frame Mod Spikes Eliminated**: `GoapScavenge` (`114.5ms -> <= 0.25ms`), `GoapFloorSnap` (`95.5ms -> <= 0.15ms`), `Emplacements` (`12.3ms -> 0.00ms`), `DictCleanup` (`7.0ms -> 0.00ms`), plus `TeamNetGoap` `22ms–30ms` spikes eliminated via `<= 3` squad refreshes/tick and cached AT checks.
+* **Allocation & GC Reduction**: Managed `.NET 6` allocations cut **`5x–9x`** (`10.5–21.7 KB/frame -> 2.05–4.5 KB/frame`, `6` `.NET 6` GCs across `24.5` min); peak `IL2CPP` Boehm churn cut from `347.5 KB/frame` (`23` GCs/`15s`) down to `53–164 KB/frame` (`1–3` GCs/`15s`).
+* **Runtime Diagnostics (Default `OFF`)**: 40-bucket [`HitchProfiler`](src/EasyRed2AI/Core/HitchProfiler.cs), lock-free ring-buffered [`BotActionTrace`](src/EasyRed2AI/Core/BotActionTrace.cs) (`BotActionTrace.jsonl`), and a 5-detector runtime `AnomalyWatchdog` (`surrender_pose_mismatch`, `prisoner_ignored_by_allies`, `retreat_despawn_stalled`, `melee_whiff_loop`, `idle_in_open_zombie`).
+
+### 3. Test Hardware Transparency
+Live game profiling runs were captured on a high-end test system:
+* **CPU**: AMD Ryzen 7 9800X3D (8-Core) · **GPU**: AMD Radeon RX 7900 XTX · **RAM**: 64 GB · **OS**: Windows 11 Pro
+
+While raw FPS ceilings depend on your CPU, the mod's optimization work targets **hardware-independent bottlenecks** that help lower-spec and mid-range PCs too: cutting per-frame managed/IL2CPP GC allocations (`KB/frame`), bounding spatial/inventory scans across chunked frames, caching linecasts/ceilings/doors, dynamically backing off extra AI brain ticks whenever frame time exceeds `25ms` (`< 40 FPS`), and pacing Co-op host updates under network/background load.
 
 ---
 
 ## Building From Source
 
-Run [`build.ps1`](build.ps1) from PowerShell (auto-discovers your Steam `Easy Red 2` installation and `.NET 6` Roslyn compiler, compiles all modules under [`src/EasyRed2AI/`](src/EasyRed2AI/), verifies all 155 Harmony patch signatures against `Assembly-CSharp.dll`, and checks that `Easy Red 2.exe` is closed before deploying). Add `-Test` to also run the headless GOAP/Acoustic/Ground-Probe suite (`VerifyGoapPlanner.ps1`) and the **687-battle Deterministic Battle Loss & Emergence Model** (`Run-BattleLossModel.ps1`, covering all 215 real campaign missions, Dynamic Conquest, Wave Defense, Demolition, Breakout/Retreat, and all 20 National Doctrines in ~4s):
+Run [`build.ps1`](build.ps1) from PowerShell (auto-discovers your Steam `Easy Red 2` installation and `.NET 6` Roslyn compiler, compiles all **28 modules** under [`src/EasyRed2AI/`](src/EasyRed2AI/), runs [`VerifyPatches.cs`](tools/verify_patches/VerifyPatches.cs) against `Assembly-CSharp.dll` and native `Soldier.asm`, and checks that `Easy Red 2.exe` is closed before deploying). Add `-Test` to also run the headless GOAP/Acoustic/Ground-Probe suite (`VerifyGoapPlanner.ps1`) and the **687-battle Deterministic Battle Loss & Emergence Model** (`Run-BattleLossModel.ps1`):
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\build.ps1 -Test -Deploy
 ```
+
+---
+
+## Development Methodology, AI Disclosure, and Credits
+
+> **Disclosure — AI-Assisted Development:**  
+> AI / LLMs were used in the development of this mod. I'm a developer by trade and worked on this with an LLM in my free time alongside hours of testing and polish. Putting this upfront in case you prefer to avoid AI-assisted mods.
+
+**Credit & Inspiration:**  
+Special credit and thanks to **[AtlasActual (`Easy-Red-2-Realism-Overhaul`)](https://github.com/AtlasActual/Easy-Red-2-Realism-Overhaul)** for pioneering several of the combined-arms, objective-coordination, and tactical realism concepts that inspired parts of this project's roadmap and feature sets.
