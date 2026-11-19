@@ -19,6 +19,7 @@ namespace EasyRed2HumanAI
         public static ConfigEntry<bool> EnableAdaptiveAiTickScaling;
         public static ConfigEntry<float> UiScaleMultiplier;
         public static ConfigEntry<KeyCode> MapPickerHotkey;
+        public static ConfigEntry<KeyCode> ConfigMenuHotkey;
         public static ConfigEntry<KeyCode> DogTagArchiveHotkey;
 
         // 1. Infantry Sight & Stance
@@ -212,6 +213,12 @@ namespace EasyRed2HumanAI
                 "MapPickerHotkey",
                 KeyCode.F5,
                 "Hotkey to open the standalone In-Game Campaign & Mission Picker window (default F5).");
+
+            ConfigMenuHotkey = config.Bind(
+                "0. General",
+                "ConfigMenuHotkey",
+                KeyCode.F6,
+                "Hotkey to open the 5-Tab Feature & Settings Menu (default F6; on MacBooks without Fn-lock you can rebind to e.g. Backslash or Home).");
 
             DogTagArchiveHotkey = config.Bind(
                 "0. General",

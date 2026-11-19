@@ -105,6 +105,7 @@ namespace EasyRed2HumanAI
                     if (input != null)
                     {
                         KeyCode mapPickerKey = VisionConfig.MapPickerHotkey != null ? VisionConfig.MapPickerHotkey.Value : KeyCode.F5;
+                        KeyCode configMenuKey = VisionConfig.ConfigMenuHotkey != null ? VisionConfig.ConfigMenuHotkey.Value : KeyCode.F6;
                         KeyCode dogTagKey = VisionConfig.DogTagArchiveHotkey != null ? VisionConfig.DogTagArchiveHotkey.Value : KeyCode.F7;
                         if (input.GetKeyDown(KeyCode.Escape) && (_showConfigMenu || _showMapPicker || _showDogTagArchive))
                         {
@@ -143,7 +144,7 @@ namespace EasyRed2HumanAI
                                 _lastModOverlayClosedFrame = Time.frameCount;
                             }
                         }
-                        else if (input.GetKeyDown(KeyCode.F6))
+                        else if (configMenuKey != KeyCode.None && input.GetKeyDown(configMenuKey))
                         {
                             _showConfigMenu = !_showConfigMenu;
                             if (_showConfigMenu)
@@ -440,7 +441,8 @@ namespace EasyRed2HumanAI
                 }
             }
 
-            private static readonly string _cachedConfigHeaderTitle =
+            private static KeyCode _cachedCfgHeaderKey = (KeyCode)(-999);
+            private static string _cachedConfigHeaderTitle =
                 $"Easy Red 2: Battle Hardened v{Plugin.PluginVersion}  |  Feature Menu (F6)";
             private static KeyCode _cachedDtBtnKey = (KeyCode)(-999);
             private static string _cachedDtBtnText = "Dogtag Archive (F7)";
@@ -471,6 +473,12 @@ namespace EasyRed2HumanAI
                 GUI.color = new Color(0.06f, 0.07f, 0.09f, 0.95f);
                 GUI.Box(new Rect(panelX, panelY, panelW, panelH), "");
 
+                KeyCode cfgKey = VisionConfig.ConfigMenuHotkey != null ? VisionConfig.ConfigMenuHotkey.Value : UnityEngine.KeyCode.F6;
+                if (cfgKey != _cachedCfgHeaderKey)
+                {
+                    _cachedCfgHeaderKey = cfgKey;
+                    _cachedConfigHeaderTitle = $"Easy Red 2: Battle Hardened v{Plugin.PluginVersion}  |  Feature Menu ({cfgKey})";
+                }
                 GUI.color = new Color(1.0f, 0.88f, 0.35f, 1.0f);
                 GUI.Label(new Rect(panelX + 20f, panelY + 10f, panelW - 410f, 22f), _cachedConfigHeaderTitle);
 

@@ -7,6 +7,7 @@ using System.Text;
 using System.Threading;
 using Corvostudio.Weapons;
 using HarmonyLib;
+using Il2CppInterop.Runtime;
 using Photon.Pun;
 using UnityEngine;
 
@@ -871,6 +872,72 @@ namespace EasyRed2HumanAI
             return h.CachedHasHeldMortar;
         }
 
+        private static bool _nativeFieldOffsetsResolved;
+        private static int _offsetSoldierTargetDest = -1;
+        private static int _offsetSoldierAiVisibleTarget = -1;
+        private static int _offsetSoldierAiPath = -1;
+
+        private static int ResolveIl2CppFieldOffset<T>(string fieldName)
+        {
+            try
+            {
+                RuntimeHelpers.RunClassConstructor(typeof(T).TypeHandle);
+                IntPtr classPtr = Il2CppClassPointerStore<T>.NativeClassPtr;
+                if (classPtr == IntPtr.Zero)
+                    return -1;
+                IntPtr fieldPtr = IL2CPP.GetIl2CppField(classPtr, fieldName);
+                if (fieldPtr == IntPtr.Zero)
+                    return -1;
+                long rawOff = IL2CPP.il2cpp_field_get_offset(fieldPtr);
+                return (rawOff > 0 && rawOff < 0x10000) ? (int)rawOff : -1;
+            }
+            catch
+            {
+                return -1;
+            }
+        }
+
+        internal static void EnsureNativeFieldOffsetsResolved()
+        {
+            if (_nativeFieldOffsetsResolved)
+                return;
+
+            _nativeFieldOffsetsResolved = true;
+            _offsetSoldierTargetDest = ResolveIl2CppFieldOffset<Soldier>("targetDestination");
+            _offsetSoldierAiVisibleTarget = ResolveIl2CppFieldOffset<SoldierAI>("visibleTarget");
+            _offsetSoldierAiPath = ResolveIl2CppFieldOffset<SoldierAI>("path");
+        }
+
+        internal static string FormatNativeFieldOffsetsSummary()
+        {
+            EnsureNativeFieldOffsetsResolved();
+            string Fmt(int off) => off > 0 ? $"+0x{off:X}" : "fallback";
+            return $"targetDest={Fmt(_offsetSoldierTargetDest)}, visibleTarget={Fmt(_offsetSoldierAiVisibleTarget)}, path={Fmt(_offsetSoldierAiPath)}";
+        }
+
+        /// <summary>
+        /// Zero-allocation raw <c>IntPtr</c> read for <c>Soldier.targetDestination</c> using the
+        /// runtime-resolved IL2CPP field offset (falling back to managed property access if unavailable).
+        /// </summary>
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        public static IntPtr GetRawTargetDestinationPtr(Soldier s)
+        {
+            if (ReferenceEquals(s, null))
+                return IntPtr.Zero;
+            IntPtr sPtr = s.Pointer;
+            if (sPtr == IntPtr.Zero)
+                return IntPtr.Zero;
+
+            if (!_nativeFieldOffsetsResolved)
+                EnsureNativeFieldOffsetsResolved();
+
+            if (_offsetSoldierTargetDest > 0)
+                return Marshal.ReadIntPtr(sPtr + _offsetSoldierTargetDest);
+
+            AiDestination d = s.targetDestination;
+            return (!ReferenceEquals(d, null) && d != null) ? d.Pointer : IntPtr.Zero;
+        }
+
         public static CachedDestKind ResolveTargetDestination(SoldierFastHandles h)
         {
             if (h == null || h.Ref == null)
@@ -895,8 +962,7 @@ namespace EasyRed2HumanAI
                 return h.DestKind;
 
             h.NextDestCheckTime = now + 0.16f;
-            IntPtr sPtr = s.Pointer;
-            IntPtr destPtr = sPtr != IntPtr.Zero ? Marshal.ReadIntPtr(sPtr + 0x570) : IntPtr.Zero;
+            IntPtr destPtr = GetRawTargetDestinationPtr(s);
             if (destPtr == IntPtr.Zero)
             {
                 if (h.CachedDestPtr != IntPtr.Zero)
@@ -958,7 +1024,7 @@ namespace EasyRed2HumanAI
         }
 
         /// <summary>
-        /// Zero-allocation raw <c>IntPtr</c> read for <c>SoldierAI.visibleTarget</c> (<c>+0x48</c>),
+        /// Zero-allocation raw <c>IntPtr</c> read for <c>SoldierAI.visibleTarget</c>,
         /// avoiding per-frame <c>Spottable</c> wrapper allocations in <c>MovementRoutine</c>.
         /// </summary>
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
@@ -967,11 +1033,21 @@ namespace EasyRed2HumanAI
             if (ReferenceEquals(ai, null))
                 return IntPtr.Zero;
             IntPtr aiPtr = ai.Pointer;
-            return aiPtr != IntPtr.Zero ? Marshal.ReadIntPtr(aiPtr + 0x48) : IntPtr.Zero;
+            if (aiPtr == IntPtr.Zero)
+                return IntPtr.Zero;
+
+            if (!_nativeFieldOffsetsResolved)
+                EnsureNativeFieldOffsetsResolved();
+
+            if (_offsetSoldierAiVisibleTarget > 0)
+                return Marshal.ReadIntPtr(aiPtr + _offsetSoldierAiVisibleTarget);
+
+            Spottable vt = ai.visibleTarget;
+            return (!ReferenceEquals(vt, null) && vt != null) ? vt.Pointer : IntPtr.Zero;
         }
 
         /// <summary>
-        /// Zero-allocation cached <c>A.d</c> path lookup (<c>SoldierAI.path</c> at <c>+0x90</c>).
+        /// Zero-allocation cached <c>A.d</c> path lookup (<c>SoldierAI.path</c>).
         /// Only materializes a managed <c>A.d</c> wrapper when the underlying native path pointer changes.
         /// </summary>
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
@@ -983,7 +1059,13 @@ namespace EasyRed2HumanAI
             if (aiPtr == IntPtr.Zero)
                 return null;
 
-            IntPtr rawPathPtr = Marshal.ReadIntPtr(aiPtr + 0x90);
+            if (!_nativeFieldOffsetsResolved)
+                EnsureNativeFieldOffsetsResolved();
+
+            if (_offsetSoldierAiPath <= 0)
+                return ai.path;
+
+            IntPtr rawPathPtr = Marshal.ReadIntPtr(aiPtr + _offsetSoldierAiPath);
             if (rawPathPtr == IntPtr.Zero)
             {
                 if (h != null && h.CachedPathPtr != IntPtr.Zero)
@@ -1243,22 +1325,29 @@ namespace EasyRed2HumanAI
                 if (unscaledNow >= _nextWindowFocusPollUnscaledTime || unscaledNow < _nextWindowFocusPollUnscaledTime - 2.0f)
                 {
                     _nextWindowFocusPollUnscaledTime = unscaledNow + 0.20f;
-                    if (_currentProcessId == 0u)
-                        _currentProcessId = GetCurrentProcessId();
-
-                    IntPtr hwnd = GetForegroundWindow();
-                    if (hwnd != _lastForegroundHwnd)
+                    if (OperatingSystem.IsWindows())
                     {
-                        _lastForegroundHwnd = hwnd;
-                        if (hwnd == IntPtr.Zero)
+                        if (_currentProcessId == 0u)
+                            _currentProcessId = GetCurrentProcessId();
+
+                        IntPtr hwnd = GetForegroundWindow();
+                        if (hwnd != _lastForegroundHwnd)
                         {
-                            _isGameWindowFocused = false;
+                            _lastForegroundHwnd = hwnd;
+                            if (hwnd == IntPtr.Zero)
+                            {
+                                _isGameWindowFocused = false;
+                            }
+                            else
+                            {
+                                GetWindowThreadProcessId(hwnd, out uint fgPid);
+                                _isGameWindowFocused = fgPid == _currentProcessId;
+                            }
                         }
-                        else
-                        {
-                            GetWindowThreadProcessId(hwnd, out uint fgPid);
-                            _isGameWindowFocused = fgPid == _currentProcessId;
-                        }
+                    }
+                    else
+                    {
+                        _isGameWindowFocused = Application.isFocused;
                     }
                 }
 

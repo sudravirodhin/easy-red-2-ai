@@ -1382,7 +1382,7 @@ namespace EasyRed2HumanAI
                     __state.PrevMoveDest = __instance.MoveDestination;
                     AiCore.SoldierFastHandles h = AiCore.GetOrCreateSoldierHandlesByAi(__instance);
                     if (h != null && h.Ref != null && h.Ptr != IntPtr.Zero &&
-                        System.Runtime.InteropServices.Marshal.ReadIntPtr(h.Ptr + 0x570) != IntPtr.Zero)
+                        AiCore.GetRawTargetDestinationPtr(h.Ref) != IntPtr.Zero)
                     {
                         __state.PrevTargetDest = h.Ref.targetDestination;
                     }

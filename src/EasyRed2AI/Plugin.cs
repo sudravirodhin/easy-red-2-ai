@@ -21,15 +21,19 @@ namespace EasyRed2HumanAI
         internal static Plugin Instance;
         internal static new ManualLogSource Log;
         private Harmony _harmony;
+        private int _patchesApplied;
+        private int _patchesFailed;
 
         private void SafePatch(Type patchType)
         {
             try
             {
                 _harmony.PatchAll(patchType);
+                _patchesApplied++;
             }
             catch (Exception ex)
             {
+                _patchesFailed++;
                 Log.LogError($"Failed to apply patch {patchType.Name}: {ex}");
             }
         }
@@ -212,7 +216,14 @@ namespace EasyRed2HumanAI
             string hitchTag = HitchProfiler.Enabled ? " [HitchAutopsy Flight Recorder ACTIVE]" : "";
             string traceTag = BotActionTrace.IsEnabled ? " [BotActionTrace ACTIVE]" : "";
 
-            Log.LogInfo($"{PluginName} v{PluginVersion}{hitchTag}{traceTag} loaded! (Hotkeys: F5 Map Picker, F6 Config Menu, F7 Dogtag Archive, F8 Toggle ON/OFF, F9 Reload Config, F10 Show Live Stats)");
+            string osLabel = OperatingSystem.IsWindows() ? "Windows"
+                : OperatingSystem.IsMacOS() ? "macOS"
+                : OperatingSystem.IsLinux() ? "Linux"
+                : "OtherOS";
+            Log.LogInfo($"Platform: {osLabel} ({IntPtr.Size * 8}-bit) | Patches: {_patchesApplied}/{_patchesApplied + _patchesFailed} OK ({_patchesFailed} failed) | Offsets: {AiCore.FormatNativeFieldOffsetsSummary()}");
+
+            string cfgHotkeyLabel = VisionConfig.ConfigMenuHotkey != null ? VisionConfig.ConfigMenuHotkey.Value.ToString() : "F6";
+            Log.LogInfo($"{PluginName} v{PluginVersion}{hitchTag}{traceTag} loaded! (Hotkeys: F5 Map Picker, {cfgHotkeyLabel} Config Menu, F7 Dogtag Archive, F8 Toggle ON/OFF, F9 Reload Config, F10 Show Live Stats)");
             Log.LogInfo($"Sight Ranges -> Standing: {VisionConfig.StandingSightRange.Value}m | Crouching: {VisionConfig.CrouchingSightRange.Value}m | Prone: {VisionConfig.ProneSightRange.Value}m | MaxOpticZoom: {VisionConfig.MaxOpticZoomMultiplier.Value}x");
             Log.LogInfo($"Tactics -> VeteranCurve: {VisionConfig.VeteranFullMaturitySeconds.Value}s | FFCone: {VisionConfig.FriendlyFireConeDegrees.Value} deg | AntiWall: {VisionConfig.EnableWallShootingPrevention.Value} | Vaulting: {VisionConfig.EnableWallVaulting.Value} | ExtendedRoomNames: {VisionConfig.EnableExtendedRoomNames.Value}");
         }
