@@ -103,8 +103,6 @@ namespace EasyRed2HumanAI
         public static ConfigEntry<bool> EnableBuddyResupply;
         public static ConfigEntry<bool> EnableEmergentWearableScavenge;
         public static ConfigEntry<bool> EnableBuddyCasualtyDragging;
-        public static ConfigEntry<bool> EnableConquestEconomyQuartermaster;
-        public static ConfigEntry<int> ConquestPlayerTicketBuffer;
         public static ConfigEntry<bool> EnableTacticalRetreatsAndRegroup;
         public static ConfigEntry<bool> EnableSpecialMunitionsAndSappers;
 
@@ -653,20 +651,6 @@ namespace EasyRed2HumanAI
                 "EnableBuddyCasualtyDragging",
                 true,
                 "Emergent GOAP Buddy Casualty Dragging: nearby riflemen drag/carry (CarryBodySynched) wounded teammates out of open fire into cover or directly to a nearby friendly/player Medic.");
-
-            EnableConquestEconomyQuartermaster = config.Bind(
-                "6. Tactical Self-Preservation & Muzzle Discipline",
-                "EnableConquestEconomyQuartermaster",
-                true,
-                "Dynamic Operations (ConquestEconomy) Net Quartermaster: makes AI teams actually obey Conquest ticket budgets instead of spawning 400-500 ticket vehicles for free, surges cheap infantry waves when outnumbered, saves surplus tickets to unlock and buy heavy armor/aircraft counters, and protects a ticket buffer for human players.");
-
-            ConquestPlayerTicketBuffer = config.Bind(
-                "6. Tactical Self-Preservation & Muzzle Discipline",
-                "ConquestPlayerTicketBuffer",
-                135,
-                new ConfigDescription(
-                    "Minimum ConquestEconomy tickets reserved on human-occupied factions (+75 per extra Co-op player, +60 while a player is on the respawn screen) before AI unlocks or purchases expensive vehicle/aircraft squads. AI-only opposing factions use 0 buffer.",
-                    new AcceptableValueRange<int>(0, 600)));
 
             EnableTacticalRetreatsAndRegroup = config.Bind(
                 "6. Tactical Self-Preservation & Muzzle Discipline",

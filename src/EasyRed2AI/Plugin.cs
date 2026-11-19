@@ -16,7 +16,7 @@ namespace EasyRed2HumanAI
     {
         public const string PluginGuid = "com.antigravity.easyred2.humanai";
         public const string PluginName = "Easy Red 2 - Battle Hardened";
-        public const string PluginVersion = "0.9.7";
+        public const string PluginVersion = "0.9.8";
 
         internal static Plugin Instance;
         internal static new ManualLogSource Log;
@@ -126,10 +126,11 @@ namespace EasyRed2HumanAI
             SafePatch(typeof(VeteranAndTacticsPatches.Soldier_Surrender_Patch));
             SafePatch(typeof(VeteranAndTacticsPatches.Soldier_SetIncapacitated_Patch));
             SafePatch(typeof(VeteranAndTacticsPatches.Soldier_RefreshAnimatorState_Patch));
+            SafePatch(typeof(VeteranAndTacticsPatches.Soldier_SetAnimatorController_Patch));
             SafePatch(typeof(VeteranAndTacticsPatches.Soldier_OnRetreat_Patch));
             SafePatch(typeof(VeteranAndTacticsPatches.Soldier_UnSurrender_Patch));
+            SafePatch(typeof(VeteranAndTacticsPatches.Soldier_MeleeDamageCR_MoveNext_Patch));
             SafePatch(typeof(VeteranAndTacticsPatches.ResourcesManager_TrySpotSquad_Patch));
-            SafePatch(typeof(VeteranAndTacticsPatches.SpawnManager_CanSpawn_Patch));
             SafePatch(typeof(VeteranAndTacticsPatches.SpawnManager_SpawnAISquadMoveNext_Patch));
             SafePatch(typeof(VeteranAndTacticsPatches.SpawnManager_SpawnUnitMoveNext_Patch));
             SafePatch(typeof(VeteranAndTacticsPatches.MiniMapGUI_GetNextUnitMarker_Patch));

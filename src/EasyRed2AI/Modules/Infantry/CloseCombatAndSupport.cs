@@ -176,10 +176,35 @@ namespace EasyRed2HumanAI
                 SetBotPose(ai, soldier, desiredPose, true);
             }
 
-            // Maintain clean weapon-reach standoff (1.35m bayonet / 1.15m knife or rifle butt) outside capsule
-            // collision diameter (~0.90m) so combatants never stack on top of each other or whip yaw in circles.
-            float standoffDist = soldier.HasBayonetReady ? 1.35f : 1.15f;
-            const float minPersonalSpace = 0.94f;
+            if (!soldier.HasBayonetReady &&
+                !soldier.HoldsMeleeWeapon &&
+                soldier.InventoryKnife != null &&
+                !soldier.isInHandsAnimation &&
+                AiCore.IsHeldGunEmptyOrReloading(soldier, soldier.GetHeldGun()) &&
+                AiCore.TryConsumeBotRpcBudget(0.35f))
+            {
+                soldier.ToggleInventoryKnife();
+            }
+
+            // Maintain clean weapon-reach standoff matched to bayonet / combat knife / pistol-whip reach
+            // while avoiding capsule overlap.
+            float standoffDist;
+            float minPersonalSpace;
+            if (soldier.HasBayonetReady)
+            {
+                standoffDist = 1.30f;
+                minPersonalSpace = 0.92f;
+            }
+            else if (soldier.HoldsMeleeWeapon)
+            {
+                standoffDist = 0.96f;
+                minPersonalSpace = 0.74f;
+            }
+            else
+            {
+                standoffDist = 0.88f;
+                minPersonalSpace = 0.68f;
+            }
 
             if (!soldier.isInBodyAnimation)
             {
@@ -485,6 +510,7 @@ namespace EasyRed2HumanAI
             bool holdsMelee = soldier.HoldsMeleeWeapon;
             bool isChargingOrder = soldier.IsCharging();
             GenericGun heldGun = soldier.GetHeldGun();
+            bool isPistol = heldGun != null && heldGun.IsPistol();
             bool gunEmptyOrReloading = AiCore.IsHeldGunEmptyOrReloading(soldier, heldGun);
             // CRITICAL: Use heldGun.boltActionRequired (isManualBoltOperated && bolt_required @ 0x180876300),
             // NEVER raw heldGun.bolt_required!
@@ -495,23 +521,33 @@ namespace EasyRed2HumanAI
             bool hasCloseGunfire = VisionPatches.TryGetNearestEnemyGunfire(myPos, myFac, 15.0f, 2.5f, out float nearGunfireDist) ||
                                    VisionPatches.HasFiredRecently(enemySoldier, 2.5f);
 
+            const float unbayonetedStrikeRange = 1.22f;
+            const float meleeWeaponStrikeRange = 1.38f;
+
             if (holdsMelee)
             {
                 lungeRange = 5.6f;
                 ceaseFireRange = 5.6f;
-                strikeRange = 1.90f;
+                strikeRange = meleeWeaponStrikeRange;
+            }
+            else if (isPistol && !gunEmptyOrReloading && !hasBayonet)
+            {
+                // Keep firing a loaded pistol at CQB range unless already inside physical contact reach.
+                lungeRange = isChargingOrder ? 1.45f : 0.95f;
+                ceaseFireRange = 0.72f;
+                strikeRange = unbayonetedStrikeRange;
             }
             else if (isChargingOrder)
             {
                 lungeRange = hasBayonet ? 5.2f : 3.6f;
                 ceaseFireRange = (gunEmptyOrReloading || boltCyclingClose) ? 4.5f : 2.5f;
-                strikeRange = hasBayonet ? 2.25f : 1.65f;
+                strikeRange = hasBayonet ? 2.25f : unbayonetedStrikeRange;
             }
             else if (gunEmptyOrReloading)
             {
                 lungeRange = hasBayonet ? 4.2f : 3.2f;
                 ceaseFireRange = lungeRange;
-                strikeRange = hasBayonet ? 2.25f : 1.65f;
+                strikeRange = hasBayonet ? 2.25f : unbayonetedStrikeRange;
             }
             else if (hasCloseGunfire)
             {
@@ -520,7 +556,7 @@ namespace EasyRed2HumanAI
                 // enters immediate contact reach.
                 lungeRange = boltCyclingClose ? (hasBayonet ? 2.35f : 1.85f) : (hasBayonet ? 1.85f : 1.55f);
                 ceaseFireRange = boltCyclingClose ? lungeRange : 1.25f;
-                strikeRange = hasBayonet ? 2.20f : 1.65f;
+                strikeRange = hasBayonet ? 2.20f : unbayonetedStrikeRange;
 
                 if (dist > lungeRange && dist <= 4.2f)
                 {
@@ -539,7 +575,7 @@ namespace EasyRed2HumanAI
                 // Quiet CQB / indoor corner encounter with no surrounding gunfire
                 lungeRange = boltCyclingClose ? (hasBayonet ? 3.1f : 2.2f) : (hasBayonet ? 2.55f : 1.80f);
                 ceaseFireRange = boltCyclingClose ? lungeRange : (hasBayonet ? 1.85f : 1.40f);
-                strikeRange = hasBayonet ? 2.25f : 1.65f;
+                strikeRange = hasBayonet ? 2.25f : unbayonetedStrikeRange;
             }
 
             if (dist > lungeRange)
@@ -623,6 +659,27 @@ namespace EasyRed2HumanAI
             soldier.SetGunTriggerPressed(false);
             soldier.Melee();
             MeleeAttacksTriggered++;
+
+            float swingNow = Time.time;
+            if (meleeH.Combat.LastMeleeSwingTargetPtr == enemy.Pointer && (swingNow - meleeH.Combat.LastMeleeSwingTime) < 3.5f)
+            {
+                if (meleeH.Combat.ConsecutiveMeleeSwingsOnTarget < 250)
+                    meleeH.Combat.ConsecutiveMeleeSwingsOnTarget++;
+            }
+            else
+            {
+                meleeH.Combat.LastMeleeSwingTargetPtr = enemy.Pointer;
+                meleeH.Combat.ConsecutiveMeleeSwingsOnTarget = 1;
+            }
+            meleeH.Combat.LastMeleeSwingTime = swingNow;
+            if (meleeH.Combat.ConsecutiveMeleeSwingsOnTarget >= 4 &&
+                enemy.IsAlive &&
+                !enemy.IsInjured &&
+                swingNow >= meleeH.NextAnomalyAlertTime)
+            {
+                meleeH.NextAnomalyAlertTime = swingNow + 8.0f;
+                BotActionTrace.RecordEvent(soldier, BotTraceEventKind.AnomalyAlert, "melee_whiff_loop", Mathf.Sqrt(toEnemy.sqrMagnitude), meleeH.Combat.ConsecutiveMeleeSwingsOnTarget);
+            }
         }
 
         internal static bool ExecuteSoldierPointBlankCqbStep(
@@ -675,6 +732,29 @@ namespace EasyRed2HumanAI
                 now,
                 isPerFrameHook: false);
             return true;
+        }
+
+        [HarmonyPatch(typeof(Soldier._MeleeDamageCR_d__489), nameof(Soldier._MeleeDamageCR_d__489.MoveNext))]
+        public static class Soldier_MeleeDamageCR_MoveNext_Patch
+        {
+            public static void Prefix(Soldier._MeleeDamageCR_d__489 __instance)
+            {
+                try
+                {
+                    if (!VisionConfig.EnableMod.Value || !VisionConfig.EnablePointBlankMelee.Value || __instance == null)
+                        return;
+
+                    if (__instance.__1__state == 1 &&
+                        __instance.mountedBlade == null &&
+                        __instance.dist < 0.95f &&
+                        __instance.__4__this != null &&
+                        !__instance.__4__this.IsPlayer())
+                    {
+                        __instance.dist = 0.95f;
+                    }
+                }
+                catch { }
+            }
         }
 
         internal static bool TryExecuteComradeLiberationStep(
@@ -756,11 +836,14 @@ namespace EasyRed2HumanAI
             for (int i = 0; i < solCount; i++)
             {
                 ref AiCore.SoldierSnapshot sol = ref soldiers[i];
-                if (!sol.HasSurrendered || sol.Ptr == rescuerPtr || sol.Faction != myFaction)
+                if (!sol.HasSurrendered || sol.Ptr == rescuerPtr || !AiCore.AreSameSideFactions(myFaction, sol.Faction))
                     continue;
 
-                // Ignore surrendered teammates on a different building floor or cliff level
-                if (Mathf.Abs(sol.Pos.y - myPos.y) > 2.4f)
+                // Ignore surrendered teammates on a different building floor or cliff level, allowing sloped outdoor terrain
+                float dx = sol.Pos.x - myPos.x;
+                float dz = sol.Pos.z - myPos.z;
+                float horizDist = Mathf.Sqrt(dx * dx + dz * dz);
+                if (Mathf.Abs(sol.Pos.y - myPos.y) > 2.6f + horizDist * 0.55f)
                     continue;
 
                 float dSq = (sol.Pos - myPos).sqrMagnitude;
@@ -794,8 +877,7 @@ namespace EasyRed2HumanAI
             float suppression)
         {
             if (ai == null ||
-                soldier == null ||
-                soldier.IsOnVehicle() ||
+                AiCore.IsSoldierInVehicleOrTransition(soldier) ||
                 soldier.HasSurrended() ||
                 soldier.IsCharging() ||
                 soldier.IsSquadLeader())
@@ -1159,7 +1241,7 @@ namespace EasyRed2HumanAI
             return false;
         }
 
-        private static void EnsureSurrenderedPrisonerAnimatorAndPose(Soldier s)
+        internal static void EnsureSurrenderedPrisonerAnimatorAndPose(Soldier s)
         {
             if (s == null || s.Pointer == IntPtr.Zero || !s.IsAlive || s.IsInjured || s.IsDead || !s.HasSurrended())
                 return;
@@ -1167,6 +1249,9 @@ namespace EasyRed2HumanAI
             AiCore.SoldierFastHandles h = AiCore.GetOrCreateSoldierHandles(s);
             if (h != null && h.IsRetreatDespawning)
                 return;
+
+            if (s.IsCarryingBody())
+                s.CarryBody(null);
 
             s.SetGunTriggerPressed(false);
             s.pointGunEndTime = 0f;
@@ -1182,7 +1267,7 @@ namespace EasyRed2HumanAI
                 ai.shotFiresEnd = 0f;
             }
 
-            if (s.m_pose != SoldierPose.Idle && !s.IsOnVehicle())
+            if (s.m_pose != SoldierPose.Idle && !AiCore.IsSoldierInVehicleOrTransition(s))
             {
                 s.SetPose(SoldierPose.Idle, true, false, -1f);
             }
@@ -1191,8 +1276,8 @@ namespace EasyRed2HumanAI
             if (anim != null)
             {
                 anim.SetLayerWeight(1, 1.0f);
-                anim.SetBool("Incapacitated", false);
-                anim.SetBool("Surrender", true);
+                anim.SetBool("Injured", false);
+                anim.SetBool("Surrended", true);
             }
 
             ClearAllFriendlyTargetLocksOnSoldier(s);
@@ -1208,7 +1293,7 @@ namespace EasyRed2HumanAI
                     if (!VisionConfig.EnableMod.Value || __instance == null || __instance.Pointer == IntPtr.Zero)
                         return true;
 
-                    if (__instance.IsDead)
+                    if (__instance.IsDead || AiCore.IsSoldierInVehicleOrTransition(__instance))
                         return false;
 
                     if (!__instance.IsAlive || __instance.IsInjured)
@@ -1246,8 +1331,11 @@ namespace EasyRed2HumanAI
                     if (!VisionConfig.EnableMod.Value || __instance == null || __instance.Pointer == IntPtr.Zero)
                         return true;
 
-                    if (__instance.IsDead)
+                    if (__instance.IsDead || AiCore.IsSoldierInVehicleOrTransition(__instance))
                         return false;
+
+                    if (__instance.IsCarryingBody())
+                        __instance.CarryBody(null);
 
                     if (!__instance.IsAlive || __instance.IsInjured)
                     {
@@ -1275,6 +1363,14 @@ namespace EasyRed2HumanAI
                     if (!VisionConfig.EnableMod.Value || __instance == null || __instance.Pointer == IntPtr.Zero)
                         return;
 
+                    if (__instance.HasSurrended())
+                    {
+                        BotActionTrace.RecordEvent(
+                            __instance,
+                            BotTraceEventKind.Surrender,
+                            __instance.IsOnVehicle() ? "on_vehicle" : "on_foot");
+                    }
+
                     EnsureSurrenderedPrisonerAnimatorAndPose(__instance);
                 }
                 catch { }
@@ -1293,13 +1389,24 @@ namespace EasyRed2HumanAI
 
                     if (__0)
                     {
+                        if (__instance.IsCarryingBody())
+                        {
+                            __instance.CarryBody(null);
+                        }
+
                         // Clear suppressionValue when downed so BattleManager.SurrenderUnitsOnMissionAreas skips this casualty,
-                        // and clear Animator "Surrender" so an already-surrendered prisoner who gets downed stays lying on the
-                        // ground in "Incapacitated" instead of popping upright with LayerWeight(1) == 0f!
+                        // clear Animator "Surrended", and force Injured/LayerWeight(1, 0f) even when downed in a vehicle seat.
                         __instance.suppressionValue = 0;
                         if (__instance.m_Animator != null)
                         {
-                            __instance.m_Animator.SetBool("Surrender", false);
+                            __instance.m_Animator.SetBool("Surrended", false);
+                            __instance.m_Animator.SetBool("Injured", true);
+                            __instance.m_Animator.SetLayerWeight(1, 0f);
+                            if (!__instance.IsOnVehicle())
+                            {
+                                __instance.m_Animator.SetTrigger("StartInjured");
+                                __instance.ForceAnimatorState("Injured", 0, 0f);
+                            }
                         }
                     }
                     else if (__instance.IsAlive && !__instance.IsInjured && __instance.HasSurrended())
@@ -1327,18 +1434,61 @@ namespace EasyRed2HumanAI
 
                     if ((__instance.IsInjured || !__instance.IsAlive) && !__instance.IsDead)
                     {
-                        anim.SetBool("Surrender", false);
+                        anim.SetBool("Surrended", false);
+                        anim.SetBool("Injured", true);
+                        anim.SetLayerWeight(1, 0f);
+                        if (!__instance.IsOnVehicle())
+                        {
+                            anim.SetTrigger("StartInjured");
+                            __instance.ForceAnimatorState("Injured", 0, 0f);
+                        }
                     }
-                    else if (__instance.IsAlive && __instance.HasSurrended())
+                    else if (__instance.IsAlive && !__instance.IsInjured && __instance.HasSurrended())
                     {
                         AiCore.SoldierFastHandles h = AiCore.GetOrCreateSoldierHandles(__instance);
                         if (h != null && h.IsRetreatDespawning)
                         {
-                            anim.SetBool("Surrender", false);
+                            anim.SetBool("Surrended", false);
                         }
                         else
                         {
+                            anim.SetBool("Injured", false);
+                            anim.SetBool("Surrended", true);
                             anim.SetLayerWeight(1, 1.0f);
+                        }
+                    }
+                }
+                catch { }
+            }
+        }
+
+        [HarmonyPatch(typeof(Soldier), nameof(Soldier.SetAnimatorController))]
+        public static class Soldier_SetAnimatorController_Patch
+        {
+            public static void Postfix(Soldier __instance, RuntimeAnimatorController __0, bool __1, string __2)
+            {
+                try
+                {
+                    if (!VisionConfig.EnableMod.Value || __instance == null || __instance.Pointer == IntPtr.Zero || __0 == null)
+                        return;
+
+                    // Fix vanilla Soldier.SetAnimatorController (0x1807636F3: cmp byte ptr [rbx+49Eh],0; jne return)
+                    // aborting when SetWalkingAnimatorControllerCR tries to replace a vehicle seat AnimatorController
+                    // on a bailed-out soldier whose surrended flag (+0x49E) became true during exit.
+                    if (__instance.HasSurrended() &&
+                        (!__instance.IsOnVehicle() || __1) &&
+                        (__instance.IsAlive || __instance.IsInjured))
+                    {
+                        Animator anim = __instance.m_Animator;
+                        if (anim != null && anim.runtimeAnimatorController != __0)
+                        {
+                            __instance.cur_anim_controller_name = !string.IsNullOrEmpty(__2) ? __2 : __0.name;
+                            anim.runtimeAnimatorController = __0;
+                            __instance.RefreshAnimatorState();
+                            if (AiCore.IsTrueSurrenderedPrisoner(__instance))
+                            {
+                                EnsureSurrenderedPrisonerAnimatorAndPose(__instance);
+                            }
                         }
                     }
                 }
@@ -1358,7 +1508,11 @@ namespace EasyRed2HumanAI
 
                     AiCore.SoldierFastHandles h = AiCore.GetOrCreateSoldierHandles(__instance);
                     if (h != null)
+                    {
                         h.IsRetreatDespawning = true;
+                        h.RetreatDespawnForceCleanupAt = Time.time + 0.35f;
+                    }
+                    BotActionTrace.RecordEvent(__instance, BotTraceEventKind.RetreatDespawn, "mission_task_retreat");
                 }
                 catch { }
             }
@@ -1378,8 +1532,10 @@ namespace EasyRed2HumanAI
                     if (h != null)
                     {
                         h.IsRetreatDespawning = false;
+                        h.RetreatDespawnForceCleanupAt = 0f;
                         h.EnemySyringeCaptureUntil = 0f;
                     }
+                    BotActionTrace.RecordEvent(__instance, BotTraceEventKind.UnSurrender, "liberated");
                 }
                 catch { }
             }

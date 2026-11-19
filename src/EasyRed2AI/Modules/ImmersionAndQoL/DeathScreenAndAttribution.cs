@@ -3348,6 +3348,11 @@ namespace EasyRed2HumanAI
             {
                 try
                 {
+                    if (__instance != null && __instance.Pointer != IntPtr.Zero && __instance.IsCarryingBody())
+                    {
+                        __instance.CarryBody(null);
+                    }
+
                     if (!IsLocalKillTrackingActive() || __instance == null || __instance.Pointer == IntPtr.Zero)
                         return;
 

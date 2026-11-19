@@ -3235,8 +3235,9 @@ namespace EasyRed2HumanAI
                         unitHandles.Stance.LocalCoverProtectedUntil = 0f;
                     ClearEmplacementAssignment(unit.Pointer, markUnreachable: false);
 
-                    if (unit.IsAI())
+                    if (unit.IsAI() && unit.IsAlive && !unit.IsInjured && !unit.IsDead)
                     {
+                        BotActionTrace.RecordEvent(unit, BotTraceEventKind.VehicleBailout, "disabled_vehicle_bailout");
                         veh.GetOffVehicle(unit);
                     }
                 }
@@ -3562,6 +3563,7 @@ namespace EasyRed2HumanAI
 
             try
             {
+                AiCore.FlushExpiredRetreatDespawningSoldiers(now);
                 IntPtr localPlayerSqPtr = IntPtr.Zero;
                 PlayerController pc = PlayerController.currentController;
                 Soldier localPlayer = pc != null ? pc.ControlledCharacter : null;
@@ -3654,8 +3656,9 @@ namespace EasyRed2HumanAI
                             ClearEmplacementAssignment(unit.Pointer, markUnreachable: false);
                             sampleCrew = unit;
 
-                            if (unit.IsAI())
+                            if (unit.IsAI() && unit.IsAlive && !unit.IsInjured && !unit.IsDead)
                             {
+                                BotActionTrace.RecordEvent(unit, BotTraceEventKind.VehicleBailout, "disabled_vehicle_bailout");
                                 veh.GetOffVehicle(unit);
                             }
                         }

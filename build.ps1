@@ -1,6 +1,7 @@
 param(
     [switch]$Deploy,
     [switch]$Test,
+    [switch]$RebuildCache,
     [string]$GameDir = $env:EASY_RED_2_DIR
 )
 
@@ -106,6 +107,98 @@ $interopDir = Join-Path $bepInExRoot "BepInEx\interop"
 $pluginsDir = Join-Path $bepInExRoot "BepInEx\plugins"
 $buildDir = Join-Path $workspace "build"
 $csc = Resolve-CscPath -WorkspaceRoot $workspace
+
+function Sync-Er2CacheIfNeeded {
+    param(
+        [string]$WorkspaceRoot,
+        [string]$ResolvedGameDir,
+        [string]$CscPath,
+        [string]$DotnetDir,
+        [bool]$ForceRebuild
+    )
+
+    if (-not $ResolvedGameDir -or -not (Test-Path (Join-Path $ResolvedGameDir "GameAssembly.dll"))) {
+        if ($ForceRebuild) {
+            throw "Cannot rebuild ER2 cache: GameAssembly.dll was not found. Pass -GameDir '<path to Easy Red 2>'."
+        }
+        return
+    }
+
+    $cacheDir = Join-Path $WorkspaceRoot "tools\er2_cache"
+    $manifestPath = Join-Path $cacheDir "manifest.json"
+    $gameAsmItem = Get-Item (Join-Path $ResolvedGameDir "GameAssembly.dll")
+    $curBytes = $gameAsmItem.Length
+    $curWriteUtc = $gameAsmItem.LastWriteTimeUtc.ToString("yyyy-MM-ddTHH:mm:ssZ")
+
+    $needsRebuild = $ForceRebuild -or (-not (Test-Path $manifestPath))
+    if (-not $needsRebuild) {
+        try {
+            $manifest = Get-Content $manifestPath -Raw | ConvertFrom-Json
+            if ([int64]$manifest.gameAssemblyBytes -ne $curBytes -or
+                [string]$manifest.gameAssemblyLastWriteUtc -ne $curWriteUtc) {
+                $needsRebuild = $true
+            }
+        } catch {
+            $needsRebuild = $true
+        }
+    }
+
+    if (-not $needsRebuild) {
+        return
+    }
+
+    Write-Host "[0/2] GameAssembly change or -RebuildCache detected: re-ripping ER2 disassembly, Lua scripts & interop cache..." -ForegroundColor Yellow
+
+    $gameInterop = Join-Path $ResolvedGameDir "BepInEx\interop"
+    $localInterop = Join-Path $WorkspaceRoot "tools\bepinex\extracted\BepInEx\interop"
+    if ((Test-Path (Join-Path $gameInterop "Assembly-CSharp.dll")) -and (Test-Path $localInterop)) {
+        $srcVer = (Get-Item (Join-Path $gameInterop "Assembly-CSharp.dll")).LastWriteTimeUtc
+        $dstDll = Join-Path $localInterop "Assembly-CSharp.dll"
+        if (-not (Test-Path $dstDll) -or $srcVer -gt (Get-Item $dstDll).LastWriteTimeUtc) {
+            Write-Host "  -> Syncing updated BepInEx\interop\*.dll into tools\bepinex\extracted\BepInEx\interop..." -ForegroundColor Cyan
+            Copy-Item -Path (Join-Path $gameInterop "*.dll") -Destination $localInterop -Force
+        }
+    }
+
+    $giDir = Join-Path $WorkspaceRoot "tools\gen_interop"
+    $inspectSrc = Join-Path $giDir "Inspect.cs"
+    $inspectDll = Join-Path $giDir "InspectInterop.dll"
+    if ((Test-Path $inspectSrc) -and (-not (Test-Path $inspectDll) -or ((Get-Item $inspectSrc).LastWriteTimeUtc -gt (Get-Item $inspectDll).LastWriteTimeUtc))) {
+        Write-Host "  -> Recompiling InspectInterop.dll..." -ForegroundColor Cyan
+        & dotnet $CscPath /nologo /target:exe /optimize+ /nostdlib `
+            "/r:$DotnetDir\System.Private.CoreLib.dll" `
+            "/r:$DotnetDir\System.Runtime.dll" `
+            "/r:$DotnetDir\System.Console.dll" `
+            "/r:$DotnetDir\System.Collections.dll" `
+            "/r:$DotnetDir\System.Linq.dll" `
+            "/r:$DotnetDir\System.IO.FileSystem.dll" `
+            "/r:$DotnetDir\System.Security.Cryptography.Algorithms.dll" `
+            "/r:$DotnetDir\System.Security.Cryptography.Primitives.dll" `
+            "/r:$DotnetDir\System.Text.RegularExpressions.dll" `
+            "/r:$DotnetDir\netstandard.dll" `
+            "/r:$giDir\AsmResolver.dll" `
+            "/r:$giDir\AsmResolver.PE.dll" `
+            "/r:$giDir\AsmResolver.PE.File.dll" `
+            "/r:$giDir\AsmResolver.DotNet.dll" `
+            "/r:$giDir\AssetRipper.Primitives.dll" `
+            "/r:$giDir\Iced.dll" `
+            "/r:$giDir\LibCpp2IL.dll" `
+            "/out:$inspectDll" `
+            $inspectSrc
+        if ($LASTEXITCODE -ne 0) {
+            throw "Failed to compile InspectInterop.dll with exit code $LASTEXITCODE"
+        }
+    }
+
+    if (Test-Path $inspectDll) {
+        & dotnet $inspectDll --build-cache $cacheDir $ResolvedGameDir
+        if ($LASTEXITCODE -ne 0) {
+            throw "InspectInterop.dll --build-cache failed with exit code $LASTEXITCODE"
+        }
+    }
+}
+
+Sync-Er2CacheIfNeeded -WorkspaceRoot $workspace -ResolvedGameDir $resolvedGameDir -CscPath $csc -DotnetDir $dotnetDir -ForceRebuild:$RebuildCache.IsPresent
 
 New-Item -ItemType Directory -Force -Path $buildDir | Out-Null
 if (Test-Path (Join-Path $workspace "tools\bepinex\extracted")) {

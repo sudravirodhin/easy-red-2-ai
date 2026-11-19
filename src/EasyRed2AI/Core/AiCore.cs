@@ -119,6 +119,12 @@ namespace EasyRed2HumanAI
             public bool CachedIsButtonedArmoredCrew;
             public float EnemySyringeCaptureUntil;
             public bool IsRetreatDespawning;
+            public float RetreatDespawnForceCleanupAt;
+            public float SurrenderedSinceTime;
+            public float UnliberatedWithNearbyAllySince;
+            public Vector3 WatchdogAnchorPos;
+            public float WatchdogStationarySince;
+            public float NextAnomalyAlertTime;
 
             internal BotMoveOverrideState MoveOverride;
             internal SoldierVeterancyState Veterancy;
@@ -227,6 +233,9 @@ namespace EasyRed2HumanAI
             public float CachedMeleeCeaseFireRange;
             public float CachedMeleeStrikeRange;
             public int CachedMeleeSlotIndex;
+            public IntPtr LastMeleeSwingTargetPtr;
+            public float LastMeleeSwingTime;
+            public byte ConsecutiveMeleeSwingsOnTarget;
             public VeteranAndTacticsPatches.FireAndMovementState FireAndMovement;
             public VeteranAndTacticsPatches.RotateAndFireFrameState RotateFireFrame;
             public VeteranAndTacticsPatches.InfantrySightReactionState SightReaction;
@@ -2278,6 +2287,52 @@ namespace EasyRed2HumanAI
                 _soldierHandlesByPtr.TryGetValue(s.Pointer, out h);
 
             return h == null || !h.IsRetreatDespawning;
+        }
+
+        public static void FlushExpiredRetreatDespawningSoldiers(float now)
+        {
+            if (_soldierHandlesByPtr.Count == 0)
+                return;
+
+            foreach (var kvp in _soldierHandlesByPtr)
+            {
+                SoldierFastHandles h = kvp.Value;
+                if (h == null || !h.IsRetreatDespawning || h.RetreatDespawnForceCleanupAt <= 0f || now < h.RetreatDespawnForceCleanupAt)
+                    continue;
+
+                Soldier s = h.Ref;
+                if (now > h.RetreatDespawnForceCleanupAt + 2.0f &&
+                    now >= h.NextAnomalyAlertTime &&
+                    !ReferenceEquals(s, null) &&
+                    s != null)
+                {
+                    h.NextAnomalyAlertTime = now + 5.0f;
+                    BotActionTrace.RecordEvent(s, BotTraceEventKind.AnomalyAlert, "retreat_despawn_stalled", now - h.RetreatDespawnForceCleanupAt);
+                }
+
+                h.RetreatDespawnForceCleanupAt = now + 2.0f;
+                if (ReferenceEquals(s, null) || s == null || s.Pointer == IntPtr.Zero || s.IsPlayer() || !IsLocallyOwnedSoldier(s))
+                    continue;
+
+                GameObject go = s.gameObject;
+                if (go == null)
+                    continue;
+
+                if (s.joinedSquad != null)
+                    s.joinedSquad.Leave(s, true);
+
+                ResourcesManager.CleanupNow(go);
+            }
+        }
+
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        public static bool IsSoldierInVehicleOrTransition(Soldier s)
+        {
+            return ReferenceEquals(s, null) ||
+                   s.Pointer == IntPtr.Zero ||
+                   s.IsOnVehicle() ||
+                   s.IsEnteringVehicle ||
+                   s.IsExitingFromVehicle();
         }
 
         [MethodImpl(MethodImplOptions.AggressiveInlining)]

@@ -25,7 +25,12 @@ namespace EasyRed2HumanAI
         FallbackRetreat = 11,
         CrewEvac = 12,
         SquadRetreat = 13,
-        StuckAlert = 14
+        StuckAlert = 14,
+        Surrender = 15,
+        UnSurrender = 16,
+        RetreatDespawn = 17,
+        VehicleBailout = 18,
+        AnomalyAlert = 19
     }
 
     /// <summary>
@@ -637,6 +642,11 @@ namespace EasyRed2HumanAI
                 case BotTraceEventKind.CrewEvac: return "retreat_crew";
                 case BotTraceEventKind.SquadRetreat: return "retreat_squad";
                 case BotTraceEventKind.StuckAlert: return "stuck_alert";
+                case BotTraceEventKind.Surrender: return "surrender";
+                case BotTraceEventKind.UnSurrender: return "unsurrender";
+                case BotTraceEventKind.RetreatDespawn: return "retreat_despawn";
+                case BotTraceEventKind.VehicleBailout: return "vehicle_bailout";
+                case BotTraceEventKind.AnomalyAlert: return "anomaly_alert";
                 default: return "event";
             }
         }

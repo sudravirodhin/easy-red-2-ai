@@ -457,6 +457,8 @@ namespace EasyRed2HumanAI
             public int UnrecoveredStucks;
             public int SquadLeaderBugs;
             public int DoctrineRealismBugs;
+            public int LiberationAndBailoutAudits;
+            public int PrisonerOrCrewZombieBugs;
             public int EmplacementStaffCount;
             public int AttritionPivotCount;
             public int NcoBalkCount;
@@ -911,7 +913,6 @@ namespace EasyRed2HumanAI
 
             int invTickets = sc.InvaderTickets;
             int defTickets = sc.DefenderTickets;
-            int humanBufferReserve = sc.Mode == SimGameMode.DynamicConquest ? 135 : 0;
             bool transitionPhaseGapActive = false;
             bool parkedTransportTaken = false;
             ulong hash = 14695981039346656037UL;
@@ -1032,33 +1033,6 @@ namespace EasyRed2HumanAI
                     {
                         res.DoctrineRealismBugs++;
                         res.Issues.Add(new BattleIssueSample { Category = "DoctrineBug", MissionKey = sc.UniqueKey, Seed = seedIdx, TimeSec = now, Detail = $"{sc.InvaderFaction} AllowGyokusai={profile0.AllowGyokusaiDesperation}" });
-                    }
-
-                    // Symmetric Dynamic Conquest Economy Check: AI buys for both sides respect 135-ticket human buffer
-                    if (sc.Mode == SimGameMode.DynamicConquest && (tick % 16 == 0))
-                    {
-                        for (int side = 0; side <= 1; side++)
-                        {
-                            int sTickets = side == 0 ? invTickets : defTickets;
-                            if (sTickets > 0 && rng.Next01() < 0.35f)
-                            {
-                                int cost = sc.HasArmor && rng.Next01() < 0.25f ? 45 : 25;
-                                if ((sTickets - cost) >= humanBufferReserve)
-                                {
-                                    sTickets -= cost;
-                                    if (side == 0) invTickets = sTickets;
-                                    else defTickets = sTickets;
-                                    int startT = side == 0 ? sc.InvaderTickets : sc.DefenderTickets;
-                                    float ratio = sTickets / (float)Math.Max(1, startT);
-                                    if (ratio < res.ConquestMinPlayerBufferRatio) res.ConquestMinPlayerBufferRatio = ratio;
-                                    if (sTickets < humanBufferReserve)
-                                    {
-                                        res.DoctrineRealismBugs++;
-                                        res.Issues.Add(new BattleIssueSample { Category = "ConquestEconomyBug", MissionKey = sc.UniqueKey, Seed = seedIdx, TimeSec = now, Detail = $"Side {side} AI breached 135-ticket human buffer ({sTickets})" });
-                                    }
-                                }
-                            }
-                        }
                     }
 
                     // Garrisons + Emplacements + Empty Transport Requisition + Aircraft Refill
@@ -1517,6 +1491,36 @@ namespace EasyRed2HumanAI
                         {
                             res.SquadLeaderBugs++;
                             res.Issues.Add(new BattleIssueSample { Category = "SquadLeaderBug", MissionKey = sc.UniqueKey, Seed = seedIdx, TimeSec = now, Detail = $"Multi-man SL {sol.Personality} picked {nextPlan.Step0}" });
+                        }
+
+                        // AUDIT 5: Non-intrusive Comrade Liberation & Bailed-Crew Evacuation checks (no SimRng/trajectory mutation)
+                        if (!sol.IsInVehicle &&
+                            !multiSl &&
+                            (ws & (VeteranAndTacticsPatches.LiberateForbiddenMask | VeteranAndTacticsPatches.GoapStateBits.RadioLinkDrifting)) == 0 &&
+                            ((tick + (int)sol.Ptr.ToInt64()) % 13 == 0))
+                        {
+                            res.LiberationAndBailoutAudits++;
+                            var libWs = ws | VeteranAndTacticsPatches.GoapStateBits.ComradeNeedsLiberation;
+                            var libPlan = VeteranAndTacticsPatches.PlanBestGoapActionChainCore(
+                                libWs, sol.Ptr, sol.Faction, true, sol.IsMedic, false, ref sq.Board, sol.Personality,
+                                MathF.Min(1f, sol.VetBonusSec / 900f), now, VeteranAndTacticsPatches.GoapActionId.None);
+                            if (libPlan.Step0 != VeteranAndTacticsPatches.GoapActionId.RescueSurrenderedComrade)
+                            {
+                                res.PrisonerOrCrewZombieBugs++;
+                                res.Issues.Add(new BattleIssueSample { Category = "PrisonerIgnoredBug", MissionKey = sc.UniqueKey, Seed = seedIdx, TimeSec = now, Detail = $"{sol.Personality} failed liberation audit: picked {libPlan.Step0} (goal={libPlan.LastGoalBit}) on ws={libWs}" });
+                            }
+
+                            var crewEvacWs = (ws & ~VeteranAndTacticsPatches.GoapStateBits.ComradeNeedsLiberation) | VeteranAndTacticsPatches.GoapStateBits.IsEntirelyAlone;
+                            var crewBoard = sq.Board;
+                            if (crewBoard.AliveMemberCount > 4) crewBoard.AliveMemberCount = 2;
+                            var crewPlan = VeteranAndTacticsPatches.PlanBestGoapActionChainCore(
+                                crewEvacWs, sol.Ptr, sol.Faction, true, false, true, ref crewBoard, sol.Personality,
+                                MathF.Min(1f, sol.VetBonusSec / 900f), now, VeteranAndTacticsPatches.GoapActionId.None);
+                            if (crewPlan.Step0 != VeteranAndTacticsPatches.GoapActionId.LoneWolfLinkUpOrAmbush)
+                            {
+                                res.PrisonerOrCrewZombieBugs++;
+                                res.Issues.Add(new BattleIssueSample { Category = "BailedCrewZombieBug", MissionKey = sc.UniqueKey, Seed = seedIdx, TimeSec = now, Detail = $"{sol.Personality} failed bailed-crew evac audit: picked {crewPlan.Step0} (goal={crewPlan.LastGoalBit}) on ws={crewEvacWs}" });
+                            }
                         }
 
                         sol.LastPlannedStep0 = nextPlan.Step0;
@@ -2078,7 +2082,8 @@ namespace EasyRed2HumanAI
 
             // Aggregate Loss & Emergence Report
             long totalPlans = 0;
-            int thrash = 0, crisisFall = 0, bad2Step = 0, stuck = 0, slBug = 0, docBug = 0, frozen = 0;
+            int thrash = 0, crisisFall = 0, bad2Step = 0, stuck = 0, slBug = 0, docBug = 0, frozen = 0, prisCrewBug = 0;
+            long libAudits = 0;
             int invWins = 0, defWins = 0, stalemates = 0;
             int emplaces = 0, pivots = 0, balks = 0, merges = 0, mines = 0, refills = 0;
             int legPlaneSnaps = 0, newPlaneSnaps = 0, legTankHits = 0, newTankHits = 0, vultureLocks = 0;
@@ -2095,6 +2100,8 @@ namespace EasyRed2HumanAI
                 stuck += r.UnrecoveredStucks;
                 slBug += r.SquadLeaderBugs;
                 docBug += r.DoctrineRealismBugs;
+                libAudits += r.LiberationAndBailoutAudits;
+                prisCrewBug += r.PrisonerOrCrewZombieBugs;
                 emplaces += r.EmplacementStaffCount;
                 pivots += r.AttritionPivotCount;
                 balks += r.NcoBalkCount;
@@ -2163,6 +2170,7 @@ namespace EasyRed2HumanAI
             Console.WriteLine($"   5. Squad Leader Rule Bugs           : {slBug}");
             Console.WriteLine($"   6. Doctrine / Realism Violations    : {docBug}");
             Console.WriteLine($"   7. Frozen Gridlock Stalemates       : {frozen}");
+            Console.WriteLine($"   8. Prisoner / Bailed-Crew Zombies   : {prisCrewBug} (across {libAudits:N0} live-state audits)");
             Console.WriteLine(" [EMERGENCE, OUTCOMES & COMBINED ARMS]");
             Console.WriteLine($"   * Determinism Match                 : {detMatched}/{detChecked} re-runs 100% identical");
             Console.WriteLine($"   * Cross-Seed Emergence              : {emergentTrios}/{catalog.Count} missions diverged across seeds (Railroaded: {railroadedTrios})");
@@ -2193,7 +2201,7 @@ namespace EasyRed2HumanAI
             {
                 opBalanceFail = opMode.inv < opMode.count * 0.35 || opMode.def < opMode.count * 0.15;
             }
-            bool fail = thrash > 0 || crisisFall > 0 || bad2Step > 0 || stuck > 0 || slBug > 0 || docBug > 0 || frozen > 0 ||
+            bool fail = thrash > 0 || crisisFall > 0 || bad2Step > 0 || stuck > 0 || slBug > 0 || docBug > 0 || frozen > 0 || prisCrewBug > 0 ||
                         detMatched != detChecked || (seeds >= 2 && railroadedTrios > 0) || stalemateGateFail || opBalanceFail;
             Console.WriteLine(fail ? " RESULT: FAILED (Loss Model detected issues above gate)" : " RESULT: PASSED (0 Loss Events | 100% Determinism | Healthy Emergence)");
             Console.WriteLine("===================================================================================");

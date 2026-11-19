@@ -788,18 +788,18 @@ namespace EasyRed2HumanAI
                     toSpawn.y = 0f;
                     float dist = toSpawn.magnitude;
 
-                    if (dist >= 18.0f && dist <= 115.0f)
+                    if (dist >= 75.0f && dist <= 135.0f)
                     {
                         retreatPos = spawnPos;
                         return true;
                     }
 
-                    if (dist > 115.0f)
+                    if (dist > 135.0f)
                     {
                         Vector3 dir = toSpawn / dist;
                         if (TrySampleDryRetreatPoint(originPos, dir, 95.0f, out retreatPos) ||
                             TrySampleDryRetreatPoint(originPos, dir, 125.0f, out retreatPos) ||
-                            TrySampleDryRetreatPoint(originPos, dir, 68.0f, out retreatPos) ||
+                            TrySampleDryRetreatPoint(originPos, dir, 78.0f, out retreatPos) ||
                             TrySampleDryRetreatPoint(originPos, dir, 155.0f, out retreatPos))
                         {
                             return true;
@@ -812,31 +812,28 @@ namespace EasyRed2HumanAI
                             return true;
                         }
 
-                        if (dist <= 175.0f)
-                        {
-                            retreatPos = spawnPos;
-                            return true;
-                        }
-
-                        if (TrySampleDryRetreatPoint(originPos, dir, 42.0f, out retreatPos))
-                        {
-                            return true;
-                        }
-
                         retreatPos = spawnPos;
                         return true;
                     }
 
-                    // Vehicle/plane crew landed right near friendly spawn (< 18m): step further rearward away from enemy
-                    if (TryGetEnemySpawnDirection(myFaction, originPos, out Vector3 enemyDir) &&
-                        TrySampleDryRetreatPoint(originPos, -enemyDir, 28.0f, out retreatPos))
+                    // Tank/vehicle was destroyed within 75m of the nearest friendly spawn: step >= 75m rearward so MissionTaskRetreat's 50m completion sphere doesn't trigger immediately
+                    Vector3 spawnDir = dist > 1.0f ? (toSpawn / dist) : Vector3.zero;
+                    bool hasEnemyDir = TryGetEnemySpawnDirection(myFaction, originPos, out Vector3 enemyDir);
+                    Vector3 rearDir = hasEnemyDir
+                        ? ((dist > 1.0f && Vector3.Dot(spawnDir, -enemyDir) > 0.25f) ? spawnDir : -enemyDir)
+                        : (dist > 1.0f ? spawnDir : Vector3.back);
+
+                    if (TrySampleDryRetreatPoint(originPos, rearDir, 95.0f, out retreatPos) ||
+                        TrySampleDryRetreatPoint(originPos, rearDir, 120.0f, out retreatPos) ||
+                        TrySampleDryRetreatPoint(originPos, rearDir, 78.0f, out retreatPos))
                     {
                         return true;
                     }
 
-                    if (dist >= 6.0f)
+                    if (dist > 1.0f &&
+                        (TrySampleDryRetreatPoint(originPos, spawnDir, 95.0f, out retreatPos) ||
+                         TrySampleDryRetreatPoint(originPos, spawnDir, 78.0f, out retreatPos)))
                     {
-                        retreatPos = spawnPos;
                         return true;
                     }
                 }
@@ -852,7 +849,7 @@ namespace EasyRed2HumanAI
                         : (TryGetEnemySpawnDirection(myFaction, originPos, out Vector3 eDir) ? -eDir : Vector3.back);
 
                     if (TrySampleDryRetreatPoint(originPos, aDir, 95.0f, out retreatPos) ||
-                        TrySampleDryRetreatPoint(originPos, aDir, 65.0f, out retreatPos) ||
+                        TrySampleDryRetreatPoint(originPos, aDir, 78.0f, out retreatPos) ||
                         TrySampleDryRetreatPoint(originPos, aDir, 130.0f, out retreatPos))
                     {
                         return true;
@@ -870,7 +867,7 @@ namespace EasyRed2HumanAI
                 int sqCount = WorldSquadCount;
                 var squads = WorldSquads;
 
-                float bestFriendlySq = 22.0f * 22.0f;
+                float bestFriendlySq = 75.0f * 75.0f;
                 Vector3 bestFriendlyPos = Vector3.zero;
                 bool hasFriendly = false;
 
@@ -910,8 +907,9 @@ namespace EasyRed2HumanAI
                 if (hasEnemy)
                 {
                     Vector3 away = originPos - nearestEnemyPos;
-                    if (TrySampleDryRetreatPoint(originPos, away, 85.0f, out retreatPos) ||
-                        TrySampleDryRetreatPoint(originPos, away, 55.0f, out retreatPos))
+                    if (TrySampleDryRetreatPoint(originPos, away, 95.0f, out retreatPos) ||
+                        TrySampleDryRetreatPoint(originPos, away, 78.0f, out retreatPos) ||
+                        TrySampleDryRetreatPoint(originPos, away, 120.0f, out retreatPos))
                     {
                         return true;
                     }
@@ -2127,6 +2125,7 @@ namespace EasyRed2HumanAI
         private static readonly Dictionary<IntPtr, int> _worldSquadIndexByPtr = new Dictionary<IntPtr, int>(96);
         private static readonly HashSet<IntPtr> _seenWorldSoldierPtrs = new HashSet<IntPtr>(384);
         private static float _lastWorldSnapshotTime = -999f;
+        private static float _nextAnomalyWatchdogScanTime;
 
         public static bool TryGetSquadSnapshot(IntPtr sqPtr, out SquadSnapshot snap)
         {
@@ -2174,6 +2173,7 @@ namespace EasyRed2HumanAI
             long profSnapStart = HitchProfiler.Begin();
             HitchProfiler.RecordWorldSnapshotRebuilt();
             _lastWorldSnapshotTime = now;
+            FlushExpiredRetreatDespawningSoldiers(now);
             int prevSqCount = WorldSquadCount;
             int prevSolCount = WorldSoldierCount;
             int prevInjCount = WorldInjuredSoldierCount;
@@ -2472,7 +2472,145 @@ namespace EasyRed2HumanAI
                 Array.Clear(WorldSoldiers, WorldSoldierCount, prevSolCount - WorldSoldierCount);
             if (prevInjCount > WorldInjuredSoldierCount)
                 Array.Clear(WorldInjuredSoldiers, WorldInjuredSoldierCount, prevInjCount - WorldInjuredSoldierCount);
+            AuditWorldSoldiersForAnomalies(now);
             HitchProfiler.End(HitchBucket.WorldSnapshot, profSnapStart);
+        }
+
+        private static void AuditWorldSoldiersForAnomalies(float now)
+        {
+            if (now < _nextAnomalyWatchdogScanTime && (now + 5.0f) >= _nextAnomalyWatchdogScanTime)
+                return;
+
+            _nextAnomalyWatchdogScanTime = now + 1.05f;
+            bool traceEnabled = BotActionTrace.IsEnabled;
+
+            for (int i = 0; i < WorldSoldierCount; i++)
+            {
+                ref SoldierSnapshot ws = ref WorldSoldiers[i];
+                Soldier u = ws.Ref;
+                SoldierFastHandles h = ws.Handles;
+                if (ReferenceEquals(u, null) || u == null || u.Pointer == IntPtr.Zero || h == null)
+                    continue;
+
+                if (now < h.NextAnomalyAlertTime && (now + 5.0f) < h.NextAnomalyAlertTime)
+                    h.NextAnomalyAlertTime = 0f;
+
+                if (ws.HasSurrendered)
+                {
+                    h.WatchdogStationarySince = 0f;
+                    if (h.SurrenderedSinceTime <= 0f || now < h.SurrenderedSinceTime)
+                        h.SurrenderedSinceTime = now;
+
+                    // Detector 1: Surrender pose mismatch (+ self-healing pose restoration)
+                    if (now - h.SurrenderedSinceTime > 1.5f && !IsSoldierInVehicleOrTransition(u))
+                    {
+                        Animator anim = u.m_Animator;
+                        if (anim != null && (!anim.GetBool("Surrended") || anim.GetLayerWeight(1) < 0.5f))
+                        {
+                            if (now >= h.NextAnomalyAlertTime)
+                            {
+                                h.NextAnomalyAlertTime = now + 8.0f;
+                                BotActionTrace.RecordEvent(u, BotTraceEventKind.AnomalyAlert, "surrender_pose_mismatch", now - h.SurrenderedSinceTime);
+                            }
+                            VeteranAndTacticsPatches.EnsureSurrenderedPrisonerAnimatorAndPose(u);
+                        }
+                    }
+
+                    // Detector 2: Surrendered prisoner ignored by unengaged nearby friendly foot bots
+                    float nearestAllyDistSq = 18.0f * 18.0f;
+                    bool hasNearbyUnengagedAlly = false;
+                    for (int j = 0; j < WorldSoldierCount; j++)
+                    {
+                        if (j == i)
+                            continue;
+
+                        ref SoldierSnapshot ally = ref WorldSoldiers[j];
+                        if (ally.IsPlayer || ally.IsOnVehicle || ally.HasSurrendered || ally.IsInjured ||
+                            ally.Ref == null || !AreSameSideFactions(ws.Faction, ally.Faction))
+                        {
+                            continue;
+                        }
+
+                        float dx = ally.Pos.x - ws.Pos.x;
+                        float dz = ally.Pos.z - ws.Pos.z;
+                        float horizSq = dx * dx + dz * dz;
+                        if (horizSq > 18.0f * 18.0f)
+                            continue;
+
+                        float horizDist = Mathf.Sqrt(horizSq);
+                        if (Mathf.Abs(ally.Pos.y - ws.Pos.y) > 2.6f + horizDist * 0.55f)
+                            continue;
+
+                        SoldierAI allyAi = ally.Handles != null && ally.Handles.Ai != null ? ally.Handles.Ai : ally.Ref.aiController;
+                        if (ally.Ref.GetSuppressionValue() < 18.0f && (allyAi == null || !allyAi.HasEnemyAndCanFireAtHim))
+                        {
+                            float dSq = horizSq + (ally.Pos.y - ws.Pos.y) * (ally.Pos.y - ws.Pos.y);
+                            if (dSq < nearestAllyDistSq)
+                                nearestAllyDistSq = dSq;
+                            hasNearbyUnengagedAlly = true;
+                        }
+                    }
+
+                    if (hasNearbyUnengagedAlly)
+                    {
+                        if (h.UnliberatedWithNearbyAllySince <= 0f || now < h.UnliberatedWithNearbyAllySince)
+                            h.UnliberatedWithNearbyAllySince = now;
+                        else if (now - h.UnliberatedWithNearbyAllySince > 12.0f && now >= h.NextAnomalyAlertTime)
+                        {
+                            h.NextAnomalyAlertTime = now + 10.0f;
+                            BotActionTrace.RecordEvent(
+                                u,
+                                BotTraceEventKind.AnomalyAlert,
+                                "prisoner_ignored_by_allies",
+                                Mathf.Sqrt(nearestAllyDistSq),
+                                now - h.UnliberatedWithNearbyAllySince);
+                        }
+                    }
+                    else
+                    {
+                        h.UnliberatedWithNearbyAllySince = 0f;
+                    }
+                }
+                else
+                {
+                    h.SurrenderedSinceTime = 0f;
+                    h.UnliberatedWithNearbyAllySince = 0f;
+
+                    // Detector 3: Idle-in-open zombie bot while destination is > 20m away (only when trace logging is active)
+                    if (traceEnabled && !ws.IsPlayer && !ws.IsOnVehicle && !ws.IsInjured && !ws.IsSquadLeader)
+                    {
+                        if (h.WatchdogStationarySince <= 0f ||
+                            now < h.WatchdogStationarySince ||
+                            (ws.Pos - h.WatchdogAnchorPos).sqrMagnitude > 0.35f * 0.35f)
+                        {
+                            h.WatchdogAnchorPos = ws.Pos;
+                            h.WatchdogStationarySince = now;
+                        }
+                        else if (now - h.WatchdogStationarySince > 15.0f &&
+                                 now >= h.NextAnomalyAlertTime &&
+                                 !u.IsOnCover() &&
+                                 !u.UsingBipod() &&
+                                 !IsSoldierInVehicleOrTransition(u))
+                        {
+                            SoldierAI ai = h.Ai != null ? h.Ai : u.aiController;
+                            if (ai != null && !ai.HasEnemyAndCanFireAtHim)
+                            {
+                                float destDistSq = (ai.MoveDestination - ws.Pos).sqrMagnitude;
+                                if (destDistSq > 20.0f * 20.0f)
+                                {
+                                    h.NextAnomalyAlertTime = now + 15.0f;
+                                    BotActionTrace.RecordEvent(
+                                        u,
+                                        BotTraceEventKind.AnomalyAlert,
+                                        "idle_in_open_zombie",
+                                        Mathf.Sqrt(destDistSq),
+                                        now - h.WatchdogStationarySince);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
         }
 
         private static bool ContainsHeavyDemoKeyword(string itemId)

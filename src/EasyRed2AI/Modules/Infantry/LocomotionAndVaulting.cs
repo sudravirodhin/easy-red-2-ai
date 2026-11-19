@@ -714,7 +714,7 @@ namespace EasyRed2HumanAI
                     if (now < h.Combat.NextVaultCheckTime)
                         return;
 
-                    if (!AiCore.IsLocallyOwnedBot(h) || h.Ref.IsOnVehicle())
+                    if (!AiCore.IsLocallyOwnedBot(h) || AiCore.IsSoldierInVehicleOrTransition(h.Ref))
                     {
                         h.Combat.NextVaultCheckTime = now + 1.50f;
                         return;

@@ -104,8 +104,7 @@ namespace EasyRed2HumanAI
         {
             if (!VisionConfig.EnableTacticalGoapPlanner.Value ||
                 ai == null ||
-                soldier == null ||
-                soldier.IsOnVehicle() ||
+                AiCore.IsSoldierInVehicleOrTransition(soldier) ||
                 soldier.HasSurrended() ||
                 soldier.isInBodyAnimation)
             {

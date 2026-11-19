@@ -33,6 +33,23 @@ $visPartB = Slice-LinesBetween $visLines '^\s*private static void RecordAcoustic
 $wqLines  = Get-Content $wqFile
 $wqSnapProbe = Slice-LinesBetween $wqLines '^\s*public static bool TrySnapWalkableGroundProbe\(' 'snappedGroundPos = gHit\.point;\s*$' 2
 
+$cqbPath = Join-Path $workspace "src\EasyRed2AI\Modules\Infantry\CloseCombatAndSupport.cs"
+$cqbText = Get-Content $cqbPath -Raw
+function Extract-CqbFloat {
+    param([string]$Text, [string]$Pattern, [string]$Label)
+    $m = [regex]::Match($Text, $Pattern)
+    if (-not $m.Success) { throw "Could not extract CQB invariant '$Label' using pattern: $Pattern" }
+    return $m.Groups[1].Value
+}
+$cqbBayonetStandoff   = Extract-CqbFloat $cqbText 'HasBayonetReady\)\s*\{\s*standoffDist\s*=\s*([0-9]+\.[0-9]+)f;' 'bayonetStandoff'
+$cqbKnifeStandoff     = Extract-CqbFloat $cqbText 'HoldsMeleeWeapon\)\s*\{\s*standoffDist\s*=\s*([0-9]+\.[0-9]+)f;' 'knifeStandoff'
+$cqbUnbayStandoff     = Extract-CqbFloat $cqbText 'standoffDist\s*=\s*([0-9]+\.[0-9]+)f;\s*minPersonalSpace\s*=\s*0\.68f;' 'unbayonetedStandoff'
+$cqbUnbayStrike       = Extract-CqbFloat $cqbText 'const float unbayonetedStrikeRange\s*=\s*([0-9]+\.[0-9]+)f;' 'unbayonetedStrikeRange'
+$cqbKnifeStrike       = Extract-CqbFloat $cqbText 'const float meleeWeaponStrikeRange\s*=\s*([0-9]+\.[0-9]+)f;' 'meleeWeaponStrikeRange'
+$cqbPistolCeaseFire   = Extract-CqbFloat $cqbText 'isPistol && !gunEmptyOrReloading && !hasBayonet\)\s*\{[^}]*?ceaseFireRange\s*=\s*([0-9]+\.[0-9]+)f;' 'pistolCeaseFireRange'
+$cqbPatchedCapsule    = Extract-CqbFloat $cqbText '__instance\.mountedBlade\s*==\s*null\s*&&\s*__instance\.dist\s*<\s*([0-9]+\.[0-9]+)f' 'patchedAiCapsuleDist'
+$cqbBayonetStrike     = Extract-CqbFloat $cqbText 'strikeRange\s*=\s*hasBayonet\s*\?\s*([0-9]+\.[0-9]+)f\s*:\s*unbayonetedStrikeRange;' 'bayonetStrikeRange'
+
 $harnessCs = @"
 #pragma warning disable 0649, 0414
 using System;
@@ -887,6 +904,148 @@ $partC
                     VeteranAndTacticsPatches.GoapStateBits.NeedAmmoOrMedScavenge | VeteranAndTacticsPatches.GoapStateBits.HasVisibleEnemy,
                     new IntPtr(9606), ref scavBoard, 100f),
                     "Visible-enemy ScavengeSupplyFromCorpse MUST be illegal (instant preemption)!");
+            }
+
+            // 12. Comrade Liberation Priority, Bailed-Crew Evacuation & CQB Weapon-Reach Invariants:
+            {
+                var all21Factions = new[]
+                {
+                    "Germany_axis", "Finland_axis", "UnitedStates_allies", "UnitedStates_Afrikan_allies",
+                    "England_allies", "Canada_allies", "Australia_allies", "NewZealand_allies",
+                    "India_allies", "Gurkha_allies", "France_allies", "Poland_allies",
+                    "Greece_allies", "Ussr_allies", "Mongolia_allies", "China_allies",
+                    "Japan_axis", "Manchukuo_axis", "Italy_axis", "Romania_axis", "Hungary_axis"
+                };
+
+                var libBoard = new VeteranAndTacticsPatches.SquadBlackboard
+                {
+                    AliveMemberCount = 5,
+                    HasActiveThreat = true,
+                    ThreatPosition = new Vector3(0f, 0f, 45f),
+                    NetDirective = VeteranAndTacticsPatches.SquadNetDirective.Connected_StandardObjective
+                };
+
+                var wsAloneLib = VeteranAndTacticsPatches.GoapStateBits.ComradeNeedsLiberation |
+                                 VeteranAndTacticsPatches.GoapStateBits.IsEntirelyAlone;
+                var wsThreatLib = VeteranAndTacticsPatches.GoapStateBits.ComradeNeedsLiberation |
+                                  VeteranAndTacticsPatches.GoapStateBits.SquadHasActiveThreat |
+                                  VeteranAndTacticsPatches.GoapStateBits.InCover |
+                                  VeteranAndTacticsPatches.GoapStateBits.CanBlindSuppressThreat |
+                                  VeteranAndTacticsPatches.GoapStateBits.HasSmokeGrenade;
+
+                int libSweepId = 0;
+                foreach (var fac in all21Factions)
+                foreach (var pers in personalities)
+                {
+                    if (pers == VeteranAndTacticsPatches.SoldierPersonality.None)
+                        continue;
+
+                    bool isMedic = pers == VeteranAndTacticsPatches.SoldierPersonality.Medic_Heroic ||
+                                   pers == VeteranAndTacticsPatches.SoldierPersonality.Medic_Combat ||
+                                   pers == VeteranAndTacticsPatches.SoldierPersonality.Medic_Triage;
+
+                    foreach (bool isBailedCrew in new[] { false, true })
+                    {
+                        var pAlone = VeteranAndTacticsPatches.PlanBestGoapActionChainCore(
+                            wsAloneLib, new IntPtr(9700 + libSweepId++), fac, true, isMedic, isBailedCrew, ref libBoard, pers, 0.5f, 100f, VeteranAndTacticsPatches.GoapActionId.None);
+                        Assert(pAlone.Step0 == VeteranAndTacticsPatches.GoapActionId.RescueSurrenderedComrade &&
+                               pAlone.LastGoalBit == VeteranAndTacticsPatches.GoapStateBits.SquadSupported,
+                            $"Lone comrade liberation failed for {fac}/{pers}/crew={isBailedCrew}: got {pAlone.Step0} ({pAlone.LastGoalBit})");
+                    }
+
+                    var pThreat = VeteranAndTacticsPatches.PlanBestGoapActionChainCore(
+                        wsThreatLib, new IntPtr(9700 + libSweepId++), fac, true, isMedic, false, ref libBoard, pers, 0.5f, 100f, VeteranAndTacticsPatches.GoapActionId.None);
+                    Assert(pThreat.Step0 == VeteranAndTacticsPatches.GoapActionId.RescueSurrenderedComrade &&
+                           pThreat.LastGoalBit == VeteranAndTacticsPatches.GoapStateBits.SquadSupported,
+                        $"Unengaged comrade liberation with smoke/suppress available failed for {fac}/{pers}: got {pThreat.Step0} ({pThreat.LastGoalBit})");
+                }
+
+                // 12b. Liberation instant danger preemption across every bit of LiberateForbiddenMask
+                Assert(VeteranAndTacticsPatches.IsGoapActionCurrentlyLegal(
+                    VeteranAndTacticsPatches.GoapActionId.RescueSurrenderedComrade,
+                    VeteranAndTacticsPatches.GoapStateBits.ComradeNeedsLiberation | VeteranAndTacticsPatches.GoapStateBits.InCover,
+                    new IntPtr(9801), ref libBoard, 100f),
+                    "Calm RescueSurrenderedComrade should be legal!");
+
+                var libForbiddenBits = new[]
+                {
+                    VeteranAndTacticsPatches.GoapStateBits.IsBleeding,
+                    VeteranAndTacticsPatches.GoapStateBits.IsSuppressed,
+                    VeteranAndTacticsPatches.GoapStateBits.IsHeavilySuppressed,
+                    VeteranAndTacticsPatches.GoapStateBits.NearFreshCasualty,
+                    VeteranAndTacticsPatches.GoapStateBits.HasVisibleEnemy,
+                    VeteranAndTacticsPatches.GoapStateBits.CanFireAtVisibleEnemy,
+                    VeteranAndTacticsPatches.GoapStateBits.ExposedSideOfWall,
+                    VeteranAndTacticsPatches.GoapStateBits.OverwhelmedNeedFallback,
+                    VeteranAndTacticsPatches.GoapStateBits.InPointBlankRange
+                };
+                foreach (var forbidBit in libForbiddenBits)
+                {
+                    Assert(!VeteranAndTacticsPatches.IsGoapActionCurrentlyLegal(
+                        VeteranAndTacticsPatches.GoapActionId.RescueSurrenderedComrade,
+                        VeteranAndTacticsPatches.GoapStateBits.ComradeNeedsLiberation | forbidBit,
+                        new IntPtr(9801), ref libBoard, 100f),
+                        $"RescueSurrenderedComrade MUST be illegal when {forbidBit} is set!");
+                }
+
+                // 12c. Bailed-crew lone-wolf evacuation selects LoneWolfLinkUpOrAmbush
+                var crewBoard = new VeteranAndTacticsPatches.SquadBlackboard
+                {
+                    AliveMemberCount = 2,
+                    HasActiveThreat = true,
+                    ThreatPosition = new Vector3(0f, 0f, 35f),
+                    NetDirective = VeteranAndTacticsPatches.SquadNetDirective.Disconnected_Autonomous
+                };
+                var pCrewEvac = VeteranAndTacticsPatches.PlanBestGoapActionChainCore(
+                    VeteranAndTacticsPatches.GoapStateBits.IsEntirelyAlone | VeteranAndTacticsPatches.GoapStateBits.SquadHasActiveThreat | VeteranAndTacticsPatches.GoapStateBits.InCover,
+                    new IntPtr(9802), "Germany_axis", true, false, true, ref crewBoard, VeteranAndTacticsPatches.SoldierPersonality.TankCrew_Brawler, 0.4f, 100f, VeteranAndTacticsPatches.GoapActionId.None);
+                Assert(pCrewEvac.Step0 == VeteranAndTacticsPatches.GoapActionId.LoneWolfLinkUpOrAmbush &&
+                       pCrewEvac.LastGoalBit == VeteranAndTacticsPatches.GoapStateBits.SquadSupported,
+                    $"Bailed crew evac expected LoneWolfLinkUpOrAmbush, got {pCrewEvac.Step0} ({pCrewEvac.LastGoalBit})!");
+
+                var wsCrewDistracted =
+                    VeteranAndTacticsPatches.GoapStateBits.IsEntirelyAlone |
+                    VeteranAndTacticsPatches.GoapStateBits.SquadHasActiveThreat |
+                    VeteranAndTacticsPatches.GoapStateBits.InCover |
+                    VeteranAndTacticsPatches.GoapStateBits.TargetLostBehindCover |
+                    VeteranAndTacticsPatches.GoapStateBits.AllyPinningThreat |
+                    VeteranAndTacticsPatches.GoapStateBits.HasFragGrenade |
+                    VeteranAndTacticsPatches.GoapStateBits.HasSmokeGrenade |
+                    VeteranAndTacticsPatches.GoapStateBits.FlankCoverAvailable |
+                    VeteranAndTacticsPatches.GoapStateBits.IsMachineGunner |
+                    VeteranAndTacticsPatches.GoapStateBits.CanBlindSuppressThreat;
+                foreach (var crewPers in new[]
+                {
+                    VeteranAndTacticsPatches.SoldierPersonality.Gunner_Anchor,
+                    VeteranAndTacticsPatches.SoldierPersonality.Assaulter_Breacher,
+                    VeteranAndTacticsPatches.SoldierPersonality.AT_Demolitionist
+                })
+                {
+                    var pCrewDistr = VeteranAndTacticsPatches.PlanBestGoapActionChainCore(
+                        wsCrewDistracted, new IntPtr(9803), "Germany_axis", true, false, true, ref crewBoard, crewPers, 0.4f, 100f, VeteranAndTacticsPatches.GoapActionId.None);
+                    Assert(pCrewDistr.Step0 == VeteranAndTacticsPatches.GoapActionId.LoneWolfLinkUpOrAmbush &&
+                           pCrewDistr.LastGoalBit == VeteranAndTacticsPatches.GoapStateBits.SquadSupported,
+                        $"Distracted bailed crew ({crewPers}) expected LoneWolfLinkUpOrAmbush, got {pCrewDistr.Step0} ({pCrewDistr.LastGoalBit})!");
+                }
+
+                // 12d. CQB Weapon-Reach & Standoff Physics Invariants (parsed live from CloseCombatAndSupport.cs)
+                const float bayonetStandoff = ${cqbBayonetStandoff}f;
+                const float knifeStandoff = ${cqbKnifeStandoff}f;
+                const float unbayonetedStandoff = ${cqbUnbayStandoff}f;
+                const float unbayonetedStrikeRange = ${cqbUnbayStrike}f;
+                const float meleeWeaponStrikeRange = ${cqbKnifeStrike}f;
+                const float pistolCeaseFireRange = ${cqbPistolCeaseFire}f;
+                const float patchedAiCapsuleDist = ${cqbPatchedCapsule}f;
+                const float bayonetStrikeRange = ${cqbBayonetStrike}f;
+
+                Assert(pistolCeaseFireRange < unbayonetedStandoff,
+                    $"Loaded pistol ceaseFireRange ({pistolCeaseFireRange}) must stay below unbayonetedStandoff ({unbayonetedStandoff})!");
+                Assert(unbayonetedStandoff < unbayonetedStrikeRange && unbayonetedStrikeRange <= patchedAiCapsuleDist + 0.30f,
+                    $"Unbayoneted/pistol-whip strike ({unbayonetedStrikeRange}) must sit between standoff ({unbayonetedStandoff}) and swing reach ({patchedAiCapsuleDist + 0.30f})!");
+                Assert(knifeStandoff < meleeWeaponStrikeRange && meleeWeaponStrikeRange <= patchedAiCapsuleDist + 0.30f + 0.18f,
+                    $"Knife strike ({meleeWeaponStrikeRange}) must sit between knife standoff ({knifeStandoff}) and extended reach ({patchedAiCapsuleDist + 0.48f})!");
+                Assert(bayonetStandoff <= 1.65f && bayonetStandoff < bayonetStrikeRange,
+                    $"Bayonet standoff ({bayonetStandoff}) must sit inside 1.65m native reach and below strike trigger ({bayonetStrikeRange})!");
             }
 
             Console.WriteLine($"  -> Verified GOAP Planner, Acoustic Ring & Ground Probe Suite: {_passed} assertions passed across {sweepCount} combinatoric states ({holdOverwatchWins} HoldOverwatch wins, 0 failures)");

@@ -2318,12 +2318,7 @@ namespace EasyRed2HumanAI
             try
             {
                 BattleData bd = BattleManager.GetCurrentBattleData();
-                if (ConquestEconomy.IsActive && !string.IsNullOrEmpty(leader.faction))
-                {
-                    int budget = ConquestEconomy.GetBudget(leader.faction);
-                    board.TicketRatio01 = Mathf.Clamp01(budget / 350.0f);
-                }
-                else if (bd != null && !string.IsNullOrEmpty(leader.faction))
+                if (!ConquestEconomy.IsActive && bd != null && !string.IsNullOrEmpty(leader.faction))
                 {
                     board.IsInvaderFaction = bd.IsInvaderFaction(leader.faction);
                     if (board.IsInvaderFaction && bd.invadersTickets > 0)
@@ -2380,12 +2375,17 @@ namespace EasyRed2HumanAI
 
                     if (u.HasSurrended())
                     {
-                        if (board.SurrenderedComrade == null &&
-                            AiCore.IsTrueSurrenderedPrisoner(u) &&
-                            Mathf.Abs(u.transform.position.y - sqCenter.y) <= 2.4f &&
-                            !HasArmedEnemyNearPosition(u.transform.position, leader.faction, 16.0f))
+                        if (board.SurrenderedComrade == null && AiCore.IsTrueSurrenderedPrisoner(u))
                         {
-                            board.SurrenderedComrade = u;
+                            Vector3 uPos = u.transform.position;
+                            float dxU = uPos.x - sqCenter.x;
+                            float dzU = uPos.z - sqCenter.z;
+                            float horizDistU = Mathf.Sqrt(dxU * dxU + dzU * dzU);
+                            if (Mathf.Abs(uPos.y - sqCenter.y) <= 2.6f + horizDistU * 0.55f &&
+                                !HasArmedEnemyNearPosition(uPos, leader.faction, 10.0f))
+                            {
+                                board.SurrenderedComrade = u;
+                            }
                         }
                         continue;
                     }
@@ -2533,7 +2533,7 @@ namespace EasyRed2HumanAI
                 AiCore.EnsureWorldSnapshot();
                 int solCount = AiCore.WorldSoldierCount;
                 var soldiers = AiCore.WorldSoldiers;
-                float maxLibR = Mathf.Max(16.0f, VisionConfig.LiberateSearchRadius.Value);
+                float maxLibR = Mathf.Max(28.0f, VisionConfig.LiberateSearchRadius.Value + 12.0f);
                 float bestSurrDistSq = maxLibR * maxLibR;
 
                 string surrLeaderFac = AiCore.GetCachedFaction(leader);
@@ -2543,11 +2543,14 @@ namespace EasyRed2HumanAI
                     if (!sSnap.HasSurrendered || !AiCore.AreSameSideFactions(surrLeaderFac, sSnap.Faction) || sSnap.Ref == null)
                         continue;
 
-                    if (Mathf.Abs(sSnap.Pos.y - sqCenter.y) > 2.8f)
+                    float dx = sSnap.Pos.x - sqCenter.x;
+                    float dz = sSnap.Pos.z - sqCenter.z;
+                    float horizDist = Mathf.Sqrt(dx * dx + dz * dz);
+                    if (Mathf.Abs(sSnap.Pos.y - sqCenter.y) > 2.6f + horizDist * 0.55f)
                         continue;
 
                     float dSq = (sSnap.Pos - sqCenter).sqrMagnitude;
-                    if (dSq < bestSurrDistSq && !HasArmedEnemyNearPosition(sSnap.Pos, surrLeaderFac, 16.0f))
+                    if (dSq < bestSurrDistSq && !HasArmedEnemyNearPosition(sSnap.Pos, surrLeaderFac, 10.0f))
                     {
                         bestSurrDistSq = dSq;
                         board.SurrenderedComrade = sSnap.Ref;

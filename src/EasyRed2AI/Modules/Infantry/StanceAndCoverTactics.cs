@@ -12,7 +12,7 @@ namespace EasyRed2HumanAI
         // =====================================================================
         private static void SetBotPose(SoldierAI ai, Soldier soldier, SoldierPose pose, bool forceImmediate = false)
         {
-            if (ai == null || soldier == null)
+            if (ai == null || soldier == null || AiCore.IsSoldierInVehicleOrTransition(soldier))
                 return;
 
             // Fast-path when already in desired non-prone pose to avoid allocating soldier.Params wrapper on redundant calls
@@ -1351,7 +1351,7 @@ namespace EasyRed2HumanAI
 
                     AiCore.SoldierFastHandles h = AiCore.GetOrCreateSoldierHandlesByAi(__instance);
                     __state.Handles = h;
-                    if (!AiCore.IsLocallyOwnedBot(h) || h.Ref.IsOnVehicle() || h.Ref.HasSurrended())
+                    if (!AiCore.IsLocallyOwnedBot(h) || AiCore.IsSoldierInVehicleOrTransition(h.Ref) || h.Ref.HasSurrended())
                         return true;
 
                     Soldier soldier = h.Ref;
@@ -1516,7 +1516,7 @@ namespace EasyRed2HumanAI
 
                     CheckAndApplyFieldPromotion(soldier);
 
-                    if (!AiCore.IsLocallyOwnedBot(h) || soldier.IsOnVehicle() || soldier.HasSurrended())
+                    if (!AiCore.IsLocallyOwnedBot(h) || AiCore.IsSoldierInVehicleOrTransition(soldier) || soldier.HasSurrended())
                         return;
 
                     TickBotInventoryWeightAndDelayedWeaponRefill(h, soldier, Time.time);
@@ -2371,7 +2371,7 @@ namespace EasyRed2HumanAI
                         return;
 
                     Soldier soldier = __instance.character;
-                    if (!AiCore.IsLocallyOwnedBot(soldier))
+                    if (!AiCore.IsLocallyOwnedBot(soldier) || AiCore.IsSoldierInVehicleOrTransition(soldier))
                         return;
 
                     AiCore.SoldierFastHandles sh = AiCore.GetOrCreateSoldierHandles(soldier);

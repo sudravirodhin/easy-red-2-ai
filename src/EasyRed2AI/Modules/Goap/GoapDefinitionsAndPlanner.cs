@@ -111,7 +111,6 @@ namespace EasyRed2HumanAI
             GoapStateBits.CanFireAtVisibleEnemy |
             GoapStateBits.ExposedSideOfWall |
             GoapStateBits.OverwhelmedNeedFallback |
-            GoapStateBits.IsRadioman |
             GoapStateBits.InPointBlankRange;
 
         private struct GoapActionDef
@@ -234,7 +233,7 @@ namespace EasyRed2HumanAI
                 Forbidden = LiberateForbiddenMask,
                 Add = GoapStateBits.SquadSupported,
                 Remove = GoapStateBits.ComradeNeedsLiberation,
-                BaseCost = 2.1f
+                BaseCost = 1.10f
             },
             new GoapActionDef
             {
@@ -1272,15 +1271,18 @@ namespace EasyRed2HumanAI
             }
 
             if (VisionConfig.EnableComradeLiberation.Value &&
-                !(soldier.IsSquadLeader() && board.AliveMemberCount >= 2) &&
                 (h == null || now >= h.Combat.LiberateMoveCooldownUntil) &&
                 board.SurrenderedComrade != null &&
                 board.SurrenderedComrade.IsAlive &&
                 board.SurrenderedComrade.HasSurrended() &&
-                (board.RescuerPtr == IntPtr.Zero || board.RescuerPtr == soldier.Pointer) &&
-                (board.SurrenderedComrade.transform.position - myPos).sqrMagnitude <= 28.0f * 28.0f)
+                (board.RescuerPtr == IntPtr.Zero || board.RescuerPtr == soldier.Pointer))
             {
-                ws |= GoapStateBits.ComradeNeedsLiberation;
+                float comradeDistSq = (board.SurrenderedComrade.transform.position - myPos).sqrMagnitude;
+                if (comradeDistSq <= 28.0f * 28.0f &&
+                    !(soldier.IsSquadLeader() && board.AliveMemberCount >= 2 && comradeDistSq > 10.0f * 10.0f))
+                {
+                    ws |= GoapStateBits.ComradeNeedsLiberation;
+                }
             }
 
             if (ai.HasEnemyAndCanFireAtHim && dist >= 16f && dist <= 140f && suppression < 42f &&
@@ -1682,8 +1684,14 @@ namespace EasyRed2HumanAI
             // 4. Lone-Wolf Survival/Link-Up (when Entirely Alone)
             // 5. Battlefield Ammo/Bandage Scavenging (when out of primary ammo or bandages out of direct LOS)
             // 6. Squad Leader & Team Net Directive (Anvil Pinning vs. Hammer Flanking vs. Local Fire & Maneuver)
+            bool canLiberateNow =
+                canMove &&
+                (ws & GoapStateBits.ComradeNeedsLiberation) != 0 &&
+                (ws & LiberateForbiddenMask) == 0;
+
             bool nonBleedingBailedCrew =
                 isBailedCrew &&
+                !canLiberateNow &&
                 board.AliveMemberCount <= 5 &&
                 (ws & (GoapStateBits.IsBleeding | GoapStateBits.InPointBlankRange | GoapStateBits.CanFireAtVisibleEnemy)) == 0 &&
                 (ws & GoapStateBits.IsEntirelyAlone) != 0;
@@ -1728,11 +1736,6 @@ namespace EasyRed2HumanAI
                 (ws & GoapStateBits.IsEntirelyAlone) != 0 &&
                 (ws & (GoapStateBits.IsBleeding | GoapStateBits.InPointBlankRange | GoapStateBits.CanFireAtVisibleEnemy)) == 0;
 
-            bool canLiberateNow =
-                canMove &&
-                (ws & GoapStateBits.ComradeNeedsLiberation) != 0 &&
-                (ws & LiberateForbiddenMask) == 0;
-
             GoapStateBits desiredGoalBit;
             if (nonBleedingBailedCrew)
             {
@@ -1761,16 +1764,16 @@ namespace EasyRed2HumanAI
             {
                 desiredGoalBit = GoapStateBits.TargetEliminated;
             }
+            else if (canLiberateNow)
+            {
+                desiredGoalBit = GoapStateBits.SquadSupported;
+            }
             else if (canLoneWolfNow)
             {
                 desiredGoalBit = GoapStateBits.SquadSupported;
             }
             else if (canScavengeNow &&
                      (ws & (GoapStateBits.CanFireAtVisibleEnemy | GoapStateBits.CanProvideOverwatch | GoapStateBits.CanBlindSuppressThreat)) == 0)
-            {
-                desiredGoalBit = GoapStateBits.SquadSupported;
-            }
-            else if (canLiberateNow)
             {
                 desiredGoalBit = GoapStateBits.SquadSupported;
             }
@@ -1846,6 +1849,21 @@ namespace EasyRed2HumanAI
                 if (a0.Id == GoapActionId.BoundWithOverwatch &&
                     !CanExecuteBoundWithOverwatch(ws, soldierPtr, ref board, now, countSelfPreservationBalk: true))
                     continue;
+                if (desiredGoalBit == GoapStateBits.SquadSupported)
+                {
+                    if (canLiberateNow &&
+                        a0.Id != GoapActionId.RescueSurrenderedComrade &&
+                        a0.Id != GoapActionId.MaintainRadioLinkWithLeader)
+                    {
+                        continue;
+                    }
+                    if (canMove &&
+                        nonBleedingBailedCrew &&
+                        a0.Id != GoapActionId.LoneWolfLinkUpOrAmbush)
+                    {
+                        continue;
+                    }
+                }
 
                 float cost0 = GetPersonalityAndDirectiveAdjustedCost(a0, ws, soldierPtr, ref board, personality, vet01, now, ref factionProfile, ref micro);
                 // Plan Commitment Hysteresis (-0.35f inertia bonus) prevents stuttering/flip-flopping between nearly-tied actions
