@@ -157,8 +157,13 @@ namespace EasyRed2HumanAI
             {
                 Id = GoapActionId.MaintainRadioLinkWithLeader,
                 Required = GoapStateBits.IsRadioman | GoapStateBits.RadioLinkDrifting,
-                Forbidden = GoapStateBits.IsBleeding | GoapStateBits.InPointBlankRange,
-                Add = GoapStateBits.RadioLinkPreserved | GoapStateBits.SquadSupported | GoapStateBits.SurvivedCrisis,
+                Forbidden = GoapStateBits.IsBleeding
+                          | GoapStateBits.InPointBlankRange
+                          | GoapStateBits.CanFireAtVisibleEnemy
+                          | GoapStateBits.IsSuppressed
+                          | GoapStateBits.IsHeavilySuppressed
+                          | GoapStateBits.NearFreshCasualty,
+                Add = GoapStateBits.RadioLinkPreserved | GoapStateBits.SquadSupported,
                 Remove = GoapStateBits.RadioLinkDrifting,
                 BaseCost = 0.85f
             },
@@ -1756,7 +1761,14 @@ namespace EasyRed2HumanAI
             {
                 desiredGoalBit = GoapStateBits.SurvivedCrisis;
             }
-            else if (canMove && (ws & GoapStateBits.RadioLinkDrifting) != 0 && (ws & (GoapStateBits.IsBleeding | GoapStateBits.InPointBlankRange)) == 0)
+            else if (canMove &&
+                     (ws & GoapStateBits.RadioLinkDrifting) != 0 &&
+                     (ws & (GoapStateBits.IsBleeding |
+                            GoapStateBits.InPointBlankRange |
+                            GoapStateBits.CanFireAtVisibleEnemy |
+                            GoapStateBits.IsSuppressed |
+                            GoapStateBits.IsHeavilySuppressed |
+                            GoapStateBits.NearFreshCasualty)) == 0)
             {
                 desiredGoalBit = GoapStateBits.RadioLinkPreserved;
             }

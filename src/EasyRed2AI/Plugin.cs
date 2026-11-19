@@ -136,6 +136,9 @@ namespace EasyRed2HumanAI
             SafePatch(typeof(VeteranAndTacticsPatches.MiniMapGUI_GetNextUnitMarker_Patch));
             SafePatch(typeof(VeteranAndTacticsPatches.Squad_GetMarkerIcon_Patch));
             SafePatch(typeof(VeteranAndTacticsPatches.MiniMapGUI_Update_Patch));
+            SafePatch(typeof(VeteranAndTacticsPatches.Marker3DGUI_GetPooled_Patch));
+            SafePatch(typeof(VeteranAndTacticsPatches.Marker3DGUI_DrawOccluded_Patch));
+            SafePatch(typeof(VeteranAndTacticsPatches.Marker3DGUI_LateUpdate_Patch));
             SafePatch(typeof(VeteranAndTacticsPatches.CircularMenu2_ShowCircle_Patch));
 
             // 64-Character Multiplayer Room Name Limit & Battle-Stat / Scoreboard Sync Fix patches

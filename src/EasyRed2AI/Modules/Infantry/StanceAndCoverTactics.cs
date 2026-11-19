@@ -2574,7 +2574,11 @@ namespace EasyRed2HumanAI
                             __0 = prevFrameState.CustomTargetPos;
 
                         if (!prevFrameState.BlockFire)
+                        {
+                            if (prevFrameState.ClampDistForEmplacementShoot && __instance.distFromTarget < 1.62f)
+                                __instance.distFromTarget = 1.65f;
                             return true;
+                        }
 
                         __instance.shotFiresEnd = 0f;
                         soldier.SetGunTriggerPressed(false);
@@ -3004,6 +3008,13 @@ namespace EasyRed2HumanAI
                         }
                     }
 
+                    bool clampDistForEmplacementShoot =
+                        !inPointBlankMelee &&
+                        !blockFire &&
+                        dist < 1.62f &&
+                        TryResolvePointBlankTargetSoldier(__instance, out _, out bool isExposedEmpGunner) &&
+                        isExposedEmpGunner;
+
                     h.Combat.RotateFireFrame = new RotateAndFireFrameState
                     {
                         Frame = curFrame,
@@ -3013,6 +3024,7 @@ namespace EasyRed2HumanAI
                         IsMoving = isMoving,
                         IsPeeking = isPeeking,
                         HasCustomTarget = hasCustomTarget,
+                        ClampDistForEmplacementShoot = clampDistForEmplacementShoot,
                         CustomTargetPos = customTargetPos
                     };
 
@@ -3035,6 +3047,13 @@ namespace EasyRed2HumanAI
                             }
                         }
                         return false;
+                    }
+
+                    // Prevent vanilla SoldierAI.RotateAndFireToward (< 1.6m hardcoded melee trigger at 0x18055FA61)
+                    // from aborting firearm fire into a whiffing 0.7m melee swing against a seated static-emplacement gunner!
+                    if (clampDistForEmplacementShoot && __instance.distFromTarget < 1.62f)
+                    {
+                        __instance.distFromTarget = 1.65f;
                     }
 
                     if (soldier.isTowardWallTps && !soldier.IsTowardWall())

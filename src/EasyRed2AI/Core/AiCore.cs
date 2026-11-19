@@ -66,6 +66,7 @@ namespace EasyRed2HumanAI
             public IntPtr Ptr;
             public IntPtr AiPtr;
             public int DiagId;
+            public string CachedFullName = string.Empty;
             public Soldier Ref;
             public SoldierAI Ai;
             public Transform Tr;
@@ -344,6 +345,7 @@ namespace EasyRed2HumanAI
             public float FlyingAroundAreaSince;
             public float RefillStateEnteredAt;
             public float OffMapRearmReadyTime;
+            public float NextStaticSelfPreservationCheckTime;
         }
 
         public struct TurretFastTraits
@@ -611,6 +613,7 @@ namespace EasyRed2HumanAI
                 Ptr = ptr,
                 AiPtr = aiPtr,
                 DiagId = ++_nextSoldierDiagId,
+                CachedFullName = s.name_surname ?? string.Empty,
                 Ref = s,
                 Ai = ai,
                 Tr = tr,

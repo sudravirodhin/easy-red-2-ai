@@ -59,6 +59,7 @@ namespace EasyRed2HumanAI
             public Vector3 Pos;
             public Vector3 Dest;
             public string Faction;
+            public string Name;
             public string Role;
             public string Net;
             public string Goal;
@@ -325,6 +326,7 @@ namespace EasyRed2HumanAI
                 Pos = pos,
                 Dest = dest,
                 Faction = fac,
+                Name = h.CachedFullName,
                 Role = VeteranAndTacticsPatches.GetPersonalityShortLabel(VeteranAndTacticsPatches.GetPersonality(soldier)),
                 Net = VeteranAndTacticsPatches.GetNetDirectiveShortName(netDir),
                 Goal = VeteranAndTacticsPatches.GetGoapGoalShortName(goalBit),
@@ -450,6 +452,7 @@ namespace EasyRed2HumanAI
                 Pos = pos,
                 Dest = dest,
                 Faction = fac,
+                Name = h.CachedFullName,
                 Role = VeteranAndTacticsPatches.GetPersonalityShortLabel(personality),
                 Net = VeteranAndTacticsPatches.GetNetDirectiveShortName(netDir),
                 Goal = VeteranAndTacticsPatches.GetGoapGoalShortName(goalBit),
@@ -578,7 +581,9 @@ namespace EasyRed2HumanAI
             AppendFloat2(sb, r.Time);
             sb.Append(",\"id\":");
             AppendInt(sb, r.BotId);
-            sb.Append(",\"sq\":");
+            sb.Append(",\"name\":\"");
+            AppendEscaped(sb, r.Name);
+            sb.Append("\",\"sq\":");
             AppendInt(sb, r.SquadId);
             sb.Append(",\"fac\":\"");
             AppendEscaped(sb, r.Faction);

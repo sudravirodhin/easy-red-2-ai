@@ -99,8 +99,7 @@ namespace EasyRed2HumanAI
                     VeteranAndTacticsPatches.UpdateLonePlayerSquadStatusAndRejoin();
                     VeteranAndTacticsPatches.UpdateSquadRosterHeaderAndFastSync();
                     VeteranAndTacticsPatches.UpdateQuickTapSpot(_showConfigMenu || _showMapPicker || _showDogTagArchive);
-                    if (_showMapPicker)
-                        BattleManager_OnGUI_Patch.StepResolveSelectedCampaignBattles();
+                    BattleManager_OnGUI_Patch.StepBackgroundPreloadCatalog();
 
                     var input = UnityInput.Current;
                     if (input != null)
@@ -715,7 +714,7 @@ namespace EasyRed2HumanAI
                             VisionConfig.EnableMapSquadLabels);
                         DrawToggleButton(colLeftX, ref yL, colW, rowH, "Always Show Squad Roster Names (Bottom-Left)", VisionConfig.EnableAlwaysShowSquadNames);
                         DrawToggleButton(colLeftX, ref yL, colW, rowH, "Always Show Own Squad 3D Overhead Names", VisionConfig.EnableInWorldSquadMemberNames);
-                        DrawToggleButton(colLeftX, ref yL, colW, rowH, "Tactical Map Friendly Squad Letters (A, B, C...)", VisionConfig.EnableMapSquadLabels);
+                        DrawToggleButton(colLeftX, ref yL, colW, rowH, "Map & 3D Squad Letters (A, B, C...)", VisionConfig.EnableMapSquadLabels);
 
                         DrawSectionHeaderWithBundle(colRightX, ref yR, colW, "Player QoL & Obituary",
                             VisionConfig.EnableQuickTapSpot,
@@ -2064,7 +2063,60 @@ namespace EasyRed2HumanAI
         [HarmonyPatch(typeof(Squad), nameof(Squad.Join))]
         public static class Squad_Join_Patch
         {
-            public static void Postfix(Squad __instance, Soldier __0)
+            public static bool Prefix(Squad __instance, Soldier __0, ref bool __state)
+            {
+                __state = false;
+                try
+                {
+                    if (__instance == null ||
+                        __instance.Pointer == IntPtr.Zero ||
+                        __0 == null ||
+                        __0.Pointer == IntPtr.Zero ||
+                        __instance.units == null)
+                    {
+                        return true;
+                    }
+
+                    Squad oldSq = __0.joinedSquad;
+                    bool isSurvivorMerge = __instance.units.Count >= 1 &&
+                                           oldSq != null &&
+                                           oldSq.Pointer != IntPtr.Zero &&
+                                           oldSq.Pointer != __instance.Pointer &&
+                                           (oldSq.units == null || oldSq.units.Count <= 1);
+                    if (!isSurvivorMerge)
+                        return true;
+
+                    if (VisionConfig.EnableMod.Value)
+                    {
+                        Soldier targetLeader = __instance.Leader;
+                        if (targetLeader == null || !targetLeader.IsAlive)
+                            return false;
+
+                        if (targetLeader.IsOnVehicle())
+                        {
+                            Vehicle targetVeh = targetLeader.GetCurrentVehicle();
+                            Vehicle joinerVeh = __0.GetCurrentVehicle();
+                            if (!__0.IsOnVehicle() || targetVeh == null || joinerVeh == null || targetVeh.Pointer != joinerVeh.Pointer)
+                                return false;
+                        }
+
+                        if (!__0.IsOnVehicle() &&
+                            !targetLeader.IsOnVehicle() &&
+                            __0.transform != null &&
+                            targetLeader.transform != null &&
+                            (targetLeader.transform.position - __0.transform.position).sqrMagnitude > 18.0f * 18.0f)
+                        {
+                            return false;
+                        }
+                    }
+
+                    __state = true;
+                }
+                catch { }
+                return true;
+            }
+
+            public static void Postfix(Squad __instance, Soldier __0, bool __state)
             {
                 try
                 {
@@ -2072,15 +2124,15 @@ namespace EasyRed2HumanAI
                         __instance == null ||
                         __instance.Pointer == IntPtr.Zero ||
                         __0 == null ||
-                        __0.Pointer == IntPtr.Zero ||
-                        PlayerGUI.instance == null ||
-                        PlayerGUI.IsSelectingSquad())
+                        __0.Pointer == IntPtr.Zero)
                     {
                         return;
                     }
 
                     Soldier localPlayer = Soldier.CurrentControlledSoldierOrNull();
-                    if (localPlayer != null &&
+                    if (PlayerGUI.instance != null &&
+                        !PlayerGUI.IsSelectingSquad() &&
+                        localPlayer != null &&
                         localPlayer.Pointer != IntPtr.Zero &&
                         localPlayer.IsAlive &&
                         localPlayer.joinedSquad != null &&
@@ -2089,6 +2141,39 @@ namespace EasyRed2HumanAI
                         PlayerGUI.ShowSquadList(__instance, 0.15f);
                         PlayerGUI.UpdateSquadGUI();
                         RefreshSquadHeaderLabel();
+                    }
+
+                    if (!__state ||
+                        __0.joinedSquad == null ||
+                        __0.joinedSquad.Pointer != __instance.Pointer ||
+                        __instance.units == null ||
+                        __instance.units.Count < 2)
+                    {
+                        return;
+                    }
+
+                    string callsign = AiCore.FormatSquadPhoneticCallsign(__instance);
+                    if (localPlayer != null && __0.Pointer == localPlayer.Pointer)
+                    {
+                        _warnedWipedSquadByPlayerSoldier.Remove(__0.Pointer);
+                        try { PlayerController.HintToPlayer($"Linked up \u2014 joined {callsign}!", false); } catch { }
+                    }
+                    else if (__0.IsPlayer() && AiCore.IsInMultiplayerRoom() && AiCore.IsMasterClient())
+                    {
+                        SyncSoldier syn = __0.soldierSyncher;
+                        Photon.Realtime.Player owner = syn != null ? (syn.Controller ?? syn.Owner) : null;
+                        if (owner != null && !owner.IsLocal && !AiCore.IsPhotonPlayerConfirmedModded(owner))
+                        {
+                            AiCore.SendTargetedVanillaChatMessage(owner, $"Linked up \u2014 joined {callsign}!", minPlayerInterval: 8.0f);
+                        }
+                    }
+                    else if (__instance.IsPlayerInSquad())
+                    {
+                        AiCore.TryShowLocalPlayerRadioHint(
+                            __instance,
+                            $"Straggler linked up \u2014 reinforced {callsign}",
+                            requireLeader: false,
+                            minInterval: 12.0f);
                     }
                 }
                 catch { }

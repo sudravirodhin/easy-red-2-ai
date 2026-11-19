@@ -3070,6 +3070,252 @@ namespace EasyRed2HumanAI
                         txt.gameObject.SetActive(true);
                     if (txt.text != letter)
                         txt.text = letter;
+                    txt.color = GetSquadLetterColor(__instance, 0.96f);
+                }
+                catch { }
+            }
+        }
+
+        internal static Color GetSquadLetterColor(Squad sq, float alpha = 0.96f)
+        {
+            Soldier localPlayer = Soldier.CurrentControlledSoldierOrNull();
+            bool isMySquad = localPlayer != null &&
+                             localPlayer.joinedSquad != null &&
+                             sq != null &&
+                             sq.Pointer != IntPtr.Zero &&
+                             localPlayer.joinedSquad.Pointer == sq.Pointer;
+            return isMySquad
+                ? new Color(1.0f, 0.88f, 0.25f, alpha)
+                : new Color(1.0f, 1.0f, 1.0f, alpha);
+        }
+
+        internal static Marker3DGUI.Entry _lastPooledMarker3DEntry;
+        internal static readonly Dictionary<IntPtr, Marker3DGUI.Entry> _squad3DMarkerEntries =
+            new Dictionary<IntPtr, Marker3DGUI.Entry>(32);
+        internal static readonly Dictionary<IntPtr, UnityEngine.UI.Text> _marker3DEntryTexts =
+            new Dictionary<IntPtr, UnityEngine.UI.Text>(64);
+        internal static readonly Dictionary<IntPtr, (Marker3DGUI.Entry Entry, UnityEngine.UI.Text Txt)> _activeSquad3DLabels =
+            new Dictionary<IntPtr, (Marker3DGUI.Entry Entry, UnityEngine.UI.Text Txt)>(32);
+        private static Font _cachedSquad3DFont;
+
+        private static Font GetSquad3DLabelFont()
+        {
+            if (_cachedSquad3DFont != null)
+                return _cachedSquad3DFont;
+
+            try
+            {
+                PlayerGUI pgui = PlayerGUI.instance;
+                if (pgui != null && pgui.squadLabelPrefab != null)
+                {
+                    SquadSoldierLabel lbl = pgui.squadLabelPrefab.GetComponent<SquadSoldierLabel>();
+                    if (lbl != null && lbl.name_surname != null && lbl.name_surname.font != null)
+                    {
+                        _cachedSquad3DFont = lbl.name_surname.font;
+                        return _cachedSquad3DFont;
+                    }
+                }
+            }
+            catch { }
+
+            try
+            {
+                _cachedSquad3DFont = Resources.GetBuiltinResource<Font>("Arial.ttf");
+            }
+            catch { }
+            return _cachedSquad3DFont;
+        }
+
+        private static UnityEngine.UI.Text GetOrCreateMarker3DSquadText(Marker3DGUI.Entry entry)
+        {
+            if (entry == null || entry.img == null)
+                return null;
+
+            IntPtr entryPtr = entry.Pointer;
+            if (_marker3DEntryTexts.TryGetValue(entryPtr, out UnityEngine.UI.Text cached) &&
+                !ReferenceEquals(cached, null) &&
+                cached != null)
+            {
+                return cached;
+            }
+
+            Transform parentTr = entry.img.transform;
+            if (parentTr == null)
+                return null;
+
+            Transform existing = parentTr.Find("ER2AI_Squad3DLetter");
+            UnityEngine.UI.Text txt = existing != null ? existing.GetComponent<UnityEngine.UI.Text>() : null;
+            if (txt == null)
+            {
+                GameObject go = new GameObject("ER2AI_Squad3DLetter");
+                RectTransform rt = go.AddComponent<RectTransform>();
+                rt.SetParent(parentTr, false);
+                rt.anchorMin = new Vector2(0.5f, 0.5f);
+                rt.anchorMax = new Vector2(0.5f, 0.5f);
+                rt.pivot = new Vector2(0.5f, 0.5f);
+                rt.anchoredPosition = Vector2.zero;
+                rt.sizeDelta = new Vector2(36f, 24f);
+                rt.localScale = Vector3.one;
+
+                txt = go.AddComponent<UnityEngine.UI.Text>();
+                Font f = GetSquad3DLabelFont();
+                if (f != null)
+                    txt.font = f;
+                txt.fontSize = 13;
+                txt.fontStyle = FontStyle.Bold;
+                txt.alignment = TextAnchor.MiddleCenter;
+                txt.horizontalOverflow = HorizontalWrapMode.Overflow;
+                txt.verticalOverflow = VerticalWrapMode.Overflow;
+                txt.raycastTarget = false;
+                txt.color = Color.white;
+
+                UnityEngine.UI.Outline outline = go.AddComponent<UnityEngine.UI.Outline>();
+                outline.effectColor = new Color(0f, 0f, 0f, 0.92f);
+                outline.effectDistance = new Vector2(1.0f, -1.0f);
+            }
+
+            if (_marker3DEntryTexts.Count > 128)
+                _marker3DEntryTexts.Clear();
+            _marker3DEntryTexts[entryPtr] = txt;
+            return txt;
+        }
+
+        [HarmonyPatch(typeof(Marker3DGUI), nameof(Marker3DGUI.GetPooled))]
+        public static class Marker3DGUI_GetPooled_Patch
+        {
+            public static void Postfix(Marker3DGUI.Entry __result)
+            {
+                try
+                {
+                    _lastPooledMarker3DEntry = __result;
+                    if (__result != null &&
+                        _marker3DEntryTexts.TryGetValue(__result.Pointer, out UnityEngine.UI.Text existing) &&
+                        !ReferenceEquals(existing, null) &&
+                        existing != null &&
+                        existing.gameObject != null &&
+                        existing.gameObject.activeSelf)
+                    {
+                        existing.gameObject.SetActive(false);
+                    }
+                    if (__result != null)
+                        _activeSquad3DLabels.Remove(__result.Pointer);
+                }
+                catch { }
+            }
+        }
+
+        [HarmonyPatch(typeof(Marker3DGUI), nameof(Marker3DGUI.DrawOccluded))]
+        public static class Marker3DGUI_DrawOccluded_Patch
+        {
+            public static void Prefix(int __1)
+            {
+                if (__1 == 0)
+                    _lastPooledMarker3DEntry = null;
+            }
+
+            public static void Postfix(Il2CppSystem.Object __0, int __1)
+            {
+                try
+                {
+                    if (__1 != 0 || __0 == null || __0.Pointer == IntPtr.Zero)
+                        return;
+
+                    if (_lastPooledMarker3DEntry != null)
+                    {
+                        if (_squad3DMarkerEntries.Count > 128)
+                            _squad3DMarkerEntries.Clear();
+                        _squad3DMarkerEntries[__0.Pointer] = _lastPooledMarker3DEntry;
+                        _lastPooledMarker3DEntry = null;
+                    }
+
+                    if (!_squad3DMarkerEntries.TryGetValue(__0.Pointer, out Marker3DGUI.Entry entry) ||
+                        entry == null ||
+                        entry.img == null ||
+                        entry.img.gameObject == null ||
+                        !entry.img.gameObject.activeInHierarchy)
+                    {
+                        return;
+                    }
+
+                    Squad sq = __0.TryCast<Squad>();
+                    if (sq == null || !VisionConfig.EnableMod.Value || !VisionConfig.EnableMapSquadLabels.Value)
+                    {
+                        if (_marker3DEntryTexts.TryGetValue(entry.Pointer, out UnityEngine.UI.Text existing) &&
+                            existing != null &&
+                            existing.gameObject != null &&
+                            existing.gameObject.activeSelf)
+                        {
+                            existing.gameObject.SetActive(false);
+                        }
+                        _activeSquad3DLabels.Remove(entry.Pointer);
+                        return;
+                    }
+
+                    string sqName = sq.squadName;
+                    if (string.IsNullOrEmpty(sqName))
+                    {
+                        _activeSquad3DLabels.Remove(entry.Pointer);
+                        return;
+                    }
+
+                    UnityEngine.UI.Text txt = GetOrCreateMarker3DSquadText(entry);
+                    if (txt == null || txt.gameObject == null)
+                        return;
+
+                    string letter = sqName.Length == 1 ? sqName : sqName.Substring(0, 1);
+                    if (txt.text != letter)
+                        txt.text = letter;
+
+                    float alpha = Mathf.Clamp01(entry.alpha * 1.15f);
+                    txt.color = GetSquadLetterColor(sq, alpha);
+                    if (!txt.gameObject.activeSelf)
+                        txt.gameObject.SetActive(true);
+
+                    _activeSquad3DLabels[entry.Pointer] = (entry, txt);
+                }
+                catch { }
+            }
+        }
+
+        [HarmonyPatch(typeof(Marker3DGUI), nameof(Marker3DGUI.LateUpdate))]
+        public static class Marker3DGUI_LateUpdate_Patch
+        {
+            public static void Postfix()
+            {
+                try
+                {
+                    if (_activeSquad3DLabels.Count == 0)
+                        return;
+
+                    bool show = VisionConfig.EnableMod.Value && VisionConfig.EnableMapSquadLabels.Value;
+                    foreach (var kv in _activeSquad3DLabels)
+                    {
+                        Marker3DGUI.Entry entry = kv.Value.Entry;
+                        UnityEngine.UI.Text txt = kv.Value.Txt;
+                        if (ReferenceEquals(txt, null) || txt == null || txt.gameObject == null)
+                            continue;
+
+                        bool entryVisible = show &&
+                                            entry != null &&
+                                            entry.img != null &&
+                                            entry.img.gameObject != null &&
+                                            entry.img.gameObject.activeSelf &&
+                                            entry.alpha > 0.01f;
+                        if (!entryVisible)
+                        {
+                            if (txt.gameObject.activeSelf)
+                                txt.gameObject.SetActive(false);
+                            continue;
+                        }
+
+                        Color c = txt.color;
+                        float targetAlpha = Mathf.Clamp01(entry.alpha * 1.15f);
+                        if (Mathf.Abs(c.a - targetAlpha) > 0.01f)
+                        {
+                            c.a = targetAlpha;
+                            txt.color = c;
+                        }
+                    }
                 }
                 catch { }
             }

@@ -41,6 +41,7 @@ namespace EasyRed2HumanAI
             public bool IsMoving;
             public bool IsPeeking;
             public bool HasCustomTarget;
+            public bool ClampDistForEmplacementShoot;
             public Vector3 CustomTargetPos;
         }
 

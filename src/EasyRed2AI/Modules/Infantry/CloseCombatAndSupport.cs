@@ -433,6 +433,59 @@ namespace EasyRed2HumanAI
             }
         }
 
+        internal static bool TryResolvePointBlankTargetSoldier(
+            SoldierAI ai,
+            out Soldier enemySoldier,
+            out bool isExposedEmplacementGunner)
+        {
+            enemySoldier = null;
+            isExposedEmplacementGunner = false;
+            if (ai == null || ai.visibleTarget == null)
+                return false;
+
+            Soldier s = ai.visibleTarget.TryCast<Soldier>();
+            if (s != null)
+            {
+                if (!s.IsAlive || s.HasSurrended())
+                    return false;
+
+                if (!s.IsOnVehicle())
+                {
+                    enemySoldier = s;
+                    return true;
+                }
+
+                Seats seat = s.currentVehicleSeat;
+                Vehicle v = s.GetCurrentVehicle();
+                if (seat != null && seat.showUnitSet && (v == null || v.TryCast<MovableVehicle>() == null))
+                {
+                    enemySoldier = s;
+                    isExposedEmplacementGunner = true;
+                    return true;
+                }
+                return false;
+            }
+
+            Vehicle veh = ai.visibleTarget.TryCast<Vehicle>();
+            if (veh != null && veh.TryCast<MovableVehicle>() == null && veh.seats != null)
+            {
+                var seats = veh.seats;
+                for (int i = 0; i < seats.Length; i++)
+                {
+                    Seats seat = seats[i];
+                    if (seat != null && seat.showUnitSet && seat.unitSet != null &&
+                        seat.unitSet.IsAlive && !seat.unitSet.HasSurrended())
+                    {
+                        enemySoldier = seat.unitSet;
+                        isExposedEmplacementGunner = true;
+                        return true;
+                    }
+                }
+            }
+
+            return false;
+        }
+
         private static bool IsEngagedInPointBlankMelee(
             SoldierAI ai,
             Soldier soldier,
@@ -491,14 +544,8 @@ namespace EasyRed2HumanAI
                 meleeEvalH.Combat.CachedMeleeEnemy = null;
             }
 
-            enemySoldier = ai.visibleTarget.TryCast<Soldier>();
-            if (enemySoldier == null ||
-                !enemySoldier.IsAlive ||
-                enemySoldier.IsOnVehicle() ||
-                enemySoldier.HasSurrended())
-            {
+            if (!TryResolvePointBlankTargetSoldier(ai, out enemySoldier, out bool isExposedEmplacementGunner))
                 return false;
-            }
 
             Vector3 myPos = soldier.transform.position;
             Vector3 enemyPos = enemySoldier.transform.position;
@@ -512,6 +559,11 @@ namespace EasyRed2HumanAI
             GenericGun heldGun = soldier.GetHeldGun();
             bool isPistol = heldGun != null && heldGun.IsPistol();
             bool gunEmptyOrReloading = AiCore.IsHeldGunEmptyOrReloading(soldier, heldGun);
+            // When facing an exposed static-emplacement gunner while holding a loaded firearm
+            // (and not charging or holding a melee weapon), shoot point-blank instead of lunging into the tripod!
+            if (isExposedEmplacementGunner && !gunEmptyOrReloading && !holdsMelee && !isChargingOrder)
+                return false;
+
             // CRITICAL: Use heldGun.boltActionRequired (isManualBoltOperated && bolt_required @ 0x180876300),
             // NEVER raw heldGun.bolt_required!
             bool boltCyclingClose = soldier.CantAimDueToBoltActionUsage ||
@@ -578,6 +630,12 @@ namespace EasyRed2HumanAI
                 strikeRange = hasBayonet ? 2.25f : unbayonetedStrikeRange;
             }
 
+            if (isExposedEmplacementGunner)
+            {
+                strikeRange = Mathf.Max(strikeRange, 1.65f);
+                lungeRange = Mathf.Max(lungeRange, strikeRange + 0.35f);
+            }
+
             if (dist > lungeRange)
                 return false;
 
@@ -586,12 +644,15 @@ namespace EasyRed2HumanAI
             if (!TryClaimMeleeTargetSlot(soldier, enemySoldier, now, out meleeSlotIndex))
                 return false;
 
-            Vector3 toEnemy = (enemyPos + Vector3.up * 1.05f) - (myPos + Vector3.up * 1.05f);
-            float checkDist = Mathf.Min(dist - 0.25f, 3.5f);
-            if (checkDist > 0.30f &&
-                AiCore.IsDirectionBlockedByEnvironment(myPos + Vector3.up * 1.05f, toEnemy.normalized, checkDist, soldier.transform.root))
+            if (!isExposedEmplacementGunner)
             {
-                return false;
+                Vector3 toEnemy = (enemyPos + Vector3.up * 1.05f) - (myPos + Vector3.up * 1.05f);
+                float checkDist = Mathf.Min(dist - 0.25f, 3.5f);
+                if (checkDist > 0.30f &&
+                    AiCore.IsDirectionBlockedByEnvironment(myPos + Vector3.up * 1.05f, toEnemy.normalized, checkDist, soldier.transform.root))
+                {
+                    return false;
+                }
             }
 
             if (meleeEvalH != null && curFrame > 0)
@@ -625,15 +686,17 @@ namespace EasyRed2HumanAI
 
             // Native Soldier+<MeleeDamageCR>d__489 (0x18077EB52) casts a horizontal 0.50m-radius OverlapCapsule
             // forward from Soldier.FacePosition() (animated headBone.position @ [rdx+160h]). Standing FacePosition().y (~1.62m)
-            // puts the capsule bottom at ~1.12m, passing completely over prone enemies (0.15m-0.55m) and skimming crouched ones!
-            // Crouch first and wait (~0.15s) until the animated headBone drops within strike height of the enemy's feet.
-            if (enemy.m_pose == SoldierPose.Prone || enemy.m_pose == SoldierPose.Crouch)
+            // puts the capsule bottom at ~1.12m, passing completely over prone/crouched enemies or seated low tripod gunners!
+            // Crouch first and wait briefly so the animated headBone drops within strike height.
+            bool isSeatedLowGunner = enemy.IsOnVehicle() && (soldier.FacePosition().y - enemy.FacePosition().y) > 0.38f;
+            if (enemy.m_pose == SoldierPose.Prone || enemy.m_pose == SoldierPose.Crouch || isSeatedLowGunner)
             {
                 if (soldier.m_pose != SoldierPose.Crouch || ai.actualPose != SoldierPose.Crouch)
                     SetBotPose(ai, soldier, SoldierPose.Crouch, true);
 
                 if (AiCore.CanBotChangePoseAutonomously(soldier) &&
-                    (soldier.FacePosition().y - enemy.transform.position.y) > 1.34f)
+                    ((!enemy.IsOnVehicle() && (soldier.FacePosition().y - enemy.transform.position.y) > 1.34f) ||
+                     (isSeatedLowGunner && soldier.m_pose != SoldierPose.Crouch)))
                 {
                     return;
                 }
@@ -746,11 +809,18 @@ namespace EasyRed2HumanAI
 
                     if (__instance.__1__state == 1 &&
                         __instance.mountedBlade == null &&
-                        __instance.dist < 0.95f &&
                         __instance.__4__this != null &&
                         !__instance.__4__this.IsPlayer())
                     {
-                        __instance.dist = 0.95f;
+                        float minReach = 0.95f;
+                        if (__instance.__4__this.aiController != null &&
+                            TryResolvePointBlankTargetSoldier(__instance.__4__this.aiController, out _, out bool isEmpGunner) &&
+                            isEmpGunner)
+                        {
+                            minReach = 1.45f;
+                        }
+                        if (__instance.dist < minReach)
+                            __instance.dist = minReach;
                     }
                 }
                 catch { }

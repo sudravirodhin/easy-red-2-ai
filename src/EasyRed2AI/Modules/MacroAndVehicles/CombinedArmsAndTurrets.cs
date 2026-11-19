@@ -173,6 +173,10 @@ namespace EasyRed2HumanAI
             _lastUnitMarkerTextComp = null;
             _lastUsedUnitMarkerIndex = -1;
             _insideMiniMapUpdate = false;
+            _lastPooledMarker3DEntry = null;
+            _squad3DMarkerEntries.Clear();
+            _marker3DEntryTexts.Clear();
+            _activeSquad3DLabels.Clear();
         }
 
         private struct PendingTurretIntercomHandoff
@@ -2078,7 +2082,7 @@ namespace EasyRed2HumanAI
             }
         }
 
-        private static void TryReleaseStaleStaticEmplacementCrew(
+        internal static void TryReleaseStaleStaticEmplacementCrew(
             Vehicle veh,
             Turret mainTurret,
             Vector3 vehPos,
@@ -2135,6 +2139,49 @@ namespace EasyRed2HumanAI
                     enemyInFiringSector = true;
             }
 
+            // Close flanking / storming infantry check directly against WorldSoldiers:
+            // bail if an enemy is within 18m outside the gun's traverse arc, or within 8.5m while
+            // the barrel points >55 deg away or the weapon is reloading.
+            if (!flankedBlindSpot)
+            {
+                TurretGun mainGun = mainTurret.TryCast<TurretGun>();
+                TurretWeapon selWep = mainGun != null ? mainGun.selectedWeapon : null;
+                bool gunReloading = selWep != null && selWep.IsReloading();
+                Vector3 gunFwd = mainTurret.GetFireDir();
+                int solCount = AiCore.WorldSoldierCount;
+                var soldiers = AiCore.WorldSoldiers;
+                const float maxFlankSq = 18.0f * 18.0f;
+                const float stormSq = 8.5f * 8.5f;
+
+                for (int j = 0; j < solCount; j++)
+                {
+                    ref AiCore.SoldierSnapshot sol = ref soldiers[j];
+                    if (sol.HasSurrendered || sol.IsInjured || !AiCore.AreEnemyFactions(occFaction, sol.Faction))
+                        continue;
+
+                    Vector3 toEnemy = sol.Pos - vehPos;
+                    if (Mathf.Abs(toEnemy.y) > 6.0f)
+                        continue;
+
+                    float dSq = toEnemy.sqrMagnitude;
+                    if (dSq > maxFlankSq)
+                        continue;
+
+                    bool inArc = canShoot360 || (dSq > 0.25f && mainTurret.IsPositionInDirection(toEnemy / Mathf.Sqrt(dSq)));
+                    if (!canShoot360 && !inArc)
+                    {
+                        flankedBlindSpot = true;
+                        break;
+                    }
+
+                    if (dSq <= stormSq && (gunReloading || Vector3.Angle(gunFwd, toEnemy) > 55.0f))
+                    {
+                        flankedBlindSpot = true;
+                        break;
+                    }
+                }
+            }
+
             bool anyFriendlySquadNear = false;
             if (!hasLiveTarget && !enemyInFiringSector && !outOfAmmo && !flankedBlindSpot)
             {
@@ -2167,19 +2214,20 @@ namespace EasyRed2HumanAI
                     continue;
 
                 var occParams = occ.Params;
-                if (occ.dontLeaveVehicle ||
-                    (occParams != null && (!occParams.canMove || occParams.neverLeaveVehicle)))
-                {
+                if (occParams != null && !occParams.canMove)
                     continue;
-                }
 
                 float occSupp = occ.GetSuppressionValue();
                 bool selfPreservationBail = occ.isBleeding ||
                                             nearBlast ||
                                             (!inConcreteBunker && s.showUnitSet && (occSupp >= 62f || (occSupp >= 45f && !hasLiveTarget)));
 
+                bool emergencyBail = selfPreservationBail || flankedBlindSpot || outOfAmmo;
+                if (!emergencyBail && (occ.dontLeaveVehicle || (occParams != null && occParams.neverLeaveVehicle)))
+                    continue;
+
                 bool soldierSquadMovedOn = false;
-                if (!hasLiveTarget && !enemyInFiringSector && !outOfAmmo && !flankedBlindSpot && !selfPreservationBail)
+                if (!hasLiveTarget && !enemyInFiringSector && !emergencyBail)
                 {
                     Squad sq = occ.joinedSquad;
                     Soldier leader = sq != null ? sq.Leader : null;
@@ -2212,9 +2260,7 @@ namespace EasyRed2HumanAI
                     }
                 }
 
-                if (!outOfAmmo &&
-                    !flankedBlindSpot &&
-                    !selfPreservationBail &&
+                if (!emergencyBail &&
                     (hasLiveTarget || enemyInFiringSector || (anyFriendlySquadNear && !soldierSquadMovedOn)))
                 {
                     continue;
@@ -2222,12 +2268,14 @@ namespace EasyRed2HumanAI
 
                 try
                 {
-                    ClearEmplacementAssignment(occ.Pointer, markUnreachable: true, selfPreservationBail ? 45.0f : 90.0f);
+                    ClearEmplacementAssignment(occ.Pointer, markUnreachable: true, (selfPreservationBail || flankedBlindSpot) ? 45.0f : 90.0f);
+                    if (occ.dontLeaveVehicle)
+                        occ.dontLeaveVehicle = false;
                     occ.CoverPosition(null);
                     if (occ.IsOnVehicle())
                         veh.GetOffVehicle(occ);
 
-                    if (selfPreservationBail && occ.aiController != null)
+                    if ((selfPreservationBail || flankedBlindSpot) && occ.aiController != null)
                     {
                         TrySeekNearbyCover(occ.aiController, occ);
                         SetBotPose(occ.aiController, occ, SoldierPose.Crouch, true);

@@ -345,7 +345,14 @@ namespace EasyRed2HumanAI
                  (ws & (GoapStateBits.InPointBlankRange | GoapStateBits.OnBridgeOrNarrow)) == 0 &&
                  activeStep != GoapActionId.TacticalFallbackRetreat &&
                  activeStep != GoapActionId.ThrowSmokeScreen) ||
-                ((ws & GoapStateBits.RadioLinkDrifting) != 0 && activeStep != GoapActionId.MaintainRadioLinkWithLeader) ||
+                ((ws & GoapStateBits.RadioLinkDrifting) != 0 &&
+                 activeStep != GoapActionId.MaintainRadioLinkWithLeader &&
+                 (ws & (GoapStateBits.IsBleeding |
+                        GoapStateBits.InPointBlankRange |
+                        GoapStateBits.CanFireAtVisibleEnemy |
+                        GoapStateBits.IsSuppressed |
+                        GoapStateBits.IsHeavilySuppressed |
+                        GoapStateBits.NearFreshCasualty)) == 0) ||
                 (nonBleedingBailedCrew &&
                  activeStep != GoapActionId.LoneWolfLinkUpOrAmbush &&
                  activeStep != GoapActionId.ThrowSmokeScreen) ||
@@ -1314,6 +1321,17 @@ namespace EasyRed2HumanAI
                     if (sq != null && sq.Leader != null && sq.Leader.IsAlive && sq.Leader.transform != null)
                     {
                         Vector3 leaderPos = sq.Leader.transform.position;
+                        if (soldier.HasDestinationAssigned && soldier.targetDestination != null)
+                        {
+                            Vector3 covPos = soldier.targetDestination.GetCoverPosition();
+                            if ((covPos - leaderPos).sqrMagnitude > 15.0f * 15.0f)
+                            {
+                                if (shGoap != null)
+                                    shGoap.Stance.LocalCoverProtectedUntil = 0f;
+                                soldier.CoverPosition(null);
+                            }
+                        }
+
                         Vector3 radioThreatDir = GetEffectiveThreatDirection(soldier, sq, leaderPos, board.ThreatDirection);
                         // Position the Radioman 3.5m behind the Squad Leader (away from the enemy threat line)
                         Vector3 safeRadioSpot = leaderPos - radioThreatDir * 3.5f;
@@ -3336,30 +3354,6 @@ namespace EasyRed2HumanAI
             return true;
         }
 
-        private static float GetClosestSquadMemberDistSq(
-            ref AiCore.SquadSnapshot sqSnap,
-            AiCore.SoldierSnapshot[] worldSoldiers,
-            int worldSoldierCount,
-            Vector3 fromPos,
-            out Vector3 closestPos)
-        {
-            closestPos = sqSnap.RefPos;
-            float bestDistSq = (closestPos - fromPos).sqrMagnitude;
-            int uStart = sqSnap.UnitStartIndex;
-            int uEnd = Math.Min(worldSoldierCount, uStart + sqSnap.UnitCount);
-            for (int uIdx = uStart; uIdx < uEnd; uIdx++)
-            {
-                Vector3 mPos = worldSoldiers[uIdx].Pos;
-                float mDistSq = (mPos - fromPos).sqrMagnitude;
-                if (mDistSq < bestDistSq)
-                {
-                    bestDistSq = mDistSq;
-                    closestPos = mPos;
-                }
-            }
-            return bestDistSq;
-        }
-
         internal static bool TryLinkUpOrJoinFriendlySquad(
             SoldierAI ai,
             Soldier self,
@@ -3375,14 +3369,12 @@ namespace EasyRed2HumanAI
 
             float bestSq = maxRadius * maxRadius;
             Squad bestSquad = null;
-            Vector3 linkUpPos = Vector3.zero;
+            Vector3 leaderPos = Vector3.zero;
             string myFaction = self.faction;
             IntPtr mySqPtr = self.joinedSquad != null ? self.joinedSquad.Pointer : IntPtr.Zero;
             bool selfIsPlayer = self.IsPlayer();
 
             var squads = AiCore.WorldSquads;
-            var wSoldiers = AiCore.WorldSoldiers;
-            int wSolCount = AiCore.WorldSoldierCount;
             for (int i = 0; i < sqCount; i++)
             {
                 ref AiCore.SquadSnapshot other = ref squads[i];
@@ -3394,113 +3386,28 @@ namespace EasyRed2HumanAI
                 if (!selfIsPlayer && other.IsPlayerInSquad && other.UnitCount >= 8)
                     continue;
 
-                float dSq = GetClosestSquadMemberDistSq(ref other, wSoldiers, wSolCount, myPos, out Vector3 nearestPos);
-
+                float dSq = (other.RefPos - myPos).sqrMagnitude;
                 if (dSq < bestSq)
                 {
                     bestSq = dSq;
                     bestSquad = other.Ref;
-                    linkUpPos = nearestPos;
+                    leaderPos = other.RefPos;
                 }
             }
 
-            if (bestSquad == null)
+            if (bestSquad == null || ai == null)
                 return false;
 
-            // Merge lone survivor (AI or lone human player within 15m-18m) properly into bestSquad via native Squad.Join!
-            // Squad.Join (0x180806A00) leaves the old squad, updates self.joinedSquad, syncs RPC_JoinSquad online when OwnSyncher, and updates GUI.
-            float joinRadius = selfIsPlayer ? 15.0f : 18.0f;
-            if (bestSq <= joinRadius * joinRadius)
-            {
-                try
-                {
-                    Soldier targetLeader = bestSquad.Leader;
-                    if (bestSquad.units != null &&
-                        bestSquad.units.Count < 10 &&
-                        targetLeader != null &&
-                        !bestSquad.InInside(self))
-                    {
-                        if (selfIsPlayer)
-                        {
-                            SyncSoldier selfSyn = self.soldierSyncher;
-                            bool localOwnedPlayer = !AiCore.IsInMultiplayerRoom() || selfSyn == null || selfSyn.OwnSyncher;
-                            if (localOwnedPlayer)
-                            {
-                                bestSquad.Join(self);
-                                return self.joinedSquad != null && self.joinedSquad.Pointer == bestSquad.Pointer;
-                            }
-                            else if (AiCore.IsMasterClient() && selfSyn != null && AiCore.TryConsumeBotRpcBudget(0.45f))
-                            {
-                                // Remote unmodded Co-op lone survivor: Syncher inherits PhotonView directly!
-                                string guidStr = bestSquad.InstanceID.ToString();
-                                if (!string.IsNullOrEmpty(guidStr))
-                                {
-                                    var rpcArgs = new Il2CppInterop.Runtime.InteropTypes.Arrays.Il2CppReferenceArray<Il2CppSystem.Object>(2);
-                                    rpcArgs[0] = (Il2CppSystem.String)guidStr;
-                                    rpcArgs[1] = (Il2CppSystem.String)(bestSquad.squadCode ?? bestSquad.squadName ?? string.Empty);
-                                    selfSyn.RPC("SyncSquad", Photon.Pun.RpcTarget.All, rpcArgs);
-                                    return true;
-                                }
-                            }
-                        }
-                        else if (AiCore.IsLocallyOwnedBot(self) &&
-                                 (targetLeader.IsPlayer() || AiCore.IsLocallyOwnedBot(targetLeader)) &&
-                                 AiCore.TryConsumeBotRpcBudget())
-                        {
-                            bestSquad.Join(self);
-                            if (self.joinedSquad != null && self.joinedSquad.Pointer == bestSquad.Pointer)
-                            {
-                                Vector3 targetOrderPos = (bestSquad.order != Order.follow && bestSquad.moveOrderPosition.sqrMagnitude > 0.1f)
-                                    ? bestSquad.moveOrderPosition
-                                    : linkUpPos;
-                                activeMoveDest = targetOrderPos;
-                                if (ai != null)
-                                {
-                                    float targetRadius = bestSquad.order != Order.follow
-                                        ? Mathf.Clamp(bestSquad.moveOrderRadius * 0.5f, 3.5f, 12.0f)
-                                        : 3.5f;
-                                    AiCore.MoveBotTowardPosition(ai, self, targetOrderPos, targetRadius, 4.0f);
-                                }
-
-                                GoapPlansExecutedCount++;
-                                if (bestSquad.IsPlayerInSquad())
-                                {
-                                    string callsign = AiCore.FormatSquadPhoneticCallsign(bestSquad);
-                                    AiCore.TryShowLocalPlayerRadioHint(
-                                        bestSquad,
-                                        $"Straggler linked up \u2014 reinforced {callsign}",
-                                        requireLeader: false,
-                                        minInterval: 12.0f);
-                                }
-                                if (VisionConfig.DebugLogging.Value)
-                                {
-                                    AiCore.LogDebug(
-                                        "GoapMerge",
-                                        $"{myFaction} lone survivor / bailed crewman merged into friendly squad '{bestSquad.squadName}'.",
-                                        3.0f);
-                                }
-                                return true;
-                            }
-                        }
-                    }
-                }
-                catch { }
-            }
-
-            if (ai != null)
-            {
-                activeMoveDest = linkUpPos;
-                AiCore.MoveBotTowardPosition(ai, self, linkUpPos, 3.5f, 3.0f);
-                return true;
-            }
-
-            return false;
+            // Steer lone AI stragglers/survivors directly toward the friendly Squad Leader;
+            // once within 10m of the Squad Leader, vanilla Squad.UpdateSquadData handles the native merge & SyncSquad RPC.
+            activeMoveDest = leaderPos;
+            AiCore.MoveBotTowardPosition(ai, self, leaderPos, 3.5f, 3.0f);
+            return true;
         }
 
         private static float _nextLonePlayerRejoinCheckTime;
         private static readonly HashSet<IntPtr> _hadMultiMemberPlayerSquads = new HashSet<IntPtr>();
-        private static readonly Dictionary<IntPtr, IntPtr> _warnedWipedSquadByPlayerSoldier = new Dictionary<IntPtr, IntPtr>(8);
-        private static readonly Dictionary<IntPtr, float> _lonePlayerRejoinEligibleAfterTime = new Dictionary<IntPtr, float>(8);
+        internal static readonly Dictionary<IntPtr, IntPtr> _warnedWipedSquadByPlayerSoldier = new Dictionary<IntPtr, IntPtr>(8);
 
         public static void UpdateLonePlayerSquadStatusAndRejoin()
         {
@@ -3516,8 +3423,6 @@ namespace EasyRed2HumanAI
                 _hadMultiMemberPlayerSquads.Clear();
             if (_warnedWipedSquadByPlayerSoldier.Count > 32)
                 _warnedWipedSquadByPlayerSoldier.Clear();
-            if (_lonePlayerRejoinEligibleAfterTime.Count > 32)
-                _lonePlayerRejoinEligibleAfterTime.Clear();
 
             // 1. Local Player
             Soldier localPlayer = Soldier.CurrentControlledSoldierOrNull();
@@ -3586,61 +3491,33 @@ namespace EasyRed2HumanAI
             if (activeOrDownedCount != 1 || !_hadMultiMemberPlayerSquads.Contains(sq.Pointer))
                 return;
 
-            Vector3 pPos = player.transform.position;
             IntPtr oldSqPtr = sq.Pointer;
-            float now = Time.time;
-
-            // Always show one-time wiped-squad warning before auto-linkup:
-            // If the player is >15m from the nearest friendly squad, allow immediate linkup as soon as they close within 15m!
-            if (!_warnedWipedSquadByPlayerSoldier.TryGetValue(player.Pointer, out IntPtr warnedSq) || warnedSq != oldSqPtr)
-            {
-                _warnedWipedSquadByPlayerSoldier[player.Pointer] = oldSqPtr;
-                bool hasNearSq = TryFindNearestOpenFriendlyFootSquad(player.faction, oldSqPtr, pPos, out Squad nearSq, out Vector3 nearPos);
-                float nearDist = hasNearSq ? Vector3.Distance(pPos, nearPos) : 999f;
-                _lonePlayerRejoinEligibleAfterTime[player.Pointer] = nearDist <= 15.0f ? (now + 1.25f) : now;
-
-                string warnMsg;
-                if (player.HasRadio() && hasNearSq)
-                {
-                    string callsign = AiCore.FormatSquadPhoneticCallsign(nearSq);
-                    string bearing = AiCore.FormatRelativeBearingAndDistance(pPos, nearPos);
-                    warnMsg = $"Field Radio: Squad wiped out \u2014 {callsign} is {bearing}, link up to rejoin";
-                }
-                else
-                {
-                    warnMsg = "Your squad was wiped out \u2014 find a friendly squad to rejoin";
-                }
-
-                if (isLocalPlayer)
-                {
-                    try { PlayerController.HintToPlayer(warnMsg, false); } catch { }
-                }
-                else if (remoteVanillaOwner != null)
-                {
-                    AiCore.SendTargetedVanillaChatMessage(remoteVanillaOwner, warnMsg, minPlayerInterval: 10.0f);
-                }
+            if (_warnedWipedSquadByPlayerSoldier.TryGetValue(player.Pointer, out IntPtr warnedSq) && warnedSq == oldSqPtr)
                 return;
+
+            _warnedWipedSquadByPlayerSoldier[player.Pointer] = oldSqPtr;
+            Vector3 pPos = player.transform.position;
+            bool hasNearSq = TryFindNearestOpenFriendlyFootSquad(player.faction, oldSqPtr, pPos, out Squad nearSq, out Vector3 nearLeaderPos);
+
+            string warnMsg;
+            if (player.HasRadio() && hasNearSq)
+            {
+                string callsign = AiCore.FormatSquadPhoneticCallsign(nearSq);
+                string bearing = AiCore.FormatRelativeBearingAndDistance(pPos, nearLeaderPos);
+                warnMsg = $"Field Radio: Squad wiped out \u2014 {callsign} Leader is {bearing}, approach to rejoin";
+            }
+            else
+            {
+                warnMsg = "Your squad was wiped out \u2014 approach a friendly squad leader to rejoin";
             }
 
-            if (_lonePlayerRejoinEligibleAfterTime.TryGetValue(player.Pointer, out float eligTime) && now < eligTime)
-                return;
-
-            // Reuse existing TryLinkUpOrJoinFriendlySquad when within 15m of any member of an open friendly foot squad!
-            if (TryLinkUpOrJoinFriendlySquad(null, player, pPos, 15.0f, out _))
+            if (isLocalPlayer)
             {
-                Squad newSq = player.joinedSquad;
-                string joinedCallsign = (newSq != null && newSq.Pointer != IntPtr.Zero && newSq.Pointer != oldSqPtr)
-                    ? AiCore.FormatSquadPhoneticCallsign(newSq)
-                    : "Allied Squad";
-                string joinMsg = $"Linked up \u2014 joined {joinedCallsign}!";
-                if (isLocalPlayer)
-                {
-                    try { PlayerController.HintToPlayer(joinMsg, false); } catch { }
-                }
-                else if (remoteVanillaOwner != null)
-                {
-                    AiCore.SendTargetedVanillaChatMessage(remoteVanillaOwner, joinMsg, minPlayerInterval: 8.0f);
-                }
+                try { PlayerController.HintToPlayer(warnMsg, false); } catch { }
+            }
+            else if (remoteVanillaOwner != null)
+            {
+                AiCore.SendTargetedVanillaChatMessage(remoteVanillaOwner, warnMsg, minPlayerInterval: 10.0f);
             }
         }
 
@@ -3649,18 +3526,16 @@ namespace EasyRed2HumanAI
             IntPtr excludeSqPtr,
             Vector3 fromPos,
             out Squad nearestSquad,
-            out Vector3 nearestPos)
+            out Vector3 nearestLeaderPos)
         {
             nearestSquad = null;
-            nearestPos = fromPos;
+            nearestLeaderPos = fromPos;
             if (string.IsNullOrEmpty(myFaction))
                 return false;
 
             AiCore.EnsureWorldSnapshot();
             int sqCount = AiCore.WorldSquadCount;
             var squads = AiCore.WorldSquads;
-            var wSoldiers = AiCore.WorldSoldiers;
-            int wSolCount = AiCore.WorldSoldierCount;
             float bestDistSq = 450.0f * 450.0f;
 
             for (int i = 0; i < sqCount; i++)
@@ -3678,13 +3553,12 @@ namespace EasyRed2HumanAI
                     continue;
                 }
 
-                float dSq = GetClosestSquadMemberDistSq(ref other, wSoldiers, wSolCount, fromPos, out Vector3 candPos);
-
+                float dSq = (other.RefPos - fromPos).sqrMagnitude;
                 if (dSq < bestDistSq)
                 {
                     bestDistSq = dSq;
                     nearestSquad = other.Ref;
-                    nearestPos = candPos;
+                    nearestLeaderPos = other.RefPos;
                 }
             }
 

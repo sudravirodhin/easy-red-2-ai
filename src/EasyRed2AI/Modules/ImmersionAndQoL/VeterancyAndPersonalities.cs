@@ -740,6 +740,22 @@ namespace EasyRed2HumanAI
                     Vehicle veh = traits.VehHandles != null ? traits.VehHandles.Ref : AiCore.GetCachedTurretVehicle(turret);
                     bool owned = (__0 != null && AiCore.IsLocallyOwnedBot(__0)) || AiCore.IsLocallyOwnedVehicle(veh);
 
+                    if (owned &&
+                        !traits.IsCommanderTurret &&
+                        traits.VehHandles != null &&
+                        traits.VehHandles.IsStaticEmplacement &&
+                        veh != null &&
+                        now >= traits.VehHandles.NextStaticSelfPreservationCheckTime)
+                    {
+                        traits.VehHandles.NextStaticSelfPreservationCheckTime = now + 0.45f;
+                        AiCore.EnsureWorldSnapshot();
+                        Vector3 vehPos = traits.VehHandles.Tr != null ? traits.VehHandles.Tr.position : veh.transform.position;
+                        bool hasAmmo = HasAnyEmplacementTurretAmmo(veh, turret);
+                        TryReleaseStaleStaticEmplacementCrew(veh, turret, vehPos, hasAmmo, now, AiCore.WorldSquads, AiCore.WorldSquadCount);
+                        if (__0 != null && !__0.IsOnVehicle())
+                            return;
+                    }
+
                     // Active 360-Degree Tank Commander Periscope / Cupola Horizon Scan:
                     // Native TurretAI.AutoPilot (0x180830802) returns immediately when CurrentVisibleTarget == null without
                     // ever calling TurretCommander.RotateToward, leaving the Commander's periscope frozen dead ahead!

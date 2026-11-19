@@ -143,23 +143,6 @@ function Sync-Er2CacheIfNeeded {
         }
     }
 
-    if (-not $needsRebuild) {
-        return
-    }
-
-    Write-Host "[0/2] GameAssembly change or -RebuildCache detected: re-ripping ER2 disassembly, Lua scripts & interop cache..." -ForegroundColor Yellow
-
-    $gameInterop = Join-Path $ResolvedGameDir "BepInEx\interop"
-    $localInterop = Join-Path $WorkspaceRoot "tools\bepinex\extracted\BepInEx\interop"
-    if ((Test-Path (Join-Path $gameInterop "Assembly-CSharp.dll")) -and (Test-Path $localInterop)) {
-        $srcVer = (Get-Item (Join-Path $gameInterop "Assembly-CSharp.dll")).LastWriteTimeUtc
-        $dstDll = Join-Path $localInterop "Assembly-CSharp.dll"
-        if (-not (Test-Path $dstDll) -or $srcVer -gt (Get-Item $dstDll).LastWriteTimeUtc) {
-            Write-Host "  -> Syncing updated BepInEx\interop\*.dll into tools\bepinex\extracted\BepInEx\interop..." -ForegroundColor Cyan
-            Copy-Item -Path (Join-Path $gameInterop "*.dll") -Destination $localInterop -Force
-        }
-    }
-
     $giDir = Join-Path $WorkspaceRoot "tools\gen_interop"
     $inspectSrc = Join-Path $giDir "Inspect.cs"
     $inspectDll = Join-Path $giDir "InspectInterop.dll"
@@ -187,6 +170,23 @@ function Sync-Er2CacheIfNeeded {
             $inspectSrc
         if ($LASTEXITCODE -ne 0) {
             throw "Failed to compile InspectInterop.dll with exit code $LASTEXITCODE"
+        }
+    }
+
+    if (-not $needsRebuild) {
+        return
+    }
+
+    Write-Host "[0/2] GameAssembly change or -RebuildCache detected: re-ripping ER2 disassembly, Lua scripts & interop cache..." -ForegroundColor Yellow
+
+    $gameInterop = Join-Path $ResolvedGameDir "BepInEx\interop"
+    $localInterop = Join-Path $WorkspaceRoot "tools\bepinex\extracted\BepInEx\interop"
+    if ((Test-Path (Join-Path $gameInterop "Assembly-CSharp.dll")) -and (Test-Path $localInterop)) {
+        $srcVer = (Get-Item (Join-Path $gameInterop "Assembly-CSharp.dll")).LastWriteTimeUtc
+        $dstDll = Join-Path $localInterop "Assembly-CSharp.dll"
+        if (-not (Test-Path $dstDll) -or $srcVer -gt (Get-Item $dstDll).LastWriteTimeUtc) {
+            Write-Host "  -> Syncing updated BepInEx\interop\*.dll into tools\bepinex\extracted\BepInEx\interop..." -ForegroundColor Cyan
+            Copy-Item -Path (Join-Path $gameInterop "*.dll") -Destination $localInterop -Force
         }
     }
 
