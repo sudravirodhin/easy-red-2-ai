@@ -657,6 +657,14 @@ namespace EasyRed2HumanAI
                     float now = Time.time;
                     _claimedVehicleDestinations[vehPtr] = __instance.setVehicleDestination;
 
+                    AiCore.VehicleFastHandles vehH = AiCore.GetOrCreateVehicleHandles(veh);
+                    if (vehH != null)
+                    {
+                        vehH.AiVeh = __instance;
+                        vehH.AiVehChecked = true;
+                    }
+                    TryEvaluateLoneDriverCombatOrBailout(__instance, veh, vehH, now);
+
                     if (VisionConfig.EnableSmartApcDismount.Value)
                     {
                         if (!_nextApcCheckTime.TryGetValue(vehPtr, out float nextCheck) || now >= nextCheck)

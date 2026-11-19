@@ -30,7 +30,9 @@ namespace EasyRed2HumanAI
         UnSurrender = 16,
         RetreatDespawn = 17,
         VehicleBailout = 18,
-        AnomalyAlert = 19
+        AnomalyAlert = 19,
+        EmplacementBoard = 20,
+        EmplacementBail = 21
     }
 
     /// <summary>
@@ -652,6 +654,8 @@ namespace EasyRed2HumanAI
                 case BotTraceEventKind.RetreatDespawn: return "retreat_despawn";
                 case BotTraceEventKind.VehicleBailout: return "vehicle_bailout";
                 case BotTraceEventKind.AnomalyAlert: return "anomaly_alert";
+                case BotTraceEventKind.EmplacementBoard: return "emplacement_board";
+                case BotTraceEventKind.EmplacementBail: return "emplacement_bail";
                 default: return "event";
             }
         }

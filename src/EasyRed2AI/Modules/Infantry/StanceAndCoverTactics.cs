@@ -47,6 +47,17 @@ namespace EasyRed2HumanAI
             }
 
             AiCore.SoldierFastHandles sh = AiCore.GetOrCreateSoldierHandles(soldier);
+            float now = Time.time;
+
+            bool isActivelyBandaging = sh != null &&
+                                       now < sh.Stance.BandageLowPoseUntil &&
+                                       (soldier.isBleeding || soldier.stopHandsAnim_end > now);
+            if (isActivelyBandaging && pose == SoldierPose.Idle && !soldier.IsJumping())
+            {
+                pose = ai.IsMoving()
+                    ? SoldierPose.Crouch
+                    : (sh.Stance.BandageTargetPose >= SoldierPose.Crouch ? sh.Stance.BandageTargetPose : SoldierPose.Crouch);
+            }
 
             // Indoor Ceiling & Bridge Prone Prevention: prevent dropping Prone under windowsills/stairs or on bridge decks
             if (pose == SoldierPose.Prone && !soldier.isBleeding)
@@ -111,6 +122,7 @@ namespace EasyRed2HumanAI
 
             bool isUrgentTransition = !blockCombativeStandOverride &&
                                       (forceImmediate ||
+                                       (soldier.isBleeding && pose >= SoldierPose.Crouch) ||
                                        (soldier.m_pose != SoldierPose.Idle && pose == SoldierPose.Idle && ai.IsMoving()) ||
                                        (soldier.m_pose == SoldierPose.Prone && ai.IsMoving()) ||
                                        (soldier.m_pose == SoldierPose.Idle && pose >= SoldierPose.Crouch && !ai.IsMoving() &&
@@ -132,6 +144,48 @@ namespace EasyRed2HumanAI
 
             ai.actualPose = pose;
             soldier.SetPose(pose, true, false, 0.2f);
+        }
+
+        internal static SoldierPose GetPreferredBandagePose(Soldier soldier, AiCore.SoldierFastHandles h, float now)
+        {
+            if (soldier == null)
+                return SoldierPose.Crouch;
+
+            Vector3 pos = (h != null && h.Tr != null)
+                ? h.Tr.position
+                : (soldier.transform != null ? soldier.transform.position : Vector3.zero);
+
+            bool forceCrouchForEnv = (h != null && now < h.Stance.NoProneUntil) ||
+                                     (VisionConfig.EnableBridgeCrossingDiscipline.Value && AiCore.IsOnBridgeOrNarrowCrossing(pos)) ||
+                                     (VisionConfig.EnableIndoorCeilingPronePrevention.Value && AiCore.HasLowCeilingOverhead(pos, 3.0f)) ||
+                                     (AiCore.TryGetActiveWaterLevel(out float waterY) && pos.y <= waterY + 0.55f);
+            if (forceCrouchForEnv)
+                return SoldierPose.Crouch;
+
+            if (soldier.IsOnCover() && soldier.GetSuppressionValue() < 48f)
+                return SoldierPose.Crouch;
+
+            return SoldierPose.Prone;
+        }
+
+        internal static void ApplyBandageLowPose(SoldierAI ai, Soldier soldier, AiCore.SoldierFastHandles h, float now)
+        {
+            if (ai == null || soldier == null || !AiCore.IsLocallyOwnedBot(soldier) || AiCore.IsSoldierInVehicleOrTransition(soldier))
+                return;
+
+            SoldierPose pose = GetPreferredBandagePose(soldier, h, now);
+            if (h != null)
+            {
+                h.Stance.BandageTargetPose = pose;
+                float lowUntil = now + 4.35f;
+                if (lowUntil > h.Stance.BandageLowPoseUntil)
+                    h.Stance.BandageLowPoseUntil = lowUntil;
+            }
+
+            if (!soldier.IsOnCover() && ai.IsMoving())
+                ai.Stop(false);
+
+            SetBotPose(ai, soldier, pose, forceImmediate: true);
         }
 
         internal static Vector3 GetCachedMoveEndpoint(AiCore.SoldierFastHandles h, SoldierAI ai, Soldier soldier, out int nodesCount)
@@ -1572,9 +1626,9 @@ namespace EasyRed2HumanAI
                         }
                         else if (!VisionConfig.BandageOnlyAfterFindingCover.Value)
                         {
+                            ApplyBandageLowPose(__instance, soldier, h, nowBleed);
                             if (!soldier.isInBodyAnimation && !soldier.isInHandsAnimation)
                             {
-                                SetBotPose(__instance, soldier, SoldierPose.Crouch);
                                 __instance.TryStopBleeding();
                             }
                             return;
@@ -1584,8 +1638,7 @@ namespace EasyRed2HumanAI
                             bool readyToBandage = soldier.IsOnCover() || nowBleed >= deadline;
                             if (readyToBandage)
                             {
-                                SoldierPose healPose = (soldier.IsOnCover() || isOnBridge) ? SoldierPose.Crouch : SoldierPose.Prone;
-                                SetBotPose(__instance, soldier, healPose);
+                                ApplyBandageLowPose(__instance, soldier, h, nowBleed);
                                 if (!soldier.isInBodyAnimation && !soldier.isInHandsAnimation)
                                 {
                                     __instance.TryStopBleeding();
@@ -1623,22 +1676,30 @@ namespace EasyRed2HumanAI
                     // Lift any indoor or bridge soldier that vanilla AI placed into Prone
                     if (soldier.m_pose == SoldierPose.Prone)
                     {
+                        float nowLift = Time.time;
                         if (VisionConfig.EnableIndoorCeilingPronePrevention.Value &&
                             AiCore.HasLowCeilingOverhead(soldier.transform.position, 3.0f))
                         {
+                            if (nowLift < h.Stance.BandageLowPoseUntil)
+                                h.Stance.BandageTargetPose = SoldierPose.Crouch;
                             SetBotPose(__instance, soldier, SoldierPose.Crouch, true);
-                            h.Stance.NoProneUntil = Time.time + 10.0f;
-                            if (Time.time >= h.Stance.NextIndoorCeilingCountTime)
+                            h.Stance.NoProneUntil = nowLift + 10.0f;
+                            if (nowLift >= h.Stance.NextIndoorCeilingCountTime)
                             {
-                                h.Stance.NextIndoorCeilingCountTime = Time.time + 5.0f;
+                                h.Stance.NextIndoorCeilingCountTime = nowLift + 5.0f;
                                 IndoorPronePreventedCount++;
                             }
                         }
                         else if (isOnBridge)
                         {
-                            bool bridgeMoving = __instance.IsMoving() || IsAsyncPathRefreshPending(__instance, soldier, h.Tr.position, Time.time);
-                            SetBotPose(__instance, soldier, bridgeMoving ? SoldierPose.Idle : SoldierPose.Crouch, true);
-                            h.Stance.NoProneUntil = Time.time + 4.0f;
+                            bool bridgeMoving = __instance.IsMoving() || IsAsyncPathRefreshPending(__instance, soldier, h.Tr.position, nowLift);
+                            bool activelyBandaging = nowLift < h.Stance.BandageLowPoseUntil &&
+                                                     (soldier.isBleeding || soldier.stopHandsAnim_end > nowLift);
+                            SoldierPose bridgeTargetPose = (bridgeMoving && !activelyBandaging) ? SoldierPose.Idle : SoldierPose.Crouch;
+                            if (nowLift < h.Stance.BandageLowPoseUntil)
+                                h.Stance.BandageTargetPose = SoldierPose.Crouch;
+                            SetBotPose(__instance, soldier, bridgeTargetPose, true);
+                            h.Stance.NoProneUntil = nowLift + 4.0f;
                         }
                     }
 

@@ -65,6 +65,7 @@ namespace EasyRed2HumanAI
             // Bundle 2-5: Infantry Combat, Cover, Macro & Vehicles, Veterancy & Personalities, UI & QoL
             SafePatch(typeof(VeteranAndTacticsPatches.SoldierAI_SequentialUpdate_Patch));
             SafePatch(typeof(VeteranAndTacticsPatches.SoldierAI_TryStopBleeding_Patch));
+            SafePatch(typeof(VeteranAndTacticsPatches.Soldier_UseBandages_Patch));
             SafePatch(typeof(VeteranAndTacticsPatches.SoldierAI_IsMoveTime_Patch));
             SafePatch(typeof(VeteranAndTacticsPatches.SoldierAI_ProcessAiAccuracy_Patch));
             SafePatch(typeof(VeteranAndTacticsPatches.SoldierAI_OnSuppressed_Patch));

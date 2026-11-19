@@ -886,6 +886,179 @@ namespace EasyRed2HumanAI
             }
         }
 
+        private static bool HasEnemySoldierNearPosition(
+            Vector3 center,
+            string friendlyFaction,
+            float maxHorizDist,
+            float maxVertDist)
+        {
+            if (string.IsNullOrEmpty(friendlyFaction))
+                return false;
+
+            AiCore.EnsureWorldSnapshot();
+            int solCount = AiCore.WorldSoldierCount;
+            var soldiers = AiCore.WorldSoldiers;
+            float maxDistSq = maxHorizDist * maxHorizDist;
+            for (int i = 0; i < solCount; i++)
+            {
+                ref AiCore.SoldierSnapshot sSnap = ref soldiers[i];
+                if (sSnap.HasSurrendered || sSnap.IsInjured || !AiCore.AreEnemyFactions(friendlyFaction, sSnap.Faction))
+                    continue;
+
+                Vector3 d = sSnap.Pos - center;
+                if (Mathf.Abs(d.y) > maxVertDist)
+                    continue;
+
+                if ((d.x * d.x + d.z * d.z) <= maxDistSq)
+                    return true;
+            }
+            return false;
+        }
+
+        internal static void TryEvaluateLoneDriverCombatOrBailout(
+            AIVehicle aiVeh,
+            Vehicle veh,
+            AiCore.VehicleFastHandles vh,
+            float now)
+        {
+            if (aiVeh == null || veh == null || vh == null || veh.Pointer == IntPtr.Zero || veh.transform == null)
+                return;
+
+            if (!AiCore.IsLocallyOwnedVehicle(veh) ||
+                veh.PlayerIsInside() ||
+                veh.IsAirVehicle() ||
+                veh.IsTransportVehicle() ||
+                veh.IsDisabled() ||
+                !vh.IsWheeledOrTank)
+            {
+                return;
+            }
+
+            int inside = veh.peopleInside;
+            if (vh.LastObservedPeopleInside > 0 && inside < vh.LastObservedPeopleInside)
+                vh.LastCrewLossTime = now;
+            vh.LastObservedPeopleInside = inside;
+
+            if (now < vh.NextLoneDriverEvalTime)
+                return;
+            vh.NextLoneDriverEvalTime = now + 0.6f;
+
+            if (inside != 1)
+                return;
+
+            var seats = veh.seats;
+            if (seats == null || seats.Length == 0)
+                return;
+
+            Soldier sole = null;
+            Seats fallbackArmedTurretSeat = null;
+            Seats anyArmedTurretSeat = null;
+            int seatCount = seats.Length;
+            for (int i = 0; i < seatCount; i++)
+            {
+                Seats s = seats[i];
+                if (s == null)
+                    continue;
+
+                Soldier u = s.unitSet;
+                if (sole == null && u != null && u.IsAlive)
+                    sole = u;
+
+                if (s.hasTurret && s.connectedTurret != null && s.connectedTurret.WeaponsCount() > 0)
+                {
+                    if (anyArmedTurretSeat == null)
+                        anyArmedTurretSeat = s;
+                    if (fallbackArmedTurretSeat == null && HasAnyEmplacementTurretAmmo(veh, s.connectedTurret))
+                        fallbackArmedTurretSeat = s;
+                }
+            }
+
+            if (sole == null ||
+                !sole.IsAlive ||
+                sole.IsPlayer() ||
+                !AiCore.IsLocallyOwnedBot(sole) ||
+                sole.dontLeaveVehicle ||
+                (sole.Params != null && sole.Params.neverLeaveVehicle))
+            {
+                return;
+            }
+
+            Seats mainSeat = veh.MainTurretSeat;
+            Seats activeWeaponSeat = mainSeat != null ? mainSeat : (fallbackArmedTurretSeat ?? anyArmedTurretSeat);
+            Turret mainTurret = activeWeaponSeat != null ? activeWeaponSeat.connectedTurret : veh.GetMainTurret(false);
+            bool vehicleHasWeaponSystem = mainTurret != null && mainTurret.WeaponsCount() > 0;
+            bool hasUsableWeapon = vehicleHasWeaponSystem && HasAnyEmplacementTurretAmmo(veh, mainTurret);
+
+            // Condition A: Dry/unarmed 1-man combat vehicle (had turret weapon(s), now dry) -> bail out to scavenge/join infantry or retreat.
+            if (vehicleHasWeaponSystem && !hasUsableWeapon)
+            {
+                aiVeh.RetreatCrew();
+                if (VisionConfig.DebugLogging.Value)
+                {
+                    AiCore.LogDebug("CrewBailout", $"{AiCore.GetCachedFaction(sole)} lone driver abandoned dry combat vehicle '{veh.name}'.");
+                }
+                return;
+            }
+
+            Vector3 vehPos = veh.transform.position;
+            string soleFac = AiCore.GetCachedFaction(sole);
+
+            // Condition B: Open-top/exposed turret seat lost its gunner under close threat/blast -> bail out cleanly
+            // instead of driving aimless circles or climbing straight into the exposed seat under close fire.
+            if (activeWeaponSeat != null && activeWeaponSeat.showUnitSet && !activeWeaponSeat.hasUnitSet)
+            {
+                bool selfDanger = sole.isBleeding || sole.GetSuppressionValue() >= 48f;
+                bool nearBlast = VisionPatches.TryGetNearestRecentExplosion(vehPos, 14.0f, 2.5f, out _, out _);
+                bool enemySwarmed = !selfDanger && !nearBlast && HasEnemySoldierNearPosition(vehPos, soleFac, 28.0f, 8.0f);
+
+                if (selfDanger || nearBlast || (enemySwarmed && (!vh.IsTank || (now - vh.LastCrewLossTime) <= 20.0f)))
+                {
+                    vh.EmplacementHazardCooldownUntil = now + 28.0f;
+                    aiVeh.RetreatCrew();
+                    if (VisionConfig.DebugLogging.Value)
+                    {
+                        AiCore.LogDebug("CrewBailout", $"{soleFac} lone driver bailed exposed/swarmed vehicle '{veh.name}'.");
+                    }
+                    return;
+                }
+            }
+
+            // Condition C: Armed vehicle without MainTurretSeat (e.g., gun-truck/halftrack with secondary turret seat only)
+            // while lone driver is stuck at the wheel: stop and hop onto the gun when enemies are nearby!
+            if (mainSeat == null &&
+                fallbackArmedTurretSeat != null &&
+                !fallbackArmedTurretSeat.hasUnitSet &&
+                veh.HasDriver() &&
+                hasUsableWeapon &&
+                now >= vh.EmplacementHazardCooldownUntil)
+            {
+                bool threatNear = HasEnemySoldierNearPosition(vehPos, soleFac, 75.0f, 12.0f);
+                if (!threatNear && !string.IsNullOrEmpty(soleFac))
+                {
+                    RefreshCombinedArmsIntelIfNeeded();
+                    const float engageDistSq = 75.0f * 75.0f;
+                    for (int c = 0; c < _knownEnemyClusters.Count; c++)
+                    {
+                        var cl = _knownEnemyClusters[c];
+                        if (AiCore.AreEnemyFactions(soleFac, cl.Faction) &&
+                            (cl.Position - vehPos).sqrMagnitude <= engageDistSq)
+                        {
+                            threatNear = true;
+                            break;
+                        }
+                    }
+                }
+
+                if (threatNear)
+                {
+                    if (aiVeh.resumeDriveTime < now + 1.5f)
+                        aiVeh.resumeDriveTime = now + 1.5f;
+                    sole.SwitchSeat(fallbackArmedTurretSeat);
+                    vh.LoneGunnerHoldUntil = now + 10.0f;
+                }
+            }
+        }
+
         [HarmonyPatch(typeof(AIVehicle), nameof(AIVehicle.RetreatCrew))]
         public static class AIVehicle_RetreatCrew_Patch
         {

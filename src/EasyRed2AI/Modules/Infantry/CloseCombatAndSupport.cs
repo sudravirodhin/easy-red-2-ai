@@ -427,9 +427,39 @@ namespace EasyRed2HumanAI
                         soldier.IsOnCover() ? "in_cover" : "safe_window",
                         __instance.distFromTarget,
                         gfDist);
+
+                    ApplyBandageLowPose(__instance, soldier, h, now);
                 }
                 catch { }
                 return true;
+            }
+        }
+
+        [HarmonyPatch(typeof(Soldier), nameof(Soldier.UseBandages))]
+        public static class Soldier_UseBandages_Patch
+        {
+            public static void Prefix(Soldier __instance, VirtualBandages __0)
+            {
+                try
+                {
+                    if (!VisionConfig.EnableMod.Value || __instance == null || __0 == null ||
+                        !__instance.IsAI() || __instance.IsPlayer() || !__instance.isBleeding || !__instance.IsAlive)
+                        return;
+
+                    if (!AiCore.IsLocallyOwnedBot(__instance) || AiCore.IsSoldierInVehicleOrTransition(__instance))
+                        return;
+
+                    if (!__instance.CanPlaySpecialAnim())
+                        return;
+
+                    AiCore.SoldierFastHandles h = AiCore.GetOrCreateSoldierHandles(__instance);
+                    SoldierAI ai = h != null ? h.Ai : __instance.aiController;
+                    if (ai != null)
+                    {
+                        ApplyBandageLowPose(ai, __instance, h, Time.time);
+                    }
+                }
+                catch { }
             }
         }
 

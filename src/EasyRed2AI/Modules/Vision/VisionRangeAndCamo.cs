@@ -19,6 +19,11 @@ namespace EasyRed2HumanAI
         [ThreadStatic]
         internal static bool AllowCommanderIntercomFovBypass;
 
+        // Thread-local flag set during AIVehicle.SwitchSeatAi when a lone driver evaluates targets for an
+        // uncrewed/frozen main turret so he uses hull-forward driver awareness instead of a narrow bore slit.
+        [ThreadStatic]
+        internal static bool AllowLoneDriverSeatSwitchFovBypass;
+
         // Live telemetry counters for HUD / debug feedback
         public static int TotalSightChecks;
         public static int BlockedByFOV;
@@ -1129,101 +1134,115 @@ namespace EasyRed2HumanAI
                         !isAlreadyTrackingThis &&
                         !AllowCommanderIntercomFovBypass)
                     {
-                        float allowedTurretHalfFov = 180.0f;
-
-                        if (traits.IsCommanderTurret)
+                        if (AllowLoneDriverSeatSwitchFovBypass && turretVeh != null && turretVeh.transform != null)
                         {
-                            // 1. Tank Commander Cupola / Periscope / Binoculars:
-                            //    Directional periscope/vision-block cone aligned with TurretCommander.GetFireDir() as the
-                            //    Commander actively pans 360 degrees (only unbuttoned cupolas get <= 7.5m ear awareness).
-                            if (traits.IsExposedCrewSeat && dist <= 7.5f)
-                                allowedTurretHalfFov = 180.0f;
-                            else if (dist <= 55.0f)
-                                allowedTurretHalfFov = Mathf.Lerp(78.0f, 62.0f, Mathf.Clamp01((dist - 7.5f) / 47.5f));
-                            else
-                                allowedTurretHalfFov = Mathf.Lerp(62.0f, 42.0f, Mathf.Clamp01((dist - 55.0f) / 155.0f));
-                        }
-                        else if (obsVehH != null && obsVehH.IsAir)
-                        {
-                            // 2. Aircraft Defensive / Flexible Gunners: wide framed hemisphere, squinting at range.
-                            allowedTurretHalfFov = dist <= 120.0f
-                                ? 86.0f
-                                : Mathf.Lerp(86.0f, 54.0f, Mathf.Clamp01((dist - 120.0f) / 280.0f));
-                        }
-                        else if (obsVehH != null && obsVehH.IsWheeledOrTank && !traits.IsExposedCrewSeat && !traits.IsAA)
-                        {
-                            // 3. Enclosed / Buttoned-Up Tank & Armored Vehicle Guns (Main Cannon, Coax, Hull Bow MG):
-                            //    NO magical 360-degree bubble! Gunner stares through a narrow telescope/ball-mount slit;
-                            //    flankers outside this bore cone require an alive Commander / escort intercom handoff!
-                            float closeSlit = turretAimFov < 42.0f ? 28.0f : 34.0f;
-                            float midSlit = turretAimFov < 42.0f ? 22.0f : 27.0f;
-                            float farSlit = turretAimFov < 42.0f ? 15.0f : 19.0f;
-                            if (!isInfantryTarget)
-                            {
-                                // Large vehicle silhouettes & muzzle flashes are slightly easier to catch at the edge of a vision block
-                                closeSlit += 8.0f;
-                                midSlit += 6.0f;
-                                farSlit += 4.0f;
-                            }
-
-                            if (dist <= 10.0f)
-                                allowedTurretHalfFov = closeSlit + 6.0f;
-                            else if (dist <= 45.0f)
-                                allowedTurretHalfFov = Mathf.Lerp(closeSlit, midSlit, (dist - 10.0f) / 35.0f);
-                            else
-                                allowedTurretHalfFov = Mathf.Lerp(midSlit, farSlit, Mathf.Clamp01((dist - 45.0f) / 165.0f));
-                        }
-                        else if (traits.IsAA)
-                        {
-                            // 4A. Open 360-degree Flak / AA Mounts: point-blank ear awareness + wide sky/horizon scan.
-                            if (dist <= 9.5f)
-                                allowedTurretHalfFov = 180.0f;
-                            else if (dist <= 125.0f)
-                                allowedTurretHalfFov = 90.0f + (crewPers == VeteranAndTacticsPatches.SoldierPersonality.LightCrew_FlakWatch ? 12.0f : 0f);
-                            else
-                                allowedTurretHalfFov = Mathf.Lerp(88.0f, 58.0f, Mathf.Clamp01((dist - 125.0f) / 220.0f));
-                        }
-                        else
-                        {
-                            // 4B. Static Emplacements (Shielded AT Guns, HMG Tripods/Pillboxes) & Open-Top Pintle MGs:
-                            //     Exposed crew hear/sense point-blank threats (<= 8.5m), restricted laterally by gun shield / embrasure.
-                            if (traits.IsExposedCrewSeat && dist <= 8.5f)
-                                allowedTurretHalfFov = 180.0f;
-                            else if (dist <= 35.0f)
-                                allowedTurretHalfFov = Mathf.Lerp(traits.IsExposedCrewSeat ? 68.0f : 52.0f, 48.0f, Mathf.Clamp01((dist - 8.5f) / 26.5f));
-                            else
-                                allowedTurretHalfFov = Mathf.Lerp(48.0f, 30.0f, Mathf.Clamp01((dist - 35.0f) / 150.0f));
-                        }
-
-                        // Tank Hull Dead-Zone & Low-Profile Stealth:
-                        // Buttoned-up tanks/armored vehicles cannot see silent crouching/prone infantry hugging within 11.5m
-                        // below their cupola/gun-depression line (outside the dead-ahead 20-deg bore), and silent prone
-                        // infantry in craters/tall grass within 38m require a direct narrow sight sweep to spot!
-                        if (isInfantryTarget &&
-                            targetSoldier != null &&
-                            obsVehH != null &&
-                            obsVehH.IsWheeledOrTank &&
-                            !traits.IsExposedCrewSeat &&
-                            targetSoldier.m_pose >= SoldierPose.Crouch &&
-                            !HasFiredRecently(targetSoldier, 3.2f))
-                        {
-                            if (dist <= 11.5f && angle > 20.0f)
+                            float driverAngle = Vector3.Angle(toTarget, turretVeh.transform.forward);
+                            float driverHalfFov = dist <= 28.0f ? 115.0f : (dist <= 110.0f ? 72.0f : 50.0f);
+                            if (driverAngle > driverHalfFov)
                             {
                                 BlockedByFOV++;
                                 __result = false;
                                 return false;
                             }
-                            if (targetSoldier.m_pose == SoldierPose.Prone && dist <= 38.0f)
-                            {
-                                allowedTurretHalfFov *= 0.55f;
-                            }
                         }
-
-                        if (angle > allowedTurretHalfFov)
+                        else
                         {
-                            BlockedByFOV++;
-                            __result = false;
-                            return false;
+                            float allowedTurretHalfFov = 180.0f;
+
+                            if (traits.IsCommanderTurret)
+                            {
+                                // 1. Tank Commander Cupola / Periscope / Binoculars:
+                                //    Directional periscope/vision-block cone aligned with TurretCommander.GetFireDir() as the
+                                //    Commander actively pans 360 degrees (only unbuttoned cupolas get <= 7.5m ear awareness).
+                                if (traits.IsExposedCrewSeat && dist <= 7.5f)
+                                    allowedTurretHalfFov = 180.0f;
+                                else if (dist <= 55.0f)
+                                    allowedTurretHalfFov = Mathf.Lerp(78.0f, 62.0f, Mathf.Clamp01((dist - 7.5f) / 47.5f));
+                                else
+                                    allowedTurretHalfFov = Mathf.Lerp(62.0f, 42.0f, Mathf.Clamp01((dist - 55.0f) / 155.0f));
+                            }
+                            else if (obsVehH != null && obsVehH.IsAir)
+                            {
+                                // 2. Aircraft Defensive / Flexible Gunners: wide framed hemisphere, squinting at range.
+                                allowedTurretHalfFov = dist <= 120.0f
+                                    ? 86.0f
+                                    : Mathf.Lerp(86.0f, 54.0f, Mathf.Clamp01((dist - 120.0f) / 280.0f));
+                            }
+                            else if (obsVehH != null && obsVehH.IsWheeledOrTank && !traits.IsExposedCrewSeat && !traits.IsAA)
+                            {
+                                // 3. Enclosed / Buttoned-Up Tank & Armored Vehicle Guns (Main Cannon, Coax, Hull Bow MG):
+                                //    NO magical 360-degree bubble! Gunner stares through a narrow telescope/ball-mount slit;
+                                //    flankers outside this bore cone require an alive Commander / escort intercom handoff!
+                                float closeSlit = turretAimFov < 42.0f ? 28.0f : 34.0f;
+                                float midSlit = turretAimFov < 42.0f ? 22.0f : 27.0f;
+                                float farSlit = turretAimFov < 42.0f ? 15.0f : 19.0f;
+                                if (!isInfantryTarget)
+                                {
+                                    // Large vehicle silhouettes & muzzle flashes are slightly easier to catch at the edge of a vision block
+                                    closeSlit += 8.0f;
+                                    midSlit += 6.0f;
+                                    farSlit += 4.0f;
+                                }
+
+                                if (dist <= 10.0f)
+                                    allowedTurretHalfFov = closeSlit + 6.0f;
+                                else if (dist <= 45.0f)
+                                    allowedTurretHalfFov = Mathf.Lerp(closeSlit, midSlit, (dist - 10.0f) / 35.0f);
+                                else
+                                    allowedTurretHalfFov = Mathf.Lerp(midSlit, farSlit, Mathf.Clamp01((dist - 45.0f) / 165.0f));
+                            }
+                            else if (traits.IsAA)
+                            {
+                                // 4A. Open 360-degree Flak / AA Mounts: point-blank ear awareness + wide sky/horizon scan.
+                                if (dist <= 9.5f)
+                                    allowedTurretHalfFov = 180.0f;
+                                else if (dist <= 125.0f)
+                                    allowedTurretHalfFov = 90.0f + (crewPers == VeteranAndTacticsPatches.SoldierPersonality.LightCrew_FlakWatch ? 12.0f : 0f);
+                                else
+                                    allowedTurretHalfFov = Mathf.Lerp(88.0f, 58.0f, Mathf.Clamp01((dist - 125.0f) / 220.0f));
+                            }
+                            else
+                            {
+                                // 4B. Static Emplacements (Shielded AT Guns, HMG Tripods/Pillboxes) & Open-Top Pintle MGs:
+                                //     Exposed crew hear/sense point-blank threats (<= 8.5m), restricted laterally by gun shield / embrasure.
+                                if (traits.IsExposedCrewSeat && dist <= 8.5f)
+                                    allowedTurretHalfFov = 180.0f;
+                                else if (dist <= 35.0f)
+                                    allowedTurretHalfFov = Mathf.Lerp(traits.IsExposedCrewSeat ? 68.0f : 52.0f, 48.0f, Mathf.Clamp01((dist - 8.5f) / 26.5f));
+                                else
+                                    allowedTurretHalfFov = Mathf.Lerp(48.0f, 30.0f, Mathf.Clamp01((dist - 35.0f) / 150.0f));
+                            }
+
+                            // Tank Hull Dead-Zone & Low-Profile Stealth:
+                            // Buttoned-up tanks/armored vehicles cannot see silent crouching/prone infantry hugging within 11.5m
+                            // below their cupola/gun-depression line (outside the dead-ahead 20-deg bore), and silent prone
+                            // infantry in craters/tall grass within 38m require a direct narrow sight sweep to spot!
+                            if (isInfantryTarget &&
+                                targetSoldier != null &&
+                                obsVehH != null &&
+                                obsVehH.IsWheeledOrTank &&
+                                !traits.IsExposedCrewSeat &&
+                                targetSoldier.m_pose >= SoldierPose.Crouch &&
+                                !HasFiredRecently(targetSoldier, 3.2f))
+                            {
+                                if (dist <= 11.5f && angle > 20.0f)
+                                {
+                                    BlockedByFOV++;
+                                    __result = false;
+                                    return false;
+                                }
+                                if (targetSoldier.m_pose == SoldierPose.Prone && dist <= 38.0f)
+                                {
+                                    allowedTurretHalfFov *= 0.55f;
+                                }
+                            }
+
+                            if (angle > allowedTurretHalfFov)
+                            {
+                                BlockedByFOV++;
+                                __result = false;
+                                return false;
+                            }
                         }
                     }
 

@@ -207,6 +207,8 @@ namespace EasyRed2HumanAI
             public bool CachedCanSafelyBandage;
             public string CachedBandageBlockReason;
             public float CachedBandageGunfireDist;
+            public float BandageLowPoseUntil;
+            public SoldierPose BandageTargetPose;
         }
 
         internal struct SoldierCombatState
@@ -354,6 +356,13 @@ namespace EasyRed2HumanAI
             public float RefillStateEnteredAt;
             public float OffMapRearmReadyTime;
             public float NextStaticSelfPreservationCheckTime;
+            public AIVehicle AiVeh;
+            public bool AiVehChecked;
+            public float LoneGunnerHoldUntil;
+            public float NextLoneDriverEvalTime;
+            public float EmplacementHazardCooldownUntil;
+            public float LastCrewLossTime;
+            public int LastObservedPeopleInside;
         }
 
         public struct TurretFastTraits
@@ -2521,6 +2530,32 @@ namespace EasyRed2HumanAI
             if (vh.Syncher == null)
                 vh.Syncher = v.vehicleSyncher;
             return vh.Syncher == null || vh.Syncher.OwnSyncher;
+        }
+
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        public static bool RequiresTrainedVehicleCrew(VehicleFastHandles vh, Vehicle veh)
+        {
+            if (vh != null)
+                return vh.IsTank || vh.IsAir || vh.IsPlane;
+            if (veh == null || veh.Pointer == IntPtr.Zero)
+                return false;
+            return veh.IsAirVehicle() || veh.TryCast<VehicleTank>() != null;
+        }
+
+        public static AIVehicle GetOrCacheAIVehicle(Vehicle veh, VehicleFastHandles vh = null)
+        {
+            if (veh == null || veh.Pointer == IntPtr.Zero)
+                return null;
+            if (vh == null)
+                vh = GetOrCreateVehicleHandles(veh);
+            if (vh == null)
+                return null;
+            if (!vh.AiVehChecked)
+            {
+                vh.AiVehChecked = true;
+                vh.AiVeh = veh.GetComponent<AIVehicle>();
+            }
+            return vh.AiVeh;
         }
 
         /// <summary>

@@ -1303,7 +1303,7 @@ namespace EasyRed2HumanAI
 
                 case GoapActionId.BandageInCover:
                     plan.LockUnitCoverChange = true;
-                    SetBotPose(ai, soldier, SoldierPose.Crouch);
+                    ApplyBandageLowPose(ai, soldier, shGoap, now);
                     if (soldier.isBleeding && !soldier.isInHandsAnimation && !soldier.isInBodyAnimation)
                     {
                         soldier.SetGunTriggerPressed(false);
