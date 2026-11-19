@@ -1209,82 +1209,7 @@ namespace EasyRed2HumanAI
             switch (action)
             {
                 case GoapActionId.SeekEmergencyCover:
-                    {
-                        bool onNarrowBridge = (ws & GoapStateBits.OnBridgeOrNarrow) != 0;
-                        bool inMultiSidedOrIndoors = IsPositionInMultiSidedOrIndoorShelter(myPos, out bool isIndoorRoofed, out _);
-                        if (TrySeekNearbyCover(ai, soldier))
-                        {
-                            plan.LockUnitCoverChange = true;
-                            if (soldier.IsOnCover())
-                            {
-                                SoldierPose coverPose = (!onNarrowBridge && !ai.HasEnemyAndCanFireAtHim && (isIndoorRoofed || inMultiSidedOrIndoors || suppression >= 28f))
-                                    ? SoldierPose.Prone
-                                    : SoldierPose.Crouch;
-                                SetBotPose(ai, soldier, coverPose);
-                                if (plan.StepCount > 1)
-                                    plan.StepIndex = 1;
-                            }
-                            else
-                            {
-                                Vector3 covPos = (soldier.HasDestinationAssigned && soldier.targetDestination != null)
-                                    ? soldier.targetDestination.GetCoverPosition()
-                                    : GetActualMoveEndpoint(ai, soldier);
-                                float covDistSq = (covPos - myPos).sqrMagnitude;
-                                plan.HasMoveOverride = covDistSq > 1.8f * 1.8f;
-                                plan.MoveOverrideDest = covPos;
-                                if (soldier.m_pose == SoldierPose.Prone && covDistSq > 1.8f * 1.8f)
-                                    SetBotPose(ai, soldier, SoldierPose.Crouch, true);
-                                ApplyDesiredMovingPose(ai, soldier, covDistSq, suppression);
-                            }
-                        }
-                        else
-                        {
-                            // Open-field / indoor / trench fallback so SeekEmergencyCover is never a no-op!
-                            if (soldier.isBleeding && (ws & GoapStateBits.BandageUnsafeUnderFire) == 0)
-                            {
-                                SetBotPose(ai, soldier, onNarrowBridge ? SoldierPose.Crouch : SoldierPose.Prone, true);
-                                if (plan.StepCount > 1)
-                                    plan.StepIndex = 1;
-                            }
-                            else if (inMultiSidedOrIndoors && !onNarrowBridge)
-                            {
-                                // Already inside a building or multi-sided trench/crater: stay sheltered inside and drop prone!
-                                if (shGoap != null)
-                                    shGoap.Stance.LocalCoverProtectedUntil = now + 4.5f;
-                                plan.LockUnitCoverChange = true;
-                                SoldierPose shelterPose = !ai.HasEnemyAndCanFireAtHim ? SoldierPose.Prone : SoldierPose.Crouch;
-                                SetBotPose(ai, soldier, shelterPose, true);
-                                plan.PlanExpireTime = Mathf.Min(plan.PlanExpireTime, now + 2.4f);
-                            }
-                            else
-                            {
-                                Vector3 openThreatDir = GetEffectiveThreatDirection(soldier, sq, myPos, board.ThreatDirection);
-                                if (AiCore.CanBotMoveAutonomously(soldier) &&
-                                    !onNarrowBridge &&
-                                    TryComputeTacticalFallbackPosition(soldier, sq, myPos, myPos + openThreatDir * 20.0f, 8.5f, 14.0f, out Vector3 openScatterPos))
-                                {
-                                    DestinationWithoutCover openDest = new DestinationWithoutCover(openScatterPos, SoldierPose.Crouch);
-                                    AiCore.AssignBotCoverOrDestination(ai, soldier, openDest.Cast<AiDestination>());
-                                    if (shGoap != null)
-                                        shGoap.Stance.LocalCoverProtectedUntil = now + 4.2f;
-                                    plan.LockUnitCoverChange = true;
-                                    plan.HasMoveOverride = true;
-                                    plan.MoveOverrideDest = openScatterPos;
-                                    float scatterSq = (openScatterPos - myPos).sqrMagnitude;
-                                    if (soldier.m_pose == SoldierPose.Prone && scatterSq > 1.8f * 1.8f)
-                                        SetBotPose(ai, soldier, SoldierPose.Crouch, true);
-                                    ApplyDesiredMovingPose(ai, soldier, scatterSq, suppression);
-                                    GoapPlansExecutedCount++;
-                                }
-                                else
-                                {
-                                    SoldierPose dropPose = (!onNarrowBridge && suppression >= 25f) ? SoldierPose.Prone : SoldierPose.Crouch;
-                                    SetBotPose(ai, soldier, dropPose, true);
-                                    plan.PlanExpireTime = Mathf.Min(plan.PlanExpireTime, now + 1.8f);
-                                }
-                            }
-                        }
-                    }
+                    ExecuteGoapSeekEmergencyCover(ai, soldier, sq, shGoap, ref board, ref plan, ws, suppression, myPos, now);
                     break;
 
                 case GoapActionId.BandageInCover:
@@ -1366,281 +1291,22 @@ namespace EasyRed2HumanAI
                     }
                     break;
 
+
                 case GoapActionId.ThrowSmokeScreen:
-                    {
-                        bool smokeThrown = false;
-                        float nextSmkThrow = shGoap != null ? shGoap.Goap.NextSmokeGrenadeTime : 0f;
-                        if (soldier.inventory != null &&
-                            now > soldier.throw_end_time + 5.0f &&
-                            board.PrimaryTarget != null &&
-                            (now >= nextSmkThrow || nextSmkThrow - now > 60.0f) &&
-                            (now >= board.SmokeActiveUntil || board.SmokeActiveUntil - now > 60.0f || (board.ThreatPosition - board.LastSmokeTargetPos).sqrMagnitude > 18f * 18f))
-                        {
-                            VirtualItem smokeItem = soldier.inventory.FindItemOfType<VirtualSmokeGrenade>();
-                            if (smokeItem != null)
-                            {
-                                float dToThreat = Vector3.Distance(myPos, board.ThreatPosition);
-                                if (dToThreat >= 12f && dToThreat <= soldier.GetGrenadeThrowRange(smokeItem) + 6f &&
-                                    !AiCore.HasLowCeilingOverhead(myPos, 3.2f) &&
-                                    AiCore.TryConsumeBotRpcBudget(0.45f))
-                                {
-                                    if (shGoap != null)
-                                        shGoap.Goap.NextSmokeGrenadeTime = now + 32.0f;
-                                    board.SmokeActiveUntil = now + 22.0f;
-                                    board.LastSmokeTargetPos = board.ThreatPosition;
-                                    soldier.Throw(smokeItem, board.PrimaryTarget);
-                                    board.Suppressor0Ptr = ptr;
-                                    board.SuppressHoldUntil = now + 6.5f;
-                                    GoapSmokeScreensCount++;
-                                    GoapPlansExecutedCount++;
-                                    smokeThrown = true;
-                                    TrySayTacticalVoice(soldier, sq, VoiceManager.VoiceClip.keepYourHeadDown, 0.1f);
-                                    if (VisionConfig.DebugLogging.Value)
-                                    {
-                                        AiCore.LogDebug(
-                                            "GoapSmoke",
-                                            $"{soldier.faction} {GetPersonality(soldier)} threw GOAP smoke screen ({dToThreat:F0}m, nextStep:{plan.Step1}).",
-                                            3.0f);
-                                    }
-                                }
-                            }
-                        }
-
-                        // Advance to Step 1 when smoke was thrown OR when an allied smoke/pin already covers the push
-                        // (or on non-offensive fallback/evac steps); never send an unmasked soldier into unpinned fire if smoke failed!
-                        bool step1SafeWithoutNewSmoke =
-                            smokeThrown ||
-                            now < board.SmokeActiveUntil ||
-                            (ws & GoapStateBits.AllyPinningThreat) != 0 ||
-                            plan.Step1 == GoapActionId.TacticalFallbackRetreat ||
-                            plan.Step1 == GoapActionId.LoneWolfLinkUpOrAmbush;
-
-                        if (plan.StepCount > 1 && plan.StepIndex == 0 && plan.Step1 != GoapActionId.None && step1SafeWithoutNewSmoke)
-                        {
-                            plan.StepIndex = 1;
-                            if (!smokeThrown && plan.Step1 != GoapActionId.ThrowSmokeScreen)
-                            {
-                                ExecuteGoapActionStep(ai, soldier, sq, ref board, ref plan, plan.Step1, ws, suppression, dist, now);
-                            }
-                        }
-                        else if (!smokeThrown)
-                        {
-                            plan.PlanExpireTime = 0f;
-                        }
-                    }
+                    ExecuteGoapThrowSmokeScreen(ai, soldier, sq, ptr, shGoap, ref board, ref plan, ws, suppression, dist, myPos, now);
                     break;
 
                 case GoapActionId.SuppressThreatPosition:
                 case GoapActionId.HoldOverwatchFire:
-                    {
-                        bool hasRealPinningFire = action == GoapActionId.HoldOverwatchFire
-                            ? (ai.HasEnemyAndCanFireAtHim && AiCore.GetRawVisibleTargetPtr(ai) != IntPtr.Zero)
-                            : (board.HasActiveThreat && CanDeliverSuppressiveFireTowardPoint(ai, soldier, board.ThreatPosition, board.PrimaryTarget, now));
-
-                        if (hasRealPinningFire)
-                        {
-                            if (board.Suppressor0Ptr == IntPtr.Zero || board.Suppressor0Ptr == ptr)
-                                board.Suppressor0Ptr = ptr;
-                            else if (board.Suppressor1Ptr == IntPtr.Zero || board.Suppressor1Ptr == ptr)
-                                board.Suppressor1Ptr = ptr;
-
-                            board.SuppressHoldUntil = Mathf.Max(board.SuppressHoldUntil, now + 3.2f);
-                        }
-                        else
-                        {
-                            // Prevent "phantom pinning": never broadcast AllyPinningThreat from behind a blind wall!
-                            if (board.Suppressor0Ptr == ptr)
-                                board.Suppressor0Ptr = IntPtr.Zero;
-                            if (board.Suppressor1Ptr == ptr)
-                                board.Suppressor1Ptr = IntPtr.Zero;
-                            plan.PlanExpireTime = Mathf.Min(plan.PlanExpireTime, now + 0.85f);
-                            break;
-                        }
-
-                        if (action == GoapActionId.HoldOverwatchFire &&
-                            (!ai.IsMoving() || IsInCommittedFiringHalt(ptr, now)) &&
-                            AiCore.TryGetSpottableCenter(ai.visibleTarget, out Vector3 owTargetPos))
-                        {
-                            bool crouchClear = HasClearLineOfFireFromCrouch(soldier, owTargetPos, dist);
-                            SetBotPose(ai, soldier, crouchClear ? SoldierPose.Crouch : SoldierPose.Idle, true);
-                            AiCore.SoldierFastHandles owHandles = shGoap ?? AiCore.GetOrCreateSoldierHandles(soldier);
-                            if (owHandles != null && now >= owHandles.Combat.NextBoundingHoldCountTime)
-                            {
-                                owHandles.Combat.NextBoundingHoldCountTime = now + 5.0f;
-                                GoapPlansExecutedCount++;
-                                TrySayTacticalVoice(soldier, sq, VoiceManager.VoiceClip.coveringFire, 0.15f);
-                            }
-                        }
-                        else if (action == GoapActionId.SuppressThreatPosition && !ai.IsMoving() && shGoap != null)
-                        {
-                            if (soldier.m_pose == SoldierPose.Idle &&
-                                !soldier.UsingBipod() &&
-                                HasClearLineOfFireFromCrouch(soldier, board.ThreatPosition + Vector3.up * 0.45f, Vector3.Distance(myPos, board.ThreatPosition)))
-                            {
-                                SetBotPose(ai, soldier, SoldierPose.Crouch);
-                            }
-                            if (now >= shGoap.Combat.NextBoundingHoldCountTime)
-                            {
-                                shGoap.Combat.NextBoundingHoldCountTime = now + 5.0f;
-                                GoapPlansExecutedCount++;
-                                TrySayTacticalVoice(soldier, sq, VoiceManager.VoiceClip.coveringFire, 0.15f);
-                            }
-                        }
-                    }
+                    ExecuteGoapHoldOverwatchOrSuppress(ai, soldier, sq, ptr, shGoap, ref board, ref plan, action, dist, myPos, now);
                     break;
 
                 case GoapActionId.MoveToFlankCover:
-                    {
-                        CombatCover chosenCover = null;
-                        if (board.FlankLeftCover != null &&
-                            (board.FlankerLeftPtr == IntPtr.Zero || board.FlankerLeftPtr == ptr) &&
-                            (soldier.nonReachableCovers == null || !soldier.nonReachableCovers.Contains(board.FlankLeftCover.Cast<AiDestination>())))
-                        {
-                            board.FlankerLeftPtr = ptr;
-                            chosenCover = board.FlankLeftCover;
-                        }
-                        else if (board.FlankRightCover != null &&
-                                 (board.FlankerRightPtr == IntPtr.Zero || board.FlankerRightPtr == ptr) &&
-                                 (soldier.nonReachableCovers == null || !soldier.nonReachableCovers.Contains(board.FlankRightCover.Cast<AiDestination>())))
-                        {
-                            board.FlankerRightPtr = ptr;
-                            chosenCover = board.FlankRightCover;
-                        }
-
-                        if (chosenCover != null)
-                        {
-                            Vector3 chosenPos = chosenCover.GetCoverPosition();
-                            float flankDistSq = (chosenPos - myPos).sqrMagnitude;
-                            board.FlankUntil = Mathf.Max(board.FlankUntil, now + 6.5f);
-                            plan.LockUnitCoverChange = true;
-                            plan.PlanExpireTime = now + 6.5f;
-                            if (shGoap != null)
-                                shGoap.Stance.LocalCoverProtectedUntil = now + 6.5f;
-
-                            if (soldier.targetDestination == null || soldier.targetDestination.Pointer != chosenCover.Pointer)
-                            {
-                                if (shGoap == null || now >= shGoap.Goap.NextFlankCoverAssignTime)
-                                {
-                                    if (shGoap != null)
-                                        shGoap.Goap.NextFlankCoverAssignTime = now + 5.5f;
-                                    AiCore.AssignBotCoverOrDestination(ai, soldier, chosenCover.Cast<AiDestination>());
-                                    plan.HasMoveOverride = flankDistSq > 1.8f * 1.8f;
-                                    plan.MoveOverrideDest = chosenPos;
-                                    if (soldier.m_pose == SoldierPose.Prone && flankDistSq > 1.8f * 1.8f)
-                                        SetBotPose(ai, soldier, SoldierPose.Crouch, true);
-                                    ApplyDesiredMovingPose(ai, soldier, flankDistSq, suppression);
-                                    plan.NextReplanTime = Mathf.Max(plan.NextReplanTime, now + 4.5f);
-                                    GoapPinAndFlankCount++;
-                                    GoapPlansExecutedCount++;
-                                    TrySayTacticalVoice(soldier, sq, VoiceManager.VoiceClip.imMoving, 0.25f);
-                                    if (VisionConfig.DebugLogging.Value)
-                                    {
-                                        AiCore.LogDebug("GoapPinFlank", $"{soldier.faction} {GetPersonality(soldier)} flanking pinned enemy to lateral cover (nextStep:{plan.Step1}).", 3.0f);
-                                    }
-                                }
-                                else
-                                {
-                                    plan.PlanExpireTime = 0f;
-                                }
-                            }
-                            else if (soldier.IsOnCover())
-                            {
-                                if (plan.StepCount > 1)
-                                    plan.StepIndex = 1;
-                            }
-                            else
-                            {
-                                plan.HasMoveOverride = flankDistSq > 1.8f * 1.8f;
-                                plan.MoveOverrideDest = chosenPos;
-                                if (soldier.m_pose == SoldierPose.Prone && flankDistSq > 1.8f * 1.8f)
-                                    SetBotPose(ai, soldier, SoldierPose.Crouch, true);
-                                ApplyDesiredMovingPose(ai, soldier, flankDistSq, suppression);
-                                if (!ai.IsMoving() && !ai.HasPath && !ai.HasPathRequest)
-                                {
-                                    AiCore.ResetBotPathLockout(ai);
-                                    ai.MoveDestination = chosenPos;
-                                    ai.UpdatePath();
-                                }
-                            }
-                        }
-                        else
-                        {
-                            plan.PlanExpireTime = 0f;
-                        }
-                    }
+                    ExecuteGoapMoveToFlankCover(ai, soldier, sq, ptr, shGoap, ref board, ref plan, suppression, myPos, now);
                     break;
 
                 case GoapActionId.FlushThreatWithFrag:
-                    {
-                        bool threwFrag = false;
-                        SoldierPersonality fragPers = GetPersonality(soldier);
-                        bool isCombatGrenadier = fragPers == SoldierPersonality.Assaulter_Breacher ||
-                                                 fragPers == SoldierPersonality.Rifleman_Grenadier ||
-                                                 fragPers == SoldierPersonality.AT_Demolitionist;
-                        if (VisionConfig.EnableLastKnownSuppression.Value || isCombatGrenadier)
-                        {
-                            if (VisionConfig.EnableLastKnownSuppression.Value &&
-                                TryFlushLastKnownEnemyWithGrenade(ai, soldier, allowWhileMoving: true))
-                            {
-                                threwFrag = true;
-                                GoapPlansExecutedCount++;
-                            }
-                            else if (shGoap != null &&
-                                     now > soldier.throw_end_time + 6.0f &&
-                                     now >= shGoap.Vision.NextSuppressiveGrenadeTime)
-                            {
-                                Spottable fragTarget = (isCombatGrenadier && ai.visibleTarget != null && !ai.visibleTarget.IsWheeledVehicleOrTank())
-                                    ? ai.visibleTarget
-                                    : ((VisionConfig.EnableLastKnownSuppression.Value &&
-                                        !ai.HasEnemyAndCanFireAtHim &&
-                                        board.HasActiveThreat)
-                                        ? board.PrimaryTarget
-                                        : null);
-                                if (fragTarget != null && fragTarget.Pointer != IntPtr.Zero)
-                                {
-                                    Soldier targetSol = fragTarget.TryCast<Soldier>();
-                                    if (targetSol != null && targetSol.IsAlive && targetSol.faction != soldier.faction)
-                                    {
-                                        Vector3 tPos = targetSol.GetCenterOfUnit();
-                                        float dFrag = Vector3.Distance(myPos, tPos);
-                                        if (TryThrowTacticalFragGrenade(
-                                                soldier,
-                                                fragTarget,
-                                                tPos,
-                                                dFrag,
-                                                isCombatGrenadier ? 9.0f : 10.0f,
-                                                isCombatGrenadier ? 34.0f : 29.0f,
-                                                isCombatGrenadier ? 9.0f : 11.5f,
-                                                now,
-                                                sayVoice: true,
-                                                cooldownSeconds: isCombatGrenadier ? 10.0f : 14.0f))
-                                        {
-                                            threwFrag = true;
-                                            GoapPlansExecutedCount++;
-                                            if (VisionConfig.DebugLogging.Value)
-                                            {
-                                                AiCore.LogDebug(
-                                                    "GoapFrag",
-                                                    $"{soldier.faction} {fragPers} lobbed GOAP frag grenade ({dFrag:F0}m).",
-                                                    3.0f);
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        }
-
-                        if (threwFrag)
-                        {
-                            board.BreacherPtr = ptr;
-                            board.BreachUntil = now + 4.0f;
-                        }
-                        else if (board.BreacherPtr == ptr)
-                        {
-                            board.BreacherPtr = IntPtr.Zero;
-                        }
-                        plan.PlanExpireTime = Mathf.Min(plan.PlanExpireTime, now + 0.85f);
-                    }
+                    ExecuteGoapFlushThreatWithFrag(ai, soldier, ptr, shGoap, ref board, ref plan, myPos, now);
                     break;
 
                 case GoapActionId.BoundWithOverwatch:
@@ -1690,628 +1356,7 @@ namespace EasyRed2HumanAI
                     break;
 
                 case GoapActionId.ScavengeSupplyFromCorpse:
-                    {
-                        if (suppression >= 5.0f ||
-                            (ws & ScavengeForbiddenMask) != 0 ||
-                            (ws & GoapStateBits.NeedAmmoOrMedScavenge) == 0)
-                        {
-                            if (shGoap != null)
-                            {
-                                shGoap.Goap.Scavenge = default;
-                                AiCore.ClearBotMoveOverride(shGoap, AiCore.BotMoveOverrideKind.GoapAction);
-                            }
-                            if (ai.moveDirectlyToward_end > now)
-                                ai.moveDirectlyToward_end = 0f;
-                            plan.LockUnitCoverChange = false;
-                            plan.HasMoveOverride = false;
-                            plan.PlanExpireTime = 0f;
-                            plan.NextReplanTime = now;
-                            if (!soldier.IsOnCover() && AiCore.CanBotMoveAutonomously(soldier))
-                                TrySeekNearbyCover(ai, soldier);
-                            break;
-                        }
-
-                        // Reuse the BotScavengeCache populated by BuildSoldierWorldState (eliminates duplicate 50-line evaluation per tick)
-                        BotScavengeCache scavCache = shGoap != null ? shGoap.Goap.Scavenge : default;
-                        if (scavCache.TargetFloorItem != null ||
-                            scavCache.TargetRefillCrate != null ||
-                            scavCache.TargetInventory != null ||
-                            scavCache.TargetBuddyDonor != null ||
-                            scavCache.TargetNeedyAllyToFeed != null)
-                        {
-                            if ((scavCache.IsBuddyBandageRefill || scavCache.IsBuddyAmmoBorrow) &&
-                                scavCache.TargetBuddyDonor != null &&
-                                scavCache.TargetBuddyDonor.Pointer != IntPtr.Zero &&
-                                scavCache.TargetBuddyDonor.IsAlive &&
-                                scavCache.TargetBuddyDonor.transform != null)
-                            {
-                                scavCache.TargetPosition = scavCache.TargetBuddyDonor.transform.position;
-                            }
-                            else if (scavCache.IsFeedingNeedyAlly &&
-                                     scavCache.TargetNeedyAllyToFeed != null &&
-                                     scavCache.TargetNeedyAllyToFeed.Pointer != IntPtr.Zero &&
-                                     scavCache.TargetNeedyAllyToFeed.IsAlive &&
-                                     scavCache.TargetNeedyAllyToFeed.transform != null)
-                            {
-                                scavCache.TargetPosition = scavCache.TargetNeedyAllyToFeed.transform.position;
-                            }
-
-                            bool isBuddyHandoff = scavCache.IsBuddyBandageRefill ||
-                                                  scavCache.IsBuddyAmmoBorrow ||
-                                                  scavCache.IsFeedingNeedyAlly;
-                            bool outOfAmmo = scavCache.NeedAmmo;
-                            bool outOfBandage = scavCache.NeedBandage;
-                            Vector3 targetPos = scavCache.TargetPosition;
-                            float dSq = (targetPos - myPos).sqrMagnitude;
-                            float triggerRadius = isBuddyHandoff ? 3.8f : 3.3f;
-                            ApplyDesiredMovingPose(ai, soldier, dSq, suppression);
-                            if (dSq <= triggerRadius * triggerRadius)
-                            {
-                                bool looted = false;
-                                string lootedDesc = "supply";
-
-                                // 0A. Buddy Bandage Refill from living friendly Medic
-                                if (scavCache.IsBuddyBandageRefill &&
-                                    scavCache.TargetBuddyDonor != null &&
-                                    scavCache.TargetBuddyDonor.Pointer != IntPtr.Zero &&
-                                    scavCache.TargetBuddyDonor.IsAlive &&
-                                    !scavCache.TargetBuddyDonor.IsInjured)
-                                {
-                                    if (!Photon.Pun.PhotonNetwork.InRoom || AiCore.TryConsumeBotRpcBudget(0.25f))
-                                    {
-                                        soldier.RefillBandages();
-                                        if (shGoap != null)
-                                            shGoap.Goap.NextBuddyBandageRefillTime = now + 45.0f;
-                                        BuddyResuppliesCount++;
-                                        looted = true;
-                                        lootedDesc = "buddy bandage from medic";
-                                        TrySayTacticalVoice(soldier, sq, VoiceManager.VoiceClip.thankYou, 0.25f);
-                                    }
-                                }
-                                // 0B. Buddy Ammo Borrow from living friendly Ammo Carrier / Support rifleman
-                                else if (scavCache.IsBuddyAmmoBorrow &&
-                                         scavCache.TargetBuddyDonor != null &&
-                                         scavCache.TargetBuddyDonor.Pointer != IntPtr.Zero &&
-                                         scavCache.TargetBuddyDonor.IsAlive &&
-                                         !scavCache.TargetBuddyDonor.IsInjured)
-                                {
-                                    if (!Photon.Pun.PhotonNetwork.InRoom || AiCore.TryConsumeBotRpcBudget(0.30f))
-                                    {
-                                        soldier.inventory?.RemoveEmptyAmmoAndMagazines();
-                                        Soldier donor = scavCache.TargetBuddyDonor;
-                                        donor.BorrowAmmos(soldier);
-                                        // Creature.BorrowAmmos (0x180A51A60) already calls RefillAmmoForWearedWeapon(0, true, ...)
-                                        // when donor has matching ammo. Only fall back to RefillSoldierPrimaryAndStowedWeapons if
-                                        // no async refill is pending, preventing duplicate Slot-0 refills (4 mags instead of 2).
-                                        if (!soldier.IsAmmoRefillPending())
-                                        {
-                                            RefillSoldierPrimaryAndStowedWeapons(soldier, 2);
-                                        }
-                                        else
-                                        {
-                                            ScheduleBotInventoryWeightAudit(soldier, 0.70f);
-                                        }
-                                        if (shGoap != null)
-                                            shGoap.Goap.NextBuddyAmmoResupplyTime = now + 35.0f;
-                                        BuddyResuppliesCount++;
-                                        looted = true;
-                                        lootedDesc = "buddy ammo from carrier";
-                                        TrySayTacticalVoice(soldier, sq, VoiceManager.VoiceClip.thankYou, 0.25f);
-                                    }
-                                }
-                                // 0C. Support / Ammo Carrier proactively feeding a dry MG gunner or AT specialist
-                                else if (scavCache.IsFeedingNeedyAlly &&
-                                         scavCache.TargetNeedyAllyToFeed != null &&
-                                         scavCache.TargetNeedyAllyToFeed.Pointer != IntPtr.Zero &&
-                                         scavCache.TargetNeedyAllyToFeed.IsAlive &&
-                                         !scavCache.TargetNeedyAllyToFeed.IsInjured)
-                                {
-                                    if (!Photon.Pun.PhotonNetwork.InRoom || AiCore.TryConsumeBotRpcBudget(0.30f))
-                                    {
-                                        Soldier ally = scavCache.TargetNeedyAllyToFeed;
-                                        ally.inventory?.RemoveEmptyAmmoAndMagazines();
-                                        soldier.BorrowAmmos(ally);
-                                        if (AiCore.IsLocallyOwnedBot(ally))
-                                        {
-                                            if (!ally.IsAmmoRefillPending())
-                                            {
-                                                RefillSoldierPrimaryAndStowedWeapons(ally, 2);
-                                            }
-                                            else
-                                            {
-                                                ScheduleBotInventoryWeightAudit(ally, 0.70f);
-                                            }
-                                        }
-                                        if (shGoap != null)
-                                            shGoap.Goap.NextBuddyAmmoResupplyTime = now + 35.0f;
-                                        AiCore.SoldierFastHandles allyH = AiCore.GetOrCreateSoldierHandles(ally);
-                                        if (allyH != null)
-                                            allyH.Goap.NextBuddyAmmoResupplyTime = now + 35.0f;
-                                        BuddyResuppliesCount++;
-                                        looted = true;
-                                        lootedDesc = "fed ammo to needy MG/AT squadmate";
-                                    }
-                                }
-                                // 0D. Placed Map AmmoRefillCrate (trench / bunker / strongpoint resupply crate)
-                                else if (scavCache.TargetRefillCrate != null &&
-                                         scavCache.TargetRefillCrate.Pointer != IntPtr.Zero &&
-                                         scavCache.TargetRefillCrate.gameObject != null &&
-                                         scavCache.TargetRefillCrate.gameObject.activeInHierarchy)
-                                {
-                                    AmmoRefillCrate crate = scavCache.TargetRefillCrate;
-                                    CachedBoxOverrideInfo ov = GetCachedBoxOverrideInfo(
-                                        crate.Pointer,
-                                        crate.overrideContent,
-                                        crate.allowTakeWeaponIntoInventory);
-                                    looted = TryResupplyFromBoxOrCrate(
-                                        soldier,
-                                        crate.overrideContent,
-                                        crate.allowTakeWeaponIntoInventory,
-                                        ov,
-                                        outOfAmmo,
-                                        scavCache.NeedFragGrenade,
-                                        scavCache.NeedSmokeGrenade,
-                                        scavCache.IsAtWeaponPickup,
-                                        outOfBandage,
-                                        now,
-                                        ref plan,
-                                        out lootedDesc);
-                                }
-                                // 1. Pick up physical floor items (dropped AT launchers, primary rifles/SMGs/MGs, helmets, radios, DroppableAmmoBox, grenades, magazines, syringes)
-                                else if (IsFloorItemFreeToPickUp(scavCache.TargetFloorItem))
-                                {
-                                    DroppableAmmoBox floorBox = scavCache.IsDroppableAmmoBox
-                                        ? scavCache.TargetFloorItem.TryCast<DroppableAmmoBox>()
-                                        : null;
-                                    GenericGun floorGun = floorBox == null ? scavCache.TargetFloorItem.TryCast<GenericGun>() : null;
-
-                                    if (floorBox != null)
-                                    {
-                                        // Resupply from floor-dropped ammo box without locking out the player's 30s UI prompt or deleting the box!
-                                        CachedBoxOverrideInfo ov = GetCachedBoxOverrideInfo(floorBox.Pointer, floorBox.overrideContent, true);
-                                        looted = TryResupplyFromBoxOrCrate(
-                                            soldier,
-                                            floorBox.overrideContent,
-                                            true,
-                                            ov,
-                                            outOfAmmo,
-                                            scavCache.NeedFragGrenade,
-                                            scavCache.NeedSmokeGrenade,
-                                            scavCache.IsAtWeaponPickup,
-                                            outOfBandage,
-                                            now,
-                                            ref plan,
-                                            out lootedDesc);
-                                    }
-                                    else if (floorGun != null)
-                                    {
-                                        bool canSwitchWeaponNow = !soldier.IsPlayer() &&
-                                                                  !soldier.isInHandsAnimation &&
-                                                                  !soldier.isInBodyAnimation &&
-                                                                  soldier.CanSwitchHeldItem &&
-                                                                  (now >= _nextGlobalBotWeaponPickupTime || now + 5.0f < _nextGlobalBotWeaponPickupTime);
-
-                                        if (canSwitchWeaponNow && (!Photon.Pun.PhotonNetwork.InRoom || AiCore.TryConsumeBotRpcBudget(0.35f)))
-                                        {
-                                            int slot = floorGun.IsAtWeapon() ? 1 : 0;
-                                            soldier.SetGunTriggerPressed(false);
-                                            soldier.PickUpItem(scavCache.TargetFloorItem.gameObject, slot);
-                                            ScheduleDelayedPickedWeaponRefill(soldier, slot, now);
-                                            _nextGlobalBotWeaponPickupTime = now + 2.20f;
-                                            if (shGoap != null)
-                                                shGoap.Goap.NextWeaponUpgradeAllowedTime = now + (scavCache.IsRoleWeaponUpgrade ? 90.0f : 20.0f);
-                                            plan.NextReplanTime = Mathf.Max(plan.NextReplanTime, now + 2.50f);
-                                            looted = true;
-                                            if (scavCache.IsRoleWeaponUpgrade)
-                                            {
-                                                RoleWeaponUpgradesCount++;
-                                                lootedDesc = $"upgraded primary ({floorGun.name})";
-                                            }
-                                            else
-                                            {
-                                                lootedDesc = floorGun.IsAtWeapon() ? "dropped AT weapon" : "dropped firearm";
-                                            }
-                                        }
-                                        else
-                                        {
-                                            if (shGoap != null)
-                                                shGoap.Goap.NextWeaponUpgradeAllowedTime = now + 8.0f;
-                                        }
-                                    }
-                                    else if ((scavCache.IsHelmetPickup || scavCache.IsRadioPackPickup) && soldier.inventory != null)
-                                    {
-                                        if (!Photon.Pun.PhotonNetwork.InRoom || AiCore.TryConsumeBotRpcBudget(0.35f))
-                                        {
-                                            VirtualItem addedWearable = soldier.inventory.AddItemToInventory(scavCache.TargetFloorItem);
-                                            if (addedWearable != null)
-                                            {
-                                                ResourcesManager.SynchDestroy(scavCache.TargetFloorItem.gameObject, true);
-                                                soldier.SetWerable(addedWearable, true);
-                                                looted = true;
-                                                if (scavCache.IsRadioPackPickup)
-                                                {
-                                                    FieldRadiosInheritedCount++;
-                                                    if (sq != null && sq.Pointer != IntPtr.Zero)
-                                                        _nextSquadRadioScavengeTime[sq.Pointer] = now + 25.0f;
-                                                    lootedDesc = "floor radio pack";
-                                                }
-                                                else
-                                                {
-                                                    HelmetsRecoveredCount++;
-                                                    lootedDesc = "helmet from ground";
-                                                    if (IsFriendlyPlayerWithinDistance(soldier, myPos, 7.5f))
-                                                    {
-                                                        TrySayTacticalVoice(soldier, sq, VoiceManager.VoiceClip.thankYou, 0.05f);
-                                                    }
-                                                }
-                                            }
-                                        }
-                                    }
-                                    else if (soldier.inventory != null &&
-                                             (scavCache.IsMedicSyringePickup ||
-                                              scavCache.IsRecoverLifePickup ||
-                                              (outOfBandage && soldier.isBleeding) ||
-                                              CanSoldierAcceptExtraMass(soldier, scavCache.TargetFloorItem.mass, 0.15f)))
-                                    {
-                                        if (scavCache.IsRecoverLifePickup)
-                                        {
-                                            if ((!Photon.Pun.PhotonNetwork.InRoom || AiCore.TryConsumeBotRpcBudget(0.30f)) &&
-                                                soldier.inventory.AddItemToInventoryAndDestroyInstance(scavCache.TargetFloorItem))
-                                            {
-                                                VirtualRecoverLife vRec = soldier.inventory.FindItemOfType<VirtualRecoverLife>()?.TryCast<VirtualRecoverLife>();
-                                                if (vRec != null)
-                                                    soldier.RecoverLife(vRec);
-                                                ScheduleBotInventoryWeightAudit(soldier, 0.50f);
-                                                looted = true;
-                                                lootedDesc = "field rations/med tin";
-                                            }
-                                        }
-                                        else
-                                        {
-                                            bool pickedFloorAmmoOrMag = scavCache.TargetFloorItem.TryCast<AmmoItem>() != null ||
-                                                                        scavCache.TargetFloorItem.TryCast<Magazine>() != null;
-                                            if (soldier.inventory.AddItemToInventoryAndDestroyInstance(scavCache.TargetFloorItem))
-                                            {
-                                                GenericGun g0Now = soldier.GetHeldGun(0);
-                                                if (outOfAmmo && !pickedFloorAmmoOrMag && g0Now != null && soldier.IsOutOfAmmosFor(g0Now))
-                                                    RefillSoldierPrimaryAndStowedWeapons(soldier, 1);
-                                                ScheduleBotInventoryWeightAudit(soldier, 0.50f);
-                                                if (scavCache.IsMedicSyringePickup &&
-                                                    CountUniqueSyringesInInventory(soldier.inventory, out _, out _, out _) >= 3)
-                                                {
-                                                    soldier.hasSyringe = true;
-                                                }
-                                                looted = true;
-                                                if (scavCache.IsAtWeaponPickup)
-                                                    lootedDesc = "floor AT grenade";
-                                                else if (scavCache.IsAtMinePickup)
-                                                    lootedDesc = "floor AT mine";
-                                                else if (scavCache.IsDeployableTripodPickup)
-                                                    lootedDesc = "deployable tripod";
-                                                else if (scavCache.IsShellAmmoPickup)
-                                                    lootedDesc = "mortar/cannon shell";
-                                                else if (scavCache.IsToolboxPickup)
-                                                    lootedDesc = "repair toolbox";
-                                                else if (scavCache.NeedFragGrenade)
-                                                    lootedDesc = "floor frag grenade";
-                                                else if (scavCache.NeedSmokeGrenade)
-                                                    lootedDesc = "floor smoke grenade";
-                                                else if (scavCache.IsMedicSyringePickup)
-                                                    lootedDesc = "fallen medic syringe";
-                                                else
-                                                    lootedDesc = "floor ammo/bandage";
-                                            }
-                                        }
-                                    }
-                                }
-                                // 2. Scavenge from verified dead corpse inventory or supply crate
-                                else if (IsInventoryValidCorpseOrCrate(
-                                             scavCache.TargetInventory,
-                                             soldier.faction,
-                                             outOfAmmo || scavCache.NeedFragGrenade || scavCache.NeedSmokeGrenade,
-                                             outOfBandage || scavCache.IsMedicSyringePickup,
-                                             out _,
-                                             out bool ownerStillDeadOrCrate))
-                                {
-                                    InventoryManager targetInv = scavCache.TargetInventory;
-                                    bool canSwitchWeaponNow = ownerStillDeadOrCrate &&
-                                                              !soldier.IsPlayer() &&
-                                                              !soldier.isInHandsAnimation &&
-                                                              !soldier.isInBodyAnimation &&
-                                                              soldier.CanSwitchHeldItem &&
-                                                              (now >= _nextGlobalBotWeaponPickupTime || now + 5.0f < _nextGlobalBotWeaponPickupTime);
-
-                                    if ((scavCache.IsRadioPackPickup || scavCache.IsHelmetPickup) &&
-                                        ownerStillDeadOrCrate &&
-                                        soldier.inventory != null &&
-                                        scavCache.TargetInventoryWearable != null &&
-                                        targetInv.Contains(scavCache.TargetInventoryWearable))
-                                    {
-                                        if (!Photon.Pun.PhotonNetwork.InRoom || AiCore.TryConsumeBotRpcBudget(0.35f))
-                                        {
-                                            VirtualItem wearable = scavCache.TargetInventoryWearable;
-                                            // InventoryManager.TakeIntoInventory (0x1807E50E0) always returns false (xor al, al):
-                                            // only VirtualHelmet (+0x113..+0x1BF) auto-calls soldier.SetWerable(copy, true), whereas
-                                            // VirtualClothing (radio packs!) jumps to +0x1C1 (AddVirtualItem) unworn and MUST be
-                                            // explicitly marked as worn via soldier.SetWerable(myRadio, true)!
-                                            soldier.inventory.TakeIntoInventory(wearable, targetInv);
-                                            if (!targetInv.Contains(wearable))
-                                            {
-                                                looted = true;
-                                                if (scavCache.IsRadioPackPickup)
-                                                {
-                                                    VirtualItem myRadio = soldier.inventory.Contains(wearable)
-                                                        ? wearable
-                                                        : (soldier.inventory.inventory != null && !string.IsNullOrEmpty(wearable.item_id)
-                                                            ? soldier.inventory.inventory.FindItemWithID(wearable.item_id)
-                                                            : wearable);
-                                                    if (myRadio != null)
-                                                    {
-                                                        soldier.SetWerable(myRadio, true);
-                                                    }
-
-                                                    FieldRadiosInheritedCount++;
-                                                    if (sq != null && sq.Pointer != IntPtr.Zero)
-                                                        _nextSquadRadioScavengeTime[sq.Pointer] = now + 25.0f;
-                                                    lootedDesc = scavCache.IsEnemyRadioCapture
-                                                        ? "captured enemy field radio (retuned)"
-                                                        : "field radio pack from fallen comrade";
-                                                }
-                                                else
-                                                {
-                                                    if (!soldier.hasHeadgear && soldier.inventory.Contains(wearable))
-                                                    {
-                                                        soldier.SetWerable(wearable, true);
-                                                    }
-
-                                                    HelmetsRecoveredCount++;
-                                                    lootedDesc = "helmet from fallen comrade";
-                                                }
-                                            }
-                                        }
-                                    }
-                                    else if (scavCache.IsAtWeaponPickup && ownerStillDeadOrCrate)
-                                    {
-                                        if (scavCache.TargetInventoryAtWeapon != null && targetInv.Contains(scavCache.TargetInventoryAtWeapon))
-                                        {
-                                            if (canSwitchWeaponNow && (!Photon.Pun.PhotonNetwork.InRoom || AiCore.TryConsumeBotRpcBudget(0.35f)))
-                                            {
-                                                soldier.SetGunTriggerPressed(false);
-                                                soldier.PickUpItemFromInventory(scavCache.TargetInventoryAtWeapon, targetInv, 1);
-                                                ScheduleDelayedPickedWeaponRefill(soldier, 1, now);
-                                                _nextGlobalBotWeaponPickupTime = now + 2.20f;
-                                                if (shGoap != null)
-                                                    shGoap.Goap.NextWeaponUpgradeAllowedTime = now + 20.0f;
-                                                plan.NextReplanTime = Mathf.Max(plan.NextReplanTime, now + 2.50f);
-                                                looted = true;
-                                                lootedDesc = "AT launcher from body/crate";
-                                            }
-                                            else
-                                            {
-                                                if (shGoap != null)
-                                                    shGoap.Goap.NextWeaponUpgradeAllowedTime = now + 8.0f;
-                                            }
-                                        }
-                                        else if (soldier.inventory != null)
-                                        {
-                                            VirtualItem atGren = targetInv.FindItemOfType<VirtualATGrenade>();
-                                            if (atGren != null &&
-                                                !AiCore.IsPressureMineItem(atGren, out _) &&
-                                                CanSoldierAcceptExtraMass(soldier, atGren.GetMass(), 0.20f))
-                                            {
-                                                soldier.inventory.TakeIntoInventory(atGren, targetInv);
-                                                if (!targetInv.Contains(atGren))
-                                                {
-                                                    looted = true;
-                                                    lootedDesc = "AT grenade from body/crate";
-                                                }
-                                            }
-                                        }
-                                    }
-                                    else if (scavCache.IsRoleWeaponUpgrade &&
-                                             scavCache.TargetInventoryPrimaryWeapon != null &&
-                                             targetInv.Contains(scavCache.TargetInventoryPrimaryWeapon))
-                                    {
-                                        if (canSwitchWeaponNow && (!Photon.Pun.PhotonNetwork.InRoom || AiCore.TryConsumeBotRpcBudget(0.35f)))
-                                        {
-                                            soldier.SetGunTriggerPressed(false);
-                                            soldier.PickUpItemFromInventory(scavCache.TargetInventoryPrimaryWeapon, targetInv, 0);
-                                            ScheduleDelayedPickedWeaponRefill(soldier, 0, now);
-                                            _nextGlobalBotWeaponPickupTime = now + 2.20f;
-                                            if (shGoap != null)
-                                                shGoap.Goap.NextWeaponUpgradeAllowedTime = now + 90.0f;
-                                            plan.NextReplanTime = Mathf.Max(plan.NextReplanTime, now + 2.50f);
-                                            RoleWeaponUpgradesCount++;
-                                            looted = true;
-                                            lootedDesc = "role-matched primary from body/crate";
-                                        }
-                                        else
-                                        {
-                                            if (shGoap != null)
-                                                shGoap.Goap.NextWeaponUpgradeAllowedTime = now + 8.0f;
-                                        }
-                                    }
-
-                                    if (scavCache.NeedFragGrenade &&
-                                        soldier.inventory != null &&
-                                        AiCore.FindThrowableGrenadeInInventory(soldier, findAtGrenade: false, findFragGrenade: true) == null)
-                                    {
-                                        VirtualItem fg = targetInv.FindItemOfType<VirtualGrenade>();
-                                        if (fg != null &&
-                                            !AiCore.IsPressureMineItem(fg, out _) &&
-                                            CanSoldierAcceptExtraMass(soldier, fg.GetMass(), 0.20f))
-                                        {
-                                            soldier.inventory.TakeIntoInventory(fg, targetInv);
-                                            if (!targetInv.Contains(fg))
-                                            {
-                                                looted = true;
-                                                if (lootedDesc == "supply")
-                                                    lootedDesc = "frag grenade from body/crate";
-                                            }
-                                        }
-                                    }
-
-                                    if (scavCache.NeedSmokeGrenade &&
-                                        soldier.inventory != null &&
-                                        soldier.inventory.FindItemOfType<VirtualSmokeGrenade>() == null)
-                                    {
-                                        VirtualItem sg = targetInv.FindItemOfType<VirtualSmokeGrenade>();
-                                        if (sg != null && CanSoldierAcceptExtraMass(soldier, sg.GetMass(), 0.20f))
-                                        {
-                                            soldier.inventory.TakeIntoInventory(sg, targetInv);
-                                            if (!targetInv.Contains(sg))
-                                            {
-                                                looted = true;
-                                                if (lootedDesc == "supply")
-                                                    lootedDesc = "smoke grenade from body/crate";
-                                            }
-                                        }
-                                    }
-
-                                    if (scavCache.IsMedicSyringePickup &&
-                                        soldier.inventory != null &&
-                                        !IsFriendlyPlayerWithinDistance(soldier, scavCache.TargetPosition, 25.0f))
-                                    {
-                                        if (TryTransferFullMedicKitAtomically(soldier, targetInv))
-                                        {
-                                            looted = true;
-                                            if (lootedDesc == "supply")
-                                                lootedDesc = "complete fallen medic kit (3/3)";
-                                        }
-                                    }
-
-                                    if (outOfBandage && soldier.inventory != null)
-                                    {
-                                        VirtualItem bnd = targetInv.FindItemOfType<VirtualBandages>();
-                                        if (bnd != null &&
-                                            CanSoldierAcceptExtraMass(soldier, bnd.GetMass(), soldier.isBleeding ? 0.0f : 0.20f))
-                                        {
-                                            soldier.inventory.TakeIntoInventory(bnd, targetInv);
-                                            if (soldier.inventory.FindItemOfType<VirtualBandages>() != null)
-                                            {
-                                                looted = true;
-                                                if (lootedDesc == "supply")
-                                                    lootedDesc = "bandage";
-                                            }
-                                        }
-                                    }
-
-                                    if (outOfAmmo && !scavCache.IsRoleWeaponUpgrade)
-                                    {
-                                        RefillSoldierPrimaryAndStowedWeapons(soldier, 2);
-                                        looted = true;
-                                        if (lootedDesc == "supply")
-                                            lootedDesc = "ammo";
-                                    }
-
-                                    if (scavCache.IsAtMinePickup && soldier.inventory != null && !HasPressureAtMineInInventory(soldier))
-                                    {
-                                        VirtualItem candMine = targetInv.FindItemOfType<VirtualATGrenade>();
-                                        if (candMine != null &&
-                                            AiCore.IsPressureMineItem(candMine, out bool atFlag) &&
-                                            atFlag &&
-                                            CanSoldierAcceptExtraMass(soldier, candMine.GetMass(), 0.20f))
-                                        {
-                                            soldier.inventory.TakeIntoInventory(candMine, targetInv);
-                                            if (!targetInv.Contains(candMine))
-                                            {
-                                                looted = true;
-                                                if (lootedDesc == "supply") lootedDesc = "AT mine from chest/corpse";
-                                            }
-                                        }
-                                    }
-
-                                    if (scavCache.IsDeployableTripodPickup && soldier.inventory != null &&
-                                        soldier.inventory.FindItemOfType<VirtualDeployableVehicle>() == null)
-                                    {
-                                        VirtualItem tripod = targetInv.FindItemOfType<VirtualDeployableVehicle>();
-                                        if (tripod != null && CanSoldierAcceptExtraMass(soldier, tripod.GetMass(), 0.15f))
-                                        {
-                                            soldier.inventory.TakeIntoInventory(tripod, targetInv);
-                                            if (!targetInv.Contains(tripod))
-                                            {
-                                                looted = true;
-                                                if (lootedDesc == "supply") lootedDesc = "deployable tripod from chest/corpse";
-                                            }
-                                        }
-                                    }
-
-                                    if (scavCache.IsShellAmmoPickup && soldier.inventory != null)
-                                    {
-                                        VirtualItem shell = targetInv.FindItemOfType<VirtualShellAmmo>();
-                                        if (shell != null && CanSoldierAcceptExtraMass(soldier, shell.GetMass(), 0.20f))
-                                        {
-                                            soldier.inventory.TakeIntoInventory(shell, targetInv);
-                                            if (!targetInv.Contains(shell))
-                                            {
-                                                looted = true;
-                                                if (lootedDesc == "supply") lootedDesc = "shell from chest/corpse";
-                                            }
-                                        }
-                                    }
-
-                                    if (scavCache.IsToolboxPickup && soldier.inventory != null && soldier.GetRepairTools() == null)
-                                    {
-                                        VirtualItem tb = targetInv.FindItemOfType<VirtualToolbox>();
-                                        if (tb != null && CanSoldierAcceptExtraMass(soldier, tb.GetMass(), 0.10f))
-                                        {
-                                            soldier.inventory.TakeIntoInventory(tb, targetInv);
-                                            if (!targetInv.Contains(tb))
-                                            {
-                                                looted = true;
-                                                if (lootedDesc == "supply") lootedDesc = "toolbox from chest/corpse";
-                                            }
-                                        }
-                                    }
-
-                                    if (scavCache.IsRecoverLifePickup && soldier.inventory != null &&
-                                        (!Photon.Pun.PhotonNetwork.InRoom || AiCore.TryConsumeBotRpcBudget(0.30f)))
-                                    {
-                                        VirtualItem recVi = targetInv.FindItemOfType<VirtualRecoverLife>();
-                                        if (recVi != null && CanSoldierAcceptExtraMass(soldier, recVi.GetMass(), 0.0f))
-                                        {
-                                            soldier.inventory.TakeIntoInventory(recVi, targetInv);
-                                            VirtualRecoverLife myRec = soldier.inventory.FindItemOfType<VirtualRecoverLife>()?.TryCast<VirtualRecoverLife>();
-                                            if (myRec != null)
-                                            {
-                                                soldier.RecoverLife(myRec);
-                                                looted = true;
-                                                if (lootedDesc == "supply") lootedDesc = "rations/med tin from chest/corpse";
-                                            }
-                                        }
-                                    }
-                                }
-
-                                if (shGoap != null)
-                                    shGoap.Goap.Scavenge = default;
-                                if (looted)
-                                {
-                                    if (ai.moveDirectlyToward_end > now)
-                                        ai.moveDirectlyToward_end = 0f;
-                                    GoapPlansExecutedCount++;
-                                    if (plan.StepCount > 1 && plan.StepIndex == 0)
-                                        plan.StepIndex = 1;
-                                    if (VisionConfig.DebugLogging.Value)
-                                    {
-                                        AiCore.LogDebug(
-                                            "GoapScavenge",
-                                            $"{soldier.faction} {GetPersonality(soldier)} scavenged {lootedDesc}.",
-                                            3.0f);
-                                    }
-                                }
-                            }
-                            else
-                            {
-                                plan.LockUnitCoverChange = true;
-                                plan.HasMoveOverride = true;
-                                plan.MoveOverrideDest = targetPos;
-                                // Stop at 2.35m arm's-length handoff distance for living buddies (1.15m for floor/corpse items)
-                                // using overlap-safe duration / CPathFinding so bots never body-hug or drop into 0.5x slow-walk!
-                                float standoff = isBuddyHandoff ? 2.35f : 1.15f;
-                                AiCore.MoveBotTowardPosition(ai, soldier, targetPos, standoff, 2.8f);
-                            }
-                        }
-                    }
+                    ExecuteGoapScavengeSupplyFromCorpse(ai, soldier, sq, shGoap, ref plan, ws, suppression, myPos, now);
                     break;
 
                 case GoapActionId.RescueSurrenderedComrade:
@@ -2357,219 +1402,11 @@ namespace EasyRed2HumanAI
                     break;
 
                 case GoapActionId.LoneWolfLinkUpOrAmbush:
-                    {
-                        // Bailed-out Pilots & Tank/Vehicle Crews follow a 3-step hierarchy:
-                        // 1. Remount a nearby operable friendly crew vehicle with a free seat (e.g., just repaired tank!)
-                        // 2. If unarmed/pistol-only or squad on retreat, fall back to friendly rear spawn
-                        // 3. Otherwise, if armed with a primary firearm, link up and join the nearest friendly infantry squad!
-                        SoldierPersonality lonePers = GetPersonality(soldier);
-                        bool isBailedCrewOrPilot = AiCore.IsConfirmedPlaneCrewSquad(sq) ||
-                                                   AiCore.IsTrueVehicleCrewSquad(sq) ||
-                                                   IsPilotOrVehicleCrewPersonality(lonePers);
-                        if (isBailedCrewOrPilot)
-                        {
-                            if (TryRemountNearbyOperableCrewVehicle(ai, soldier, sq, myPos, 28f))
-                            {
-                                plan.LockUnitCoverChange = true;
-                                ApplyDesiredMovingPose(ai, soldier, (GetActualMoveEndpoint(ai, soldier) - myPos).sqrMagnitude, suppression);
-                                break;
-                            }
-
-                            if (shGoap != null && now < shGoap.Goap.BailoutShockUntil)
-                            {
-                                if (AiCore.IsSoldierInVehicleOrTransition(soldier))
-                                    break;
-
-                                SetBotPose(ai, soldier, suppression >= 45f ? SoldierPose.Prone : SoldierPose.Crouch, true);
-                                Vector3 toWreck = myPos - shGoap.Goap.BailoutWreckPos;
-                                toWreck.y = 0f;
-                                if (toWreck.sqrMagnitude < 6.5f * 6.5f && !ai.IsMoving())
-                                {
-                                    Vector3 awayDir;
-                                    if (toWreck.sqrMagnitude > 0.25f)
-                                    {
-                                        awayDir = toWreck.normalized;
-                                    }
-                                    else
-                                    {
-                                        Vector3 fallbackAway = board.HasActiveThreat ? (myPos - board.ThreatPosition) : soldier.transform.forward;
-                                        fallbackAway.y = 0f;
-                                        awayDir = fallbackAway.sqrMagnitude > 0.04f ? fallbackAway.normalized : soldier.transform.forward;
-                                    }
-                                    float jitterDeg = ((AiCore.GetDeterministicHash(ptr, 53) & 15) - 7) * 6.0f;
-                                    Vector3 lat = Quaternion.Euler(0f, jitterDeg, 0f) * awayDir;
-                                    Vector3 scramblePos = shGoap.Goap.BailoutWreckPos + lat * 6.5f;
-                                    float terrY = ResourcesManager.GetTerrainAltitude(scramblePos, myPos.y);
-                                    scramblePos.y = Mathf.Abs(terrY - myPos.y) <= 4.0f ? terrY : myPos.y;
-                                    AiCore.SetBotMoveDestinationAndRefreshPath(ai, scramblePos, 0.25f);
-                                    plan.HasMoveOverride = true;
-                                    plan.MoveOverrideDest = scramblePos;
-                                }
-                                plan.LockUnitCoverChange = true;
-                                plan.IsEvacuatingBailedCrew = true;
-                                break;
-                            }
-
-                            if (ShouldBailedCrewRetreatOverJoinSquad(soldier, sq, myPos))
-                            {
-                                if (TryRetreatBailedCrewTowardFriendlySpawn(ai, soldier, sq, myPos, out Vector3 spawnOverride, out bool hasSpawnOverride))
-                                {
-                                    plan.LockUnitCoverChange = true;
-                                    plan.HasMoveOverride = hasSpawnOverride;
-                                    plan.MoveOverrideDest = spawnOverride;
-                                    plan.IsEvacuatingBailedCrew = hasSpawnOverride;
-                                    if (ai.HasEnemyAndCanFireAtHim && dist > 6.2f && !ai.IsMoving())
-                                        SetBotPose(ai, soldier, SoldierPose.Crouch);
-                                    else
-                                        ApplyDesiredMovingPose(ai, soldier, (spawnOverride - myPos).sqrMagnitude, suppression);
-                                    break;
-                                }
-                            }
-
-                            if (TryLinkUpOrJoinFriendlySquad(ai, soldier, myPos, 140f, out Vector3 linkDest1))
-                            {
-                                DetachStaleFootCoverForEvacuation(soldier);
-                                plan.LockUnitCoverChange = true;
-                                plan.HasMoveOverride = true;
-                                plan.MoveOverrideDest = linkDest1;
-                                plan.IsEvacuatingBailedCrew = true;
-                                if (ai.HasEnemyAndCanFireAtHim && dist > 6.2f && !ai.IsMoving())
-                                    SetBotPose(ai, soldier, SoldierPose.Crouch);
-                                else
-                                    ApplyDesiredMovingPose(ai, soldier, (linkDest1 - myPos).sqrMagnitude, suppression);
-                                break;
-                            }
-
-                            if (TryRetreatBailedCrewTowardFriendlySpawn(ai, soldier, sq, myPos, out Vector3 fallbackSpawnOverride, out bool hasFallbackSpawn))
-                            {
-                                plan.LockUnitCoverChange = true;
-                                plan.HasMoveOverride = hasFallbackSpawn;
-                                plan.MoveOverrideDest = fallbackSpawnOverride;
-                                plan.IsEvacuatingBailedCrew = hasFallbackSpawn;
-                                if (ai.HasEnemyAndCanFireAtHim && dist > 6.2f && !ai.IsMoving())
-                                    SetBotPose(ai, soldier, SoldierPose.Crouch);
-                                else
-                                    ApplyDesiredMovingPose(ai, soldier, (fallbackSpawnOverride - myPos).sqrMagnitude, suppression);
-                                break;
-                            }
-                        }
-
-                        bool preferAmbush = !isBailedCrewOrPilot &&
-                                            (ws & GoapStateBits.OnBridgeOrNarrow) == 0 &&
-                                            GetFactionCommandProfile(soldier.faction).PreferAmbushWhenAlone;
-                        if (preferAmbush)
-                        {
-                            if (!soldier.IsOnCover() && TrySeekNearbyCover(ai, soldier))
-                            {
-                                plan.LockUnitCoverChange = true;
-                                ApplyDesiredMovingPose(ai, soldier, (GetActualMoveEndpoint(ai, soldier) - myPos).sqrMagnitude, suppression);
-                            }
-                            else if (soldier.IsOnCover())
-                            {
-                                SetBotPose(ai, soldier, SoldierPose.Crouch);
-                            }
-                            else if (TryLinkUpOrJoinFriendlySquad(ai, soldier, myPos, 55f, out Vector3 linkDest2))
-                            {
-                                plan.LockUnitCoverChange = true;
-                                plan.HasMoveOverride = true;
-                                plan.MoveOverrideDest = linkDest2;
-                                ApplyDesiredMovingPose(ai, soldier, (linkDest2 - myPos).sqrMagnitude, suppression);
-                            }
-                        }
-                        else
-                        {
-                            if (TryLinkUpOrJoinFriendlySquad(ai, soldier, myPos, 75f, out Vector3 linkDest3))
-                            {
-                                plan.LockUnitCoverChange = true;
-                                plan.HasMoveOverride = true;
-                                plan.MoveOverrideDest = linkDest3;
-                                ApplyDesiredMovingPose(ai, soldier, (linkDest3 - myPos).sqrMagnitude, suppression);
-                            }
-                            else if (!soldier.IsOnCover() && TrySeekNearbyCover(ai, soldier))
-                            {
-                                plan.LockUnitCoverChange = true;
-                                ApplyDesiredMovingPose(ai, soldier, (GetActualMoveEndpoint(ai, soldier) - myPos).sqrMagnitude, suppression);
-                            }
-                        }
-                    }
+                    ExecuteGoapLoneWolfLinkUpOrAmbush(ai, soldier, sq, ptr, shGoap, ref board, ref plan, ws, suppression, dist, myPos, now);
                     break;
 
                 case GoapActionId.TacticalFallbackRetreat:
-                    {
-                        bool hasActiveDest = shGoap != null &&
-                                             shGoap.MoveOverride.Kind == AiCore.BotMoveOverrideKind.EmergencyFallback &&
-                                             now < shGoap.MoveOverride.ExpireTime;
-                        float fbEnd = hasActiveDest ? shGoap.MoveOverride.ExpireTime : 0f;
-                        Vector3 fbDest = hasActiveDest ? shGoap.MoveOverride.Dest : Vector3.zero;
-
-                        if (!hasActiveDest)
-                        {
-                            if (shGoap != null && now < shGoap.Goap.NextIndividualFallbackTime)
-                            {
-                                AiCore.ClearBotMoveOverride(shGoap, AiCore.BotMoveOverrideKind.EmergencyFallback);
-                                plan.PlanExpireTime = 0f;
-                                plan.NextReplanTime = now;
-                                break;
-                            }
-
-                            Vector3 threatRef = board.HasActiveThreat
-                                ? board.ThreatPosition
-                                : (myPos + (soldier.transform != null ? soldier.transform.forward * 16.0f : Vector3.forward * 16.0f));
-                            if (ai.visibleTarget != null && AiCore.TryGetSpottableCenter(ai.visibleTarget, out Vector3 visThreat))
-                                threatRef = visThreat;
-
-                            if (!TryComputeTacticalFallbackPosition(soldier, sq, myPos, threatRef, 22.0f, 36.0f, out fbDest))
-                            {
-                                if (shGoap != null)
-                                    shGoap.Goap.NextIndividualFallbackTime = now + 18.0f;
-                                plan.PlanExpireTime = 0f;
-                                plan.NextReplanTime = now;
-                                break;
-                            }
-
-                            fbEnd = now + 8.5f;
-                            if (shGoap != null)
-                            {
-                                AiCore.SetBotMoveOverride(shGoap, AiCore.BotMoveOverrideKind.EmergencyFallback, fbDest, fbEnd);
-                                shGoap.Goap.NextIndividualFallbackTime = now + 38.0f;
-                            }
-                            TacticalRetreatsCount++;
-                            GoapPlansExecutedCount++;
-                            TrySayTacticalVoice(soldier, sq, VoiceManager.VoiceClip.timeToRetreat, 0.08f);
-                            BotActionTrace.RecordEvent(soldier, BotTraceEventKind.FallbackRetreat, "goap_break_contact", dist);
-
-                            if (VisionConfig.DebugLogging.Value)
-                            {
-                                AiCore.LogDebug(
-                                    "IndivFallback",
-                                    $"{soldier.faction} {GetPersonality(soldier)} executing break-contact fallback ({Vector3.Distance(myPos, fbDest):F0}m rearward).",
-                                    3.0f);
-                            }
-                        }
-
-                        float remSq = (fbDest - myPos).sqrMagnitude;
-                        if (remSq <= 3.2f * 3.2f)
-                        {
-                            AiCore.ClearBotMoveOverride(shGoap, AiCore.BotMoveOverrideKind.EmergencyFallback);
-                            SetBotPose(ai, soldier, SoldierPose.Crouch);
-                            plan.PlanExpireTime = 0f;
-                            plan.NextReplanTime = now;
-                        }
-                        else
-                        {
-                            plan.LockUnitCoverChange = true;
-                            plan.PlanExpireTime = Mathf.Min(fbEnd, Mathf.Max(plan.PlanExpireTime, now + 4.5f));
-                            if (shGoap != null)
-                                shGoap.Stance.LocalCoverProtectedUntil = now + 4.5f;
-                            plan.HasMoveOverride = true;
-                            plan.MoveOverrideDest = fbDest;
-                            if (ai.HasEnemyAndCanFireAtHim && dist > 6.2f && !ai.IsMoving())
-                                SetBotPose(ai, soldier, SoldierPose.Crouch);
-                            else
-                                SetBotPose(ai, soldier, remSq <= 5.0f * 5.0f ? SoldierPose.Crouch : SoldierPose.Idle, remSq > 5.0f * 5.0f);
-                            AiCore.MoveBotTowardPosition(ai, soldier, fbDest, 2.2f, 3.0f);
-                        }
-                    }
+                    ExecuteGoapTacticalFallbackRetreat(ai, soldier, sq, shGoap, ref board, ref plan, dist, myPos, now);
                     break;
 
                 case GoapActionId.DirectFireEngagement:
@@ -2607,6 +1444,1194 @@ namespace EasyRed2HumanAI
                         }
                     }
                     break;
+            }
+        }
+
+        private static void ExecuteGoapSeekEmergencyCover(SoldierAI ai, Soldier soldier, Squad sq, AiCore.SoldierFastHandles shGoap, ref SquadBlackboard board, ref BotGoapPlan plan, GoapStateBits ws, float suppression, Vector3 myPos, float now)
+        {
+            bool onNarrowBridge = (ws & GoapStateBits.OnBridgeOrNarrow) != 0;
+            bool inMultiSidedOrIndoors = IsPositionInMultiSidedOrIndoorShelter(myPos, out bool isIndoorRoofed, out _);
+            if (TrySeekNearbyCover(ai, soldier))
+            {
+                plan.LockUnitCoverChange = true;
+                if (soldier.IsOnCover())
+                {
+                    SoldierPose coverPose = (!onNarrowBridge && !ai.HasEnemyAndCanFireAtHim && (isIndoorRoofed || inMultiSidedOrIndoors || suppression >= 28f))
+                        ? SoldierPose.Prone
+                        : SoldierPose.Crouch;
+                    SetBotPose(ai, soldier, coverPose);
+                    if (plan.StepCount > 1)
+                        plan.StepIndex = 1;
+                }
+                else
+                {
+                    Vector3 covPos = (soldier.HasDestinationAssigned && soldier.targetDestination != null)
+                        ? soldier.targetDestination.GetCoverPosition()
+                        : GetActualMoveEndpoint(ai, soldier);
+                    float covDistSq = (covPos - myPos).sqrMagnitude;
+                    plan.HasMoveOverride = covDistSq > 1.8f * 1.8f;
+                    plan.MoveOverrideDest = covPos;
+                    if (soldier.m_pose == SoldierPose.Prone && covDistSq > 1.8f * 1.8f)
+                        SetBotPose(ai, soldier, SoldierPose.Crouch, true);
+                    ApplyDesiredMovingPose(ai, soldier, covDistSq, suppression);
+                }
+            }
+            else
+            {
+                // Open-field / indoor / trench fallback so SeekEmergencyCover is never a no-op!
+                if (soldier.isBleeding && (ws & GoapStateBits.BandageUnsafeUnderFire) == 0)
+                {
+                    SetBotPose(ai, soldier, onNarrowBridge ? SoldierPose.Crouch : SoldierPose.Prone, true);
+                    if (plan.StepCount > 1)
+                        plan.StepIndex = 1;
+                }
+                else if (inMultiSidedOrIndoors && !onNarrowBridge)
+                {
+                    // Already inside a building or multi-sided trench/crater: stay sheltered inside and drop prone!
+                    if (shGoap != null)
+                        shGoap.Stance.LocalCoverProtectedUntil = now + 4.5f;
+                    plan.LockUnitCoverChange = true;
+                    SoldierPose shelterPose = !ai.HasEnemyAndCanFireAtHim ? SoldierPose.Prone : SoldierPose.Crouch;
+                    SetBotPose(ai, soldier, shelterPose, true);
+                    plan.PlanExpireTime = Mathf.Min(plan.PlanExpireTime, now + 2.4f);
+                }
+                else
+                {
+                    Vector3 openThreatDir = GetEffectiveThreatDirection(soldier, sq, myPos, board.ThreatDirection);
+                    if (AiCore.CanBotMoveAutonomously(soldier) &&
+                        !onNarrowBridge &&
+                        TryComputeTacticalFallbackPosition(soldier, sq, myPos, myPos + openThreatDir * 20.0f, 8.5f, 14.0f, out Vector3 openScatterPos))
+                    {
+                        DestinationWithoutCover openDest = new DestinationWithoutCover(openScatterPos, SoldierPose.Crouch);
+                        AiCore.AssignBotCoverOrDestination(ai, soldier, openDest.Cast<AiDestination>());
+                        if (shGoap != null)
+                            shGoap.Stance.LocalCoverProtectedUntil = now + 4.2f;
+                        plan.LockUnitCoverChange = true;
+                        plan.HasMoveOverride = true;
+                        plan.MoveOverrideDest = openScatterPos;
+                        float scatterSq = (openScatterPos - myPos).sqrMagnitude;
+                        if (soldier.m_pose == SoldierPose.Prone && scatterSq > 1.8f * 1.8f)
+                            SetBotPose(ai, soldier, SoldierPose.Crouch, true);
+                        ApplyDesiredMovingPose(ai, soldier, scatterSq, suppression);
+                        GoapPlansExecutedCount++;
+                    }
+                    else
+                    {
+                        SoldierPose dropPose = (!onNarrowBridge && suppression >= 25f) ? SoldierPose.Prone : SoldierPose.Crouch;
+                        SetBotPose(ai, soldier, dropPose, true);
+                        plan.PlanExpireTime = Mathf.Min(plan.PlanExpireTime, now + 1.8f);
+                    }
+                }
+            }
+        }
+
+        private static void ExecuteGoapThrowSmokeScreen(SoldierAI ai, Soldier soldier, Squad sq, IntPtr ptr, AiCore.SoldierFastHandles shGoap, ref SquadBlackboard board, ref BotGoapPlan plan, GoapStateBits ws, float suppression, float dist, Vector3 myPos, float now)
+        {
+            bool smokeThrown = false;
+            float nextSmkThrow = shGoap != null ? shGoap.Goap.NextSmokeGrenadeTime : 0f;
+            if (soldier.inventory != null &&
+                now > soldier.throw_end_time + 5.0f &&
+                board.PrimaryTarget != null &&
+                (now >= nextSmkThrow || nextSmkThrow - now > 60.0f) &&
+                (now >= board.SmokeActiveUntil || board.SmokeActiveUntil - now > 60.0f || (board.ThreatPosition - board.LastSmokeTargetPos).sqrMagnitude > 18f * 18f))
+            {
+                VirtualItem smokeItem = soldier.inventory.FindItemOfType<VirtualSmokeGrenade>();
+                if (smokeItem != null)
+                {
+                    float dToThreat = Vector3.Distance(myPos, board.ThreatPosition);
+                    if (dToThreat >= 12f && dToThreat <= soldier.GetGrenadeThrowRange(smokeItem) + 6f &&
+                        !AiCore.HasLowCeilingOverhead(myPos, 3.2f) &&
+                        AiCore.TryConsumeBotRpcBudget(0.45f))
+                    {
+                        if (shGoap != null)
+                            shGoap.Goap.NextSmokeGrenadeTime = now + 32.0f;
+                        board.SmokeActiveUntil = now + 22.0f;
+                        board.LastSmokeTargetPos = board.ThreatPosition;
+                        soldier.Throw(smokeItem, board.PrimaryTarget);
+                        board.Suppressor0Ptr = ptr;
+                        board.SuppressHoldUntil = now + 6.5f;
+                        GoapSmokeScreensCount++;
+                        GoapPlansExecutedCount++;
+                        smokeThrown = true;
+                        TrySayTacticalVoice(soldier, sq, VoiceManager.VoiceClip.keepYourHeadDown, 0.1f);
+                        if (VisionConfig.DebugLogging.Value)
+                        {
+                            AiCore.LogDebug(
+                                "GoapSmoke",
+                                $"{soldier.faction} {GetPersonality(soldier)} threw GOAP smoke screen ({dToThreat:F0}m, nextStep:{plan.Step1}).",
+                                3.0f);
+                        }
+                    }
+                }
+            }
+
+            // Advance to Step 1 when smoke was thrown OR when an allied smoke/pin already covers the push
+            // (or on non-offensive fallback/evac steps); never send an unmasked soldier into unpinned fire if smoke failed!
+            bool step1SafeWithoutNewSmoke =
+                smokeThrown ||
+                now < board.SmokeActiveUntil ||
+                (ws & GoapStateBits.AllyPinningThreat) != 0 ||
+                plan.Step1 == GoapActionId.TacticalFallbackRetreat ||
+                plan.Step1 == GoapActionId.LoneWolfLinkUpOrAmbush;
+
+            if (plan.StepCount > 1 && plan.StepIndex == 0 && plan.Step1 != GoapActionId.None && step1SafeWithoutNewSmoke)
+            {
+                plan.StepIndex = 1;
+                if (!smokeThrown && plan.Step1 != GoapActionId.ThrowSmokeScreen)
+                {
+                    ExecuteGoapActionStep(ai, soldier, sq, ref board, ref plan, plan.Step1, ws, suppression, dist, now);
+                }
+            }
+            else if (!smokeThrown)
+            {
+                plan.PlanExpireTime = 0f;
+            }
+        }
+
+        private static void ExecuteGoapHoldOverwatchOrSuppress(SoldierAI ai, Soldier soldier, Squad sq, IntPtr ptr, AiCore.SoldierFastHandles shGoap, ref SquadBlackboard board, ref BotGoapPlan plan, GoapActionId action, float dist, Vector3 myPos, float now)
+        {
+            bool hasRealPinningFire = action == GoapActionId.HoldOverwatchFire
+                ? (ai.HasEnemyAndCanFireAtHim && AiCore.GetRawVisibleTargetPtr(ai) != IntPtr.Zero)
+                : (board.HasActiveThreat && CanDeliverSuppressiveFireTowardPoint(ai, soldier, board.ThreatPosition, board.PrimaryTarget, now));
+
+            if (hasRealPinningFire)
+            {
+                if (board.Suppressor0Ptr == IntPtr.Zero || board.Suppressor0Ptr == ptr)
+                    board.Suppressor0Ptr = ptr;
+                else if (board.Suppressor1Ptr == IntPtr.Zero || board.Suppressor1Ptr == ptr)
+                    board.Suppressor1Ptr = ptr;
+
+                board.SuppressHoldUntil = Mathf.Max(board.SuppressHoldUntil, now + 3.2f);
+            }
+            else
+            {
+                // Prevent "phantom pinning": never broadcast AllyPinningThreat from behind a blind wall!
+                if (board.Suppressor0Ptr == ptr)
+                    board.Suppressor0Ptr = IntPtr.Zero;
+                if (board.Suppressor1Ptr == ptr)
+                    board.Suppressor1Ptr = IntPtr.Zero;
+                plan.PlanExpireTime = Mathf.Min(plan.PlanExpireTime, now + 0.85f);
+                return;
+            }
+
+            if (action == GoapActionId.HoldOverwatchFire &&
+                (!ai.IsMoving() || IsInCommittedFiringHalt(ptr, now)) &&
+                AiCore.TryGetSpottableCenter(ai.visibleTarget, out Vector3 owTargetPos))
+            {
+                bool crouchClear = HasClearLineOfFireFromCrouch(soldier, owTargetPos, dist);
+                SetBotPose(ai, soldier, crouchClear ? SoldierPose.Crouch : SoldierPose.Idle, true);
+                AiCore.SoldierFastHandles owHandles = shGoap ?? AiCore.GetOrCreateSoldierHandles(soldier);
+                if (owHandles != null && now >= owHandles.Combat.NextBoundingHoldCountTime)
+                {
+                    owHandles.Combat.NextBoundingHoldCountTime = now + 5.0f;
+                    GoapPlansExecutedCount++;
+                    TrySayTacticalVoice(soldier, sq, VoiceManager.VoiceClip.coveringFire, 0.15f);
+                }
+            }
+            else if (action == GoapActionId.SuppressThreatPosition && !ai.IsMoving() && shGoap != null)
+            {
+                if (soldier.m_pose == SoldierPose.Idle &&
+                    !soldier.UsingBipod() &&
+                    HasClearLineOfFireFromCrouch(soldier, board.ThreatPosition + Vector3.up * 0.45f, Vector3.Distance(myPos, board.ThreatPosition)))
+                {
+                    SetBotPose(ai, soldier, SoldierPose.Crouch);
+                }
+                if (now >= shGoap.Combat.NextBoundingHoldCountTime)
+                {
+                    shGoap.Combat.NextBoundingHoldCountTime = now + 5.0f;
+                    GoapPlansExecutedCount++;
+                    TrySayTacticalVoice(soldier, sq, VoiceManager.VoiceClip.coveringFire, 0.15f);
+                }
+            }
+        }
+
+        private static void ExecuteGoapMoveToFlankCover(SoldierAI ai, Soldier soldier, Squad sq, IntPtr ptr, AiCore.SoldierFastHandles shGoap, ref SquadBlackboard board, ref BotGoapPlan plan, float suppression, Vector3 myPos, float now)
+        {
+            CombatCover chosenCover = null;
+            if (board.FlankLeftCover != null &&
+                (board.FlankerLeftPtr == IntPtr.Zero || board.FlankerLeftPtr == ptr) &&
+                (soldier.nonReachableCovers == null || !soldier.nonReachableCovers.Contains(board.FlankLeftCover.Cast<AiDestination>())))
+            {
+                board.FlankerLeftPtr = ptr;
+                chosenCover = board.FlankLeftCover;
+            }
+            else if (board.FlankRightCover != null &&
+                     (board.FlankerRightPtr == IntPtr.Zero || board.FlankerRightPtr == ptr) &&
+                     (soldier.nonReachableCovers == null || !soldier.nonReachableCovers.Contains(board.FlankRightCover.Cast<AiDestination>())))
+            {
+                board.FlankerRightPtr = ptr;
+                chosenCover = board.FlankRightCover;
+            }
+
+            if (chosenCover != null)
+            {
+                Vector3 chosenPos = chosenCover.GetCoverPosition();
+                float flankDistSq = (chosenPos - myPos).sqrMagnitude;
+                board.FlankUntil = Mathf.Max(board.FlankUntil, now + 6.5f);
+                plan.LockUnitCoverChange = true;
+                plan.PlanExpireTime = now + 6.5f;
+                if (shGoap != null)
+                    shGoap.Stance.LocalCoverProtectedUntil = now + 6.5f;
+
+                if (soldier.targetDestination == null || soldier.targetDestination.Pointer != chosenCover.Pointer)
+                {
+                    if (shGoap == null || now >= shGoap.Goap.NextFlankCoverAssignTime)
+                    {
+                        if (shGoap != null)
+                            shGoap.Goap.NextFlankCoverAssignTime = now + 5.5f;
+                        AiCore.AssignBotCoverOrDestination(ai, soldier, chosenCover.Cast<AiDestination>());
+                        plan.HasMoveOverride = flankDistSq > 1.8f * 1.8f;
+                        plan.MoveOverrideDest = chosenPos;
+                        if (soldier.m_pose == SoldierPose.Prone && flankDistSq > 1.8f * 1.8f)
+                            SetBotPose(ai, soldier, SoldierPose.Crouch, true);
+                        ApplyDesiredMovingPose(ai, soldier, flankDistSq, suppression);
+                        plan.NextReplanTime = Mathf.Max(plan.NextReplanTime, now + 4.5f);
+                        GoapPinAndFlankCount++;
+                        GoapPlansExecutedCount++;
+                        TrySayTacticalVoice(soldier, sq, VoiceManager.VoiceClip.imMoving, 0.25f);
+                        if (VisionConfig.DebugLogging.Value)
+                        {
+                            AiCore.LogDebug("GoapPinFlank", $"{soldier.faction} {GetPersonality(soldier)} flanking pinned enemy to lateral cover (nextStep:{plan.Step1}).", 3.0f);
+                        }
+                    }
+                    else
+                    {
+                        plan.PlanExpireTime = 0f;
+                    }
+                }
+                else if (soldier.IsOnCover())
+                {
+                    if (plan.StepCount > 1)
+                        plan.StepIndex = 1;
+                }
+                else
+                {
+                    plan.HasMoveOverride = flankDistSq > 1.8f * 1.8f;
+                    plan.MoveOverrideDest = chosenPos;
+                    if (soldier.m_pose == SoldierPose.Prone && flankDistSq > 1.8f * 1.8f)
+                        SetBotPose(ai, soldier, SoldierPose.Crouch, true);
+                    ApplyDesiredMovingPose(ai, soldier, flankDistSq, suppression);
+                    if (!ai.IsMoving() && !ai.HasPath && !ai.HasPathRequest)
+                    {
+                        AiCore.ResetBotPathLockout(ai);
+                        ai.MoveDestination = chosenPos;
+                        ai.UpdatePath();
+                    }
+                }
+            }
+            else
+            {
+                plan.PlanExpireTime = 0f;
+            }
+        }
+
+        private static void ExecuteGoapFlushThreatWithFrag(SoldierAI ai, Soldier soldier, IntPtr ptr, AiCore.SoldierFastHandles shGoap, ref SquadBlackboard board, ref BotGoapPlan plan, Vector3 myPos, float now)
+        {
+            bool threwFrag = false;
+            SoldierPersonality fragPers = GetPersonality(soldier);
+            bool isCombatGrenadier = fragPers == SoldierPersonality.Assaulter_Breacher ||
+                                     fragPers == SoldierPersonality.Rifleman_Grenadier ||
+                                     fragPers == SoldierPersonality.AT_Demolitionist;
+            if (VisionConfig.EnableLastKnownSuppression.Value || isCombatGrenadier)
+            {
+                if (VisionConfig.EnableLastKnownSuppression.Value &&
+                    TryFlushLastKnownEnemyWithGrenade(ai, soldier, allowWhileMoving: true))
+                {
+                    threwFrag = true;
+                    GoapPlansExecutedCount++;
+                }
+                else if (shGoap != null &&
+                         now > soldier.throw_end_time + 6.0f &&
+                         now >= shGoap.Vision.NextSuppressiveGrenadeTime)
+                {
+                    Spottable fragTarget = (isCombatGrenadier && ai.visibleTarget != null && !ai.visibleTarget.IsWheeledVehicleOrTank())
+                        ? ai.visibleTarget
+                        : ((VisionConfig.EnableLastKnownSuppression.Value &&
+                            !ai.HasEnemyAndCanFireAtHim &&
+                            board.HasActiveThreat)
+                            ? board.PrimaryTarget
+                            : null);
+                    if (fragTarget != null && fragTarget.Pointer != IntPtr.Zero)
+                    {
+                        Soldier targetSol = fragTarget.TryCast<Soldier>();
+                        if (targetSol != null && targetSol.IsAlive && targetSol.faction != soldier.faction)
+                        {
+                            Vector3 tPos = targetSol.GetCenterOfUnit();
+                            float dFrag = Vector3.Distance(myPos, tPos);
+                            if (TryThrowTacticalFragGrenade(
+                                    soldier,
+                                    fragTarget,
+                                    tPos,
+                                    dFrag,
+                                    isCombatGrenadier ? 9.0f : 10.0f,
+                                    isCombatGrenadier ? 34.0f : 29.0f,
+                                    isCombatGrenadier ? 9.0f : 11.5f,
+                                    now,
+                                    sayVoice: true,
+                                    cooldownSeconds: isCombatGrenadier ? 10.0f : 14.0f))
+                            {
+                                threwFrag = true;
+                                GoapPlansExecutedCount++;
+                                if (VisionConfig.DebugLogging.Value)
+                                {
+                                    AiCore.LogDebug(
+                                        "GoapFrag",
+                                        $"{soldier.faction} {fragPers} lobbed GOAP frag grenade ({dFrag:F0}m).",
+                                        3.0f);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            if (threwFrag)
+            {
+                board.BreacherPtr = ptr;
+                board.BreachUntil = now + 4.0f;
+            }
+            else if (board.BreacherPtr == ptr)
+            {
+                board.BreacherPtr = IntPtr.Zero;
+            }
+            plan.PlanExpireTime = Mathf.Min(plan.PlanExpireTime, now + 0.85f);
+        }
+
+        private static void ExecuteGoapScavengeSupplyFromCorpse(SoldierAI ai, Soldier soldier, Squad sq, AiCore.SoldierFastHandles shGoap, ref BotGoapPlan plan, GoapStateBits ws, float suppression, Vector3 myPos, float now)
+        {
+            if (suppression >= 5.0f ||
+                (ws & ScavengeForbiddenMask) != 0 ||
+                (ws & GoapStateBits.NeedAmmoOrMedScavenge) == 0)
+            {
+                if (shGoap != null)
+                {
+                    shGoap.Goap.Scavenge = default;
+                    AiCore.ClearBotMoveOverride(shGoap, AiCore.BotMoveOverrideKind.GoapAction);
+                }
+                if (ai.moveDirectlyToward_end > now)
+                    ai.moveDirectlyToward_end = 0f;
+                plan.LockUnitCoverChange = false;
+                plan.HasMoveOverride = false;
+                plan.PlanExpireTime = 0f;
+                plan.NextReplanTime = now;
+                if (!soldier.IsOnCover() && AiCore.CanBotMoveAutonomously(soldier))
+                    TrySeekNearbyCover(ai, soldier);
+                return;
+            }
+
+            // Reuse the BotScavengeCache populated by BuildSoldierWorldState (eliminates duplicate 50-line evaluation per tick)
+            BotScavengeCache scavCache = shGoap != null ? shGoap.Goap.Scavenge : default;
+            if (scavCache.TargetFloorItem != null ||
+                scavCache.TargetRefillCrate != null ||
+                scavCache.TargetInventory != null ||
+                scavCache.TargetBuddyDonor != null ||
+                scavCache.TargetNeedyAllyToFeed != null)
+            {
+                if ((scavCache.IsBuddyBandageRefill || scavCache.IsBuddyAmmoBorrow) &&
+                    scavCache.TargetBuddyDonor != null &&
+                    scavCache.TargetBuddyDonor.Pointer != IntPtr.Zero &&
+                    scavCache.TargetBuddyDonor.IsAlive &&
+                    scavCache.TargetBuddyDonor.transform != null)
+                {
+                    scavCache.TargetPosition = scavCache.TargetBuddyDonor.transform.position;
+                }
+                else if (scavCache.IsFeedingNeedyAlly &&
+                         scavCache.TargetNeedyAllyToFeed != null &&
+                         scavCache.TargetNeedyAllyToFeed.Pointer != IntPtr.Zero &&
+                         scavCache.TargetNeedyAllyToFeed.IsAlive &&
+                         scavCache.TargetNeedyAllyToFeed.transform != null)
+                {
+                    scavCache.TargetPosition = scavCache.TargetNeedyAllyToFeed.transform.position;
+                }
+
+                bool isBuddyHandoff = scavCache.IsBuddyBandageRefill ||
+                                      scavCache.IsBuddyAmmoBorrow ||
+                                      scavCache.IsFeedingNeedyAlly;
+                bool outOfAmmo = scavCache.NeedAmmo;
+                bool outOfBandage = scavCache.NeedBandage;
+                Vector3 targetPos = scavCache.TargetPosition;
+                float dSq = (targetPos - myPos).sqrMagnitude;
+                float triggerRadius = isBuddyHandoff ? 3.8f : 3.3f;
+                ApplyDesiredMovingPose(ai, soldier, dSq, suppression);
+                if (dSq <= triggerRadius * triggerRadius)
+                {
+                    bool looted = false;
+                    string lootedDesc = "supply";
+
+                    // 0A. Buddy Bandage Refill from living friendly Medic
+                    if (scavCache.IsBuddyBandageRefill &&
+                        scavCache.TargetBuddyDonor != null &&
+                        scavCache.TargetBuddyDonor.Pointer != IntPtr.Zero &&
+                        scavCache.TargetBuddyDonor.IsAlive &&
+                        !scavCache.TargetBuddyDonor.IsInjured)
+                    {
+                        if (!Photon.Pun.PhotonNetwork.InRoom || AiCore.TryConsumeBotRpcBudget(0.25f))
+                        {
+                            soldier.RefillBandages();
+                            if (shGoap != null)
+                                shGoap.Goap.NextBuddyBandageRefillTime = now + 45.0f;
+                            BuddyResuppliesCount++;
+                            looted = true;
+                            lootedDesc = "buddy bandage from medic";
+                            TrySayTacticalVoice(soldier, sq, VoiceManager.VoiceClip.thankYou, 0.25f);
+                        }
+                    }
+                    // 0B. Buddy Ammo Borrow from living friendly Ammo Carrier / Support rifleman
+                    else if (scavCache.IsBuddyAmmoBorrow &&
+                             scavCache.TargetBuddyDonor != null &&
+                             scavCache.TargetBuddyDonor.Pointer != IntPtr.Zero &&
+                             scavCache.TargetBuddyDonor.IsAlive &&
+                             !scavCache.TargetBuddyDonor.IsInjured)
+                    {
+                        if (!Photon.Pun.PhotonNetwork.InRoom || AiCore.TryConsumeBotRpcBudget(0.30f))
+                        {
+                            soldier.inventory?.RemoveEmptyAmmoAndMagazines();
+                            Soldier donor = scavCache.TargetBuddyDonor;
+                            donor.BorrowAmmos(soldier);
+                            // Creature.BorrowAmmos (0x180A51A60) already calls RefillAmmoForWearedWeapon(0, true, ...)
+                            // when donor has matching ammo. Only fall back to RefillSoldierPrimaryAndStowedWeapons if
+                            // no async refill is pending, preventing duplicate Slot-0 refills (4 mags instead of 2).
+                            if (!soldier.IsAmmoRefillPending())
+                            {
+                                RefillSoldierPrimaryAndStowedWeapons(soldier, 2);
+                            }
+                            else
+                            {
+                                ScheduleBotInventoryWeightAudit(soldier, 0.70f);
+                            }
+                            if (shGoap != null)
+                                shGoap.Goap.NextBuddyAmmoResupplyTime = now + 35.0f;
+                            BuddyResuppliesCount++;
+                            looted = true;
+                            lootedDesc = "buddy ammo from carrier";
+                            TrySayTacticalVoice(soldier, sq, VoiceManager.VoiceClip.thankYou, 0.25f);
+                        }
+                    }
+                    // 0C. Support / Ammo Carrier proactively feeding a dry MG gunner or AT specialist
+                    else if (scavCache.IsFeedingNeedyAlly &&
+                             scavCache.TargetNeedyAllyToFeed != null &&
+                             scavCache.TargetNeedyAllyToFeed.Pointer != IntPtr.Zero &&
+                             scavCache.TargetNeedyAllyToFeed.IsAlive &&
+                             !scavCache.TargetNeedyAllyToFeed.IsInjured)
+                    {
+                        if (!Photon.Pun.PhotonNetwork.InRoom || AiCore.TryConsumeBotRpcBudget(0.30f))
+                        {
+                            Soldier ally = scavCache.TargetNeedyAllyToFeed;
+                            ally.inventory?.RemoveEmptyAmmoAndMagazines();
+                            soldier.BorrowAmmos(ally);
+                            if (AiCore.IsLocallyOwnedBot(ally))
+                            {
+                                if (!ally.IsAmmoRefillPending())
+                                {
+                                    RefillSoldierPrimaryAndStowedWeapons(ally, 2);
+                                }
+                                else
+                                {
+                                    ScheduleBotInventoryWeightAudit(ally, 0.70f);
+                                }
+                            }
+                            if (shGoap != null)
+                                shGoap.Goap.NextBuddyAmmoResupplyTime = now + 35.0f;
+                            AiCore.SoldierFastHandles allyH = AiCore.GetOrCreateSoldierHandles(ally);
+                            if (allyH != null)
+                                allyH.Goap.NextBuddyAmmoResupplyTime = now + 35.0f;
+                            BuddyResuppliesCount++;
+                            looted = true;
+                            lootedDesc = "fed ammo to needy MG/AT squadmate";
+                        }
+                    }
+                    // 0D. Placed Map AmmoRefillCrate (trench / bunker / strongpoint resupply crate)
+                    else if (scavCache.TargetRefillCrate != null &&
+                             scavCache.TargetRefillCrate.Pointer != IntPtr.Zero &&
+                             scavCache.TargetRefillCrate.gameObject != null &&
+                             scavCache.TargetRefillCrate.gameObject.activeInHierarchy)
+                    {
+                        AmmoRefillCrate crate = scavCache.TargetRefillCrate;
+                        CachedBoxOverrideInfo ov = GetCachedBoxOverrideInfo(
+                            crate.Pointer,
+                            crate.overrideContent,
+                            crate.allowTakeWeaponIntoInventory);
+                        looted = TryResupplyFromBoxOrCrate(
+                            soldier,
+                            crate.overrideContent,
+                            crate.allowTakeWeaponIntoInventory,
+                            ov,
+                            outOfAmmo,
+                            scavCache.NeedFragGrenade,
+                            scavCache.NeedSmokeGrenade,
+                            scavCache.IsAtWeaponPickup,
+                            outOfBandage,
+                            now,
+                            ref plan,
+                            out lootedDesc);
+                    }
+                    // 1. Pick up physical floor items (dropped AT launchers, primary rifles/SMGs/MGs, helmets, radios, DroppableAmmoBox, grenades, magazines, syringes)
+                    else if (IsFloorItemFreeToPickUp(scavCache.TargetFloorItem))
+                    {
+                        DroppableAmmoBox floorBox = scavCache.IsDroppableAmmoBox
+                            ? scavCache.TargetFloorItem.TryCast<DroppableAmmoBox>()
+                            : null;
+                        GenericGun floorGun = floorBox == null ? scavCache.TargetFloorItem.TryCast<GenericGun>() : null;
+
+                        if (floorBox != null)
+                        {
+                            // Resupply from floor-dropped ammo box without locking out the player's 30s UI prompt or deleting the box!
+                            CachedBoxOverrideInfo ov = GetCachedBoxOverrideInfo(floorBox.Pointer, floorBox.overrideContent, true);
+                            looted = TryResupplyFromBoxOrCrate(
+                                soldier,
+                                floorBox.overrideContent,
+                                true,
+                                ov,
+                                outOfAmmo,
+                                scavCache.NeedFragGrenade,
+                                scavCache.NeedSmokeGrenade,
+                                scavCache.IsAtWeaponPickup,
+                                outOfBandage,
+                                now,
+                                ref plan,
+                                out lootedDesc);
+                        }
+                        else if (floorGun != null)
+                        {
+                            bool canSwitchWeaponNow = !soldier.IsPlayer() &&
+                                                      !soldier.isInHandsAnimation &&
+                                                      !soldier.isInBodyAnimation &&
+                                                      soldier.CanSwitchHeldItem &&
+                                                      (now >= _nextGlobalBotWeaponPickupTime || now + 5.0f < _nextGlobalBotWeaponPickupTime);
+
+                            if (canSwitchWeaponNow && (!Photon.Pun.PhotonNetwork.InRoom || AiCore.TryConsumeBotRpcBudget(0.35f)))
+                            {
+                                int slot = floorGun.IsAtWeapon() ? 1 : 0;
+                                soldier.SetGunTriggerPressed(false);
+                                soldier.PickUpItem(scavCache.TargetFloorItem.gameObject, slot);
+                                ScheduleDelayedPickedWeaponRefill(soldier, slot, now);
+                                _nextGlobalBotWeaponPickupTime = now + 2.20f;
+                                if (shGoap != null)
+                                    shGoap.Goap.NextWeaponUpgradeAllowedTime = now + (scavCache.IsRoleWeaponUpgrade ? 90.0f : 20.0f);
+                                plan.NextReplanTime = Mathf.Max(plan.NextReplanTime, now + 2.50f);
+                                looted = true;
+                                if (scavCache.IsRoleWeaponUpgrade)
+                                {
+                                    RoleWeaponUpgradesCount++;
+                                    lootedDesc = $"upgraded primary ({floorGun.name})";
+                                }
+                                else
+                                {
+                                    lootedDesc = floorGun.IsAtWeapon() ? "dropped AT weapon" : "dropped firearm";
+                                }
+                            }
+                            else
+                            {
+                                if (shGoap != null)
+                                    shGoap.Goap.NextWeaponUpgradeAllowedTime = now + 8.0f;
+                            }
+                        }
+                        else if ((scavCache.IsHelmetPickup || scavCache.IsRadioPackPickup) && soldier.inventory != null)
+                        {
+                            if (!Photon.Pun.PhotonNetwork.InRoom || AiCore.TryConsumeBotRpcBudget(0.35f))
+                            {
+                                VirtualItem addedWearable = soldier.inventory.AddItemToInventory(scavCache.TargetFloorItem);
+                                if (addedWearable != null)
+                                {
+                                    ResourcesManager.SynchDestroy(scavCache.TargetFloorItem.gameObject, true);
+                                    soldier.SetWerable(addedWearable, true);
+                                    looted = true;
+                                    if (scavCache.IsRadioPackPickup)
+                                    {
+                                        FieldRadiosInheritedCount++;
+                                        if (sq != null && sq.Pointer != IntPtr.Zero)
+                                            _nextSquadRadioScavengeTime[sq.Pointer] = now + 25.0f;
+                                        lootedDesc = "floor radio pack";
+                                    }
+                                    else
+                                    {
+                                        HelmetsRecoveredCount++;
+                                        lootedDesc = "helmet from ground";
+                                        if (IsFriendlyPlayerWithinDistance(soldier, myPos, 7.5f))
+                                        {
+                                            TrySayTacticalVoice(soldier, sq, VoiceManager.VoiceClip.thankYou, 0.05f);
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        else if (soldier.inventory != null &&
+                                 (scavCache.IsMedicSyringePickup ||
+                                  scavCache.IsRecoverLifePickup ||
+                                  (outOfBandage && soldier.isBleeding) ||
+                                  CanSoldierAcceptExtraMass(soldier, scavCache.TargetFloorItem.mass, 0.15f)))
+                        {
+                            if (scavCache.IsRecoverLifePickup)
+                            {
+                                if ((!Photon.Pun.PhotonNetwork.InRoom || AiCore.TryConsumeBotRpcBudget(0.30f)) &&
+                                    soldier.inventory.AddItemToInventoryAndDestroyInstance(scavCache.TargetFloorItem))
+                                {
+                                    VirtualRecoverLife vRec = soldier.inventory.FindItemOfType<VirtualRecoverLife>()?.TryCast<VirtualRecoverLife>();
+                                    if (vRec != null)
+                                        soldier.RecoverLife(vRec);
+                                    ScheduleBotInventoryWeightAudit(soldier, 0.50f);
+                                    looted = true;
+                                    lootedDesc = "field rations/med tin";
+                                }
+                            }
+                            else
+                            {
+                                bool pickedFloorAmmoOrMag = scavCache.TargetFloorItem.TryCast<AmmoItem>() != null ||
+                                                            scavCache.TargetFloorItem.TryCast<Magazine>() != null;
+                                if (soldier.inventory.AddItemToInventoryAndDestroyInstance(scavCache.TargetFloorItem))
+                                {
+                                    GenericGun g0Now = soldier.GetHeldGun(0);
+                                    if (outOfAmmo && !pickedFloorAmmoOrMag && g0Now != null && soldier.IsOutOfAmmosFor(g0Now))
+                                        RefillSoldierPrimaryAndStowedWeapons(soldier, 1);
+                                    ScheduleBotInventoryWeightAudit(soldier, 0.50f);
+                                    if (scavCache.IsMedicSyringePickup &&
+                                        CountUniqueSyringesInInventory(soldier.inventory, out _, out _, out _) >= 3)
+                                    {
+                                        soldier.hasSyringe = true;
+                                    }
+                                    looted = true;
+                                    if (scavCache.IsAtWeaponPickup)
+                                        lootedDesc = "floor AT grenade";
+                                    else if (scavCache.IsAtMinePickup)
+                                        lootedDesc = "floor AT mine";
+                                    else if (scavCache.IsDeployableTripodPickup)
+                                        lootedDesc = "deployable tripod";
+                                    else if (scavCache.IsShellAmmoPickup)
+                                        lootedDesc = "mortar/cannon shell";
+                                    else if (scavCache.IsToolboxPickup)
+                                        lootedDesc = "repair toolbox";
+                                    else if (scavCache.NeedFragGrenade)
+                                        lootedDesc = "floor frag grenade";
+                                    else if (scavCache.NeedSmokeGrenade)
+                                        lootedDesc = "floor smoke grenade";
+                                    else if (scavCache.IsMedicSyringePickup)
+                                        lootedDesc = "fallen medic syringe";
+                                    else
+                                        lootedDesc = "floor ammo/bandage";
+                                }
+                            }
+                        }
+                    }
+                    // 2. Scavenge from verified dead corpse inventory or supply crate
+                    else if (IsInventoryValidCorpseOrCrate(
+                                 scavCache.TargetInventory,
+                                 soldier.faction,
+                                 outOfAmmo || scavCache.NeedFragGrenade || scavCache.NeedSmokeGrenade,
+                                 outOfBandage || scavCache.IsMedicSyringePickup,
+                                 out _,
+                                 out bool ownerStillDeadOrCrate))
+                    {
+                        InventoryManager targetInv = scavCache.TargetInventory;
+                        bool canSwitchWeaponNow = ownerStillDeadOrCrate &&
+                                                  !soldier.IsPlayer() &&
+                                                  !soldier.isInHandsAnimation &&
+                                                  !soldier.isInBodyAnimation &&
+                                                  soldier.CanSwitchHeldItem &&
+                                                  (now >= _nextGlobalBotWeaponPickupTime || now + 5.0f < _nextGlobalBotWeaponPickupTime);
+
+                        if ((scavCache.IsRadioPackPickup || scavCache.IsHelmetPickup) &&
+                            ownerStillDeadOrCrate &&
+                            soldier.inventory != null &&
+                            scavCache.TargetInventoryWearable != null &&
+                            targetInv.Contains(scavCache.TargetInventoryWearable))
+                        {
+                            if (!Photon.Pun.PhotonNetwork.InRoom || AiCore.TryConsumeBotRpcBudget(0.35f))
+                            {
+                                VirtualItem wearable = scavCache.TargetInventoryWearable;
+                                // InventoryManager.TakeIntoInventory (0x1807E50E0) always returns false (xor al, al):
+                                // only VirtualHelmet (+0x113..+0x1BF) auto-calls soldier.SetWerable(copy, true), whereas
+                                // VirtualClothing (radio packs!) jumps to +0x1C1 (AddVirtualItem) unworn and MUST be
+                                // explicitly marked as worn via soldier.SetWerable(myRadio, true)!
+                                soldier.inventory.TakeIntoInventory(wearable, targetInv);
+                                if (!targetInv.Contains(wearable))
+                                {
+                                    looted = true;
+                                    if (scavCache.IsRadioPackPickup)
+                                    {
+                                        VirtualItem myRadio = soldier.inventory.Contains(wearable)
+                                            ? wearable
+                                            : (soldier.inventory.inventory != null && !string.IsNullOrEmpty(wearable.item_id)
+                                                ? soldier.inventory.inventory.FindItemWithID(wearable.item_id)
+                                                : wearable);
+                                        if (myRadio != null)
+                                        {
+                                            soldier.SetWerable(myRadio, true);
+                                        }
+
+                                        FieldRadiosInheritedCount++;
+                                        if (sq != null && sq.Pointer != IntPtr.Zero)
+                                            _nextSquadRadioScavengeTime[sq.Pointer] = now + 25.0f;
+                                        lootedDesc = scavCache.IsEnemyRadioCapture
+                                            ? "captured enemy field radio (retuned)"
+                                            : "field radio pack from fallen comrade";
+                                    }
+                                    else
+                                    {
+                                        if (!soldier.hasHeadgear && soldier.inventory.Contains(wearable))
+                                        {
+                                            soldier.SetWerable(wearable, true);
+                                        }
+
+                                        HelmetsRecoveredCount++;
+                                        lootedDesc = "helmet from fallen comrade";
+                                    }
+                                }
+                            }
+                        }
+                        else if (scavCache.IsAtWeaponPickup && ownerStillDeadOrCrate)
+                        {
+                            if (scavCache.TargetInventoryAtWeapon != null && targetInv.Contains(scavCache.TargetInventoryAtWeapon))
+                            {
+                                if (canSwitchWeaponNow && (!Photon.Pun.PhotonNetwork.InRoom || AiCore.TryConsumeBotRpcBudget(0.35f)))
+                                {
+                                    soldier.SetGunTriggerPressed(false);
+                                    soldier.PickUpItemFromInventory(scavCache.TargetInventoryAtWeapon, targetInv, 1);
+                                    ScheduleDelayedPickedWeaponRefill(soldier, 1, now);
+                                    _nextGlobalBotWeaponPickupTime = now + 2.20f;
+                                    if (shGoap != null)
+                                        shGoap.Goap.NextWeaponUpgradeAllowedTime = now + 20.0f;
+                                    plan.NextReplanTime = Mathf.Max(plan.NextReplanTime, now + 2.50f);
+                                    looted = true;
+                                    lootedDesc = "AT launcher from body/crate";
+                                }
+                                else
+                                {
+                                    if (shGoap != null)
+                                        shGoap.Goap.NextWeaponUpgradeAllowedTime = now + 8.0f;
+                                }
+                            }
+                            else if (soldier.inventory != null)
+                            {
+                                VirtualItem atGren = targetInv.FindItemOfType<VirtualATGrenade>();
+                                if (atGren != null &&
+                                    !AiCore.IsPressureMineItem(atGren, out _) &&
+                                    CanSoldierAcceptExtraMass(soldier, atGren.GetMass(), 0.20f))
+                                {
+                                    soldier.inventory.TakeIntoInventory(atGren, targetInv);
+                                    if (!targetInv.Contains(atGren))
+                                    {
+                                        looted = true;
+                                        lootedDesc = "AT grenade from body/crate";
+                                    }
+                                }
+                            }
+                        }
+                        else if (scavCache.IsRoleWeaponUpgrade &&
+                                 scavCache.TargetInventoryPrimaryWeapon != null &&
+                                 targetInv.Contains(scavCache.TargetInventoryPrimaryWeapon))
+                        {
+                            if (canSwitchWeaponNow && (!Photon.Pun.PhotonNetwork.InRoom || AiCore.TryConsumeBotRpcBudget(0.35f)))
+                            {
+                                soldier.SetGunTriggerPressed(false);
+                                soldier.PickUpItemFromInventory(scavCache.TargetInventoryPrimaryWeapon, targetInv, 0);
+                                ScheduleDelayedPickedWeaponRefill(soldier, 0, now);
+                                _nextGlobalBotWeaponPickupTime = now + 2.20f;
+                                if (shGoap != null)
+                                    shGoap.Goap.NextWeaponUpgradeAllowedTime = now + 90.0f;
+                                plan.NextReplanTime = Mathf.Max(plan.NextReplanTime, now + 2.50f);
+                                RoleWeaponUpgradesCount++;
+                                looted = true;
+                                lootedDesc = "role-matched primary from body/crate";
+                            }
+                            else
+                            {
+                                if (shGoap != null)
+                                    shGoap.Goap.NextWeaponUpgradeAllowedTime = now + 8.0f;
+                            }
+                        }
+
+                        if (scavCache.NeedFragGrenade &&
+                            soldier.inventory != null &&
+                            AiCore.FindThrowableGrenadeInInventory(soldier, findAtGrenade: false, findFragGrenade: true) == null)
+                        {
+                            VirtualItem fg = targetInv.FindItemOfType<VirtualGrenade>();
+                            if (fg != null &&
+                                !AiCore.IsPressureMineItem(fg, out _) &&
+                                CanSoldierAcceptExtraMass(soldier, fg.GetMass(), 0.20f))
+                            {
+                                soldier.inventory.TakeIntoInventory(fg, targetInv);
+                                if (!targetInv.Contains(fg))
+                                {
+                                    looted = true;
+                                    if (lootedDesc == "supply")
+                                        lootedDesc = "frag grenade from body/crate";
+                                }
+                            }
+                        }
+
+                        if (scavCache.NeedSmokeGrenade &&
+                            soldier.inventory != null &&
+                            soldier.inventory.FindItemOfType<VirtualSmokeGrenade>() == null)
+                        {
+                            VirtualItem sg = targetInv.FindItemOfType<VirtualSmokeGrenade>();
+                            if (sg != null && CanSoldierAcceptExtraMass(soldier, sg.GetMass(), 0.20f))
+                            {
+                                soldier.inventory.TakeIntoInventory(sg, targetInv);
+                                if (!targetInv.Contains(sg))
+                                {
+                                    looted = true;
+                                    if (lootedDesc == "supply")
+                                        lootedDesc = "smoke grenade from body/crate";
+                                }
+                            }
+                        }
+
+                        if (scavCache.IsMedicSyringePickup &&
+                            soldier.inventory != null &&
+                            !IsFriendlyPlayerWithinDistance(soldier, scavCache.TargetPosition, 25.0f))
+                        {
+                            if (TryTransferFullMedicKitAtomically(soldier, targetInv))
+                            {
+                                looted = true;
+                                if (lootedDesc == "supply")
+                                    lootedDesc = "complete fallen medic kit (3/3)";
+                            }
+                        }
+
+                        if (outOfBandage && soldier.inventory != null)
+                        {
+                            VirtualItem bnd = targetInv.FindItemOfType<VirtualBandages>();
+                            if (bnd != null &&
+                                CanSoldierAcceptExtraMass(soldier, bnd.GetMass(), soldier.isBleeding ? 0.0f : 0.20f))
+                            {
+                                soldier.inventory.TakeIntoInventory(bnd, targetInv);
+                                if (soldier.inventory.FindItemOfType<VirtualBandages>() != null)
+                                {
+                                    looted = true;
+                                    if (lootedDesc == "supply")
+                                        lootedDesc = "bandage";
+                                }
+                            }
+                        }
+
+                        if (outOfAmmo && !scavCache.IsRoleWeaponUpgrade)
+                        {
+                            RefillSoldierPrimaryAndStowedWeapons(soldier, 2);
+                            looted = true;
+                            if (lootedDesc == "supply")
+                                lootedDesc = "ammo";
+                        }
+
+                        if (scavCache.IsAtMinePickup && soldier.inventory != null && !HasPressureAtMineInInventory(soldier))
+                        {
+                            VirtualItem candMine = targetInv.FindItemOfType<VirtualATGrenade>();
+                            if (candMine != null &&
+                                AiCore.IsPressureMineItem(candMine, out bool atFlag) &&
+                                atFlag &&
+                                CanSoldierAcceptExtraMass(soldier, candMine.GetMass(), 0.20f))
+                            {
+                                soldier.inventory.TakeIntoInventory(candMine, targetInv);
+                                if (!targetInv.Contains(candMine))
+                                {
+                                    looted = true;
+                                    if (lootedDesc == "supply") lootedDesc = "AT mine from chest/corpse";
+                                }
+                            }
+                        }
+
+                        if (scavCache.IsDeployableTripodPickup && soldier.inventory != null &&
+                            soldier.inventory.FindItemOfType<VirtualDeployableVehicle>() == null)
+                        {
+                            VirtualItem tripod = targetInv.FindItemOfType<VirtualDeployableVehicle>();
+                            if (tripod != null && CanSoldierAcceptExtraMass(soldier, tripod.GetMass(), 0.15f))
+                            {
+                                soldier.inventory.TakeIntoInventory(tripod, targetInv);
+                                if (!targetInv.Contains(tripod))
+                                {
+                                    looted = true;
+                                    if (lootedDesc == "supply") lootedDesc = "deployable tripod from chest/corpse";
+                                }
+                            }
+                        }
+
+                        if (scavCache.IsShellAmmoPickup && soldier.inventory != null)
+                        {
+                            VirtualItem shell = targetInv.FindItemOfType<VirtualShellAmmo>();
+                            if (shell != null && CanSoldierAcceptExtraMass(soldier, shell.GetMass(), 0.20f))
+                            {
+                                soldier.inventory.TakeIntoInventory(shell, targetInv);
+                                if (!targetInv.Contains(shell))
+                                {
+                                    looted = true;
+                                    if (lootedDesc == "supply") lootedDesc = "shell from chest/corpse";
+                                }
+                            }
+                        }
+
+                        if (scavCache.IsToolboxPickup && soldier.inventory != null && soldier.GetRepairTools() == null)
+                        {
+                            VirtualItem tb = targetInv.FindItemOfType<VirtualToolbox>();
+                            if (tb != null && CanSoldierAcceptExtraMass(soldier, tb.GetMass(), 0.10f))
+                            {
+                                soldier.inventory.TakeIntoInventory(tb, targetInv);
+                                if (!targetInv.Contains(tb))
+                                {
+                                    looted = true;
+                                    if (lootedDesc == "supply") lootedDesc = "toolbox from chest/corpse";
+                                }
+                            }
+                        }
+
+                        if (scavCache.IsRecoverLifePickup && soldier.inventory != null &&
+                            (!Photon.Pun.PhotonNetwork.InRoom || AiCore.TryConsumeBotRpcBudget(0.30f)))
+                        {
+                            VirtualItem recVi = targetInv.FindItemOfType<VirtualRecoverLife>();
+                            if (recVi != null && CanSoldierAcceptExtraMass(soldier, recVi.GetMass(), 0.0f))
+                            {
+                                soldier.inventory.TakeIntoInventory(recVi, targetInv);
+                                VirtualRecoverLife myRec = soldier.inventory.FindItemOfType<VirtualRecoverLife>()?.TryCast<VirtualRecoverLife>();
+                                if (myRec != null)
+                                {
+                                    soldier.RecoverLife(myRec);
+                                    looted = true;
+                                    if (lootedDesc == "supply") lootedDesc = "rations/med tin from chest/corpse";
+                                }
+                            }
+                        }
+                    }
+
+                    if (shGoap != null)
+                        shGoap.Goap.Scavenge = default;
+                    if (looted)
+                    {
+                        if (ai.moveDirectlyToward_end > now)
+                            ai.moveDirectlyToward_end = 0f;
+                        GoapPlansExecutedCount++;
+                        if (plan.StepCount > 1 && plan.StepIndex == 0)
+                            plan.StepIndex = 1;
+                        if (VisionConfig.DebugLogging.Value)
+                        {
+                            AiCore.LogDebug(
+                                "GoapScavenge",
+                                $"{soldier.faction} {GetPersonality(soldier)} scavenged {lootedDesc}.",
+                                3.0f);
+                        }
+                    }
+                }
+                else
+                {
+                    plan.LockUnitCoverChange = true;
+                    plan.HasMoveOverride = true;
+                    plan.MoveOverrideDest = targetPos;
+                    // Stop at 2.35m arm's-length handoff distance for living buddies (1.15m for floor/corpse items)
+                    // using overlap-safe duration / CPathFinding so bots never body-hug or drop into 0.5x slow-walk!
+                    float standoff = isBuddyHandoff ? 2.35f : 1.15f;
+                    AiCore.MoveBotTowardPosition(ai, soldier, targetPos, standoff, 2.8f);
+                }
+            }
+        }
+
+        private static void ExecuteGoapLoneWolfLinkUpOrAmbush(SoldierAI ai, Soldier soldier, Squad sq, IntPtr ptr, AiCore.SoldierFastHandles shGoap, ref SquadBlackboard board, ref BotGoapPlan plan, GoapStateBits ws, float suppression, float dist, Vector3 myPos, float now)
+        {
+            // Bailed-out Pilots & Tank/Vehicle Crews follow a 3-step hierarchy:
+            // 1. Remount a nearby operable friendly crew vehicle with a free seat (e.g., just repaired tank!)
+            // 2. If unarmed/pistol-only or squad on retreat, fall back to friendly rear spawn
+            // 3. Otherwise, if armed with a primary firearm, link up and join the nearest friendly infantry squad!
+            SoldierPersonality lonePers = GetPersonality(soldier);
+            bool isBailedCrewOrPilot = AiCore.IsConfirmedPlaneCrewSquad(sq) ||
+                                       AiCore.IsTrueVehicleCrewSquad(sq) ||
+                                       IsPilotOrVehicleCrewPersonality(lonePers);
+            if (isBailedCrewOrPilot)
+            {
+                if (TryRemountNearbyOperableCrewVehicle(ai, soldier, sq, myPos, 28f))
+                {
+                    plan.LockUnitCoverChange = true;
+                    ApplyDesiredMovingPose(ai, soldier, (GetActualMoveEndpoint(ai, soldier) - myPos).sqrMagnitude, suppression);
+                    return;
+                }
+
+                if (shGoap != null && now < shGoap.Goap.BailoutShockUntil)
+                {
+                    if (AiCore.IsSoldierInVehicleOrTransition(soldier))
+                        return;
+
+                    SetBotPose(ai, soldier, suppression >= 45f ? SoldierPose.Prone : SoldierPose.Crouch, true);
+                    Vector3 toWreck = myPos - shGoap.Goap.BailoutWreckPos;
+                    toWreck.y = 0f;
+                    if (toWreck.sqrMagnitude < 6.5f * 6.5f && !ai.IsMoving())
+                    {
+                        Vector3 awayDir;
+                        if (toWreck.sqrMagnitude > 0.25f)
+                        {
+                            awayDir = toWreck.normalized;
+                        }
+                        else
+                        {
+                            Vector3 fallbackAway = board.HasActiveThreat ? (myPos - board.ThreatPosition) : soldier.transform.forward;
+                            fallbackAway.y = 0f;
+                            awayDir = fallbackAway.sqrMagnitude > 0.04f ? fallbackAway.normalized : soldier.transform.forward;
+                        }
+                        float jitterDeg = ((AiCore.GetDeterministicHash(ptr, 53) & 15) - 7) * 6.0f;
+                        Vector3 lat = Quaternion.Euler(0f, jitterDeg, 0f) * awayDir;
+                        Vector3 scramblePos = shGoap.Goap.BailoutWreckPos + lat * 6.5f;
+                        float terrY = ResourcesManager.GetTerrainAltitude(scramblePos, myPos.y);
+                        scramblePos.y = Mathf.Abs(terrY - myPos.y) <= 4.0f ? terrY : myPos.y;
+                        AiCore.SetBotMoveDestinationAndRefreshPath(ai, scramblePos, 0.25f);
+                        plan.HasMoveOverride = true;
+                        plan.MoveOverrideDest = scramblePos;
+                    }
+                    plan.LockUnitCoverChange = true;
+                    plan.IsEvacuatingBailedCrew = true;
+                    return;
+                }
+
+                if (ShouldBailedCrewRetreatOverJoinSquad(soldier, sq, myPos))
+                {
+                    if (TryRetreatBailedCrewTowardFriendlySpawn(ai, soldier, sq, myPos, out Vector3 spawnOverride, out bool hasSpawnOverride))
+                    {
+                        plan.LockUnitCoverChange = true;
+                        plan.HasMoveOverride = hasSpawnOverride;
+                        plan.MoveOverrideDest = spawnOverride;
+                        plan.IsEvacuatingBailedCrew = hasSpawnOverride;
+                        if (ai.HasEnemyAndCanFireAtHim && dist > 6.2f && !ai.IsMoving())
+                            SetBotPose(ai, soldier, SoldierPose.Crouch);
+                        else
+                            ApplyDesiredMovingPose(ai, soldier, (spawnOverride - myPos).sqrMagnitude, suppression);
+                        return;
+                    }
+                }
+
+                if (TryLinkUpOrJoinFriendlySquad(ai, soldier, myPos, 140f, out Vector3 linkDest1))
+                {
+                    DetachStaleFootCoverForEvacuation(soldier);
+                    plan.LockUnitCoverChange = true;
+                    plan.HasMoveOverride = true;
+                    plan.MoveOverrideDest = linkDest1;
+                    plan.IsEvacuatingBailedCrew = true;
+                    if (ai.HasEnemyAndCanFireAtHim && dist > 6.2f && !ai.IsMoving())
+                        SetBotPose(ai, soldier, SoldierPose.Crouch);
+                    else
+                        ApplyDesiredMovingPose(ai, soldier, (linkDest1 - myPos).sqrMagnitude, suppression);
+                    return;
+                }
+
+                if (TryRetreatBailedCrewTowardFriendlySpawn(ai, soldier, sq, myPos, out Vector3 fallbackSpawnOverride, out bool hasFallbackSpawn))
+                {
+                    plan.LockUnitCoverChange = true;
+                    plan.HasMoveOverride = hasFallbackSpawn;
+                    plan.MoveOverrideDest = fallbackSpawnOverride;
+                    plan.IsEvacuatingBailedCrew = hasFallbackSpawn;
+                    if (ai.HasEnemyAndCanFireAtHim && dist > 6.2f && !ai.IsMoving())
+                        SetBotPose(ai, soldier, SoldierPose.Crouch);
+                    else
+                        ApplyDesiredMovingPose(ai, soldier, (fallbackSpawnOverride - myPos).sqrMagnitude, suppression);
+                    return;
+                }
+            }
+
+            bool preferAmbush = !isBailedCrewOrPilot &&
+                                (ws & GoapStateBits.OnBridgeOrNarrow) == 0 &&
+                                GetFactionCommandProfile(soldier.faction).PreferAmbushWhenAlone;
+            if (preferAmbush)
+            {
+                if (!soldier.IsOnCover() && TrySeekNearbyCover(ai, soldier))
+                {
+                    plan.LockUnitCoverChange = true;
+                    ApplyDesiredMovingPose(ai, soldier, (GetActualMoveEndpoint(ai, soldier) - myPos).sqrMagnitude, suppression);
+                }
+                else if (soldier.IsOnCover())
+                {
+                    SetBotPose(ai, soldier, SoldierPose.Crouch);
+                }
+                else if (TryLinkUpOrJoinFriendlySquad(ai, soldier, myPos, 55f, out Vector3 linkDest2))
+                {
+                    plan.LockUnitCoverChange = true;
+                    plan.HasMoveOverride = true;
+                    plan.MoveOverrideDest = linkDest2;
+                    ApplyDesiredMovingPose(ai, soldier, (linkDest2 - myPos).sqrMagnitude, suppression);
+                }
+            }
+            else
+            {
+                if (TryLinkUpOrJoinFriendlySquad(ai, soldier, myPos, 75f, out Vector3 linkDest3))
+                {
+                    plan.LockUnitCoverChange = true;
+                    plan.HasMoveOverride = true;
+                    plan.MoveOverrideDest = linkDest3;
+                    ApplyDesiredMovingPose(ai, soldier, (linkDest3 - myPos).sqrMagnitude, suppression);
+                }
+                else if (!soldier.IsOnCover() && TrySeekNearbyCover(ai, soldier))
+                {
+                    plan.LockUnitCoverChange = true;
+                    ApplyDesiredMovingPose(ai, soldier, (GetActualMoveEndpoint(ai, soldier) - myPos).sqrMagnitude, suppression);
+                }
+            }
+        }
+
+        private static void ExecuteGoapTacticalFallbackRetreat(SoldierAI ai, Soldier soldier, Squad sq, AiCore.SoldierFastHandles shGoap, ref SquadBlackboard board, ref BotGoapPlan plan, float dist, Vector3 myPos, float now)
+        {
+            bool hasActiveDest = shGoap != null &&
+                                 shGoap.MoveOverride.Kind == AiCore.BotMoveOverrideKind.EmergencyFallback &&
+                                 now < shGoap.MoveOverride.ExpireTime;
+            float fbEnd = hasActiveDest ? shGoap.MoveOverride.ExpireTime : 0f;
+            Vector3 fbDest = hasActiveDest ? shGoap.MoveOverride.Dest : Vector3.zero;
+
+            if (!hasActiveDest)
+            {
+                if (shGoap != null && now < shGoap.Goap.NextIndividualFallbackTime)
+                {
+                    AiCore.ClearBotMoveOverride(shGoap, AiCore.BotMoveOverrideKind.EmergencyFallback);
+                    plan.PlanExpireTime = 0f;
+                    plan.NextReplanTime = now;
+                    return;
+                }
+
+                Vector3 threatRef = board.HasActiveThreat
+                    ? board.ThreatPosition
+                    : (myPos + (soldier.transform != null ? soldier.transform.forward * 16.0f : Vector3.forward * 16.0f));
+                if (ai.visibleTarget != null && AiCore.TryGetSpottableCenter(ai.visibleTarget, out Vector3 visThreat))
+                    threatRef = visThreat;
+
+                if (!TryComputeTacticalFallbackPosition(soldier, sq, myPos, threatRef, 22.0f, 36.0f, out fbDest))
+                {
+                    if (shGoap != null)
+                        shGoap.Goap.NextIndividualFallbackTime = now + 18.0f;
+                    plan.PlanExpireTime = 0f;
+                    plan.NextReplanTime = now;
+                    return;
+                }
+
+                fbEnd = now + 8.5f;
+                if (shGoap != null)
+                {
+                    AiCore.SetBotMoveOverride(shGoap, AiCore.BotMoveOverrideKind.EmergencyFallback, fbDest, fbEnd);
+                    shGoap.Goap.NextIndividualFallbackTime = now + 38.0f;
+                }
+                TacticalRetreatsCount++;
+                GoapPlansExecutedCount++;
+                TrySayTacticalVoice(soldier, sq, VoiceManager.VoiceClip.timeToRetreat, 0.08f);
+                BotActionTrace.RecordEvent(soldier, BotTraceEventKind.FallbackRetreat, "goap_break_contact", dist);
+
+                if (VisionConfig.DebugLogging.Value)
+                {
+                    AiCore.LogDebug(
+                        "IndivFallback",
+                        $"{soldier.faction} {GetPersonality(soldier)} executing break-contact fallback ({Vector3.Distance(myPos, fbDest):F0}m rearward).",
+                        3.0f);
+                }
+            }
+
+            float remSq = (fbDest - myPos).sqrMagnitude;
+            if (remSq <= 3.2f * 3.2f)
+            {
+                AiCore.ClearBotMoveOverride(shGoap, AiCore.BotMoveOverrideKind.EmergencyFallback);
+                SetBotPose(ai, soldier, SoldierPose.Crouch);
+                plan.PlanExpireTime = 0f;
+                plan.NextReplanTime = now;
+            }
+            else
+            {
+                plan.LockUnitCoverChange = true;
+                plan.PlanExpireTime = Mathf.Min(fbEnd, Mathf.Max(plan.PlanExpireTime, now + 4.5f));
+                if (shGoap != null)
+                    shGoap.Stance.LocalCoverProtectedUntil = now + 4.5f;
+                plan.HasMoveOverride = true;
+                plan.MoveOverrideDest = fbDest;
+                if (ai.HasEnemyAndCanFireAtHim && dist > 6.2f && !ai.IsMoving())
+                    SetBotPose(ai, soldier, SoldierPose.Crouch);
+                else
+                    SetBotPose(ai, soldier, remSq <= 5.0f * 5.0f ? SoldierPose.Crouch : SoldierPose.Idle, remSq > 5.0f * 5.0f);
+                AiCore.MoveBotTowardPosition(ai, soldier, fbDest, 2.2f, 3.0f);
             }
         }
 

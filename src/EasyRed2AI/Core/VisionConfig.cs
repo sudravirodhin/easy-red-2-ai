@@ -112,7 +112,6 @@ namespace EasyRed2HumanAI
         public static ConfigEntry<bool> EnableVehicleAndPilotPersonalities;
         public static ConfigEntry<bool> VeterancyCuresSkittishness;
         public static ConfigEntry<bool> ShowPersonalityInSquadRoster;
-        public static ConfigEntry<bool> ShowPersonalityOnDeathScreen;
 
         // 8. Phase 4: Ballistics, Plane Audio De-Throbber & Battlefield Immersion
         public static ConfigEntry<bool> EnablePlaneAudioSmoothing;
@@ -694,12 +693,6 @@ namespace EasyRed2HumanAI
                 "ShowPersonalityInSquadRoster",
                 true,
                 "Display each squadmate's personality trait (e.g. [Shock], [Anchor], [Deadeye]) in the bottom-left Squad Roster UI.");
-
-            ShowPersonalityOnDeathScreen = config.Bind(
-                "7. AI Role Personalities",
-                "ShowPersonalityOnDeathScreen",
-                true,
-                "Include the attacker's personality archetype on the Death Screen obituary banner.");
 
             // 8. Ballistics, Plane Audio De-Throbber & Battlefield Immersion
             EnablePlaneAudioSmoothing = config.Bind(

@@ -1133,37 +1133,6 @@ namespace EasyRed2HumanAI
             return true;
         }
 
-        private static bool TryValidateVehicleGroundPoint(
-            Vector3 candidateXZ,
-            float refY,
-            Vector3 squadDest,
-            float maxAllowedOffset,
-            Vector3 fwdAxis,
-            Transform ignoreRoot,
-            out Vector3 validPoint)
-        {
-            Vector3 offsetFromDest = candidateXZ - squadDest;
-            offsetFromDest.y = 0f;
-            float offsetMag = offsetFromDest.magnitude;
-            if (offsetMag > maxAllowedOffset && offsetMag > 0.01f)
-            {
-                candidateXZ = squadDest + (offsetFromDest / offsetMag) * maxAllowedOffset;
-            }
-
-            Vector3 rayOrigin = new Vector3(candidateXZ.x, refY + 18.0f, candidateXZ.z);
-            if (Physics.Raycast(rayOrigin, Vector3.down, out RaycastHit gHit, 42.0f, AiCore.GetSolidEnvironmentMask(), QueryTriggerInteraction.Ignore) &&
-                gHit.normal.y >= 0.72f &&
-                Mathf.Abs(gHit.point.y - refY) <= 9.5f &&
-                !AiCore.IsDirectionBlockedByEnvironment(gHit.point + Vector3.up * 1.6f, fwdAxis, 3.8f, ignoreRoot))
-            {
-                validPoint = gHit.point;
-                return true;
-            }
-
-            validPoint = Vector3.zero;
-            return false;
-        }
-
         private static void TrySteerVehicleTowardKnownThreat(AIVehicle aiVeh, Vehicle veh, float now)
         {
             if (aiVeh == null || veh == null || veh.Pointer == IntPtr.Zero || veh.transform == null)
