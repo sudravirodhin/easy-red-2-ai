@@ -249,7 +249,7 @@ namespace EasyRed2HumanAI
 
     public static class AiCore
     {
-        public struct ScavengeStub { public bool IsAtWeaponPickup; }
+        public struct ScavengeStub { public bool IsAtWeaponPickup; public bool IsUrgentPrimaryPickup; }
         public struct GoapStub { public ScavengeStub Scavenge; }
         public class SoldierFastHandles
         {
@@ -904,6 +904,47 @@ $partC
                     VeteranAndTacticsPatches.GoapStateBits.NeedAmmoOrMedScavenge | VeteranAndTacticsPatches.GoapStateBits.HasVisibleEnemy,
                     new IntPtr(9606), ref scavBoard, 100f),
                     "Visible-enemy ScavengeSupplyFromCorpse MUST be illegal (instant preemption)!");
+
+                // 11f. Pistol-only urgent primary upgrade (e.g., non-retreating tank crewman) scavenges even from cover under active squad threat,
+                //      while danger bits still block scavenging and actively evacuating bailed crew still strictly plan LoneWolfLinkUpOrAmbush!
+                IntPtr urgentPrimaryPtr = new IntPtr(9607);
+                AiCore.MockHandles[urgentPrimaryPtr] = new AiCore.SoldierFastHandles
+                {
+                    Ref = new Soldier(),
+                    Goap = new AiCore.GoapStub
+                    {
+                        Scavenge = new AiCore.ScavengeStub { IsUrgentPrimaryPickup = true }
+                    }
+                };
+                var wsUrgentPrimaryCover = VeteranAndTacticsPatches.GoapStateBits.NeedAmmoOrMedScavenge |
+                                           VeteranAndTacticsPatches.GoapStateBits.SquadHasActiveThreat |
+                                           VeteranAndTacticsPatches.GoapStateBits.InCover;
+                var planUrgentPrimary = VeteranAndTacticsPatches.PlanBestGoapActionChainCore(
+                    wsUrgentPrimaryCover, urgentPrimaryPtr, "UnitedStates_allies", true, false, false, ref scavBoard,
+                    VeteranAndTacticsPatches.SoldierPersonality.TankCrew_Brawler, 0.4f, 100f, VeteranAndTacticsPatches.GoapActionId.None);
+                Assert(planUrgentPrimary.Step0 == VeteranAndTacticsPatches.GoapActionId.ScavengeSupplyFromCorpse,
+                    $"Calm pistol-only tank crewman needing urgent primary in cover expected ScavengeSupplyFromCorpse, got {planUrgentPrimary.Step0}!");
+
+                var planUrgentSupp = VeteranAndTacticsPatches.PlanBestGoapActionChainCore(
+                    wsUrgentPrimaryCover | VeteranAndTacticsPatches.GoapStateBits.IsSuppressed, urgentPrimaryPtr, "UnitedStates_allies", true, false, false, ref scavBoard,
+                    VeteranAndTacticsPatches.SoldierPersonality.TankCrew_Brawler, 0.4f, 100f, VeteranAndTacticsPatches.GoapActionId.None);
+                Assert(planUrgentSupp.Step0 != VeteranAndTacticsPatches.GoapActionId.ScavengeSupplyFromCorpse,
+                    $"Suppressed pistol-only crewman MUST NOT scavenge, got {planUrgentSupp.Step0}!");
+
+                var planUrgentVis = VeteranAndTacticsPatches.PlanBestGoapActionChainCore(
+                    wsUrgentPrimaryCover | VeteranAndTacticsPatches.GoapStateBits.HasVisibleEnemy | VeteranAndTacticsPatches.GoapStateBits.CanFireAtVisibleEnemy, urgentPrimaryPtr, "UnitedStates_allies", true, false, false, ref scavBoard,
+                    VeteranAndTacticsPatches.SoldierPersonality.TankCrew_Brawler, 0.4f, 100f, VeteranAndTacticsPatches.GoapActionId.None);
+                Assert(planUrgentVis.Step0 != VeteranAndTacticsPatches.GoapActionId.ScavengeSupplyFromCorpse,
+                    $"Pistol-only crewman with visible enemy MUST NOT scavenge, got {planUrgentVis.Step0}!");
+
+                var evacCrewBoard = scavBoard;
+                evacCrewBoard.AliveMemberCount = 2;
+                var planEvacCrew = VeteranAndTacticsPatches.PlanBestGoapActionChainCore(
+                    VeteranAndTacticsPatches.GoapStateBits.IsEntirelyAlone | VeteranAndTacticsPatches.GoapStateBits.NeedAmmoOrMedScavenge,
+                    urgentPrimaryPtr, "UnitedStates_allies", true, false, true, ref evacCrewBoard,
+                    VeteranAndTacticsPatches.SoldierPersonality.TankCrew_Brawler, 0.4f, 100f, VeteranAndTacticsPatches.GoapActionId.None);
+                Assert(planEvacCrew.Step0 == VeteranAndTacticsPatches.GoapActionId.LoneWolfLinkUpOrAmbush,
+                    $"Actively evacuating bailed crewman MUST still plan LoneWolfLinkUpOrAmbush, got {planEvacCrew.Step0}!");
             }
 
             // 12. Comrade Liberation Priority, Bailed-Crew Evacuation & CQB Weapon-Reach Invariants:

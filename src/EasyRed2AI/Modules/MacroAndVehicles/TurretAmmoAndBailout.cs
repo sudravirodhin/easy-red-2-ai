@@ -582,6 +582,99 @@ namespace EasyRed2HumanAI
             }
         }
 
+        /// <summary>
+        /// Returns true if the soldier carries a non-pistol, non-AT primary firearm with loaded or reserve ammo.
+        /// </summary>
+        internal static bool HasRealPrimaryWithAmmo(Soldier soldier)
+        {
+            if (soldier == null || soldier.Pointer == IntPtr.Zero)
+                return false;
+
+            for (int slot = 0; slot <= 2; slot++)
+            {
+                GenericGun g = soldier.GetHeldGun(slot);
+                if (g != null && !g.IsPistol() && !g.IsAtWeapon() && (g.GetCurrentAmmoCount() > 0 || !soldier.IsOutOfAmmosFor(g)))
+                    return true;
+            }
+            return false;
+        }
+
+        /// <summary>
+        /// Returns true if an eligible open friendly infantry squad with an alive foot leader exists within <paramref name="maxRadius"/>.
+        /// </summary>
+        internal static bool HasNearbyOpenFriendlyInfantrySquad(Squad selfSq, string faction, Vector3 originPos, float maxRadius)
+        {
+            if (string.IsNullOrEmpty(faction))
+                return false;
+
+            AiCore.EnsureWorldSnapshot();
+            int sqCount = AiCore.WorldSquadCount;
+            var squads = AiCore.WorldSquads;
+            IntPtr mySqPtr = selfSq != null ? selfSq.Pointer : IntPtr.Zero;
+            float maxSq = maxRadius * maxRadius;
+
+            for (int i = 0; i < sqCount; i++)
+            {
+                ref AiCore.SquadSnapshot other = ref squads[i];
+                if (!other.LeaderIsAlive ||
+                    other.Ptr == mySqPtr ||
+                    other.IsVehicleCrew ||
+                    other.LeaderOnVehicle ||
+                    other.Faction != faction)
+                {
+                    continue;
+                }
+
+                int cap = other.IsPlayerInSquad ? 8 : 10;
+                if (other.UnitCount >= cap)
+                    continue;
+
+                if ((other.RefPos - originPos).sqrMagnitude <= maxSq)
+                    return true;
+            }
+
+            return false;
+        }
+
+        /// <summary>
+        /// Returns true if a grounded AI tank/vehicle crew should stay on foot to reinforce nearby friendly infantry instead of retreating.
+        /// </summary>
+        internal static bool ShouldGroundedTankCrewStayAndJoinInfantry(Squad sq, string faction, Vector3 originPos)
+        {
+            if (sq == null ||
+                sq.Pointer == IntPtr.Zero ||
+                sq.units == null ||
+                string.IsNullOrEmpty(faction) ||
+                AiCore.IsConfirmedPlaneCrewSquad(sq))
+            {
+                return false;
+            }
+
+            if (!HasNearbyOpenFriendlyInfantrySquad(sq, faction, originPos, 85.0f))
+                return false;
+
+            int uCount = sq.units.Count;
+            for (int i = 0; i < uCount; i++)
+            {
+                Soldier u = sq.units[i];
+                if (u == null || u.Pointer == IntPtr.Zero || u.IsDead || u.IsInjured || u.HasSurrended())
+                    continue;
+
+                if (HasRealPrimaryWithAmmo(u))
+                    return true;
+
+                SoldierPersonality pers = GetPersonality(u);
+                if (pers == SoldierPersonality.TankCrew_Brawler ||
+                    pers == SoldierPersonality.LightCrew_Outrider ||
+                    pers == SoldierPersonality.LightCrew_Escort)
+                {
+                    return true;
+                }
+            }
+
+            return false;
+        }
+
         private static void EvaluateGroundedAiTankCrewSquad(Squad sq)
         {
             if (sq == null ||
@@ -658,6 +751,9 @@ namespace EasyRed2HumanAI
                     return;
                 }
             }
+
+            if (ShouldGroundedTankCrewStayAndJoinInfantry(sq, myFaction, crewPos))
+                return;
 
             AssignCrewSquadRetreatTask(sq, myFaction, crewPos, allowWaterSurface: false, replaceExistingIfFar: false);
         }
@@ -904,7 +1000,16 @@ namespace EasyRed2HumanAI
                             ? veh.transform.position
                             : (crewSq.Leader != null && crewSq.Leader.transform != null ? crewSq.Leader.transform.position : Vector3.zero);
 
-                        AssignCrewSquadRetreatTask(crewSq, fac, originPos, allowWaterSurface: false, replaceExistingIfFar: false);
+                        if (crewSq.IsPlayerInSquad() || !ShouldGroundedTankCrewStayAndJoinInfantry(crewSq, fac, originPos))
+                        {
+                            AssignCrewSquadRetreatTask(crewSq, fac, originPos, allowWaterSurface: false, replaceExistingIfFar: false);
+                        }
+                        else if (VisionConfig.DebugLogging.Value)
+                        {
+                            AiCore.LogDebug(
+                                "CrewBailout",
+                                $"{fac} tank crew '{crewSq.squadName}' staying on foot to scavenge & reinforce nearby infantry.");
+                        }
                     }
                 }
                 catch { }

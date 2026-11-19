@@ -361,7 +361,8 @@ namespace EasyRed2HumanAI
                 IsSoldierBailedOutVehicleCrew(soldier, sq) &&
                 board.AliveMemberCount <= 5 &&
                 (ws & GoapStateBits.IsBleeding) == 0 &&
-                !closeBailedThreat;
+                !closeBailedThreat &&
+                !IsBailedCrewPrioritizingScavenge(soldier, sq, ws, now);
             bool emergencyPreempt =
                 vulnerableTaskInDanger ||
                 ((ws & GoapStateBits.InPointBlankRange) != 0 && activeStep != GoapActionId.PointBlankBayonetBreach) ||
@@ -1229,6 +1230,14 @@ namespace EasyRed2HumanAI
             if (soldier == null || sq == null || !AiCore.IsTrueVehicleCrewSquad(sq) || soldier.IsOnVehicle())
                 return false;
 
+            if (!AiCore.IsConfirmedPlaneCrewSquad(sq) &&
+                sq.IsPlayerInSquad() &&
+                (!IsSquadOnRetreatTask(sq) ||
+                 (sq.Leader != null && sq.Leader.IsAlive && sq.Leader.IsPlayer())))
+            {
+                return false;
+            }
+
             if (sq.SomeoneIsRepairing())
                 return false;
 
@@ -1249,6 +1258,23 @@ namespace EasyRed2HumanAI
 
             AiDestination td = soldier.targetDestination;
             return td == null || td.TryCast<VehicleRepairTask>() == null;
+        }
+
+        /// <summary>
+        /// Returns true if a non-retreating grounded vehicle crewman outside initial bailout shock has a calm scavenge opportunity.
+        /// </summary>
+        private static bool IsBailedCrewPrioritizingScavenge(Soldier soldier, Squad sq, GoapStateBits ws, float now)
+        {
+            if (soldier == null || sq == null || AiCore.IsConfirmedPlaneCrewSquad(sq) || IsSquadOnRetreatTask(sq))
+                return false;
+
+            if ((ws & GoapStateBits.NeedAmmoOrMedScavenge) == 0 || (ws & ScavengeForbiddenMask) != 0)
+                return false;
+
+            if (AiCore.TryGetSoldierHandles(soldier.Pointer, out AiCore.SoldierFastHandles h) && now < h.Goap.BailoutShockUntil)
+                return false;
+
+            return true;
         }
 
         private static void ExecuteGoapActionStep(
@@ -3587,33 +3613,14 @@ namespace EasyRed2HumanAI
                            pers == SoldierPersonality.Pilot_Ace ||
                            pers == SoldierPersonality.Pilot_Daredevil ||
                            pers == SoldierPersonality.Pilot_Disciplined;
-
-            GenericGun g0 = soldier.GetHeldGun(0);
-            GenericGun g1 = soldier.GetHeldGun(1);
-            GenericGun g2 = soldier.GetHeldGun(2);
-            bool hasRealPrimary = (g0 != null && !g0.IsPistol() && !g0.IsAtWeapon() && !soldier.IsOutOfAmmosFor(g0)) ||
-                                  (g1 != null && !g1.IsPistol() && !g1.IsAtWeapon() && !soldier.IsOutOfAmmosFor(g1)) ||
-                                  (g2 != null && !g2.IsPistol() && !g2.IsAtWeapon() && !soldier.IsOutOfAmmosFor(g2));
-
-            // Unarmed / pistol-only bailed crew or pilots retreat toward rear spawn to survive
-            if (!hasRealPrimary || isPilot)
+            if (isPilot)
                 return true;
 
-            // Armed vehicle crewmen check if a friendly infantry squad is within 85m to link up with; otherwise retreat
-            AiCore.EnsureWorldSnapshot();
-            int sqCount = AiCore.WorldSquadCount;
-            var squads = AiCore.WorldSquads;
-            IntPtr mySqPtr = sq != null ? sq.Pointer : IntPtr.Zero;
-            string myFaction = soldier.faction;
+            if (!HasNearbyOpenFriendlyInfantrySquad(sq, soldier.faction, myPos, 85.0f))
+                return true;
 
-            for (int i = 0; i < sqCount; i++)
-            {
-                ref AiCore.SquadSnapshot other = ref squads[i];
-                if (!other.LeaderIsAlive || other.Ptr == mySqPtr || other.IsVehicleCrew || other.IsPlayerInSquad || other.LeaderOnVehicle || other.Faction != myFaction)
-                    continue;
-                if ((other.RefPos - myPos).sqrMagnitude <= 85f * 85f)
-                    return false;
-            }
+            if (HasRealPrimaryWithAmmo(soldier) || ShouldGroundedTankCrewStayAndJoinInfantry(sq, soldier.faction, myPos))
+                return false;
 
             return true;
         }
@@ -3661,6 +3668,45 @@ namespace EasyRed2HumanAI
 
             if (bestSquad == null || ai == null)
                 return false;
+
+            // Vanilla Squad.UpdateSquadData (0x18080C561) skips merging any squad with isOpenForJoiners == false (including
+            // vehicle crews!). When a grounded non-retreating tank crewman arrives within 10m of an eligible open friendly
+            // infantry Squad Leader, perform the Co-op-safe Squad.Join merge directly under local ownership.
+            Squad curSq = self.joinedSquad;
+            Soldier targetLeader = bestSquad.Leader;
+            if (!selfIsPlayer &&
+                bestSq <= 10.0f * 10.0f &&
+                bestSquad.isOpenForJoiners &&
+                AiCore.IsLocallyOwnedBot(self) &&
+                !AiCore.IsSoldierInVehicleOrTransition(self) &&
+                curSq != null &&
+                AiCore.IsTrueVehicleCrewSquad(curSq) &&
+                !AiCore.IsConfirmedPlaneCrewSquad(curSq) &&
+                !IsSquadOnRetreatTask(curSq) &&
+                targetLeader != null &&
+                targetLeader.IsAlive &&
+                !targetLeader.IsInjured &&
+                !targetLeader.HasSurrended() &&
+                !targetLeader.IsOnVehicle() &&
+                (!Photon.Pun.PhotonNetwork.InRoom || AiCore.TryConsumeBotRpcBudget(0.40f)))
+            {
+                bestSquad.Join(self);
+                AiCore.SoldierFastHandles joinH = AiCore.GetOrCreateSoldierHandles(self);
+                if (joinH != null)
+                {
+                    joinH.Goap.Plan.PlanExpireTime = 0f;
+                    joinH.Goap.Plan.NextReplanTime = 0f;
+                    AiCore.ClearBotMoveOverride(joinH, AiCore.BotMoveOverrideKind.GoapAction);
+                }
+                if (VisionConfig.DebugLogging.Value)
+                {
+                    AiCore.LogDebug(
+                        "CrewBailout",
+                        $"{self.faction} grounded tank crewman merged into friendly infantry squad '{bestSquad.squadName}'.");
+                }
+                activeMoveDest = leaderPos;
+                return true;
+            }
 
             // Steer lone AI stragglers/survivors directly toward the friendly Squad Leader;
             // once within 10m of the Squad Leader, vanilla Squad.UpdateSquadData handles the native merge & SyncSquad RPC.

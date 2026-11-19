@@ -2134,7 +2134,7 @@ namespace EasyRed2HumanAI
                                            oldSq != null &&
                                            oldSq.Pointer != IntPtr.Zero &&
                                            oldSq.Pointer != __instance.Pointer &&
-                                           (oldSq.units == null || oldSq.units.Count <= 1);
+                                           (oldSq.units == null || oldSq.units.Count <= 1 || AiCore.IsTrueVehicleCrewSquad(oldSq));
                     if (!isSurvivorMerge)
                         return true;
 

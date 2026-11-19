@@ -1376,7 +1376,8 @@ namespace EasyRed2HumanAI
                                          (now - h.Vision.LastKnownTarget.LastSeenTime) < 10.0f;
                 bool recentCloseGunfire = VisionPatches.TryGetNearestEnemyGunfire(myPos, soldier.faction, 55f, 3.5f, out _);
                 bool inActiveFirefight = board.HasActiveThreat || recentFootContact || recentCloseGunfire || suppression >= 2.0f;
-                bool casualScavengeAllowed = !urgentBandageWhileBleeding && !isEvadingArmor && !isBailedVehicleCrew;
+                bool isRetreatingBailedCrew = isBailedVehicleCrew && (onRetreatTask || AiCore.IsConfirmedPlaneCrewSquad(sq));
+                bool casualScavengeAllowed = !urgentBandageWhileBleeding && !isEvadingArmor && !isRetreatingBailedCrew;
                 bool inCoverDwellForCalmLoot =
                     soldier.IsOnCover() &&
                     h != null &&
@@ -1395,9 +1396,8 @@ namespace EasyRed2HumanAI
                                    ((gun0 != null && soldier.IsOutOfAmmosFor(gun0)) ||
                                     (gun1 != null && gun1.IsAtWeapon() && !string.IsNullOrEmpty(gun1.compatibleAmmo) && soldier.IsOutOfAmmosFor(gun1)) ||
                                     (gun2 != null && !gun2.IsPistol() && !gun2.IsAtWeapon() && soldier.IsOutOfAmmosFor(gun2)))));
-                bool outOfBandage = (urgentBandageWhileBleeding || !inActiveFirefight) &&
+                bool outOfBandage = (urgentBandageWhileBleeding || (!inActiveFirefight && !isRetreatingBailedCrew)) &&
                                     !isEvadingArmor &&
-                                    !isBailedVehicleCrew &&
                                     !hasBandage;
 
                 bool armorThreatPresent = (ws & GoapStateBits.ArmorThreatClose) != 0 ||
@@ -1498,6 +1498,7 @@ namespace EasyRed2HumanAI
                                         soldier.inventory.FindItemOfType<VirtualSmokeGrenade>() == null;
 
                 bool wantToolbox = isBailedVehicleCrew &&
+                                   !isRetreatingBailedCrew &&
                                    !urgentBandageWhileBleeding &&
                                    !isEvadingArmor &&
                                    suppression < 20f &&
@@ -1566,6 +1567,10 @@ namespace EasyRed2HumanAI
                         out _))
                 {
                     ws |= GoapStateBits.NeedAmmoOrMedScavenge;
+                    if (isBailedVehicleCrew && IsBailedCrewPrioritizingScavenge(soldier, sq, ws, now))
+                    {
+                        ws &= ~GoapStateBits.IsEntirelyAlone;
+                    }
                 }
             }
             else if (h != null)
@@ -1684,7 +1689,9 @@ namespace EasyRed2HumanAI
             float now,
             GoapActionId prevActiveAction)
         {
-            bool isBailedCrew = IsSoldierBailedOutVehicleCrew(soldier, soldier.joinedSquad);
+            Squad planSq = soldier.joinedSquad;
+            bool isBailedCrew = IsSoldierBailedOutVehicleCrew(soldier, planSq) &&
+                                !IsBailedCrewPrioritizingScavenge(soldier, planSq, ws, now);
             bool isMedic = AiCore.IsMedicSoldierOrPersonality(soldier, personality);
             bool canMove = AiCore.CanBotMoveAutonomously(soldier);
             return PlanBestGoapActionChainCore(
@@ -2309,19 +2316,25 @@ namespace EasyRed2HumanAI
                     cost *= factionProfile.ScavengeAndResupplyMult * micro.CautionCostMult;
                     if (lowTicketConservation)
                         cost -= 0.40f;
-                    bool isAtPickup = AiCore.TryGetSoldierHandles(soldierPtr, out AiCore.SoldierFastHandles scH) &&
-                                      scH.Goap.Scavenge.IsAtWeaponPickup;
+                    bool hasScavHandle = AiCore.TryGetSoldierHandles(soldierPtr, out AiCore.SoldierFastHandles scH);
+                    bool isAtPickup = hasScavHandle && scH.Goap.Scavenge.IsAtWeaponPickup;
+                    bool isUrgentPrimaryPickup = hasScavHandle && scH.Goap.Scavenge.IsUrgentPrimaryPickup;
                     // Urgently prioritize grabbing a nearby fallen Bazooka/Panzerfaust/AT grenade when enemy armor is closing in,
                     // while heavily penalizing any non-AT scavenging until out of immediate armor danger!
                     if ((ws & GoapStateBits.ArmorThreatClose) != 0)
                     {
                         cost += isAtPickup ? -0.70f : 1.50f;
                     }
-                    // Self-Preservation: penalize abandoning existing cover during an active squad firefight unless grabbing AT vs armor or bleeding without a bandage!
+                    else if (isUrgentPrimaryPickup)
+                    {
+                        cost -= 0.85f;
+                    }
+                    // Self-Preservation: penalize abandoning existing cover during an active squad firefight unless grabbing AT vs armor, upgrading from pistol-only, or bleeding without a bandage!
                     if ((ws & GoapStateBits.SquadHasActiveThreat) != 0 &&
                         (ws & GoapStateBits.InCover) != 0 &&
                         (ws & GoapStateBits.IsBleeding) == 0 &&
-                        !isAtPickup)
+                        !isAtPickup &&
+                        !isUrgentPrimaryPickup)
                     {
                         cost += 1.15f;
                     }

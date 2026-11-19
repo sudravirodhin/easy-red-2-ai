@@ -28,6 +28,7 @@ namespace EasyRed2HumanAI
             public bool IsDroppableAmmoBox;
             public bool IsAtWeaponPickup;
             public bool IsRoleWeaponUpgrade;
+            public bool IsUrgentPrimaryPickup;
             public bool IsBuddyBandageRefill;
             public bool IsBuddyAmmoBorrow;
             public bool IsFeedingNeedyAlly;
@@ -1521,8 +1522,9 @@ namespace EasyRed2HumanAI
 
             if (!g0RealPrimary && !g1RealPrimary && !g2RealPrimary && !hasInventoryRealPrimary)
             {
-                bool isRetreatingCrew = onRetreatTask && sq != null && AiCore.IsTrueVehicleCrewSquad(sq);
-                if (!isRetreatingCrew && (!onRetreatTask || board.HasActiveThreat || soldier.GetSuppressionValue() >= 8))
+                bool isPlayerSquad = sq != null && sq.IsPlayerInSquad();
+                bool isRetreatingCrew = onRetreatTask && sq != null && AiCore.IsTrueVehicleCrewSquad(sq) && !isPlayerSquad;
+                if (!isRetreatingCrew && (!onRetreatTask || isPlayerSquad || board.HasActiveThreat || soldier.GetSuppressionValue() >= 8))
                     needUrgentPrimary = true;
                 return;
             }
@@ -1730,7 +1732,8 @@ namespace EasyRed2HumanAI
                 now < result.NextScanTime &&
                 (!onlyUrgentAt || result.IsAtWeaponPickup) &&
                 (!onlyUrgentBandage || result.IsBuddyBandageRefill || result.NeedBandage) &&
-                (!result.IsRadioPackPickup || wantRadioPack))
+                (!result.IsRadioPackPickup || wantRadioPack) &&
+                (!result.IsUrgentPrimaryPickup || needUrgentPrimary))
             {
                 if ((result.IsBuddyBandageRefill || result.IsBuddyAmmoBorrow) &&
                     result.TargetBuddyDonor != null &&
@@ -1830,7 +1833,7 @@ namespace EasyRed2HumanAI
             if (soldier.IsSquadLeader() && !soldier.isBleeding && soldier.joinedSquad != null &&
                 soldier.joinedSquad.units != null && soldier.joinedSquad.units.Count >= 2)
             {
-                maxSearchRadius = Mathf.Min(maxSearchRadius, needAmmo ? 12.0f : 10.0f);
+                maxSearchRadius = Mathf.Min(maxSearchRadius, (needAmmo || needUrgentPrimary) ? 14.0f : 10.0f);
             }
             float bestDistSq = maxSearchRadius * maxSearchRadius;
             float lastRadLostTime = 0f;
@@ -2007,7 +2010,8 @@ namespace EasyRed2HumanAI
                                     NeedBandage = needBandage,
                                     TargetFloorItem = item,
                                     TargetPosition = itemPos,
-                                    IsRoleWeaponUpgrade = true
+                                    IsRoleWeaponUpgrade = true,
+                                    IsUrgentPrimaryPickup = needUrgentPrimary
                                 };
                             }
                         }
@@ -2496,7 +2500,8 @@ namespace EasyRed2HumanAI
                                     TargetInventory = inv,
                                     TargetInventoryPrimaryWeapon = matchedUpgWep,
                                     TargetPosition = invPos,
-                                    IsRoleWeaponUpgrade = true
+                                    IsRoleWeaponUpgrade = true,
+                                    IsUrgentPrimaryPickup = needUrgentPrimary
                                 };
                                 continue;
                             }

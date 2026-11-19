@@ -116,7 +116,7 @@ namespace EasyRed2HumanAI
 
     public static partial class AiCore
     {
-        public struct ScavengeStub { public bool IsAtWeaponPickup; }
+        public struct ScavengeStub { public bool IsAtWeaponPickup; public bool IsUrgentPrimaryPickup; }
         public struct GoapStub { public ScavengeStub Scavenge; }
         public class SoldierFastHandles
         {
