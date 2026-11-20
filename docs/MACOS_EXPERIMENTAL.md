@@ -1,4 +1,4 @@
-# Easy Red 2: Battle Hardened (`v0.9.9`) — Experimental macOS Build & Reviewer Guide
+# Easy Red 2: Battle Hardened (`v0.9.12`) — Experimental macOS Build & Reviewer Guide
 
 > **Audience:** Prepared specifically for **Eric** and **Eric's Claude** to inspect **before** running anything.  
 > **Status:** Experimental test build — compiled and verified on Windows, packaged with official macOS BepInEx 6 (`x64`), and awaiting first real-hardware smoke test on macOS.
@@ -7,7 +7,7 @@
 
 ## 1. Overview & Trust / Safety Summary
 
-### What Is in `EasyRed2HumanAI-v0.9.9-macOS-Experimental.zip`
+### What Is in `EasyRed2HumanAI-v0.9.12-macOS-Experimental.zip`
 Every binary and script inside the zip comes from one of three transparent sources:
 
 | Path in Zip | Source & Purpose |
@@ -15,7 +15,7 @@ Every binary and script inside the zip comes from one of three transparent sourc
 | `dotnet/` (incl. `libcoreclr.dylib`), `libdoorstop.dylib`, `.doorstop_version`, `BepInEx/core/` (incl. `libdobby.dylib`, `BepInEx.*.dll`, `0Harmony.dll`, `Il2CppInterop.*.dll`), `BepInEx/patchers/` | **Unmodified official BepInEx 6.0.0-be.791** (`BepInEx-Unity.IL2CPP-macos-x64-6.0.0-be.791+b782da4.zip` from `https://builds.bepinex.dev/projects/bepinex_be/791/`). |
 | `run_bepinex.sh` | **Official BE 791 `run_bepinex.sh` with a minimal 5-line macOS fix** (exact diff explained in [Section 3](#3-exact-diff-vs-upstream-run_bepinexsh)). |
 | `BepInEx/unity-libs/2022.3.62.zip` | **Official Unity 2022.3.62 base stub libraries** (pre-bundled from `https://unity.bepinex.dev/libraries/2022.3.62.zip` so first-boot IL2CPP interop generation works offline). |
-| `BepInEx/plugins/EasyRed2HumanAI.dll` | **Battle Hardened `v0.9.9`** compiled from `src/EasyRed2AI/` (`VerifyPatches`: `155` Harmony signatures verified, `0` mismatches). |
+| `BepInEx/plugins/EasyRed2HumanAI.dll` | **Battle Hardened `v0.9.12`** compiled from `src/EasyRed2AI/` (`VerifyPatches`: `166` Harmony signatures & `18` Animator strings verified, `0` mismatches). |
 | `Install-BattleHardened-Mac.command`<br>`Launch-BattleHardened-Mac.command`<br>`Uninstall-BattleHardened-Mac.command` | **Plain-text, LF-only (`bash 3.2`-compatible) helper scripts** (readable in any editor; also tracked in `macos/` in the repo). |
 | `MACOS_EXPERIMENTAL.md` | This review & smoke-test guide. |
 
@@ -118,9 +118,9 @@ The bundled `run_bepinex.sh` is byte-for-byte official BepInEx `6.0.0-be.791` (`
 
 ---
 
-## 4. What Changed in `EasyRed2HumanAI.dll` (`v0.9.9`) for macOS
+## 4. macOS Compatibility in `EasyRed2HumanAI.dll` (`v0.9.12`)
 
-A full codebase audit found that >98% of the mod was already platform-agnostic `.NET 6` IL (`Path.Combine`, `BepInEx.Paths`, `UnityEngine`, `HarmonyLib`). Four small updates were added to `v0.9.9` so macOS runs cleanly without Windows assumptions:
+A full codebase audit found that >98% of the mod was already platform-agnostic `.NET 6` IL (`Path.Combine`, `BepInEx.Paths`, `UnityEngine`, `HarmonyLib`). Four updates were added in `v0.9.9` and audited clean through `v0.9.12` (zero new `DllImport`s or hardcoded offsets; Mode 4 Command Net uses cross-platform Unity `Universal Render Pipeline/Unlit` / `Sprites/Default` / `Unlit/Color` shaders safe on Metal):
 
 1. **Cross-Platform Window Focus & Alt-Tab FPS Cap (`AiCore.cs`)**:
    * Previously used `user32.dll` (`GetForegroundWindow`, `GetWindowThreadProcessId`) + `kernel32.dll` (`GetCurrentProcessId`) every `0.20s`.
@@ -133,14 +133,14 @@ A full codebase audit found that >98% of the mod was already platform-agnostic `
    * **MacBook Keyboard Tip:** On MacBooks without `Fn`-lock enabled, press **`Fn + F5`..`Fn + F10`**, or change `ConfigMenuHotkey` / `MapPickerHotkey` / `DogTagArchiveHotkey` to e.g. `Backslash`, `Home`, or `Insert` in the `.cfg`.
 4. **Startup Diagnostic Banner (`Plugin.cs`)**:
    * Logs one clear summary line into `BepInEx/LogOutput.log` on startup:
-     `Platform: macOS (64-bit) | Patches: 155/155 OK (0 failed) | Offsets: targetDest=+0x..., visibleTarget=+0x..., path=+0x...`
+     `Platform: macOS (64-bit) | Patches: 166/166 OK (0 failed) | Offsets: targetDest=+0x..., visibleTarget=+0x..., path=+0x...`
 
 ---
 
 ## 5. Step-by-Step Install, First Boot & Smoke Test Checklist
 
 ### Step A: Extract & Install
-1. Unzip `EasyRed2HumanAI-v0.9.9-macOS-Experimental.zip` to a temporary folder (e.g., `~/Downloads/ER2-BH-Mac/`).
+1. Unzip `EasyRed2HumanAI-v0.9.12-macOS-Experimental.zip` to a temporary folder (e.g., `~/Downloads/ER2-BH-Mac/`).
 2. Review the 3 `.command` scripts and `run_bepinex.sh` if desired.
 3. Run the installer from Terminal (or double-click it):
    ```bash
@@ -168,32 +168,32 @@ Once the game reaches the Main Menu (even if you quit right after), inspect:
 <GameDir>/BepInEx/LogOutput.log
 ```
 Check specifically for:
-1. **`Platform: macOS (64-bit) | Patches: 155/155 OK (0 failed)`**
+1. **`Platform: macOS (64-bit) | Patches: 166/166 OK (0 failed)`**
    * Look closely for any `Failed to apply patch ...` errors!
-   * **Watch-items on macOS `Assembly-CSharp.dll`:** 4 patches target compiler-generated coroutine classes (`_MeleeDamageCR_d__489`, `_ReloadCR_d__159`, `_SpawnAISquad_d__45`, `_SpawnUnit_d__37`) and 1 uses obfuscated path type `A.d`. If the macOS Unity build shifted a `d__NNN` number or obfuscated name, `LogOutput.log` will show which one failed!
+   * **Watch-items on macOS `Assembly-CSharp.dll`:** 5 patches target compiler-generated coroutine classes (`_MeleeDamageCR_d__489`, `_ReloadCR_d__159`, `_SpawnAISquad_d__45`, `_SpawnUnit_d__37`, `_WaitAnthemEnd_d__46`) and 1 uses obfuscated path type `A.d`. If the macOS Unity build shifted a `d__NNN` number or obfuscated name, `LogOutput.log` will show which one failed!
 2. **`Offsets: targetDest=+0x..., visibleTarget=+0x..., path=+0x...`**
    * Confirm none say `fallback` (or let us know what offsets printed!).
-3. **`Easy Red 2 - Battle Hardened v0.9.9 loaded!`**
+3. **`Easy Red 2 - Battle Hardened v0.9.12 loaded!`**
 
 ### Step D: Quick 5-Minute In-Game Smoke Test
 1. **Menus & Hotkeys** (`Fn+F5`..`Fn+F10` on MacBook):
    * Press **`F6`** (or `Fn+F6`) → verify the 5-tab Feature Menu renders cleanly and mouse cursor unlocks.
-   * Press **`F5`** → verify the Campaign/Map Picker window opens and loads campaigns.
+   * Press **`F5`** → verify the **2-Tab Campaign/Map & Match Settings Picker** window opens and loads campaigns/settings.
 2. **Short Skirmish (any small Normandy/Tunisia mission, 30–60 seconds)**:
    * Verify bots spawn, move into cover, crouch/sprint normally, vault obstacles, and shoot without immediate `NullReferenceException` / `MissingMethodException` spam in `LogOutput.log`.
+   * Enter Free Camera and press **`F`** to cycle into **Mode 4 (`Command Net Overhead`)** + toggle **`F8`** OFF/ON to verify live Vanilla A/B Observer rendering on Metal.
    * Press **`F10`** → verify the 5-line Telemetry HUD toast appears.
-   * Toggle **`F8`** OFF/ON → verify live toggle works cleanly.
 3. **Window Focus / Alt-Tab (`Cmd+Tab`)**:
    * Switch away from Easy Red 2 (`Cmd+Tab`) and back — verify no freezes or audio/FPS stuck issues.
 4. **Multiplayer Co-op (Optional)**:
-   * Join a Windows host running `v0.9.9` (or vice versa) and confirm lobby join & match start work cleanly.
+   * Join a Windows host running `v0.9.12` (or vice versa) and confirm lobby join, scoreboard, and match transition work cleanly.
 
 ---
 
 ## 6. Test Report Template (Copy-Paste Back)
 
 ```markdown
-### macOS Experimental Smoke Test Report (v0.9.9)
+### macOS Experimental Smoke Test Report (v0.9.12)
 - **Mac Model / Chip:** (e.g., MacBook Pro M2 Pro / Intel i7)
 - **macOS Version:** (e.g., 15.x Sequoia)
 - **Pre-Flight Output (`file`, `GameAssembly`, `codesign`):**
