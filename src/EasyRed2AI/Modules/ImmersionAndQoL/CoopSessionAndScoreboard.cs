@@ -1491,6 +1491,7 @@ namespace EasyRed2HumanAI
             public static void Prefix()
             {
                 ResetLocalPlayerScoreboardLedger();
+                _pendingJoinMotdQueue.Clear();
                 _inBattleLoaderOnJoinedRoom = true;
             }
 
@@ -1516,6 +1517,7 @@ namespace EasyRed2HumanAI
 
         private struct PendingJoinMotdEntry
         {
+            public IntPtr RoomPtr;
             public Photon.Realtime.Player PlayerRef;
             public int ActorNumber;
             public string DedupKey;
@@ -1655,15 +1657,30 @@ namespace EasyRed2HumanAI
                         return;
                     }
 
+                    IntPtr curRoomPtr = Photon.Pun.PhotonNetwork.CurrentRoom != null
+                        ? Photon.Pun.PhotonNetwork.CurrentRoom.Pointer
+                        : IntPtr.Zero;
                     string dedupKey = GetJoinerMotdDedupKey(__0);
                     if (!string.IsNullOrEmpty(dedupKey) && _welcomedMotdPlayerKeys.Contains(dedupKey))
                         return;
 
                     int actorNum = __0.ActorNumber;
-                    for (int i = 0; i < _pendingJoinMotdQueue.Count; i++)
+                    for (int i = _pendingJoinMotdQueue.Count - 1; i >= 0; i--)
                     {
-                        if (_pendingJoinMotdQueue[i].ActorNumber == actorNum)
-                            return;
+                        PendingJoinMotdEntry existing = _pendingJoinMotdQueue[i];
+                        if (existing.RoomPtr != curRoomPtr)
+                        {
+                            _pendingJoinMotdQueue.RemoveAt(i);
+                            continue;
+                        }
+
+                        if (existing.ActorNumber == actorNum)
+                        {
+                            if (string.Equals(existing.DedupKey, dedupKey, StringComparison.OrdinalIgnoreCase))
+                                return;
+
+                            _pendingJoinMotdQueue.RemoveAt(i);
+                        }
                     }
 
                     if (_pendingJoinMotdQueue.Count < 16)
@@ -1671,6 +1688,7 @@ namespace EasyRed2HumanAI
                         float nowUnscaled = Time.unscaledTime;
                         _pendingJoinMotdQueue.Add(new PendingJoinMotdEntry
                         {
+                            RoomPtr = curRoomPtr,
                             PlayerRef = __0,
                             ActorNumber = actorNum,
                             DedupKey = dedupKey,
@@ -1698,36 +1716,52 @@ namespace EasyRed2HumanAI
                 return;
             }
 
+            var room = Photon.Pun.PhotonNetwork.CurrentRoom;
+            if (room == null || room.Players == null)
+            {
+                _pendingJoinMotdQueue.Clear();
+                return;
+            }
+
+            IntPtr curRoomPtr = room.Pointer;
             float now = Time.unscaledTime;
             for (int i = _pendingJoinMotdQueue.Count - 1; i >= 0; i--)
             {
                 PendingJoinMotdEntry entry = _pendingJoinMotdQueue[i];
+                if (entry.RoomPtr != curRoomPtr)
+                {
+                    _pendingJoinMotdQueue.RemoveAt(i);
+                    continue;
+                }
+
                 if (now < entry.SendAtUnscaledTime)
                     continue;
 
-                Photon.Realtime.Player target = entry.PlayerRef;
+                Photon.Realtime.Player target = null;
+                try
+                {
+                    if (room.Players.ContainsKey(entry.ActorNumber))
+                        target = room.Players[entry.ActorNumber];
+                }
+                catch { }
+
                 if (target == null || target.IsLocal)
                 {
                     _pendingJoinMotdQueue.RemoveAt(i);
                     continue;
                 }
 
-                // Confirm player is still connected in the current room
-                bool stillInRoom = false;
-                try
-                {
-                    var room = Photon.Pun.PhotonNetwork.CurrentRoom;
-                    if (room != null && room.Players != null && room.Players.ContainsKey(entry.ActorNumber))
-                        stillInRoom = true;
-                }
-                catch { }
-                if (!stillInRoom)
+                string liveDedup = GetJoinerMotdDedupKey(target);
+                if (!string.IsNullOrEmpty(entry.DedupKey) &&
+                    !string.IsNullOrEmpty(liveDedup) &&
+                    !string.Equals(entry.DedupKey, liveDedup, StringComparison.OrdinalIgnoreCase))
                 {
                     _pendingJoinMotdQueue.RemoveAt(i);
                     continue;
                 }
 
-                if (!string.IsNullOrEmpty(entry.DedupKey) && _welcomedMotdPlayerKeys.Contains(entry.DedupKey))
+                if ((!string.IsNullOrEmpty(entry.DedupKey) && _welcomedMotdPlayerKeys.Contains(entry.DedupKey)) ||
+                    (!string.IsNullOrEmpty(liveDedup) && _welcomedMotdPlayerKeys.Contains(liveDedup)))
                 {
                     _pendingJoinMotdQueue.RemoveAt(i);
                     continue;
@@ -1742,7 +1776,7 @@ namespace EasyRed2HumanAI
                         _pendingJoinMotdQueue[i] = entry;
                         continue;
                     }
-                    if (now - entry.EnqueuedAtUnscaledTime < 45.0f)
+                    if (now - entry.EnqueuedAtUnscaledTime < 8.0f)
                         continue;
                     entry.ReadyAtUnscaledTime = now;
                 }
@@ -1755,24 +1789,38 @@ namespace EasyRed2HumanAI
                 AiCore.InvalidatePlayerModdedCache(entry.ActorNumber);
                 bool isModdedJoiner = AiCore.IsPhotonPlayerConfirmedModded(target);
                 string greetingLine = GetFactionMotdGreeting(joinerFaction);
-                string motd = isModdedJoiner
-                    ? $"{greetingLine}\n" +
-                      $"[Battle Hardened v{Plugin.PluginVersion} Lobby] Host AI active.\n" +
-                      "\u2022 Squad Leaders: Open [Radial] or [Map] to Accept / Balk incoming HQ radio orders."
-                    : $"{greetingLine}\n" +
-                      "[Battle Hardened AI \u2014 Host Mod Active | No Download Needed]\n" +
-                      "\u2022 Smarter AI: Bots use human sight cones (no 360\u00B0 eyes), flank, smoke, scavenge gear & crew weapons.\n" +
-                      "\u2022 Cover & Night: Rifles/MGs pierce thin wood; stance/camo matter, and night is dark\u2014watch muzzle flashes!\n" +
-                      "\u2022 Squad Radio: Keep your Radioman alive so your squad stays linked to HQ orders & armor/flank support.";
+                string[] motdLines = isModdedJoiner
+                    ? new[]
+                    {
+                        $"{greetingLine} [Battle Hardened v{Plugin.PluginVersion} Lobby]",
+                        "Squad Leaders: use [Radial] or [Map] to Accept or Balk HQ radio orders."
+                    }
+                    : new[]
+                    {
+                        $"{greetingLine} [Battle Hardened AI Host - No Download Needed]",
+                        "AI uses human FOV (flanks, smoke, scavenging); rifles pierce thin wood.",
+                        "Keep your Radioman alive for HQ orders & armor/flank support. Good luck!"
+                    };
 
-                if (AiCore.SendTargetedVanillaChatMessage(target, motd, minPlayerInterval: 0f, bypassRpcBudget: true))
+                bool anySent = false;
+                for (int lineIdx = 0; lineIdx < motdLines.Length; lineIdx++)
+                {
+                    if (AiCore.SendTargetedVanillaChatMessage(target, motdLines[lineIdx], minPlayerInterval: 0f, bypassRpcBudget: true))
+                        anySent = true;
+                }
+
+                if (anySent)
                 {
                     try
                     {
-                        if (PlayerGUI.instance != null && Photon.Pun.PhotonNetwork.LocalPlayer != null)
+                        if (PlayerGUI.instance != null)
                         {
                             string joinerNick = !string.IsNullOrEmpty(target.NickName) ? target.NickName : $"Player#{entry.ActorNumber}";
-                            ChatMessage.NewChatMessage(Photon.Pun.PhotonNetwork.LocalPlayer, $"[MOTD -> {joinerNick}] {motd}");
+                            for (int lineIdx = 0; lineIdx < motdLines.Length; lineIdx++)
+                            {
+                                string prefix = lineIdx == 0 ? $"<color=#9AA7B0>[MOTD -> {joinerNick}]</color> " : "<color=#9AA7B0>[MOTD]</color> ";
+                                new ChatMessage(prefix + motdLines[lineIdx]);
+                            }
                         }
                     }
                     catch { }
@@ -1782,6 +1830,12 @@ namespace EasyRed2HumanAI
                         if (_welcomedMotdPlayerKeys.Count > 128)
                             _welcomedMotdPlayerKeys.Clear();
                         _welcomedMotdPlayerKeys.Add(entry.DedupKey);
+                    }
+                    if (!string.IsNullOrEmpty(liveDedup))
+                    {
+                        if (_welcomedMotdPlayerKeys.Count > 128)
+                            _welcomedMotdPlayerKeys.Clear();
+                        _welcomedMotdPlayerKeys.Add(liveDedup);
                     }
                 }
             }

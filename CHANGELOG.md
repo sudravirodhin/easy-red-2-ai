@@ -5,6 +5,20 @@ For pre-compiled downloads, see **[GitHub Releases](https://github.com/sudraviro
 
 ---
 
+## `v0.9.11` — Emplacement Takeover From Bots, Solo HUD Flash Fix, Joiner MOTD Fixes & Rain Acoustic Masking
+* **Human Emplacement Seat Takeover (`EmplacementAndCrewBoarding.cs`, `Plugin.cs`)**:
+  * Patched `VehicleDamagablePart.GetInteractions`, `Vehicle.HasSpace`, and `Vehicle.GetOnVehicleBestPos` so human players on foot see the `[F]` prompt and can directly take over the gunner seat of friendly bot-manned static emplacements (including full 1/1 MGs and 2/2 AT/AA guns), never displacing other human players.
+  * Updated `Vehicle_GetOnVehicle_Patch` to cleanly dismount the displaced AI bot (`player_takeover`) with a `22.0s` cooldown when no spare seat remains, and added a polite `2.2m` facing yield in `TryReleaseStaleStaticEmplacementCrew` (`vanilla_client_yield`) so unmodded Co-op joiners can also step up and take over full bot-crewed static guns.
+* **Eliminated Solo Soldier Squad-List HUD Flashing (`ConfigMenuAndHud.cs`)**:
+  * Updated `PlayerGUI_ShowSquadList_Patch.Prefix` to deduplicate identical active squad-panel refreshes (`labelCount == unitCount` 1-to-1 pointer match), stopping `Squad.UpdateSquadData()` from destroying and re-animating the HUD label every frame when a solo player stands within `10m` of a friendly squad.
+  * Relaxed `Squad_Join_Patch.Prefix`'s on-foot leader distance check from `18m` to **`45m`** so solo players near a healthy squadmate merge cleanly, and guarded `Squad_Join_Patch.Postfix` HUD refreshes to verified merges only.
+* **Host Joiner MOTD Attribution, Timing & Full-Message Delivery (`CoopSessionAndScoreboard.cs`)**:
+  * Cleared `_pendingJoinMotdQueue` on `BattleLoader.OnJoinedRoom`, tracked live `RoomPtr` across matches, resolved joiners dynamically from `PhotonNetwork.CurrentRoom.Players[ActorNumber]` with `DedupKey` validation, and lowered the faction-wait fallback timeout from `45s` to **`8s`**.
+  * Split MOTDs into concise single-line ASCII-safe chat messages (within ER2's `400px` single-bubble `ChatMessage` layout) and echoed Host-side confirmations cleanly via `new ChatMessage(...)` without a fake `<HostName>:` prefix.
+* **Rain Acoustic Masking (`AiCore.cs`, `VisionRangeAndCamo.cs`)**:
+  * Cached `AiCore.RainIntensity01` inside `AiCore.UpdateNightVisionSnapshotIfDue` (before the daytime early return) from `DayNightCycle.currentRainIntensity` / `WeatherType.Raining`.
+  * Scaled close-range enemy footstep hearing in rain (`0.55x`, stacking with gunfire down to `0.35x`) and shrank `closeOmni` 360° close sense in `Creature.CanSee` during rain (`0.58x`, `>= 3.5m` floor) when no muzzle flare is visible.
+
 ## `v0.9.10` — Human Inertia & Anti-Second-Guessing Combat Rhythm (Instant Reflexes Preserved)
 * **Personality-Scaled Cover Dwell & Post-Contact Angle Hold (`AiCore.cs`, `SoldierGoapExecution.cs`, `GoapDefinitionsAndPlanner.cs`)**:
   * Added `LastSettledCoverPtr` and `CoverSettledUntil` to `AiCore.SoldierStanceState`, giving soldiers who reach valid cover a `5.5s–13.75s` dwell window (longer for Anchor/Overwatch gunners, Cautious riflemen, Old Guard NCOs & Medics; shorter for Shock/Breacher/Skirmisher assaulters) plus a `3.0s` post-contact angle-hold beat after `LastKnownTarget` disappears behind cover.

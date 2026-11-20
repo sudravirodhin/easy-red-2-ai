@@ -886,6 +886,64 @@ namespace EasyRed2HumanAI
             if (string.IsNullOrEmpty(occFaction))
                 return;
 
+            // If an unmodded Co-op client stands right next to a full bot-manned static gun facing it,
+            // politely dismount one locally-owned bot so the vanilla client gets the [F] Enter prompt.
+            if (!veh.PlayerIsInside() && !veh.HasSpace() && AiCore.IsInMultiplayerRoom())
+            {
+                var soldiers = AiCore.WorldSoldiers;
+                int solCount = AiCore.WorldSoldierCount;
+                for (int si = 0; si < solCount; si++)
+                {
+                    ref AiCore.SoldierSnapshot ss = ref soldiers[si];
+                    if (!ss.IsPlayer ||
+                        ss.IsOnVehicle ||
+                        ss.Ref == null ||
+                        ss.Ref.Pointer == IntPtr.Zero ||
+                        ss.Ref.transform == null ||
+                        AiCore.AreEnemyFactions(occFaction, ss.Faction))
+                    {
+                        continue;
+                    }
+
+                    Vector3 diff = vehPos - ss.Pos;
+                    if (diff.sqrMagnitude > 2.2f * 2.2f)
+                        continue;
+
+                    if (AiCore.IsPlayerRunningBattleHardened(ss.Ref))
+                        continue;
+
+                    diff.y = 0f;
+                    Vector3 pFwd = ss.Ref.transform.forward;
+                    pFwd.y = 0f;
+                    if (diff.sqrMagnitude > 0.01f &&
+                        pFwd.sqrMagnitude > 0.01f &&
+                        Vector3.Dot(diff.normalized, pFwd.normalized) < 0.55f)
+                    {
+                        continue;
+                    }
+
+                    Seats mtSeat = veh.MainTurretSeat;
+                    Soldier mtOcc = mtSeat != null ? mtSeat.unitSet : null;
+                    Soldier yieldBot = (mtOcc != null && mtOcc.IsAlive && AiCore.IsLocallyOwnedBot(mtOcc))
+                        ? mtOcc
+                        : firstOcc;
+                    try
+                    {
+                        ClearEmplacementAssignment(yieldBot.Pointer, markUnreachable: true, 22.0f);
+                        if (yieldBot.dontLeaveVehicle)
+                            yieldBot.dontLeaveVehicle = false;
+                        yieldBot.CoverPosition(null);
+                        if (yieldBot.IsOnVehicle())
+                        {
+                            BotActionTrace.RecordEvent(yieldBot, BotTraceEventKind.EmplacementBail, "vanilla_client_yield");
+                            veh.GetOffVehicle(yieldBot);
+                        }
+                    }
+                    catch { }
+                    return;
+                }
+            }
+
             EvaluateEmplacementImmediateThreat(
                 veh,
                 mainTurret,
@@ -1734,11 +1792,154 @@ namespace EasyRed2HumanAI
             }
         }
 
+        [ThreadStatic]
+        private static bool _allowEmplacementTakeoverHasSpace;
+        [ThreadStatic]
+        private static Soldier _emplacementTakeoverInteractor;
+
+        private static bool CanHumanTakeOverStaticEmplacementSeat(Vehicle veh, Soldier humanSoldier, out int takeSeatIdx)
+        {
+            takeSeatIdx = -1;
+            if (!VisionConfig.EnableMod.Value ||
+                veh == null ||
+                veh.Pointer == IntPtr.Zero ||
+                humanSoldier == null ||
+                humanSoldier.Pointer == IntPtr.Zero ||
+                humanSoldier.IsAI() ||
+                !humanSoldier.IsAlive ||
+                humanSoldier.IsOnVehicle())
+            {
+                return false;
+            }
+
+            if (veh.IsLocked() || veh.IsDisabled() || veh.IsCoverDestroyed() || veh.IsAirVehicle())
+                return false;
+
+            AiCore.VehicleFastHandles vh = AiCore.GetOrCreateVehicleHandles(veh);
+            bool isStatic = vh != null ? vh.IsStaticEmplacement : veh.TryCast<MovableVehicle>() == null;
+            if (!isStatic)
+                return false;
+
+            string vehFac = veh.GetVehicleFaction();
+            string solFac = AiCore.GetCachedFaction(humanSoldier);
+            if (!string.IsNullOrEmpty(vehFac) && !string.IsNullOrEmpty(solFac) && AiCore.AreEnemyFactions(vehFac, solFac))
+                return false;
+
+            var seats = veh.seats;
+            if (seats == null || seats.Length == 0)
+                return false;
+
+            Seats mainSeat = veh.MainTurretSeat;
+            if (mainSeat != null &&
+                mainSeat.hasUnitSet &&
+                mainSeat.unitSet != null &&
+                mainSeat.unitSet.IsAI() &&
+                !mainSeat.unitSet.IsPlayer())
+            {
+                for (int i = 0; i < seats.Length; i++)
+                {
+                    if (seats[i] != null && seats[i].Pointer == mainSeat.Pointer)
+                    {
+                        takeSeatIdx = i;
+                        return true;
+                    }
+                }
+            }
+
+            for (int i = 0; i < seats.Length; i++)
+            {
+                Seats s = seats[i];
+                if (s != null &&
+                    s.hasUnitSet &&
+                    s.unitSet != null &&
+                    s.unitSet.IsAI() &&
+                    !s.unitSet.IsPlayer())
+                {
+                    takeSeatIdx = i;
+                    return true;
+                }
+            }
+
+            return false;
+        }
+
+        [HarmonyPatch(typeof(VehicleDamagablePart), nameof(VehicleDamagablePart.GetInteractions))]
+        public static class VehicleDamagablePart_GetInteractions_Patch
+        {
+            public static void Prefix(VehicleDamagablePart __instance, InventoryManager __0, out bool __state)
+            {
+                __state = false;
+                try
+                {
+                    if (!VisionConfig.EnableMod.Value || __instance == null || __instance.rootVeh == null || __0 == null)
+                        return;
+
+                    Soldier sol = __0.GetComponent<Soldier>();
+                    if (sol != null && !sol.IsAI() && sol.IsPlayer() && !sol.IsOnVehicle())
+                    {
+                        _allowEmplacementTakeoverHasSpace = true;
+                        _emplacementTakeoverInteractor = sol;
+                        __state = true;
+                    }
+                }
+                catch { }
+            }
+
+            public static Exception Finalizer(bool __state, Exception __exception)
+            {
+                if (__state)
+                {
+                    _allowEmplacementTakeoverHasSpace = false;
+                    _emplacementTakeoverInteractor = null;
+                }
+                return __exception;
+            }
+        }
+
+        [HarmonyPatch(typeof(Vehicle), nameof(Vehicle.HasSpace))]
+        public static class Vehicle_HasSpace_Patch
+        {
+            public static void Postfix(Vehicle __instance, ref bool __result)
+            {
+                if (__result || !_allowEmplacementTakeoverHasSpace || __instance == null || _emplacementTakeoverInteractor == null)
+                    return;
+
+                try
+                {
+                    if (CanHumanTakeOverStaticEmplacementSeat(__instance, _emplacementTakeoverInteractor, out _))
+                    {
+                        __result = true;
+                    }
+                }
+                catch { }
+            }
+        }
+
+        [HarmonyPatch(typeof(Vehicle), nameof(Vehicle.GetOnVehicleBestPos))]
+        public static class Vehicle_GetOnVehicleBestPos_Patch
+        {
+            public static void Postfix(Vehicle __instance, Soldier __0, ref bool __result)
+            {
+                if (__result || !VisionConfig.EnableMod.Value || __instance == null || __0 == null || __0.IsAI())
+                    return;
+
+                try
+                {
+                    if (CanHumanTakeOverStaticEmplacementSeat(__instance, __0, out int takeSeatIdx))
+                    {
+                        __instance.GetOnVehicle(takeSeatIdx, __0);
+                        __result = true;
+                    }
+                }
+                catch { }
+            }
+        }
+
         /// <summary>
         /// When a remote client human player switches into a vehicle seat occupied by a Host-owned AI bot,
         /// the Host receives `SyncSoldier.SyncUnitOnVehicle` -> `Vehicle.GetOnVehicle(seatIndex, playerSoldier)`.
         /// Relocate the displaced locally-owned AI bot into the player's previous seat (broadcasting its new seat
-        /// across Photon) so both Host and Clients stay 100% synchronized.
+        /// across Photon), or cleanly dismount the bot when no spare seat exists (e.g., player taking over a full static gun).
         /// </summary>
         [HarmonyPatch(typeof(Vehicle), nameof(Vehicle.GetOnVehicle))]
         public static class Vehicle_GetOnVehicle_Patch
@@ -1789,6 +1990,20 @@ namespace EasyRed2HumanAI
                                 break;
                             }
                         }
+                    }
+
+                    if (oldIdx < 0)
+                    {
+                        ClearEmplacementAssignment(existing.Pointer, markUnreachable: true, 22.0f);
+                        if (existing.dontLeaveVehicle)
+                            existing.dontLeaveVehicle = false;
+                        existing.CoverPosition(null);
+                        if (existing.IsOnVehicle())
+                        {
+                            BotActionTrace.RecordEvent(existing, BotTraceEventKind.EmplacementBail, "player_takeover");
+                            __instance.GetOffVehicle(existing);
+                        }
+                        return;
                     }
 
                     __state.DisplacedBot = existing;

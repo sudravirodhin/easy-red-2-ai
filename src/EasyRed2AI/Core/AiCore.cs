@@ -2123,11 +2123,12 @@ namespace EasyRed2HumanAI
         }
 
         // =====================================================================
-        // Global 0.45s Cached DayNightCycle Darkness Snapshot & Match Theater
+        // Global 0.45s Cached DayNightCycle Darkness / Rain Snapshot & Match Theater
         // =====================================================================
         private static float _nextNightSnapshotTime;
         public static float NightDarkness01 { get; private set; }
         public static float VanillaNightFactor { get; private set; } = 1.0f;
+        public static float RainIntensity01 { get; private set; }
 
         public static void UpdateNightVisionSnapshotIfDue()
         {
@@ -2143,8 +2144,14 @@ namespace EasyRed2HumanAI
                 {
                     NightDarkness01 = 0f;
                     VanillaNightFactor = 1.0f;
+                    RainIntensity01 = 0f;
                     return;
                 }
+
+                float rain = Mathf.Clamp01(Corvostudio.SuperDayNightCycle.DayNightCycle.currentRainIntensity);
+                if (rain < 0.01f && Corvostudio.SuperDayNightCycle.DayNightCycle.lastSetWeather == WeatherType.Raining)
+                    rain = 1.0f;
+                RainIntensity01 = rain;
 
                 float nv = Mathf.Clamp(Corvostudio.SuperDayNightCycle.DayNightCycle.NightVisionMultiplier, 0.10f, 1.0f);
                 VanillaNightFactor = 0.20f + 0.80f * nv;
@@ -2174,6 +2181,7 @@ namespace EasyRed2HumanAI
             {
                 NightDarkness01 = 0f;
                 VanillaNightFactor = 1.0f;
+                RainIntensity01 = 0f;
             }
         }
 

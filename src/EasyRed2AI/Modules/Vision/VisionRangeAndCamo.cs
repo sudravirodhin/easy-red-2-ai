@@ -175,7 +175,10 @@ namespace EasyRed2HumanAI
                 found = true;
             }
 
-            float stepMaskMult = HasAnyLoudEventNear(observerPos, 35.0f, 3.0f, now) ? 0.50f : 1.0f;
+            float rain01 = AiCore.RainIntensity01;
+            float rainStepMult = rain01 > 0.05f ? Mathf.Lerp(1.0f, 0.55f, rain01) : 1.0f;
+            float combatStepMult = HasAnyLoudEventNear(observerPos, 35.0f, 3.0f, now) ? 0.50f : 1.0f;
+            float stepMaskMult = Mathf.Max(0.35f, rainStepMult * combatStepMult);
             for (int i = 0; i < FootstepRingSize; i++)
             {
                 ref FootstepEntry fe = ref _footstepRing[i];
@@ -948,6 +951,12 @@ namespace EasyRed2HumanAI
                         {
                             // Shrink 360-degree footstep/breathing sense radius in darkness (12m -> ~4.5m)
                             closeOmni = Mathf.Lerp(closeOmni, Mathf.Min(closeOmni, 4.5f), night01);
+                        }
+
+                        float rain01 = AiCore.RainIntensity01;
+                        if (rain01 > 0.05f && !targetMuzzleFlare)
+                        {
+                            closeOmni = Mathf.Max(3.5f, closeOmni * Mathf.Lerp(1.0f, 0.58f, rain01));
                         }
 
                         float allowedHalfFOV = AiCore.EvaluateHumanSquintHalfFov(

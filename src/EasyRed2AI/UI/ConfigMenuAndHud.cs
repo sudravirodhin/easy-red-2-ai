@@ -2063,25 +2063,101 @@ namespace EasyRed2HumanAI
         [HarmonyPatch(typeof(PlayerGUI), nameof(PlayerGUI.ShowSquadList))]
         public static class PlayerGUI_ShowSquadList_Patch
         {
-            public static void Prefix(ref Squad __0)
+            public static bool Prefix(ref Squad __0)
             {
                 try
                 {
                     if (!VisionConfig.EnableMod.Value)
-                        return;
+                        return true;
 
-                    Soldier lp = Soldier.CurrentControlledSoldierOrNull();
-                    if (lp != null &&
-                        lp.IsAlive &&
-                        lp.joinedSquad != null &&
-                        lp.joinedSquad.Pointer != IntPtr.Zero &&
-                        __0 != null &&
-                        __0.Pointer != lp.joinedSquad.Pointer)
+                    bool selectingSquad = PlayerGUI.IsSelectingSquad();
+                    if (!selectingSquad)
                     {
-                        __0 = lp.joinedSquad;
+                        Soldier lp = Soldier.CurrentControlledSoldierOrNull();
+                        if (lp != null &&
+                            lp.IsAlive &&
+                            lp.joinedSquad != null &&
+                            lp.joinedSquad.Pointer != IntPtr.Zero &&
+                            __0 != null &&
+                            __0.Pointer != lp.joinedSquad.Pointer)
+                        {
+                            __0 = lp.joinedSquad;
+                        }
+                    }
+
+                    PlayerGUI pgui = PlayerGUI.instance;
+                    if (!selectingSquad &&
+                        pgui != null &&
+                        pgui.squadGUI_Panel != null &&
+                        pgui.squadGUI_Panel.gameObject.activeInHierarchy &&
+                        PlayerGUI.GUISquad != null &&
+                        __0 != null &&
+                        PlayerGUI.GUISquad.Pointer == __0.Pointer &&
+                        __0.units != null &&
+                        __0.units.Count > 0)
+                    {
+                        var units = __0.units;
+                        int unitCount = units.Count;
+                        Transform panel = pgui.squadGUI_Panel;
+                        int childCount = panel.childCount;
+                        int labelCount = 0;
+                        bool allMatch = true;
+                        ulong matchedUnitBits = 0UL;
+
+                        for (int i = 0; i < childCount; i++)
+                        {
+                            Transform child = panel.GetChild(i);
+                            if (child == null)
+                                continue;
+
+                            SquadSoldierLabel lbl = child.GetComponent<SquadSoldierLabel>();
+                            if (lbl == null || lbl.isRespawnAction)
+                                continue;
+
+                            labelCount++;
+                            Soldier lblSoldier = lbl.assignedSoldier;
+                            if (lblSoldier == null || lblSoldier.Pointer == IntPtr.Zero)
+                            {
+                                allMatch = false;
+                                break;
+                            }
+
+                            IntPtr lblPtr = lblSoldier.Pointer;
+                            bool foundInUnits = false;
+                            for (int j = 0; j < unitCount; j++)
+                            {
+                                Soldier u = units[j];
+                                if (u == null || u.Pointer != lblPtr)
+                                    continue;
+
+                                if (j < 64)
+                                {
+                                    ulong bit = 1UL << j;
+                                    if ((matchedUnitBits & bit) != 0UL)
+                                        continue;
+                                    matchedUnitBits |= bit;
+                                }
+
+                                foundInUnits = true;
+                                break;
+                            }
+
+                            if (!foundInUnits)
+                            {
+                                allMatch = false;
+                                break;
+                            }
+                        }
+
+                        if (allMatch && labelCount == unitCount)
+                        {
+                            RefreshSquadHeaderLabel();
+                            return false;
+                        }
                     }
                 }
                 catch { }
+                return true;
             }
 
             public static void Postfix()
@@ -2161,7 +2237,7 @@ namespace EasyRed2HumanAI
                             !targetLeader.IsOnVehicle() &&
                             __0.transform != null &&
                             targetLeader.transform != null &&
-                            (targetLeader.transform.position - __0.transform.position).sqrMagnitude > 18.0f * 18.0f)
+                            (targetLeader.transform.position - __0.transform.position).sqrMagnitude > 45.0f * 45.0f)
                         {
                             return false;
                         }
@@ -2189,6 +2265,8 @@ namespace EasyRed2HumanAI
                     Soldier localPlayer = Soldier.CurrentControlledSoldierOrNull();
                     if (PlayerGUI.instance != null &&
                         !PlayerGUI.IsSelectingSquad() &&
+                        __0.joinedSquad != null &&
+                        __0.joinedSquad.Pointer == __instance.Pointer &&
                         localPlayer != null &&
                         localPlayer.Pointer != IntPtr.Zero &&
                         localPlayer.IsAlive &&
