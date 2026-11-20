@@ -255,6 +255,47 @@ namespace EasyRed2HumanAI
             return false;
         }
 
+        private static bool HasAircraftAntiArmorCannons(AIPlane plane, out float bestPenMm)
+        {
+            bestPenMm = 0f;
+            if (plane == null || plane.veh == null)
+                return false;
+
+            try
+            {
+                TurretGun pilotTurret = plane.veh.GetPilotTurret();
+                if (pilotTurret == null || pilotTurret.weapons == null)
+                    return false;
+
+                InventoryManager inv = plane.veh.GetInventory();
+                var weapons = pilotTurret.weapons;
+                for (int wIdx = 0; wIdx < weapons.Length; wIdx++)
+                {
+                    TurretWeapon w = weapons[wIdx];
+                    if (w == null || w.ammos == null)
+                        continue;
+
+                    bool refreshedInv = false;
+                    var ammos = w.ammos;
+                    for (int aIdx = 0; aIdx < ammos.Length; aIdx++)
+                    {
+                        if (!HasTurretWeaponAmmoInSlot(w, aIdx, inv, ref refreshedInv))
+                            continue;
+
+                        BulletData bd = w.GetBulletDataFor(aIdx) ?? w.BulletData;
+                        if (bd == null)
+                            continue;
+
+                        float pen = Mathf.Max(bd.CalculateMmPenetrationWithFallof(250f), bd.explosion_penetration);
+                        if (pen > bestPenMm)
+                            bestPenMm = pen;
+                    }
+                }
+            }
+            catch { }
+            return bestPenMm >= 22.0f;
+        }
+
         public static void TrySelectKnownAircraftTarget(AIPlane plane, ref Spottable currentResult)
         {
             if (plane == null || plane.veh == null || plane.transform == null)
@@ -320,8 +361,8 @@ namespace EasyRed2HumanAI
             float unmarkedAwareCap = Mathf.Min(
                 effectiveMaxDist,
                 Mathf.Max(VisionConfig.AircraftUnmarkedInfantryMaxDist.Value * 2.5f + altitudeCompensation, 680.0f));
-            bool hasBombs = plane.HasBombsToDeliver() || plane.HasBombBayConfigured();
             bool hasLiveBombsNow = plane.HasBombsToDeliver();
+            bool hasAntiArmorCannons = HasAircraftAntiArmorCannons(plane, out float bestPlanePenMm);
 
             int clusterCount = _knownEnemyClusters.Count;
             for (int i = 0; i < clusterCount; i++)
@@ -362,8 +403,19 @@ namespace EasyRed2HumanAI
                     float vehBonus = 0f;
                     if (isVehCand)
                     {
-                        bool isArmoredTank = cand.TryCast<VehicleTank>() != null;
-                        vehBonus = (isArmoredTank && !hasBombs) ? 5.0f : 30.0f;
+                        Vehicle candVeh = cand.TryCast<Vehicle>();
+                        float armorMm = candVeh != null ? GetVehicleMaxHullArmorMm(candVeh) : 0f;
+                        if (armorMm >= 12.0f)
+                        {
+                            bool canPierceTopOrSide = bestPlanePenMm >= armorMm * 0.40f;
+                            if (!hasLiveBombsNow && !canPierceTopOrSide)
+                                continue;
+                            vehBonus = hasLiveBombsNow ? 30.0f : (hasAntiArmorCannons ? 35.0f : 8.0f);
+                        }
+                        else
+                        {
+                            vehBonus = 24.0f;
+                        }
                     }
 
                     // Per-plane deterministic tie-breaker so multiple CAS aircraft spread attacks across clusters

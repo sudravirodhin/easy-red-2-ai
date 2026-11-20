@@ -364,6 +364,9 @@ namespace EasyRed2HumanAI
             public IntPtr AcousticInvestigatorPtr;
             public float AcousticInvestigateUntil;
 
+            public bool WasHoldingForFriendlyBarrage;
+            public float BarrageSurgeUntil;
+
             public bool IsThreatBeingPinned(float now)
             {
                 return now < SuppressHoldUntil && (Suppressor0Ptr != IntPtr.Zero || Suppressor1Ptr != IntPtr.Zero);
@@ -1088,6 +1091,7 @@ namespace EasyRed2HumanAI
             _nextAiSquadRetreatTime.Clear();
             _nextSquadRadioScavengeTime.Clear();
             _aiSquadRetreatUntil.Clear();
+            ClearBarrageCoordinationCaches();
             FootBotUnsticksCount = 0;
             _nextGlobalBotWeaponPickupTime = 0f;
         }
@@ -1143,6 +1147,8 @@ namespace EasyRed2HumanAI
                 ws |= GoapStateBits.IsSuppressed;
             if (suppression >= heavySuppThresh)
                 ws |= GoapStateBits.IsHeavilySuppressed;
+            if (TryGetActiveEnemyShellingPocket(soldier.faction, myPos, now, out _, out _))
+                ws |= GoapStateBits.IsSuppressed;
 
             if (board.LastCasualtyTime > 0f &&
                 (now - board.LastCasualtyTime) <= 5.5f &&
@@ -1271,7 +1277,7 @@ namespace EasyRed2HumanAI
                 !IsAsyncPathRefreshPending(ai, soldier, myPos, now) &&
                 !IsInCommittedFiringHalt(soldier.Pointer, now) &&
                 (suppression >= 3f ||
-                 board.HasActiveThreat ||
+                 (board.HasActiveThreat && (board.ThreatPosition - myPos).sqrMagnitude <= 140.0f * 140.0f) ||
                  VisionPatches.TryGetNearestEnemyGunfire(myPos, soldier.faction, 135f, 3.5f, out _)) &&
                 IsPositionOnExposedSideOfWall(myPos, localThreatDir, soldier.transform.root, out _))
             {

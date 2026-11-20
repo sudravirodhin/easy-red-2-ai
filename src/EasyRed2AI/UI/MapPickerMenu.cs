@@ -64,6 +64,205 @@ namespace EasyRed2HumanAI
         private static string _mpSwitchDisplayName;
         private static bool _mpSwitchRetriedConnect;
 
+        // MP-only end-of-match anthem cap (~16s + 2s smooth fadeout) so custom long anthems never trap clients on black screen.
+        private static IntPtr _mpAnthemOrigSourcePtr;
+        private static float _mpAnthemOrigVolume = 1.0f;
+
+        // Persistent Multiplayer transition banner state (survives BattleManager destruction between scenes).
+        internal static bool _mpTransitionBannerActive;
+        private static float _mpTransitionBannerStartUnscaled;
+        private static float _mpTransitionBannerWaitSeconds;
+        private static bool _mpTransitionBannerIsClient;
+        private static string _mpTransitionBannerMapName = "";
+        private static IntPtr _mpTransitionBannerOldBmPtr;
+        private static int _mpTransitionBannerLastSec = -1;
+        private static string _mpTransitionBannerCachedText = "";
+
+        private static string ResolveNextTransitionMapName(string fallback = null)
+        {
+            try
+            {
+                if (!string.IsNullOrEmpty(fallback))
+                    return fallback;
+                MatchData md = MatchData.data;
+                IBattle lb = md != null ? md.GetLoadedBattle(true) : null;
+                if (lb != null)
+                {
+                    string bn = lb.GetBattleName();
+                    if (!string.IsNullOrEmpty(bn))
+                        return bn;
+                }
+                MatchBattle cb = md != null ? md.CurrentBattle : null;
+                if (cb != null && cb.battle_reference != null)
+                {
+                    string uid = cb.battle_reference.GetUniqueId();
+                    if (!string.IsNullOrEmpty(uid))
+                    {
+                        int slash = uid.LastIndexOf('/');
+                        if (slash >= 0 && slash + 1 < uid.Length)
+                            uid = uid.Substring(slash + 1);
+                        return uid.Replace('_', ' ');
+                    }
+                }
+            }
+            catch { }
+            return "next mission";
+        }
+
+        internal static void ActivateMpTransitionBanner(bool isClient, string mapName, float waitSeconds = 0f)
+        {
+            _mpTransitionBannerActive = true;
+            _mpTransitionBannerIsClient = isClient;
+            _mpTransitionBannerStartUnscaled = Time.unscaledTime;
+            _mpTransitionBannerWaitSeconds = Mathf.Max(0f, waitSeconds);
+            _mpTransitionBannerMapName = ResolveNextTransitionMapName(mapName);
+            BattleManager bm = BattleManager.instance;
+            _mpTransitionBannerOldBmPtr = bm != null ? bm.Pointer : IntPtr.Zero;
+            _mpTransitionBannerLastSec = -1;
+            _mpTransitionBannerCachedText = "";
+        }
+
+        [HarmonyPatch(typeof(EndBattleGUI._WaitAnthemEnd_d__46), nameof(EndBattleGUI._WaitAnthemEnd_d__46.MoveNext))]
+        public static class EndBattleGUI_WaitAnthemEnd_Patch
+        {
+            private const float MpAnthemMaxSeconds = 16.0f;
+            private const float MpAnthemFadeSeconds = 2.0f;
+
+            public static bool Prefix(EndBattleGUI._WaitAnthemEnd_d__46 __instance, ref bool __result)
+            {
+                try
+                {
+                    if (!VisionConfig.EnableMod.Value || !Photon.Pun.PhotonNetwork.InRoom)
+                        return true;
+
+                    if (__instance == null || __instance.__1__state != 1)
+                        return true;
+
+                    AudioSource music = __instance._music_5__2;
+                    if (music == null || music.clip == null || !music.isPlaying)
+                        return true;
+
+                    IntPtr srcPtr = music.Pointer;
+                    if (srcPtr != _mpAnthemOrigSourcePtr)
+                    {
+                        _mpAnthemOrigSourcePtr = srcPtr;
+                        _mpAnthemOrigVolume = Mathf.Max(0.05f, music.volume);
+                    }
+
+                    float elapsed = music.time;
+                    float clipLen = music.clip.length;
+                    if (clipLen <= MpAnthemMaxSeconds + 0.25f)
+                        return true;
+
+                    if (elapsed >= MpAnthemMaxSeconds)
+                    {
+                        music.Stop();
+                        music.volume = _mpAnthemOrigVolume;
+                        _mpAnthemOrigSourcePtr = IntPtr.Zero;
+                        __instance.__1__state = -1;
+                        __result = false;
+                        return false;
+                    }
+
+                    float fadeStart = MpAnthemMaxSeconds - MpAnthemFadeSeconds;
+                    if (elapsed > fadeStart)
+                    {
+                        float t = Mathf.Clamp01((MpAnthemMaxSeconds - elapsed) / MpAnthemFadeSeconds);
+                        music.volume = _mpAnthemOrigVolume * t;
+                    }
+                }
+                catch { }
+                return true;
+            }
+        }
+
+        public sealed class MpTransitionBannerBehaviour : MonoBehaviour
+        {
+            public MpTransitionBannerBehaviour(IntPtr ptr) : base(ptr) { }
+
+            public void OnGUI()
+            {
+                if (!_mpTransitionBannerActive)
+                    return;
+
+                try
+                {
+                    float now = Time.unscaledTime;
+                    float elapsed = now - _mpTransitionBannerStartUnscaled;
+                    BattleManager bm = BattleManager.instance;
+                    IntPtr curBmPtr = bm != null ? bm.Pointer : IntPtr.Zero;
+                    bool newBattleStarted = curBmPtr != IntPtr.Zero &&
+                                            curBmPtr != _mpTransitionBannerOldBmPtr &&
+                                            bm.spawnsInitialized &&
+                                            elapsed > 2.0f;
+                    bool returnedToMenu = MainMenu.instance != null &&
+                                          !Photon.Pun.PhotonNetwork.InRoom &&
+                                          _mpSwitchStage == 0 &&
+                                          elapsed > 5.0f &&
+                                          BattleLoader.instance == null;
+
+                    if (newBattleStarted || returnedToMenu || elapsed > 75.0f)
+                    {
+                        _mpTransitionBannerActive = false;
+                        return;
+                    }
+
+                    int sec = Mathf.Max(0, Mathf.FloorToInt(elapsed));
+                    if (sec != _mpTransitionBannerLastSec || string.IsNullOrEmpty(_mpTransitionBannerCachedText))
+                    {
+                        _mpTransitionBannerLastSec = sec;
+                        string map = string.IsNullOrEmpty(_mpTransitionBannerMapName) ? "next mission" : _mpTransitionBannerMapName;
+                        _mpTransitionBannerCachedText = _mpTransitionBannerIsClient
+                            ? $"Waiting for Host to load '{map}'... ({sec}s)"
+                            : $"Switching Multiplayer Room to '{map}'... ({sec}s)";
+                    }
+
+                    int oldDepth = GUI.depth;
+                    Color oldColor = GUI.color;
+                    GUI.depth = -999;
+
+                    float boxW = Mathf.Min(Screen.width - 40f, 680f);
+                    float boxH = 44f;
+                    float boxX = (Screen.width - boxW) * 0.5f;
+                    float boxY = Screen.height - 86f;
+
+                    GUI.color = new Color(0.04f, 0.05f, 0.08f, 0.88f);
+                    GUI.Box(new Rect(boxX, boxY, boxW, boxH), "");
+
+                    GUIStyle lbl = GUI.skin != null ? GUI.skin.label : null;
+                    int oldSize = 0;
+                    TextAnchor oldAlign = TextAnchor.UpperLeft;
+                    FontStyle oldStyle = FontStyle.Normal;
+                    bool oldWrap = false;
+                    if (lbl != null)
+                    {
+                        oldSize = lbl.fontSize;
+                        oldAlign = lbl.alignment;
+                        oldStyle = lbl.fontStyle;
+                        oldWrap = lbl.wordWrap;
+                        lbl.fontSize = 18;
+                        lbl.alignment = TextAnchor.MiddleCenter;
+                        lbl.fontStyle = FontStyle.Bold;
+                        lbl.wordWrap = false;
+                    }
+
+                    GUI.color = new Color(0.95f, 0.90f, 0.65f, 1.0f);
+                    GUI.Label(new Rect(boxX + 10f, boxY + 2f, boxW - 20f, boxH - 4f), _mpTransitionBannerCachedText);
+
+                    if (lbl != null)
+                    {
+                        lbl.fontSize = oldSize;
+                        lbl.alignment = oldAlign;
+                        lbl.fontStyle = oldStyle;
+                        lbl.wordWrap = oldWrap;
+                    }
+                    GUI.color = oldColor;
+                    GUI.depth = oldDepth;
+                }
+                catch { }
+            }
+        }
+
         // Vanilla BattleLoader.ConnectToNextMatch (0x180A6E2CD) accidentally sets `this.waitBeforeJoining = (float)this.waitTime`
         // (reading the int retry counter `this.waitTime` = 0 instead of the `float waitTime` RPC parameter), causing Clients
         // to race into JoinRoom before the Host has finished leaving the old room and creating the new room.
@@ -77,6 +276,10 @@ namespace EasyRed2HumanAI
                     if (__instance != null && __1 > __instance.waitBeforeJoining)
                     {
                         __instance.waitBeforeJoining = __1;
+                    }
+                    if (VisionConfig.EnableMod.Value)
+                    {
+                        ActivateMpTransitionBanner(isClient: true, mapName: null, waitSeconds: __1);
                     }
                 }
                 catch { }
@@ -1178,8 +1381,11 @@ namespace EasyRed2HumanAI
                 out short scaledAxis)
             {
                 float clampedScale = Mathf.Clamp(botScale, 0.25f, 3.00f);
-                scaledAllies = (short)Mathf.Clamp(Mathf.RoundToInt(Mathf.Max(1, baseAllies) * clampedScale), 1, 500);
-                scaledAxis = (short)Mathf.Clamp(Mathf.RoundToInt(Mathf.Max(1, baseAxis) * clampedScale), 1, 500);
+                float bias = Mathf.Clamp(_mapPickerAlliesBias, -0.40f, 0.40f);
+                float alliesMult = clampedScale * (1.0f + bias);
+                float axisMult = clampedScale * (1.0f - bias);
+                scaledAllies = (short)Mathf.Clamp(Mathf.RoundToInt(Mathf.Max(1, baseAllies) * alliesMult), 1, 500);
+                scaledAxis = (short)Mathf.Clamp(Mathf.RoundToInt(Mathf.Max(1, baseAxis) * axisMult), 1, 500);
             }
 
             private static MatchBattle CreateConfiguredMatchBattle(
@@ -1203,9 +1409,9 @@ namespace EasyRed2HumanAI
                 newMb.proportionalAlliesRefValue = (short)Mathf.Clamp(baseAllies, 1, 500);
                 newMb.proportionalAxisRefValue = (short)Mathf.Clamp(baseAxis, 1, 500);
                 newMb.proportionalSliderRefValue = Mathf.Clamp(botScale, 0.25f, 3.00f);
+                newMb.ticketsMultiplier = Mathf.Clamp(_mapPickerTicketsMult, 0.25f, 3.00f);
                 if (curMb != null)
                 {
-                    newMb.ticketsMultiplier = curMb.ticketsMultiplier;
                     newMb.allowAchievements = curMb.allowAchievements;
                 }
                 return newMb;
@@ -1301,6 +1507,7 @@ namespace EasyRed2HumanAI
                     queuedMb.proportionalAlliesRefValue = (short)Mathf.Clamp(baseAllies, 1, 500);
                     queuedMb.proportionalAxisRefValue = (short)Mathf.Clamp(baseAxis, 1, 500);
                     queuedMb.proportionalSliderRefValue = clampedScale;
+                    queuedMb.ticketsMultiplier = Mathf.Clamp(_mapPickerTicketsMult, 0.25f, 3.00f);
                     if (updated == 0)
                     {
                         nextAllies = scaledAllies;
@@ -1387,6 +1594,382 @@ namespace EasyRed2HumanAI
                 return changed;
             }
 
+            private static int _mapPickerActiveTab;
+            private static float _mapPickerAlliesBias;
+            private static float _mapPickerTicketsMult = 1.0f;
+            private static bool _matchSettingsDraftInitialized;
+            private static bool _matchSettingsDraftDirty;
+            private static IntPtr _lastSyncedDiffPtr;
+            private static string _draftDiffPresetName = "Current";
+            private static float _draftAiAcc = 1.0f;
+            private static float _draftAiAccStatic = 0.63f;
+            private static float _draftAiAirAggro = 3.0f;
+            private static float _draftPlayerDmg = 1.0f;
+            private static float _draftSuppShake = 0.15f;
+            private static float _draftExpRadius = 1.0f;
+            private static float _draftStamina = 1.0f;
+            private static float _draftBarrelOverheat = 1.0f;
+            private static float _draftNightLight = 1.0f;
+            private static bool _draftFriendlyInd;
+            private static bool _draftSuppDir = true;
+            private static bool _draftAutoSurrender;
+            private static bool _draftSimpleVehUi = true;
+            private static bool _draftDmgAnim = true;
+
+            private static void SyncMatchSettingsDraftFromMatchData(bool force = false)
+            {
+                try
+                {
+                    MatchData md = MatchData.data;
+                    MatchDifficultySettings diff = MatchData.Difficulty;
+                    if (diff == null)
+                        return;
+
+                    IntPtr diffPtr = diff.Pointer;
+                    if (!force && _matchSettingsDraftInitialized && _matchSettingsDraftDirty)
+                        return;
+                    if (!force && _matchSettingsDraftInitialized && diffPtr == _lastSyncedDiffPtr)
+                        return;
+
+                    _lastSyncedDiffPtr = diffPtr;
+                    _matchSettingsDraftInitialized = true;
+                    _matchSettingsDraftDirty = false;
+                    _draftDiffPresetName = "Synced";
+
+                    _draftAiAcc = Mathf.Clamp(diff.aiAccuracyMultiplier.Value, 0.25f, 2.50f);
+                    _draftAiAccStatic = Mathf.Clamp(diff.aiAccuracyMultiplierStatic.Value, 0.25f, 2.50f);
+                    _draftAiAirAggro = Mathf.Clamp(diff.aiAircraftAggressivnessMultiplier.Value, 0.25f, 3.00f);
+                    _draftPlayerDmg = Mathf.Clamp(diff.playerDamageMultiplier.Value, 0.25f, 2.50f);
+                    _draftSuppShake = Mathf.Clamp(diff.suppressionShakeMultiplier.Value, 0.00f, 2.50f);
+                    _draftExpRadius = Mathf.Clamp(diff.explosionRadiusMultiplier.Value, 0.50f, 2.00f);
+                    _draftStamina = Mathf.Clamp(diff.staminaMultiplier.Value, 0.00f, 2.50f);
+                    _draftBarrelOverheat = Mathf.Clamp(diff.barrellOverheatMultiplier, 0.25f, 2.50f);
+                    _draftNightLight = Mathf.Clamp(diff.nighLightMultiplier, 0.25f, 2.00f);
+                    _draftFriendlyInd = diff.showFriendlyUnitsIndicator.Value;
+                    _draftSuppDir = diff.suppressionDirectionIndicatorOn.Value;
+                    _draftAutoSurrender = diff.allowPlayerAutoSurrender.Value;
+                    _draftSimpleVehUi = diff.simplifiedVehicleDamageUi.Value;
+                    _draftDmgAnim = diff.playerDamageAnimationOn.Value;
+
+                    MatchBattle cb = md != null ? md.CurrentBattle : null;
+                    if (cb != null && cb.ticketsMultiplier > 0.05f)
+                        _mapPickerTicketsMult = Mathf.Clamp(cb.ticketsMultiplier, 0.25f, 3.00f);
+                }
+                catch { }
+            }
+
+            private static void ApplyPresetToMatchDraft(DifficultyValue preset, string label)
+            {
+                try
+                {
+                    MatchDifficultySettings temp = new MatchDifficultySettings();
+                    temp.SetDifficultyPresed(preset);
+                    _draftAiAcc = Mathf.Clamp(temp.aiAccuracyMultiplier.Value, 0.25f, 2.50f);
+                    _draftAiAccStatic = Mathf.Clamp(temp.aiAccuracyMultiplierStatic.Value, 0.25f, 2.50f);
+                    _draftAiAirAggro = Mathf.Clamp(temp.aiAircraftAggressivnessMultiplier.Value, 0.25f, 3.00f);
+                    _draftPlayerDmg = Mathf.Clamp(temp.playerDamageMultiplier.Value, 0.25f, 2.50f);
+                    _draftSuppShake = Mathf.Clamp(temp.suppressionShakeMultiplier.Value, 0.00f, 2.50f);
+                    _draftExpRadius = Mathf.Clamp(temp.explosionRadiusMultiplier.Value, 0.50f, 2.00f);
+                    _draftStamina = Mathf.Clamp(temp.staminaMultiplier.Value, 0.00f, 2.50f);
+                    _draftBarrelOverheat = Mathf.Clamp(temp.barrellOverheatMultiplier, 0.25f, 2.50f);
+                    _draftNightLight = Mathf.Clamp(temp.nighLightMultiplier, 0.25f, 2.00f);
+                    _draftFriendlyInd = temp.showFriendlyUnitsIndicator.Value;
+                    _draftSuppDir = temp.suppressionDirectionIndicatorOn.Value;
+                    _draftAutoSurrender = temp.allowPlayerAutoSurrender.Value;
+                    _draftSimpleVehUi = temp.simplifiedVehicleDamageUi.Value;
+                    _draftDmgAnim = temp.playerDamageAnimationOn.Value;
+                    _draftDiffPresetName = label;
+                    _matchSettingsDraftInitialized = true;
+                    _matchSettingsDraftDirty = true;
+                }
+                catch { }
+            }
+
+            private static void ApplyDraftSettingsToMatchData(bool updateUpcomingQueue)
+            {
+                MatchData md = MatchData.data;
+                if (md == null)
+                    return;
+
+                MatchDifficultySettings diff = MatchData.Difficulty != null
+                    ? MatchData.Difficulty.ShallowClone()
+                    : new MatchDifficultySettings();
+                diff.aiAccuracyMultiplier = new ProtectedFloat(_draftAiAcc);
+                diff.aiAccuracyMultiplierStatic = new ProtectedFloat(_draftAiAccStatic);
+                diff.aiAircraftAggressivnessMultiplier = new ProtectedFloat(_draftAiAirAggro);
+                diff.playerDamageMultiplier = new ProtectedFloat(_draftPlayerDmg);
+                diff.suppressionShakeMultiplier = new ProtectedFloat(_draftSuppShake);
+                diff.explosionRadiusMultiplier = new ProtectedFloat(_draftExpRadius);
+                diff.staminaMultiplier = new ProtectedFloat(_draftStamina);
+                diff.barrellOverheatMultiplier = _draftBarrelOverheat;
+                diff.nighLightMultiplier = _draftNightLight;
+                diff.showFriendlyUnitsIndicator = new ProtectedBool(_draftFriendlyInd);
+                diff.suppressionDirectionIndicatorOn = new ProtectedBool(_draftSuppDir);
+                diff.allowPlayerAutoSurrender = new ProtectedBool(_draftAutoSurrender);
+                diff.simplifiedVehicleDamageUi = new ProtectedBool(_draftSimpleVehUi);
+                diff.playerDamageAnimationOn = new ProtectedBool(_draftDmgAnim);
+                MatchData.Difficulty = diff;
+                _lastSyncedDiffPtr = MatchData.Difficulty != null ? MatchData.Difficulty.Pointer : IntPtr.Zero;
+
+                if (md.CurrentBattle != null)
+                    md.CurrentBattle.ticketsMultiplier = Mathf.Clamp(_mapPickerTicketsMult, 0.25f, 3.00f);
+
+                int updatedQueue = 0;
+                if (updateUpcomingQueue)
+                    updatedQueue = ApplyBotScaleToQueuedBattles(_mapPickerBotScale, out _, out _);
+
+                if (Photon.Pun.PhotonNetwork.InRoom && Photon.Pun.PhotonNetwork.IsMasterClient && updatedQueue == 0)
+                {
+                    try { md.UpdateNetworkMatchInfo(); } catch { }
+                }
+
+                _matchSettingsDraftDirty = false;
+                string mpNote = Photon.Pun.PhotonNetwork.InRoom
+                    ? " Synced to lobby (AI settings live on Host; full player/ticket/balance rules apply next map & to new joiners)."
+                    : " Active immediately (tickets & force balance apply on next map).";
+                ShowToast($"[Battle Hardened] Applied Match & Difficulty settings ({_draftDiffPresetName}, queued maps updated: {updatedQueue}).{mpNote}");
+            }
+
+            private static bool DrawFloatSettingRow(
+                Rect rowRect,
+                string label,
+                ref float value,
+                float min,
+                float max,
+                float step,
+                string valText,
+                bool canEdit,
+                bool accentAmber = false)
+            {
+                bool changed = false;
+                float labelW = 164f;
+                float btnW = 28f;
+                float barX = rowRect.x + labelW + 4f;
+                float barW = Mathf.Max(60f, rowRect.width - labelW - btnW * 2f - 18f);
+                Rect barRect = new Rect(barX, rowRect.y + 3f, barW, rowRect.height - 6f);
+
+                GUI.color = canEdit ? new Color(0.86f, 0.92f, 0.98f, 1.0f) : new Color(0.66f, 0.70f, 0.76f, 0.85f);
+                GUI.Label(new Rect(rowRect.x, rowRect.y + 3f, labelW, rowRect.height - 4f), label);
+
+                GUI.color = new Color(0.14f, 0.16f, 0.21f, 1.0f);
+                GUI.Box(barRect, "");
+                float t = Mathf.InverseLerp(min, max, value);
+                float fillW = Mathf.Max(4f, barRect.width * t);
+                GUI.color = !canEdit
+                    ? new Color(0.45f, 0.48f, 0.54f, 0.70f)
+                    : (accentAmber ? new Color(1.0f, 0.78f, 0.30f, 0.90f) : new Color(0.42f, 0.85f, 0.62f, 0.90f));
+                GUI.Box(new Rect(barRect.x + 1f, barRect.y + 2f, Mathf.Max(2f, fillW - 2f), barRect.height - 4f), "");
+
+                GUIStyle lblStyle = GUI.skin != null ? GUI.skin.label : null;
+                TextAnchor oldAlign = TextAnchor.UpperLeft;
+                if (lblStyle != null)
+                {
+                    oldAlign = lblStyle.alignment;
+                    lblStyle.alignment = TextAnchor.MiddleCenter;
+                }
+                GUI.color = Color.white;
+                GUI.Label(barRect, valText);
+                if (lblStyle != null)
+                    lblStyle.alignment = oldAlign;
+
+                if (canEdit)
+                {
+                    Event ev = Event.current;
+                    if (ev != null && (ev.type == EventType.MouseDown || ev.type == EventType.MouseDrag) && ev.button == 0 && barRect.Contains(ev.mousePosition))
+                    {
+                        float norm = Mathf.Clamp01((ev.mousePosition.x - barRect.x) / Mathf.Max(1f, barRect.width));
+                        float raw = Mathf.Lerp(min, max, norm);
+                        float snapped = Mathf.Clamp(Mathf.Round(raw / step) * step, min, max);
+                        if (!Mathf.Approximately(snapped, value))
+                        {
+                            value = snapped;
+                            changed = true;
+                        }
+                        ev.Use();
+                    }
+
+                    GUI.color = new Color(0.82f, 0.88f, 0.96f, 1.0f);
+                    if (GUI.Button(new Rect(barX + barW + 4f, rowRect.y + 2f, btnW, rowRect.height - 4f), "-"))
+                    {
+                        float next = Mathf.Clamp(Mathf.Round((value - step) / step) * step, min, max);
+                        if (!Mathf.Approximately(next, value))
+                        {
+                            value = next;
+                            changed = true;
+                        }
+                    }
+                    if (GUI.Button(new Rect(barX + barW + btnW + 8f, rowRect.y + 2f, btnW, rowRect.height - 4f), "+"))
+                    {
+                        float next = Mathf.Clamp(Mathf.Round((value + step) / step) * step, min, max);
+                        if (!Mathf.Approximately(next, value))
+                        {
+                            value = next;
+                            changed = true;
+                        }
+                    }
+                }
+                return changed;
+            }
+
+            private static void DrawMatchAndDifficultyTab(float panelX, float panelY, float panelW, bool canControlMatch, KeyCode mpKey)
+            {
+                SyncMatchSettingsDraftFromMatchData();
+
+                float topY = panelY + 86f;
+                GUI.color = new Color(0.65f, 0.88f, 1.0f, 1.0f);
+                GUI.Label(new Rect(panelX + 20f, topY + 3f, 115f, 22f), "Vanilla Presets:");
+
+                float px = panelX + 136f;
+                if (GUI.Button(new Rect(px, topY, 90f, 24f), "Easy") && canControlMatch)
+                    ApplyPresetToMatchDraft(DifficultyValue.Easy, "Easy");
+                px += 96f;
+                if (GUI.Button(new Rect(px, topY, 90f, 24f), "Normal") && canControlMatch)
+                    ApplyPresetToMatchDraft(DifficultyValue.Normal, "Normal");
+                px += 96f;
+                if (GUI.Button(new Rect(px, topY, 96f, 24f), "Realistic") && canControlMatch)
+                    ApplyPresetToMatchDraft(DifficultyValue.Realistic, "Realistic");
+
+                GUI.color = new Color(0.84f, 0.90f, 0.98f, 1.0f);
+                if (GUI.Button(new Rect(panelX + panelW - 140f, topY, 120f, 24f), "Reload Active"))
+                    SyncMatchSettingsDraftFromMatchData(force: true);
+
+                float gridY = panelY + 122f;
+                float rowH = 34f;
+                float colW = 398f;
+                float col1X = panelX + 20f;
+                float col2X = panelX + 442f;
+                bool d = false;
+
+                d |= DrawFloatSettingRow(new Rect(col1X, gridY, colW, rowH), "AI Infantry Accuracy", ref _draftAiAcc, 0.25f, 2.50f, 0.05f, $"{Mathf.RoundToInt(_draftAiAcc * 100f)}%", canControlMatch);
+                d |= DrawFloatSettingRow(new Rect(col1X, gridY + rowH, colW, rowH), "AI Turret / Static Acc.", ref _draftAiAccStatic, 0.25f, 2.50f, 0.05f, $"{Mathf.RoundToInt(_draftAiAccStatic * 100f)}%", canControlMatch);
+                d |= DrawFloatSettingRow(new Rect(col1X, gridY + rowH * 2f, colW, rowH), "AI Aircraft Aggression", ref _draftAiAirAggro, 0.25f, 3.00f, 0.10f, $"{_draftAiAirAggro:F2}x", canControlMatch);
+                d |= DrawFloatSettingRow(new Rect(col1X, gridY + rowH * 3f, colW, rowH), "Player Damage Taken", ref _draftPlayerDmg, 0.25f, 2.50f, 0.05f, $"{Mathf.RoundToInt(_draftPlayerDmg * 100f)}%", canControlMatch, accentAmber: _draftPlayerDmg > 1.05f);
+                d |= DrawFloatSettingRow(new Rect(col1X, gridY + rowH * 4f, colW, rowH), "Suppression Shake", ref _draftSuppShake, 0.00f, 2.50f, 0.10f, $"{Mathf.RoundToInt(_draftSuppShake * 100f)}%", canControlMatch);
+
+                d |= DrawFloatSettingRow(new Rect(col2X, gridY, colW, rowH), "Explosion Radius", ref _draftExpRadius, 0.50f, 2.00f, 0.05f, $"{Mathf.RoundToInt(_draftExpRadius * 100f)}%", canControlMatch);
+                d |= DrawFloatSettingRow(new Rect(col2X, gridY + rowH, colW, rowH), "Stamina Drain (0=Inf)", ref _draftStamina, 0.00f, 2.50f, 0.10f, _draftStamina <= 0.01f ? "Infinite" : $"{Mathf.RoundToInt(_draftStamina * 100f)}%", canControlMatch);
+                d |= DrawFloatSettingRow(new Rect(col2X, gridY + rowH * 2f, colW, rowH), "Barrel Overheat Rate", ref _draftBarrelOverheat, 0.25f, 2.50f, 0.10f, $"{Mathf.RoundToInt(_draftBarrelOverheat * 100f)}%", canControlMatch);
+                d |= DrawFloatSettingRow(new Rect(col2X, gridY + rowH * 3f, colW, rowH), "Night Brightness", ref _draftNightLight, 0.25f, 2.00f, 0.05f, $"{Mathf.RoundToInt(_draftNightLight * 100f)}%", canControlMatch);
+
+                // Toggles row
+                float togY = panelY + 306f;
+                GUI.color = new Color(0.65f, 0.88f, 1.0f, 1.0f);
+                GUI.Label(new Rect(panelX + 20f, togY, 400f, 20f), "=== Battlefield HUD & Player Realism Toggles ===");
+                float tbY = togY + 24f;
+                float tbW = 158f;
+                float tbGap = 7f;
+                float tx = panelX + 20f;
+
+                GUI.color = _draftFriendlyInd ? new Color(0.45f, 0.92f, 0.56f, 1.0f) : new Color(0.75f, 0.78f, 0.84f, 0.88f);
+                if (GUI.Button(new Rect(tx, tbY, tbW, 28f), $"Friendly Icons: {(_draftFriendlyInd ? "ON" : "OFF")}") && canControlMatch) { _draftFriendlyInd = !_draftFriendlyInd; d = true; }
+                tx += tbW + tbGap;
+
+                GUI.color = _draftSuppDir ? new Color(0.45f, 0.92f, 0.56f, 1.0f) : new Color(0.75f, 0.78f, 0.84f, 0.88f);
+                if (GUI.Button(new Rect(tx, tbY, tbW, 28f), $"Supp Arrows: {(_draftSuppDir ? "ON" : "OFF")}") && canControlMatch) { _draftSuppDir = !_draftSuppDir; d = true; }
+                tx += tbW + tbGap;
+
+                GUI.color = _draftAutoSurrender ? new Color(1.0f, 0.78f, 0.35f, 1.0f) : new Color(0.75f, 0.78f, 0.84f, 0.88f);
+                if (GUI.Button(new Rect(tx, tbY, tbW, 28f), $"Player Surr: {(_draftAutoSurrender ? "ON" : "OFF")}") && canControlMatch) { _draftAutoSurrender = !_draftAutoSurrender; d = true; }
+                tx += tbW + tbGap;
+
+                GUI.color = _draftSimpleVehUi ? new Color(0.45f, 0.92f, 0.56f, 1.0f) : new Color(0.75f, 0.78f, 0.84f, 0.88f);
+                if (GUI.Button(new Rect(tx, tbY, tbW, 28f), $"Simple Veh UI: {(_draftSimpleVehUi ? "ON" : "OFF")}") && canControlMatch) { _draftSimpleVehUi = !_draftSimpleVehUi; d = true; }
+                tx += tbW + tbGap;
+
+                GUI.color = _draftDmgAnim ? new Color(0.45f, 0.92f, 0.56f, 1.0f) : new Color(0.75f, 0.78f, 0.84f, 0.88f);
+                if (GUI.Button(new Rect(tx, tbY, tbW, 28f), $"Dmg Flinch: {(_draftDmgAnim ? "ON" : "OFF")}") && canControlMatch) { _draftDmgAnim = !_draftDmgAnim; d = true; }
+
+                // Next-Map & Queue Balance Section
+                float balY = panelY + 378f;
+                GUI.color = new Color(0.65f, 0.88f, 1.0f, 1.0f);
+                GUI.Label(new Rect(panelX + 20f, balY, 600f, 20f), "=== Force Ratio & Tickets (Applies to Next Map / Queued Missions) ===");
+
+                if (DrawFloatSettingRow(new Rect(panelX + 20f, balY + 26f, 440f, 34f), "Tickets Multiplier", ref _mapPickerTicketsMult, 0.25f, 3.00f, 0.25f, $"{_mapPickerTicketsMult:F2}x", canControlMatch))
+                    d = true;
+                float tpx = panelX + 472f;
+                float[] tPresets = { 0.5f, 1.0f, 1.5f, 2.0f, 3.0f };
+                for (int i = 0; i < tPresets.Length; i++)
+                {
+                    float tp = tPresets[i];
+                    GUI.color = Mathf.Abs(_mapPickerTicketsMult - tp) < 0.05f ? new Color(0.50f, 0.94f, 0.60f, 1.0f) : new Color(0.80f, 0.86f, 0.94f, 1.0f);
+                    if (GUI.Button(new Rect(tpx, balY + 28f, 54f, 26f), $"{tp:0.#}x") && canControlMatch)
+                    {
+                        _mapPickerTicketsMult = tp;
+                        d = true;
+                    }
+                    tpx += 58f;
+                }
+
+                if (DrawFloatSettingRow(new Rect(panelX + 20f, balY + 66f, 440f, 34f), "Bot Scale (Total Units)", ref _mapPickerBotScale, 0.25f, 3.00f, 0.05f, $"{Mathf.RoundToInt(_mapPickerBotScale * 100f)}%", canControlMatch))
+                {
+                    _mapPickerBotScaleDirty = true;
+                    d = true;
+                }
+
+                int biasPct = Mathf.RoundToInt(_mapPickerAlliesBias * 100f);
+                string biasText = biasPct == 0 ? "Even (0%)" : (biasPct > 0 ? $"Allies +{biasPct}%" : $"Axis +{-biasPct}%");
+                if (DrawFloatSettingRow(new Rect(panelX + 20f, balY + 106f, 440f, 34f), "Side Balance Bias", ref _mapPickerAlliesBias, -0.40f, 0.40f, 0.05f, biasText, canControlMatch, accentAmber: biasPct != 0))
+                {
+                    _mapPickerBotScaleDirty = true;
+                    d = true;
+                }
+                GUI.color = new Color(0.82f, 0.88f, 0.96f, 1.0f);
+                if (GUI.Button(new Rect(panelX + 472f, balY + 108f, 108f, 26f), "Reset Even (0%)") && canControlMatch)
+                {
+                    _mapPickerAlliesBias = 0f;
+                    _mapPickerBotScaleDirty = true;
+                    d = true;
+                }
+
+                if (d)
+                {
+                    _draftDiffPresetName = "Custom";
+                    _matchSettingsDraftDirty = true;
+                }
+
+                MatchData curMd = MatchData.data;
+                MatchBattle curMb = curMd != null ? curMd.CurrentBattle : null;
+                int upcomingCount = (curMd != null && curMd.battles != null)
+                    ? Mathf.Max(0, curMd.battles.Count - (curMd.currentBattleId + 1))
+                    : 0;
+                int curAllies = curMb != null ? curMb.maxAllies : 32;
+                int curAxis = curMb != null ? curMb.maxAxis : 32;
+                ComputeScaledUnitCounts(
+                    curMb != null && curMb.proportionalAlliesRefValue > 0 ? curMb.proportionalAlliesRefValue : curAllies,
+                    curMb != null && curMb.proportionalAxisRefValue > 0 ? curMb.proportionalAxisRefValue : curAxis,
+                    _mapPickerBotScale,
+                    out short pAllies,
+                    out short pAxis);
+
+                GUI.color = new Color(0.80f, 0.90f, 0.98f, 0.96f);
+                GUI.Label(new Rect(panelX + 20f, panelY + 532f, panelW - 40f, 20f),
+                    $"Current Match Caps: {curAllies} Allies / {curAxis} Axis (Tickets {(curMb != null ? curMb.ticketsMultiplier : 1f):F2}x)  ->  Next Preview: {pAllies} Allies / {pAxis} Axis (Tickets {_mapPickerTicketsMult:F2}x)");
+
+                GUI.color = canControlMatch
+                    ? (_matchSettingsDraftDirty || _mapPickerBotScaleDirty ? new Color(0.45f, 0.95f, 0.52f, 1.0f) : new Color(0.52f, 0.86f, 0.96f, 1.0f))
+                    : new Color(0.55f, 0.55f, 0.55f, 0.65f);
+                string applyBtnText = _matchSettingsDraftDirty || _mapPickerBotScaleDirty
+                    ? $"Apply Difficulty & Sync Lobby ({upcomingCount} queued)*"
+                    : $"Apply Difficulty & Sync Lobby ({upcomingCount} queued)";
+                if (GUI.Button(new Rect(panelX + 20f, panelY + 576f, 440f, 34f), applyBtnText) && canControlMatch)
+                {
+                    ApplyDraftSettingsToMatchData(updateUpcomingQueue: upcomingCount > 0);
+                }
+
+                GUI.color = new Color(0.75f, 0.90f, 1.0f, 1.0f);
+                if (GUI.Button(new Rect(panelX + 476f, panelY + 576f, 198f, 34f), "Go to Missions & Playlist"))
+                {
+                    _mapPickerActiveTab = 0;
+                }
+
+                GUI.color = new Color(1.0f, 0.80f, 0.80f, 1.0f);
+                if (GUI.Button(new Rect(panelX + 686f, panelY + 576f, 154f, 34f), $"Close ({mpKey})"))
+                {
+                    _showMapPicker = false;
+                }
+                GUI.color = Color.white;
+            }
+
             private static void DrawMapPickerWindow(float virtualW, float virtualH)
             {
                 EnsureMapPickerCatalog();
@@ -1395,7 +1978,7 @@ namespace EasyRed2HumanAI
                 try { prog = SavableData.Progresses; } catch { }
 
                 float panelW = 860f;
-                float panelH = 640f;
+                float panelH = 668f;
                 float panelX = (virtualW - panelW) * 0.5f;
                 float panelY = (virtualH - panelH) * 0.5f;
 
@@ -1406,17 +1989,20 @@ namespace EasyRed2HumanAI
                 if (mpKey != _cachedPickerHeaderKey)
                 {
                     _cachedPickerHeaderKey = mpKey;
-                    _cachedPickerHeaderText = $"Easy Red 2: Battle Hardened  |  Campaign, Playlist & Mission Picker ({mpKey})";
+                    _cachedPickerHeaderText = $"Easy Red 2: Battle Hardened  |  Campaign, Playlist & Match Setup ({mpKey})";
                 }
                 GUI.color = new Color(1.0f, 0.88f, 0.35f, 1.0f);
                 GUI.Label(new Rect(panelX + 20f, panelY + 10f, panelW - 360f, 22f), _cachedPickerHeaderText);
 
-                GUI.color = _revealMapPickerSpoilers
-                    ? new Color(1.0f, 0.86f, 0.36f, 1.0f)
-                    : new Color(0.68f, 0.78f, 0.90f, 0.95f);
-                if (GUI.Button(new Rect(panelX + panelW - 332f, panelY + 8f, 114f, 24f), _revealMapPickerSpoilers ? "Hide ??? [ON]" : "Show ???"))
+                if (_mapPickerActiveTab == 0)
                 {
-                    _revealMapPickerSpoilers = !_revealMapPickerSpoilers;
+                    GUI.color = _revealMapPickerSpoilers
+                        ? new Color(1.0f, 0.86f, 0.36f, 1.0f)
+                        : new Color(0.68f, 0.78f, 0.90f, 0.95f);
+                    if (GUI.Button(new Rect(panelX + panelW - 332f, panelY + 8f, 114f, 24f), _revealMapPickerSpoilers ? "Hide ??? [ON]" : "Show ???"))
+                    {
+                        _revealMapPickerSpoilers = !_revealMapPickerSpoilers;
+                    }
                 }
 
                 GUI.color = new Color(0.75f, 0.90f, 1.0f, 1.0f);
@@ -1426,20 +2012,41 @@ namespace EasyRed2HumanAI
                     _showConfigMenu = true;
                 }
 
+                // 2-Tab Navigation Header
+                float tabY = panelY + 36f;
+                GUI.color = _mapPickerActiveTab == 0 ? new Color(0.45f, 0.92f, 0.58f, 1.0f) : new Color(0.76f, 0.82f, 0.90f, 0.85f);
+                if (GUI.Button(new Rect(panelX + 20f, tabY, 220f, 24f), "1. Missions & Playlist"))
+                    _mapPickerActiveTab = 0;
+
+                GUI.color = _mapPickerActiveTab == 1 ? new Color(0.45f, 0.92f, 0.58f, 1.0f) : new Color(0.76f, 0.82f, 0.90f, 0.85f);
+                if (GUI.Button(new Rect(panelX + 248f, tabY, 220f, 24f), "2. Match & Difficulty"))
+                {
+                    _mapPickerActiveTab = 1;
+                    SyncMatchSettingsDraftFromMatchData();
+                }
+
                 bool canControlMatch = !Photon.Pun.PhotonNetwork.InRoom || Photon.Pun.PhotonNetwork.IsMasterClient;
                 GUI.color = canControlMatch
                     ? new Color(0.75f, 0.88f, 0.78f, 1.0f)
                     : new Color(1.0f, 0.65f, 0.55f, 1.0f);
                 string roleNote = canControlMatch
-                    ? "Select missions, toggle [+] to build a multi-map playlist, pick 'Campaign From Here', and tune Next Bot Scale:"
-                    : "Note: In Multiplayer Co-op, only the Room Host (MasterClient) can switch or queue missions.";
-                GUI.Label(new Rect(panelX + 20f, panelY + 34f, panelW - 40f, 20f), roleNote);
+                    ? (_mapPickerActiveTab == 0
+                        ? "Select missions, [+] for multi-map playlist, 'Campaign From Here', or switch to Match & Difficulty:"
+                        : "Configure vanilla Match Difficulty, Realism toggles, Tickets, and Allies/Axis Balance Bias:")
+                    : "Note: In Multiplayer Co-op, only the Room Host (MasterClient) can change maps or match settings.";
+                GUI.Label(new Rect(panelX + 20f, panelY + 64f, panelW - 40f, 20f), roleNote);
+
+                if (_mapPickerActiveTab == 1)
+                {
+                    DrawMatchAndDifficultyTab(panelX, panelY, panelW, canControlMatch, mpKey);
+                    return;
+                }
 
                 float colCampX = panelX + 20f;
                 float colCampW = 304f;
                 float colBatX = panelX + 338f;
                 float colBatW = 502f;
-                float listTopY = panelY + 56f;
+                float listTopY = panelY + 86f;
                 int rowsPerPage = MapPickerRowsPerPage;
                 float rowH = 24f;
 
@@ -1640,7 +2247,7 @@ namespace EasyRed2HumanAI
                 }
 
                 // Bottom Selection Summary, Playlist Strip, Bot Scale Slider & Launch/Queue Actions
-                float summaryY = panelY + 444f;
+                float summaryY = panelY + 474f;
                 string selSummary = "No mission selected.";
                 string chosenVisibleName = null;
                 PickerBattleEntry chosenBattle = default;
@@ -1681,7 +2288,7 @@ namespace EasyRed2HumanAI
                 GUI.Label(new Rect(panelX + 20f, summaryY, panelW - 40f, 20f), selSummary);
 
                 // Playlist Preview Strip
-                float playlistY = panelY + 467f;
+                float playlistY = panelY + 497f;
                 StringBuilder plSb = new StringBuilder(128);
                 plSb.Append($"Multi-Map Playlist ({_mapPickerPlaylist.Count}): ");
                 if (_mapPickerPlaylist.Count == 0)
@@ -1713,7 +2320,7 @@ namespace EasyRed2HumanAI
                 }
 
                 // Next-Map Bot Scale Slider Bar (fits cleanly inside 820px inner width with wordWrap=false)
-                float sliderY = panelY + 494f;
+                float sliderY = panelY + 524f;
                 int botPct = Mathf.RoundToInt(_mapPickerBotScale * 100f);
                 float sx = panelX + 132f;
                 if (DrawBotScaleSliderBar(new Rect(sx, sliderY, 206f, 23f), ref _mapPickerBotScale))
@@ -1770,7 +2377,7 @@ namespace EasyRed2HumanAI
                 }
 
                 // Preview line showing selected mission & upcoming queued mission scaled unit counts
-                float previewY = panelY + 523f;
+                float previewY = panelY + 553f;
                 string unitPreviewText;
                 if (hasChosen && chosenBattle.DefaultMaxAllies > 0 && chosenBattle.DefaultMaxAxis > 0)
                 {
@@ -1801,7 +2408,7 @@ namespace EasyRed2HumanAI
                 bool hasPlaylist = _mapPickerPlaylist.Count > 0;
 
                 // Bottom Row 1: Start / Replace Active Playlist Now
-                float row1Y = panelY + 549f;
+                float row1Y = panelY + 579f;
                 GUI.color = (hasChosen && canControlMatch)
                     ? new Color(0.45f, 0.95f, 0.52f, 1.0f)
                     : new Color(0.55f, 0.55f, 0.55f, 0.70f);
@@ -1849,7 +2456,7 @@ namespace EasyRed2HumanAI
                 }
 
                 // Bottom Row 2: Queue After Current Mission
-                float row2Y = panelY + 584f;
+                float row2Y = panelY + 614f;
                 GUI.color = (hasChosen && canControlMatch)
                     ? new Color(0.58f, 0.84f, 1.0f, 1.0f)
                     : new Color(0.55f, 0.55f, 0.55f, 0.70f);
@@ -2025,6 +2632,7 @@ namespace EasyRed2HumanAI
                         md.SetMultiplayerRoomSettings();
                         MatchData.actorType = MatchData.RoomActorType.master;
                         _mpSwitchDisplayName = labelSummary;
+                        ActivateMpTransitionBanner(isClient: false, mapName: labelSummary);
 
                         if (hasRemoteClients)
                         {

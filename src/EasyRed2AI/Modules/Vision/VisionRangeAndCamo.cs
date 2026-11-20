@@ -356,7 +356,28 @@ namespace EasyRed2HumanAI
             float maxAgeSeconds,
             out float nearestDist)
         {
+            if (TryGetNearestEnemyGunfirePosition(observerPos, observerFaction, maxRadius, maxAgeSeconds, out Vector3 gunfirePos))
+            {
+                nearestDist = Mathf.Sqrt((gunfirePos - observerPos).sqrMagnitude);
+                return true;
+            }
+
             nearestDist = -1f;
+            return false;
+        }
+
+        /// <summary>
+        /// Zero-allocation scan over the live acoustic ring buffer returning the 3D muzzle origin
+        /// of the nearest recent unexpired non-explosion enemy weapon report.
+        /// </summary>
+        public static bool TryGetNearestEnemyGunfirePosition(
+            Vector3 observerPos,
+            string observerFaction,
+            float maxRadius,
+            float maxAgeSeconds,
+            out Vector3 gunfirePos)
+        {
+            gunfirePos = Vector3.zero;
             if (string.IsNullOrEmpty(observerFaction) || maxRadius <= 0f)
                 return false;
 
@@ -389,15 +410,11 @@ namespace EasyRed2HumanAI
                     continue;
 
                 bestDistSq = distSq;
+                gunfirePos = e.Pos;
                 found = true;
             }
 
-            if (found)
-            {
-                nearestDist = Mathf.Sqrt(bestDistSq);
-                return true;
-            }
-            return false;
+            return found;
         }
 
         /// <summary>
@@ -914,6 +931,22 @@ namespace EasyRed2HumanAI
                     Vector3 toTarget = targetPos - observerPos;
                     float dist = toTarget.magnitude;
 
+                    if (dist > 4.5f && !targetMuzzleFlare)
+                    {
+                        if (now >= obsH.NextInSmokeCheckTime)
+                        {
+                            obsH.NextInSmokeCheckTime = now + 0.25f;
+                            int smokeMask = AiCore.GetSmokeOcclusionMask();
+                            obsH.InSmokeCached = smokeMask != 0 &&
+                                                 Physics.CheckSphere(observerPos, 0.45f, smokeMask, QueryTriggerInteraction.Collide);
+                        }
+                        if (obsH.InSmokeCached)
+                        {
+                            __result = false;
+                            return false;
+                        }
+                    }
+
                     Vector3 bodyFwd = obsH.Tr.forward;
                     float angle;
                     if (observer.IsAiming)
@@ -1130,6 +1163,16 @@ namespace EasyRed2HumanAI
                     float turretAimFov = traits.AimFov > 0.1f ? traits.AimFov : turret.GetAimingFOV();
                     Vehicle turretVeh = traits.RootVehicle;
                     AiCore.VehicleFastHandles obsVehH = traits.VehHandles;
+
+                    if (!traits.IsCommanderTurret &&
+                        isWheeledOrTank &&
+                        targetVehH != null &&
+                        targetVehH.Ref != null &&
+                        !VeteranAndTacticsPatches.CanTurretEffectivelyDamageArmoredVehicle(turret, targetVehH.Ref, dist))
+                    {
+                        __result = false;
+                        return false;
+                    }
                     VeteranAndTacticsPatches.SoldierPersonality crewPers = turretVeh != null
                         ? VeteranAndTacticsPatches.GetVehicleCrewPersonality(turretVeh)
                         : VeteranAndTacticsPatches.SoldierPersonality.None;

@@ -16,7 +16,7 @@ namespace EasyRed2HumanAI
     {
         public const string PluginGuid = "com.antigravity.easyred2.humanai";
         public const string PluginName = "Easy Red 2 - Battle Hardened";
-        public const string PluginVersion = "0.9.11";
+        public const string PluginVersion = "0.9.12";
 
         internal static Plugin Instance;
         internal static new ManualLogSource Log;
@@ -61,6 +61,8 @@ namespace EasyRed2HumanAI
             SafePatch(typeof(VisionPatches.ResourcesManager_UsingGUI_Patch));
             SafePatch(typeof(VisionPatches.ResourcesManager_UsingGUIExceptEndBattle_Patch));
             SafePatch(typeof(VisionPatches.BattleLoader_ConnectToNextMatch_Patch));
+            SafePatch(typeof(VisionPatches.EndBattleGUI_WaitAnthemEnd_Patch));
+            try { AddComponent<VisionPatches.MpTransitionBannerBehaviour>(); } catch (Exception ex) { Log.LogWarning($"MpTransitionBannerBehaviour init skipped: {ex.Message}"); }
 
             // Bundle 2-5: Infantry Combat, Cover, Macro & Vehicles, Veterancy & Personalities, UI & QoL
             SafePatch(typeof(VeteranAndTacticsPatches.SoldierAI_SequentialUpdate_Patch));
@@ -118,11 +120,14 @@ namespace EasyRed2HumanAI
             SafePatch(typeof(VeteranAndTacticsPatches.Vehicle_HasSpace_Patch));
             SafePatch(typeof(VeteranAndTacticsPatches.Vehicle_GetOnVehicleBestPos_Patch));
             SafePatch(typeof(VeteranAndTacticsPatches.Vehicle_GetOnVehicle_Patch));
+            SafePatch(typeof(VeteranAndTacticsPatches.VehicleSpawner_SpawnVehicle_Patch));
+            SafePatch(typeof(VeteranAndTacticsPatches.VehicleSpawner_IsAvailable_Patch));
             SafePatch(typeof(VeteranAndTacticsPatches.Vehicle_OnDisableVehicle_Patch));
             SafePatch(typeof(VeteranAndTacticsPatches.MovableVehicle_OnDisableVehicle_Patch));
             SafePatch(typeof(VeteranAndTacticsPatches.Vehicle_OnRepaired_Patch));
             SafePatch(typeof(VeteranAndTacticsPatches.AIVehicle_RetreatCrew_Patch));
             SafePatch(typeof(VeteranAndTacticsPatches.AIVehicle_MovableVehicleRoutine_Patch));
+            SafePatch(typeof(VeteranAndTacticsPatches.VehicleTank_FixedUpdate_Patch));
             SafePatch(typeof(VeteranAndTacticsPatches.Vehicle_OnVehicleSuppressed_Patch));
             SafePatch(typeof(VeteranAndTacticsPatches.VehicleWithWheels_OnTriggerEnter_Patch));
             SafePatch(typeof(VeteranAndTacticsPatches.VehiclePlane_OnSquadSpawnInside_Patch));
@@ -190,6 +195,9 @@ namespace EasyRed2HumanAI
             SafePatch(typeof(VeteranAndTacticsPatches.BulletInstance_TryRichochet_Patch));
             SafePatch(typeof(VeteranAndTacticsPatches.VehicleDamagablePart_TryPenetrateArmor_Patch));
             SafePatch(typeof(VeteranAndTacticsPatches.Soldier_Damage_Patch));
+            SafePatch(typeof(VeteranAndTacticsPatches.BodyPart_HitPart_Patch));
+            SafePatch(typeof(VeteranAndTacticsPatches.Soldier_DamageWithAnimation_Patch));
+            SafePatch(typeof(VeteranAndTacticsPatches.LoadBalancingClient_OnEvent_Patch));
             SafePatch(typeof(VeteranAndTacticsPatches.ResourcesManager_FactionCanDamageFaction_Patch));
             SafePatch(typeof(VeteranAndTacticsPatches.BodyPart_TryDamageWithExplosion_Patch));
             SafePatch(typeof(VeteranAndTacticsPatches.ItemGrenade_ExplodeAfter_Patch));

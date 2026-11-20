@@ -1386,6 +1386,7 @@ namespace EasyRed2HumanAI
             if (anim != null)
             {
                 anim.SetLayerWeight(1, 1.0f);
+                anim.ResetTrigger("StartInjured");
                 anim.SetBool("Injured", false);
                 anim.SetBool("Surrended", true);
             }
@@ -1507,6 +1508,7 @@ namespace EasyRed2HumanAI
                         // Clear suppressionValue when downed so BattleManager.SurrenderUnitsOnMissionAreas skips this casualty,
                         // clear Animator "Surrended", and force Injured/LayerWeight(1, 0f) even when downed in a vehicle seat.
                         __instance.suppressionValue = 0;
+                        VeteranAndTacticsPatches.NotifyFriendlyHitOrCasualty(__instance, Vector3.zero, false, isFatalOrDown: true);
                         if (__instance.m_Animator != null)
                         {
                             __instance.m_Animator.SetBool("Surrended", false);
@@ -1514,14 +1516,23 @@ namespace EasyRed2HumanAI
                             __instance.m_Animator.SetLayerWeight(1, 0f);
                             if (!__instance.IsOnVehicle())
                             {
-                                __instance.m_Animator.SetTrigger("StartInjured");
+                                __instance.m_Animator.ResetTrigger("StartInjured");
                                 __instance.ForceAnimatorState("Injured", 0, 0f);
                             }
                         }
                     }
-                    else if (__instance.IsAlive && !__instance.IsInjured && __instance.HasSurrended())
+                    else
                     {
-                        EnsureSurrenderedPrisonerAnimatorAndPose(__instance);
+                        if (__instance.m_Animator != null)
+                        {
+                            __instance.m_Animator.ResetTrigger("StartInjured");
+                            __instance.m_Animator.SetBool("Injured", false);
+                        }
+
+                        if (__instance.IsAlive && !__instance.IsInjured && __instance.HasSurrended())
+                        {
+                            EnsureSurrenderedPrisonerAnimatorAndPose(__instance);
+                        }
                     }
                 }
                 catch { }
@@ -1549,22 +1560,26 @@ namespace EasyRed2HumanAI
                         anim.SetLayerWeight(1, 0f);
                         if (!__instance.IsOnVehicle())
                         {
-                            anim.SetTrigger("StartInjured");
+                            anim.ResetTrigger("StartInjured");
                             __instance.ForceAnimatorState("Injured", 0, 0f);
                         }
                     }
-                    else if (__instance.IsAlive && !__instance.IsInjured && __instance.HasSurrended())
+                    else if (__instance.IsAlive && !__instance.IsInjured)
                     {
-                        AiCore.SoldierFastHandles h = AiCore.GetOrCreateSoldierHandles(__instance);
-                        if (h != null && h.IsRetreatDespawning)
+                        anim.ResetTrigger("StartInjured");
+                        anim.SetBool("Injured", false);
+                        if (__instance.HasSurrended())
                         {
-                            anim.SetBool("Surrended", false);
-                        }
-                        else
-                        {
-                            anim.SetBool("Injured", false);
-                            anim.SetBool("Surrended", true);
-                            anim.SetLayerWeight(1, 1.0f);
+                            AiCore.SoldierFastHandles h = AiCore.GetOrCreateSoldierHandles(__instance);
+                            if (h != null && h.IsRetreatDespawning)
+                            {
+                                anim.SetBool("Surrended", false);
+                            }
+                            else
+                            {
+                                anim.SetBool("Surrended", true);
+                                anim.SetLayerWeight(1, 1.0f);
+                            }
                         }
                     }
                 }

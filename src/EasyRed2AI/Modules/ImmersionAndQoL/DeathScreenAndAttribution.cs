@@ -16,32 +16,56 @@ namespace EasyRed2HumanAI
             public string HitDetail;
             public int DistanceMeters;
             public float Timestamp;
+            public bool CausedBleeding;
         }
 
+        private const byte DeathAttributionPhotonEventCode = 197;
         private static readonly Dictionary<IntPtr, DamageAttribution> _lastDamageByVictim = new Dictionary<IntPtr, DamageAttribution>(32);
+        private static readonly Dictionary<int, DamageAttribution> _pendingRemoteDeathByViewId = new Dictionary<int, DamageAttribution>(16);
+        private static readonly Dictionary<IntPtr, float> _lastRemoteAttrSendTimeByPtr = new Dictionary<IntPtr, float>(16);
         private static readonly List<IntPtr> _reusableExpiredAttrKeys = new List<IntPtr>(32);
+        private static readonly List<int> _reusableExpiredViewIds = new List<int>(16);
 
         internal static void PruneExpiredDamageAttributions(float now, bool forceClear = false)
         {
             if (forceClear)
             {
                 _lastDamageByVictim.Clear();
+                _pendingRemoteDeathByViewId.Clear();
+                _lastRemoteAttrSendTimeByPtr.Clear();
                 return;
             }
 
-            if (_lastDamageByVictim.Count == 0)
-                return;
-
-            _reusableExpiredAttrKeys.Clear();
-            foreach (var kv in _lastDamageByVictim)
+            if (_lastDamageByVictim.Count > 0)
             {
-                if (now - kv.Value.Timestamp > 90.0f || now < kv.Value.Timestamp)
-                    _reusableExpiredAttrKeys.Add(kv.Key);
+                _reusableExpiredAttrKeys.Clear();
+                foreach (var kv in _lastDamageByVictim)
+                {
+                    if (now - kv.Value.Timestamp > 90.0f || now < kv.Value.Timestamp)
+                        _reusableExpiredAttrKeys.Add(kv.Key);
+                }
+
+                for (int i = 0; i < _reusableExpiredAttrKeys.Count; i++)
+                {
+                    IntPtr expPtr = _reusableExpiredAttrKeys[i];
+                    _lastDamageByVictim.Remove(expPtr);
+                    _lastRemoteAttrSendTimeByPtr.Remove(expPtr);
+                }
             }
 
-            for (int i = 0; i < _reusableExpiredAttrKeys.Count; i++)
+            if (_pendingRemoteDeathByViewId.Count > 0)
             {
-                _lastDamageByVictim.Remove(_reusableExpiredAttrKeys[i]);
+                _reusableExpiredViewIds.Clear();
+                foreach (var kv in _pendingRemoteDeathByViewId)
+                {
+                    if (now - kv.Value.Timestamp > 90.0f || now < kv.Value.Timestamp)
+                        _reusableExpiredViewIds.Add(kv.Key);
+                }
+
+                for (int i = 0; i < _reusableExpiredViewIds.Count; i++)
+                {
+                    _pendingRemoteDeathByViewId.Remove(_reusableExpiredViewIds[i]);
+                }
             }
         }
         private static string _activeExplosionWeaponName;
@@ -289,15 +313,310 @@ namespace EasyRed2HumanAI
                     : $"{Mathf.RoundToInt(bulletData.caliber)}mm Autocannon";
             }
 
-            ItemObject held = shooter.GetHeldItem();
-            if (held != null && !string.IsNullOrWhiteSpace(held.name))
-                return CleanUnityObjectName(held.name);
-
             GenericGun curWep = shooter.GetHeldGun();
             if (curWep != null && !string.IsNullOrWhiteSpace(curWep.name))
                 return CleanUnityObjectName(curWep.name);
 
+            ItemObject held = shooter.GetHeldItem();
+            if (held != null && !string.IsNullOrWhiteSpace(held.name) && !IsNonCombatUtilityItemName(held.name))
+                return CleanUnityObjectName(held.name);
+
             return "";
+        }
+
+        private static bool IsNonCombatUtilityItemName(string itemName)
+        {
+            if (string.IsNullOrWhiteSpace(itemName))
+                return true;
+
+            return itemName.IndexOf("bandage", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                   itemName.IndexOf("syringe", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                   itemName.IndexOf("medkit", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                   itemName.IndexOf("medic", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                   itemName.IndexOf("binocular", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                   itemName.IndexOf("repair", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                   itemName.IndexOf("wrench", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                   itemName.IndexOf("sandbag", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                   itemName.IndexOf("shovel", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                   itemName.IndexOf("radio", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                   itemName.IndexOf("compass", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                   itemName.IndexOf("whistle", StringComparison.OrdinalIgnoreCase) >= 0;
+        }
+
+        private static string CleanDisplayLabel(string raw)
+        {
+            if (string.IsNullOrWhiteSpace(raw))
+                return "";
+
+            string cleaned = raw.Replace('_', ' ').Trim();
+            while (cleaned.Contains("  "))
+                cleaned = cleaned.Replace("  ", " ");
+            return cleaned;
+        }
+
+        private static bool IsSevereKillDetail(string hitDetail)
+        {
+            if (string.IsNullOrEmpty(hitDetail))
+                return false;
+
+            return hitDetail.IndexOf("Cook-off", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                   hitDetail.IndexOf("Destroyed", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                   hitDetail.IndexOf("Direct Blast", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                   hitDetail.IndexOf("Crash", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                   hitDetail.IndexOf("Run Over", StringComparison.OrdinalIgnoreCase) >= 0;
+        }
+
+        internal static void RecordPlayerDamageAttribution(Soldier victim, DamageAttribution attr, bool onlyIfNoRecentDetailed = false)
+        {
+            if (victim == null || victim.Pointer == IntPtr.Zero)
+                return;
+
+            if (onlyIfNoRecentDetailed &&
+                _lastDamageByVictim.TryGetValue(victim.Pointer, out DamageAttribution prev) &&
+                (Time.time - prev.Timestamp) <= 0.35f)
+            {
+                if (attr.CausedBleeding && !prev.CausedBleeding)
+                {
+                    prev.CausedBleeding = true;
+                    _lastDamageByVictim[victim.Pointer] = prev;
+                    if (Photon.Pun.PhotonNetwork.InRoom && Photon.Pun.PhotonNetwork.IsMasterClient)
+                    {
+                        TrySendRemotePlayerDeathAttribution(victim, in prev);
+                    }
+                }
+                return;
+            }
+
+            _lastDamageByVictim[victim.Pointer] = attr;
+            if (Photon.Pun.PhotonNetwork.InRoom && Photon.Pun.PhotonNetwork.IsMasterClient)
+            {
+                TrySendRemotePlayerDeathAttribution(victim, in attr);
+            }
+        }
+
+        private static void TrySendRemotePlayerDeathAttribution(Soldier victim, in DamageAttribution attr)
+        {
+            try
+            {
+                if (victim == null || victim.Pointer == IntPtr.Zero)
+                    return;
+
+                SyncSoldier syn = victim.soldierSyncher;
+                if (syn == null || syn.OwnSyncher || syn.ViewID <= 0)
+                    return;
+
+                Photon.Realtime.Player owner = syn.Controller ?? syn.Owner;
+                if (owner == null || owner.IsLocal || owner.ActorNumber <= 0)
+                    return;
+
+                float now = Time.time;
+                bool bypassCooldown = !victim.IsAlive || IsSevereKillDetail(attr.HitDetail);
+                if (!bypassCooldown &&
+                    _lastRemoteAttrSendTimeByPtr.TryGetValue(victim.Pointer, out float lastSent) &&
+                    (now - lastSent) < 0.5f)
+                {
+                    return;
+                }
+
+                _lastRemoteAttrSendTimeByPtr[victim.Pointer] = now;
+
+                int flags = (attr.IsSelfInflicted ? 1 : 0) |
+                            (attr.IsFriendlyFire ? 2 : 0) |
+                            (attr.CausedBleeding ? 4 : 0);
+
+                var payload = new Il2CppInterop.Runtime.InteropTypes.Arrays.Il2CppStringArray(new string[]
+                {
+                    syn.ViewID.ToString(),
+                    flags.ToString(),
+                    attr.DistanceMeters.ToString(),
+                    attr.WeaponOrSource ?? "",
+                    attr.HitDetail ?? ""
+                });
+
+                var opts = new Photon.Realtime.RaiseEventOptions
+                {
+                    TargetActors = new Il2CppInterop.Runtime.InteropTypes.Arrays.Il2CppStructArray<int>(new int[] { owner.ActorNumber })
+                };
+
+                Photon.Pun.PhotonNetwork.RaiseEvent(
+                    DeathAttributionPhotonEventCode,
+                    payload.Cast<Il2CppSystem.Object>(),
+                    opts,
+                    ExitGames.Client.Photon.SendOptions.SendReliable);
+            }
+            catch { }
+        }
+
+        private static void StampExplosionPlayerAttribution(
+            Soldier player,
+            Vector3 expPos,
+            float expRadius,
+            Soldier attacker,
+            bool isOffMapArtilleryOrAir,
+            string expSource)
+        {
+            if (player == null || player.Pointer == IntPtr.Zero)
+                return;
+
+            Vector3 playerPos = player.GetCenterOfUnit();
+            float blastDist = Vector3.Distance(expPos, playerPos);
+            if (blastDist > Mathf.Max(18f, expRadius * 4.0f))
+                return;
+
+            int distMeters;
+            if (isOffMapArtilleryOrAir || attacker == null || attacker.Pointer == player.Pointer)
+            {
+                // For off-map artillery/aerial bombs or self-damage, report distance from blast impact point
+                distMeters = Mathf.RoundToInt(blastDist);
+            }
+            else if (_activeImpactHasContext && _activeImpactStartPos.sqrMagnitude > 1f)
+            {
+                distMeters = Mathf.RoundToInt(Vector3.Distance(_activeImpactStartPos, playerPos));
+            }
+            else
+            {
+                distMeters = Mathf.RoundToInt(Vector3.Distance(attacker.GetCenterOfUnit(), playerPos));
+            }
+
+            bool isSelf = attacker != null && attacker.Pointer == player.Pointer;
+            bool isFF = attacker != null && !isSelf && !string.IsNullOrEmpty(attacker.faction) && attacker.faction == player.faction;
+            string blastDetail = blastDist <= Mathf.Max(2.5f, expRadius * 0.45f)
+                ? "Direct Blast"
+                : "Blast Wave";
+
+            RecordPlayerDamageAttribution(
+                player,
+                new DamageAttribution
+                {
+                    IsSelfInflicted = isSelf,
+                    IsFriendlyFire = isFF,
+                    WeaponOrSource = expSource,
+                    HitDetail = blastDetail,
+                    DistanceMeters = Mathf.Max(0, distMeters),
+                    Timestamp = Time.time,
+                    CausedBleeding = player.isBleeding
+                },
+                onlyIfNoRecentDetailed: false);
+        }
+
+        internal static void RecordVehicleDisabledAttribution(Vehicle veh)
+        {
+            try
+            {
+                if (!VisionConfig.EnableMod.Value ||
+                    !VisionConfig.EnableDeathScreenAttribution.Value ||
+                    veh == null ||
+                    veh.Pointer == IntPtr.Zero)
+                {
+                    return;
+                }
+
+                AiCore.EnsureWorldSnapshot();
+                IntPtr vehPtr = veh.Pointer;
+                bool isAir = veh.IsAirVehicle();
+                string vehName = !string.IsNullOrWhiteSpace(veh.name) ? CleanUnityObjectName(veh.name) : (isAir ? "Aircraft" : "Vehicle");
+                string cookedDetail = isAir ? "Aircraft Destroyed" : "Vehicle Destroyed (Cook-off)";
+                string fallbackDetail = isAir ? "Aircraft Destroyed / Crash" : "Vehicle Destroyed (Cook-off)";
+                float now = Time.time;
+
+                int count = AiCore.WorldSoldierCount;
+                var soldiers = AiCore.WorldSoldiers;
+                for (int i = 0; i < count; i++)
+                {
+                    ref AiCore.SoldierSnapshot ss = ref soldiers[i];
+                    if (!ss.IsPlayer || ss.Ref == null || ss.Ref.Pointer == IntPtr.Zero)
+                        continue;
+
+                    if (!ss.Ref.IsOnVehicle())
+                        continue;
+
+                    Vehicle curVeh = ss.Ref.GetCurrentVehicle();
+                    if (curVeh == null || curVeh.Pointer != vehPtr)
+                        continue;
+
+                    if (_lastDamageByVictim.TryGetValue(ss.Ptr, out DamageAttribution prev) &&
+                        (now - prev.Timestamp) <= 3.0f &&
+                        !string.IsNullOrWhiteSpace(prev.WeaponOrSource))
+                    {
+                        prev.HitDetail = cookedDetail;
+                        prev.Timestamp = now;
+                        RecordPlayerDamageAttribution(ss.Ref, prev, onlyIfNoRecentDetailed: false);
+                    }
+                    else
+                    {
+                        RecordPlayerDamageAttribution(
+                            ss.Ref,
+                            new DamageAttribution
+                            {
+                                IsSelfInflicted = false,
+                                IsFriendlyFire = false,
+                                WeaponOrSource = vehName,
+                                HitDetail = fallbackDetail,
+                                DistanceMeters = 0,
+                                Timestamp = now,
+                                CausedBleeding = ss.Ref.isBleeding
+                            },
+                            onlyIfNoRecentDetailed: false);
+                    }
+                }
+            }
+            catch { }
+        }
+
+        [HarmonyPatch(typeof(Photon.Realtime.LoadBalancingClient), nameof(Photon.Realtime.LoadBalancingClient.OnEvent))]
+        public static class LoadBalancingClient_OnEvent_Patch
+        {
+            public static void Postfix(ExitGames.Client.Photon.EventData __0)
+            {
+                try
+                {
+                    if (__0 == null ||
+                        __0.Code != DeathAttributionPhotonEventCode ||
+                        !VisionConfig.EnableMod.Value ||
+                        !VisionConfig.EnableDeathScreenAttribution.Value)
+                    {
+                        return;
+                    }
+
+                    var arr = __0.CustomData != null
+                        ? __0.CustomData.TryCast<Il2CppInterop.Runtime.InteropTypes.Arrays.Il2CppStringArray>()
+                        : null;
+                    if (arr == null || arr.Length < 5)
+                        return;
+
+                    if (!int.TryParse(arr[0], out int viewId) || viewId <= 0)
+                        return;
+
+                    int.TryParse(arr[1], out int flags);
+                    int.TryParse(arr[2], out int distMeters);
+                    string weapon = arr[3] ?? "";
+                    string hitDetail = arr[4] ?? "";
+
+                    DamageAttribution attr = new DamageAttribution
+                    {
+                        IsSelfInflicted = (flags & 1) != 0,
+                        IsFriendlyFire = (flags & 2) != 0,
+                        CausedBleeding = (flags & 4) != 0,
+                        WeaponOrSource = weapon,
+                        HitDetail = hitDetail,
+                        DistanceMeters = Mathf.Max(0, distMeters),
+                        Timestamp = Time.time
+                    };
+
+                    _pendingRemoteDeathByViewId[viewId] = attr;
+
+                    Soldier cur = Soldier.CurrentControlledSoldierOrNull();
+                    if (cur != null && cur.Pointer != IntPtr.Zero)
+                    {
+                        SyncSoldier syn = cur.soldierSyncher;
+                        if (syn != null && syn.ViewID == viewId)
+                        {
+                            _lastDamageByVictim[cur.Pointer] = attr;
+                        }
+                    }
+                }
+                catch { }
+            }
         }
 
         private static string FormatBodyPart(BodyPartType part)
@@ -343,6 +662,7 @@ namespace EasyRed2HumanAI
                     if (!VisionConfig.EnableMod.Value || !__7)
                         return;
 
+                    string srcVehFac = null;
                     if (__4 != null && __4.Pointer != IntPtr.Zero)
                     {
                         VisionPatches.RecordExplosionSound(__0, __3, __4);
@@ -351,7 +671,7 @@ namespace EasyRed2HumanAI
                     else
                     {
                         Vehicle srcVeh = __5 != null ? (__5.GetComponent<Vehicle>() ?? __5.GetComponentInParent<Vehicle>()) : null;
-                        string srcVehFac = (srcVeh != null && srcVeh.Pointer != IntPtr.Zero) ? srcVeh.GetVehicleFaction() : null;
+                        srcVehFac = (srcVeh != null && srcVeh.Pointer != IntPtr.Zero) ? srcVeh.GetVehicleFaction() : null;
                         VisionPatches.RecordExplosionSound(__0, __3, null, srcVehFac);
 
                         IntPtr resolvedVehicleKillerPtr = new IntPtr(-1);
@@ -371,6 +691,12 @@ namespace EasyRed2HumanAI
                     // Reclassify Molotov / phosphorus / incendiary grenade shatters from HitType.Explosion -> HitType.Fire
                     // BEFORE native CreateExplosion runs so tank tracks (VehicleDamageableTrackPart) are 100% immune!
                     TryReclassifyIncendiaryGrenadeExplosion(__0, __5, ref __6);
+
+                    if (__3 >= 4.5f && __6 == HitType.Explosion)
+                    {
+                        string shellFac = (__4 != null && __4.Pointer != IntPtr.Zero) ? AiCore.GetCachedFaction(__4) : srcVehFac;
+                        RecordHeavyArtilleryShellingImpact(__0, __3, shellFac);
+                    }
 
                     if (!VisionConfig.EnableDeathScreenAttribution.Value)
                         return;
@@ -534,45 +860,25 @@ namespace EasyRed2HumanAI
                     _activeExplosionWeaponName = expSource;
                     _activeExplosionIsArtillery = isOffMapArtilleryOrAir || (__4 == null);
 
-                    Soldier player = Soldier.CurrentControlledSoldierOrNull();
-                    if (player != null && player.Pointer != IntPtr.Zero)
+                    Soldier localPlayer = Soldier.CurrentControlledSoldierOrNull();
+                    IntPtr localPlayerPtr = (localPlayer != null && localPlayer.Pointer != IntPtr.Zero) ? localPlayer.Pointer : IntPtr.Zero;
+                    if (localPlayerPtr != IntPtr.Zero)
                     {
-                        Vector3 playerPos = player.GetCenterOfUnit();
-                        float blastDist = Vector3.Distance(__0, playerPos);
-                        // __3 is explosionRadius
-                        if (blastDist <= Mathf.Max(18f, __3 * 4.0f))
+                        StampExplosionPlayerAttribution(localPlayer, __0, __3, __4, isOffMapArtilleryOrAir, expSource);
+                    }
+
+                    if (Photon.Pun.PhotonNetwork.InRoom && Photon.Pun.PhotonNetwork.IsMasterClient)
+                    {
+                        AiCore.EnsureWorldSnapshot();
+                        int count = AiCore.WorldSoldierCount;
+                        var soldiers = AiCore.WorldSoldiers;
+                        for (int i = 0; i < count; i++)
                         {
-                            int distMeters;
-                            if (isOffMapArtilleryOrAir || __4 == null || __4.Pointer == player.Pointer)
+                            ref AiCore.SoldierSnapshot ss = ref soldiers[i];
+                            if (ss.IsPlayer && ss.Ref != null && ss.Ptr != IntPtr.Zero && ss.Ptr != localPlayerPtr)
                             {
-                                // For off-map artillery/aerial bombs or self-damage, report distance from blast impact point
-                                distMeters = Mathf.RoundToInt(blastDist);
+                                StampExplosionPlayerAttribution(ss.Ref, __0, __3, __4, isOffMapArtilleryOrAir, expSource);
                             }
-                            else if (_activeImpactHasContext && _activeImpactStartPos.sqrMagnitude > 1f)
-                            {
-                                distMeters = Mathf.RoundToInt(Vector3.Distance(_activeImpactStartPos, playerPos));
-                            }
-                            else
-                            {
-                                distMeters = Mathf.RoundToInt(Vector3.Distance(__4.GetCenterOfUnit(), playerPos));
-                            }
-
-                            bool isSelf = __4 != null && __4.Pointer == player.Pointer;
-                            bool isFF = __4 != null && !isSelf && !string.IsNullOrEmpty(__4.faction) && __4.faction == player.faction;
-
-                            string blastDetail = blastDist <= Mathf.Max(2.5f, __3 * 0.45f)
-                                ? "Direct Blast"
-                                : "Blast Wave";
-
-                            _lastDamageByVictim[player.Pointer] = new DamageAttribution
-                            {
-                                IsSelfInflicted = isSelf,
-                                IsFriendlyFire = isFF,
-                                WeaponOrSource = expSource,
-                                HitDetail = blastDetail,
-                                DistanceMeters = Mathf.Max(0, distMeters),
-                                Timestamp = Time.time
-                            };
                         }
                     }
                 }
@@ -590,6 +896,7 @@ namespace EasyRed2HumanAI
         public struct BulletDamagePatchState
         {
             public Soldier BotCalloutVictim;
+            public Soldier PlayerAttrVictim;
             public IntPtr PrevAttackerPtr;
         }
 
@@ -777,6 +1084,18 @@ namespace EasyRed2HumanAI
                         __state.BotCalloutVictim = victim;
                     }
 
+                    // Trigger nearby cross-squad witness suppression & cover replanning whenever any friendly soldier takes a hit
+                    if (isDirectBodyOrHelmetHit &&
+                        victim != null &&
+                        victim.Pointer != IntPtr.Zero &&
+                        victim.IsAlive &&
+                        __3 > 0)
+                    {
+                        bool hasOrigin = __4 != null && __4.Pointer != IntPtr.Zero && __4.transform != null;
+                        Vector3 origin = hasOrigin ? __4.transform.position : __2;
+                        NotifyFriendlyHitOrCasualty(victim, origin, hasOrigin, isFatalOrDown: false);
+                    }
+
                     if (!VisionConfig.EnableDeathScreenAttribution.Value || victim == null || !IsPlayerCharacter(victim))
                         return true;
 
@@ -831,15 +1150,18 @@ namespace EasyRed2HumanAI
                         distMeters = Mathf.RoundToInt(Vector3.Distance(__2, victim.GetCenterOfUnit()));
                     }
 
-                    _lastDamageByVictim[victim.Pointer] = new DamageAttribution
+                    DamageAttribution bulletAttr = new DamageAttribution
                     {
                         IsSelfInflicted = isSelf,
                         IsFriendlyFire = isFF,
                         WeaponOrSource = !string.IsNullOrEmpty(weaponOrSource) ? weaponOrSource : (_activeExplosionIsArtillery ? "Artillery / Mortar Barrage" : "Enemy Fire"),
                         HitDetail = hitDetail,
                         DistanceMeters = Mathf.Max(0, distMeters),
-                        Timestamp = Time.time
+                        Timestamp = Time.time,
+                        CausedBleeding = victim.isBleeding
                     };
+                    RecordPlayerDamageAttribution(victim, bulletAttr, onlyIfNoRecentDetailed: false);
+                    __state.PlayerAttrVictim = victim;
                 }
                 catch { }
 
@@ -849,6 +1171,21 @@ namespace EasyRed2HumanAI
             public static void Postfix(Soldier __4, BulletDamagePatchState __state)
             {
                 _activeDamageAttackerPtr = __state.PrevAttackerPtr;
+
+                try
+                {
+                    Soldier attrVictim = __state.PlayerAttrVictim;
+                    if (attrVictim != null &&
+                        attrVictim.Pointer != IntPtr.Zero &&
+                        attrVictim.isBleeding &&
+                        _lastDamageByVictim.TryGetValue(attrVictim.Pointer, out DamageAttribution attr) &&
+                        !attr.CausedBleeding)
+                    {
+                        attr.CausedBleeding = true;
+                        RecordPlayerDamageAttribution(attrVictim, attr, onlyIfNoRecentDetailed: false);
+                    }
+                }
+                catch { }
 
                 Soldier botVictim = __state.BotCalloutVictim;
                 if (botVictim == null)
@@ -871,6 +1208,137 @@ namespace EasyRed2HumanAI
                             TrySayTacticalVoice(__4, __4.joinedSquad, VoiceManager.VoiceClip.enemyDown, 0.25f);
                         }
                     }
+                }
+                catch { }
+            }
+        }
+
+        [HarmonyPatch(typeof(BodyPart), nameof(BodyPart.HitPart))]
+        public static class BodyPart_HitPart_Patch
+        {
+            public static void Prefix(BodyPart __instance, float __0, float __1, Vector3 __2, string __3, HitType __4)
+            {
+                try
+                {
+                    if (!VisionConfig.EnableMod.Value ||
+                        !VisionConfig.EnableDeathScreenAttribution.Value ||
+                        __instance == null ||
+                        __instance.unit == null ||
+                        __0 <= 0f)
+                    {
+                        return;
+                    }
+
+                    Soldier victim = __instance.unit.TryCast<Soldier>();
+                    if (victim == null || victim.Pointer == IntPtr.Zero || !IsPlayerCharacter(victim))
+                        return;
+
+                    string weaponOrSource;
+                    string hitDetail;
+                    bool onlyIfNoRecentDetailed;
+
+                    switch (__4)
+                    {
+                        case HitType.Fire:
+                            weaponOrSource = !string.IsNullOrEmpty(_activeExplosionWeaponName) ? _activeExplosionWeaponName : "Fire / Incendiary";
+                            hitDetail = "Burns";
+                            onlyIfNoRecentDetailed = false;
+                            break;
+                        case HitType.Melee:
+                            weaponOrSource = "Melee / Bayonet";
+                            hitDetail = FormatBodyPart(__instance.bodyPart);
+                            onlyIfNoRecentDetailed = false;
+                            break;
+                        case HitType.VehicleCollision:
+                            weaponOrSource = "Vehicle";
+                            hitDetail = "Run Over / Crushed";
+                            onlyIfNoRecentDetailed = false;
+                            break;
+                        case HitType.Explosion:
+                            weaponOrSource = !string.IsNullOrEmpty(_activeExplosionWeaponName) ? _activeExplosionWeaponName : "Artillery / Explosion";
+                            hitDetail = $"Shrapnel ({FormatBodyPart(__instance.bodyPart)})";
+                            onlyIfNoRecentDetailed = true;
+                            break;
+                        default:
+                            weaponOrSource = !string.IsNullOrEmpty(__3) ? $"{__3} Fire" : "Enemy Fire";
+                            hitDetail = FormatBodyPart(__instance.bodyPart);
+                            onlyIfNoRecentDetailed = true;
+                            break;
+                    }
+
+                    Vector3 vPos = victim.GetCenterOfUnit();
+                    int distMeters = (__4 == HitType.Melee || __4 == HitType.VehicleCollision)
+                        ? Mathf.RoundToInt(Vector3.Distance(__2, vPos))
+                        : 0;
+                    bool isFF = !string.IsNullOrEmpty(__3) &&
+                                !string.IsNullOrEmpty(victim.faction) &&
+                                AiCore.AreSameSideFactions(__3, victim.faction);
+
+                    RecordPlayerDamageAttribution(
+                        victim,
+                        new DamageAttribution
+                        {
+                            IsFriendlyFire = isFF,
+                            IsSelfInflicted = false,
+                            WeaponOrSource = weaponOrSource,
+                            HitDetail = hitDetail,
+                            DistanceMeters = Mathf.Max(0, distMeters),
+                            Timestamp = Time.time,
+                            CausedBleeding = victim.isBleeding
+                        },
+                        onlyIfNoRecentDetailed);
+                }
+                catch { }
+            }
+        }
+
+        [HarmonyPatch(typeof(Soldier), nameof(Soldier.DamageWithAnimation))]
+        public static class Soldier_DamageWithAnimation_Patch
+        {
+            public static void Postfix(Soldier __instance, float __0, BodyPartType __1, HitType __2)
+            {
+                try
+                {
+                    if (!VisionConfig.EnableMod.Value ||
+                        !VisionConfig.EnableDeathScreenAttribution.Value ||
+                        __instance == null ||
+                        __instance.Pointer == IntPtr.Zero ||
+                        !IsPlayerCharacter(__instance))
+                    {
+                        return;
+                    }
+
+                    if (_lastDamageByVictim.TryGetValue(__instance.Pointer, out DamageAttribution prev) &&
+                        (Time.time - prev.Timestamp) <= 0.40f)
+                    {
+                        if (__instance.isBleeding && !prev.CausedBleeding)
+                        {
+                            prev.CausedBleeding = true;
+                            RecordPlayerDamageAttribution(__instance, prev, onlyIfNoRecentDetailed: false);
+                        }
+                        return;
+                    }
+
+                    string weaponOrSource = __2 == HitType.Fire ? "Fire / Incendiary"
+                        : __2 == HitType.Melee ? "Melee / Bayonet"
+                        : __2 == HitType.VehicleCollision ? "Vehicle"
+                        : __2 == HitType.Explosion ? (!string.IsNullOrEmpty(_activeExplosionWeaponName) ? _activeExplosionWeaponName : "Explosion")
+                        : "Enemy Fire";
+                    string hitDetail = __2 == HitType.VehicleCollision ? "Run Over / Crushed" : FormatBodyPart(__1);
+
+                    RecordPlayerDamageAttribution(
+                        __instance,
+                        new DamageAttribution
+                        {
+                            IsFriendlyFire = false,
+                            IsSelfInflicted = false,
+                            WeaponOrSource = weaponOrSource,
+                            HitDetail = hitDetail,
+                            DistanceMeters = 0,
+                            Timestamp = Time.time,
+                            CausedBleeding = __instance.isBleeding
+                        },
+                        onlyIfNoRecentDetailed: true);
                 }
                 catch { }
             }
@@ -928,74 +1396,102 @@ namespace EasyRed2HumanAI
                     bool hasAttr = _lastDamageByVictim.TryGetValue(__0.Pointer, out DamageAttribution attr);
                     _lastDamageByVictim.Remove(__0.Pointer);
 
+                    SyncSoldier syn = __0.soldierSyncher;
+                    int viewId = syn != null ? syn.ViewID : 0;
+                    if (viewId > 0 && _pendingRemoteDeathByViewId.TryGetValue(viewId, out DamageAttribution remoteAttr))
+                    {
+                        _pendingRemoteDeathByViewId.Remove(viewId);
+                        if (!hasAttr || remoteAttr.Timestamp > attr.Timestamp || (Time.time - attr.Timestamp) > 120f)
+                        {
+                            attr = remoteAttr;
+                            hasAttr = true;
+                        }
+                    }
+
                     bool staleVehicleHit = hasAttr &&
                                            string.Equals(attr.HitDetail, "Vehicle Hit", StringComparison.Ordinal) &&
                                            (Time.time - attr.Timestamp) > 8.0f;
 
+                    string causeLine;
+                    string subColor = "#D8D2C2";
+                    bool isFriendlyFire = false;
+                    bool isSelfInflicted = false;
+
                     if (!hasAttr || Time.time - attr.Timestamp > 120f || staleVehicleHit)
                     {
-                        if (yearLabel != null && !string.IsNullOrEmpty(yearLineWithAge))
-                            yearLabel.text = $"<size={yearFontSize}>{yearLineWithAge}</size>";
-
-                        if (dp != null)
-                            ActivateInstantDeathPanel(dp, __0.Pointer);
-
-                        ActiveDeathAttributionExpireTime = 0f;
-                        ActiveDeathAttributionText = null;
-                        return;
+                        string cleanedReason = CleanDisplayLabel(__1);
+                        if (!string.IsNullOrEmpty(cleanedReason))
+                        {
+                            causeLine = cleanedReason;
+                        }
+                        else if (__0.IsOnVehicle() && __0.GetCurrentVehicle() != null)
+                        {
+                            Vehicle deadVeh = __0.GetCurrentVehicle();
+                            string vName = !string.IsNullOrWhiteSpace(deadVeh.name)
+                                ? CleanUnityObjectName(deadVeh.name)
+                                : (deadVeh.IsAirVehicle() ? "Aircraft" : "Vehicle");
+                            string vDetail = deadVeh.IsAirVehicle() ? "Aircraft Crash" : "Vehicle Destroyed";
+                            causeLine = $"{vName}  \u2022  {vDetail}";
+                        }
+                        else if (__0.isBleeding)
+                        {
+                            causeLine = "Bled out from Wounds";
+                        }
+                        else if (AiCore.TryGetActiveWaterLevel(out float wl) &&
+                                 __0.transform != null &&
+                                 __0.transform.position.y < wl - 0.5f)
+                        {
+                            causeLine = "Drowned";
+                        }
+                        else
+                        {
+                            causeLine = "Killed in Action";
+                        }
                     }
-
-                    bool bledOut = (Time.time - attr.Timestamp) > 1.5f;
-
-                    string prefixTag = "";
-                    string subColor = "#D8D2C2";
-                    if (attr.IsSelfInflicted)
+                    else
                     {
-                        prefixTag = "[SELF-INFLICTED] ";
-                        subColor = "#FFB347";
-                    }
-                    else if (attr.IsFriendlyFire)
-                    {
-                        prefixTag = "[FRIENDLY FIRE] ";
-                        subColor = "#FF6666";
-                    }
+                        isFriendlyFire = attr.IsFriendlyFire;
+                        isSelfInflicted = attr.IsSelfInflicted;
+                        bool bledOut = __0.isBleeding || ((Time.time - attr.Timestamp) > 3.0f && attr.CausedBleeding);
 
-                    List<string> detailParts = new List<string>(4);
-                    if (bledOut)
-                    {
-                        detailParts.Add("Bled out");
-                    }
+                        string prefixTag = "";
+                        if (isSelfInflicted)
+                        {
+                            prefixTag = "[SELF-INFLICTED] ";
+                            subColor = "#FFB347";
+                        }
+                        else if (isFriendlyFire)
+                        {
+                            prefixTag = "[FRIENDLY FIRE] ";
+                            subColor = "#FF6666";
+                        }
 
-                    string cleanWep = "";
-                    if (!string.IsNullOrEmpty(attr.WeaponOrSource))
-                    {
-                        cleanWep = attr.WeaponOrSource.Replace('_', ' ').Trim();
-                        while (cleanWep.Contains("  "))
-                            cleanWep = cleanWep.Replace("  ", " ");
+                        List<string> detailParts = new List<string>(4);
+                        if (bledOut)
+                        {
+                            detailParts.Add("Bled out");
+                        }
+
+                        string cleanWep = CleanDisplayLabel(attr.WeaponOrSource);
                         if (!string.IsNullOrEmpty(cleanWep))
                             detailParts.Add(cleanWep);
-                    }
 
-                    if (!string.IsNullOrEmpty(attr.HitDetail))
-                    {
-                        string cleanHit = attr.HitDetail.Replace('_', ' ').Trim();
-                        while (cleanHit.Contains("  "))
-                            cleanHit = cleanHit.Replace("  ", " ");
+                        string cleanHit = CleanDisplayLabel(attr.HitDetail);
                         if (!string.IsNullOrEmpty(cleanHit) &&
                             !string.Equals(cleanWep, cleanHit, StringComparison.OrdinalIgnoreCase))
                         {
                             detailParts.Add(cleanHit);
                         }
-                    }
 
-                    if (!attr.IsSelfInflicted || attr.DistanceMeters > 0)
-                    {
-                        detailParts.Add($"{attr.DistanceMeters}m");
-                    }
+                        if (!attr.IsSelfInflicted || attr.DistanceMeters > 0)
+                        {
+                            detailParts.Add($"{attr.DistanceMeters}m");
+                        }
 
-                    string causeLine = detailParts.Count > 0
-                        ? prefixTag + string.Join("  \u2022  ", detailParts)
-                        : (prefixTag + "Killed in Action").Trim();
+                        causeLine = detailParts.Count > 0
+                            ? prefixTag + string.Join("  \u2022  ", detailParts)
+                            : (prefixTag + "Killed in Action").Trim();
+                    }
 
                     bool shownOnNativeDeathPanel = false;
                     if (yearLabel != null)
@@ -1017,8 +1513,8 @@ namespace EasyRed2HumanAI
                     else
                     {
                         ActiveDeathAttributionText = causeLine;
-                        ActiveDeathAttributionIsFF = attr.IsFriendlyFire;
-                        ActiveDeathAttributionIsSelf = attr.IsSelfInflicted;
+                        ActiveDeathAttributionIsFF = isFriendlyFire;
+                        ActiveDeathAttributionIsSelf = isSelfInflicted;
                         ActiveDeathAttributionStartTime = Time.unscaledTime;
                         ActiveDeathAttributionExpireTime = Time.unscaledTime + 8.5f;
                         ActiveDeathAttributionVictimPtr = __0.Pointer;

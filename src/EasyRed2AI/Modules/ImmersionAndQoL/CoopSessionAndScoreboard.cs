@@ -1776,7 +1776,7 @@ namespace EasyRed2HumanAI
                         _pendingJoinMotdQueue[i] = entry;
                         continue;
                     }
-                    if (now - entry.EnqueuedAtUnscaledTime < 8.0f)
+                    if (now - entry.EnqueuedAtUnscaledTime < 45.0f)
                         continue;
                     entry.ReadyAtUnscaledTime = now;
                 }

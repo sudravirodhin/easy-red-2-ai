@@ -574,12 +574,12 @@ namespace EasyRed2HumanAI
             if (soldier.IsOnCover())
                 return true;
 
+            Vector3 myPos = h.Tr.position;
             float now = Time.time;
             if (now >= h.Stance.NextLocalCoverSeekTime)
             {
                 h.Stance.NextLocalCoverSeekTime = now + 1.5f;
 
-                Vector3 myPos = h.Tr.position;
                 string myFaction = AiCore.GetCachedFaction(h, now);
                 bool isOnBridge = VisionConfig.EnableBridgeCrossingDiscipline.Value &&
                                   AiCore.IsOnBridgeOrNarrowCrossing(myPos);
@@ -590,10 +590,23 @@ namespace EasyRed2HumanAI
                     h.Tr.forward,
                     out bool isCrossfire,
                     out bool hasDirectTarget);
+                Vector3 threatOrigin3D;
+                if (ai.visibleTarget != null && AiCore.TryGetSpottableCenter(ai.visibleTarget, out Vector3 visPos))
+                    threatOrigin3D = visPos;
+                else if (VisionPatches.TryGetNearestEnemyGunfirePosition(myPos, myFaction, 140f, 4.0f, out Vector3 gfPos))
+                    threatOrigin3D = gfPos + Vector3.up * 1.4f;
+                else
+                    threatOrigin3D = myPos + threatDir * 28.0f + Vector3.up * 1.8f;
+
                 float curSupp = soldier.GetSuppressionValue();
                 CombatCover bestCover = null;
                 float bestScoreSq = float.MaxValue;
                 float bestRawDistSq = float.MaxValue;
+
+                CombatCover bestCov0 = null, bestCov1 = null, bestCov2 = null;
+                Vector3 bestCovPos0 = Vector3.zero, bestCovPos1 = Vector3.zero, bestCovPos2 = Vector3.zero;
+                float bestCovScore0 = float.MaxValue, bestCovScore1 = float.MaxValue, bestCovScore2 = float.MaxValue;
+                float bestCovDistSq0 = float.MaxValue, bestCovDistSq1 = float.MaxValue, bestCovDistSq2 = float.MaxValue;
 
                 var octree = CoverManager.staticCovers;
                 if (octree != null)
@@ -620,7 +633,7 @@ namespace EasyRed2HumanAI
                                 continue;
 
                             float dSq = (covPos - myPos).sqrMagnitude;
-                            if (dSq * 0.20f >= bestScoreSq)
+                            if (dSq * 0.20f >= bestCovScore2)
                                 continue;
 
                             if (isOnBridge && !AiCore.IsSafeBridgeDeckStep(myPos, covPos, out _))
@@ -653,12 +666,54 @@ namespace EasyRed2HumanAI
                             }
 
                             float scoreSq = dSq * scoreMult;
-                            if (scoreSq >= bestScoreSq)
+                            if (scoreSq >= bestCovScore2)
                                 continue;
 
-                            bestScoreSq = scoreSq;
-                            bestRawDistSq = dSq;
-                            bestCover = cc;
+                            if (scoreSq < bestCovScore0)
+                            {
+                                bestCov2 = bestCov1; bestCovPos2 = bestCovPos1; bestCovScore2 = bestCovScore1; bestCovDistSq2 = bestCovDistSq1;
+                                bestCov1 = bestCov0; bestCovPos1 = bestCovPos0; bestCovScore1 = bestCovScore0; bestCovDistSq1 = bestCovDistSq0;
+                                bestCov0 = cc;       bestCovPos0 = covPos;      bestCovScore0 = scoreSq;       bestCovDistSq0 = dSq;
+                            }
+                            else if (scoreSq < bestCovScore1)
+                            {
+                                bestCov2 = bestCov1; bestCovPos2 = bestCovPos1; bestCovScore2 = bestCovScore1; bestCovDistSq2 = bestCovDistSq1;
+                                bestCov1 = cc;       bestCovPos1 = covPos;      bestCovScore1 = scoreSq;       bestCovDistSq1 = dSq;
+                            }
+                            else
+                            {
+                                bestCov2 = cc;       bestCovPos2 = covPos;      bestCovScore2 = scoreSq;       bestCovDistSq2 = dSq;
+                            }
+                        }
+                    }
+                }
+
+                // Evaluate up to 3 finalists with a single short 3D eye-to-threat LOS-break raycast each
+                // so bots strongly favor cover that physically breaks 3D line-of-sight from elevated/flanking shooters.
+                if (bestCov0 != null)
+                {
+                    Transform ignoreRoot = h.Tr.root;
+                    for (int f = 0; f < 3; f++)
+                    {
+                        CombatCover cand = f == 0 ? bestCov0 : (f == 1 ? bestCov1 : bestCov2);
+                        if (cand == null)
+                            break;
+
+                        Vector3 candPos = f == 0 ? bestCovPos0 : (f == 1 ? bestCovPos1 : bestCovPos2);
+                        float rawScore = f == 0 ? bestCovScore0 : (f == 1 ? bestCovScore1 : bestCovScore2);
+                        float candDistSq = f == 0 ? bestCovDistSq0 : (f == 1 ? bestCovDistSq1 : bestCovDistSq2);
+
+                        Vector3 eyePos = candPos + Vector3.up * 1.15f;
+                        Vector3 toThreat = threatOrigin3D - eyePos;
+                        float dist = toThreat.magnitude;
+                        bool breaksLos = dist > 0.6f &&
+                                         AiCore.RaycastEnvironment(eyePos, toThreat / dist, Mathf.Min(dist, 25.0f), ignoreRoot, out _);
+                        float adjScore = rawScore * (breaksLos ? 0.48f : 1.55f);
+                        if (adjScore < bestScoreSq)
+                        {
+                            bestScoreSq = adjScore;
+                            bestRawDistSq = candDistSq;
+                            bestCover = cand;
                         }
                     }
                 }
@@ -701,15 +756,26 @@ namespace EasyRed2HumanAI
 
             if (soldier.HasDestinationAssigned)
             {
-                soldier.TryToGetToActualCover();
-                if (!soldier.IsOnCover() && !ai.IsMoving() && !ai.HasPath && !ai.HasPathRequest)
+                if (soldier.IsOnCover())
                 {
-                    if (ai.moveDirectlyToward_end > now)
-                        ai.moveDirectlyToward_end = 0f;
-                    AiCore.ResetBotPathLockout(ai);
-                    ai.UpdatePath();
+                    soldier.TryToGetToActualCover();
+                    return true;
                 }
-                return soldier.IsOnCover() || ai.IsMoving() || ai.HasPathRequest;
+
+                AiDestination curDest = soldier.targetDestination;
+                CombatCover curCov = curDest != null ? curDest.TryCast<CombatCover>() : null;
+                if (curCov != null && !curCov.destroyed && (curCov.GetCoverPosition() - myPos).sqrMagnitude <= 14.0f * 14.0f)
+                {
+                    soldier.TryToGetToActualCover();
+                    if (!ai.IsMoving() && !ai.HasPath && !ai.HasPathRequest)
+                    {
+                        if (ai.moveDirectlyToward_end > now)
+                            ai.moveDirectlyToward_end = 0f;
+                        AiCore.ResetBotPathLockout(ai);
+                        ai.UpdatePath();
+                    }
+                    return ai.IsMoving() || ai.HasPathRequest;
+                }
             }
 
             return false;
@@ -3178,14 +3244,43 @@ namespace EasyRed2HumanAI
                     // vanilla Soldier.GetBestMissionObjective(), so Squad Leaders never leave their squad behind.
                     if (soldier.IsSquadLeader() && (!soldier.HasDestinationAssigned || soldier.targetDestination == null))
                     {
-                        AiCore.SoldierFastHandles h = AiCore.GetOrCreateSoldierHandles(soldier);
-                        Squad sq = h != null ? AiCore.GetCachedSquad(h, now) : soldier.joinedSquad;
+                        Squad sq = covH != null ? AiCore.GetCachedSquad(covH, now) : soldier.joinedSquad;
                         if (sq != null && sq.order == Order.follow && sq.currentTask != null)
                         {
                             Vector3 taskDest = sq.currentTask.GetTaskDestination();
                             if (taskDest.sqrMagnitude > 0.01f)
                             {
                                 __result = taskDest;
+                                return false;
+                            }
+                        }
+                    }
+
+                    // Release bots from vanilla's 15m FollowLeader leash if their human Squad Leader is AFK (>= 25s
+                    // with zero movement/rotation/animation), snapping back immediately when the player moves.
+                    if (!soldier.IsSquadLeader() && (!soldier.HasDestinationAssigned || soldier.targetDestination == null))
+                    {
+                        Squad botSq = covH != null ? AiCore.GetCachedSquad(covH, now) : soldier.joinedSquad;
+                        if (botSq != null &&
+                            botSq.order == Order.follow &&
+                            botSq.Leader != null &&
+                            botSq.Leader.IsAlive &&
+                            botSq.Leader.IsPlayer() &&
+                            AiCore.IsHumanSoldierAfk(botSq.Leader, now, 25.0f))
+                        {
+                            if (botSq.currentTask != null)
+                            {
+                                Vector3 taskDest = botSq.currentTask.GetTaskDestination();
+                                if (taskDest.sqrMagnitude > 0.01f)
+                                {
+                                    __result = taskDest;
+                                    return false;
+                                }
+                            }
+                            if (soldier.transform != null &&
+                                AiCore.TryFindFallbackObjectiveOrFriendlyPos(soldier.faction, soldier.transform.position, out Vector3 fallbackPos))
+                            {
+                                __result = fallbackPos;
                                 return false;
                             }
                         }

@@ -432,6 +432,172 @@ namespace EasyRed2HumanAI
             }
         }
 
+        internal struct ActiveBarragePocket
+        {
+            public Vector3 Position;
+            public float Radius;
+            public string Faction;
+            public float ExpireTime;
+            public bool IsFriendlyRadioStrike;
+        }
+
+        private static readonly ActiveBarragePocket[] _friendlyArtilleryZones = new ActiveBarragePocket[12];
+        private static int _friendlyArtilleryZoneCount;
+        private static float _nextFriendlyArtilleryRefreshTime;
+        private static readonly ActiveBarragePocket[] _activeShellingPockets = new ActiveBarragePocket[8];
+        private static int _shellingPocketRingHead;
+
+        internal static void ClearBarrageCoordinationCaches()
+        {
+            _friendlyArtilleryZoneCount = 0;
+            _nextFriendlyArtilleryRefreshTime = 0f;
+            _shellingPocketRingHead = 0;
+            Array.Clear(_friendlyArtilleryZones, 0, _friendlyArtilleryZones.Length);
+            Array.Clear(_activeShellingPockets, 0, _activeShellingPockets.Length);
+        }
+
+        private static void RefreshFriendlyArtilleryZones(float now)
+        {
+            if (now < _nextFriendlyArtilleryRefreshTime)
+                return;
+
+            _nextFriendlyArtilleryRefreshTime = now + 1.0f;
+            _friendlyArtilleryZoneCount = 0;
+
+            int sqCount = AiCore.WorldSquadCount;
+            var squads = AiCore.WorldSquads;
+            for (int s = 0; s < sqCount && _friendlyArtilleryZoneCount < _friendlyArtilleryZones.Length; s++)
+            {
+                ref AiCore.SquadSnapshot sqSnap = ref squads[s];
+                Squad sq = sqSnap.Ref;
+                if (sq == null || sq.Pointer == IntPtr.Zero || string.IsNullOrEmpty(sqSnap.Faction))
+                    continue;
+
+                try
+                {
+                    if (sq.RadioRequestActiveAndConfirmed() && sq.RadioRequestIsExplosiveArtillery)
+                    {
+                        float exp = sq.radioRequestEnd > now ? sq.radioRequestEnd : (now + 2.0f);
+                        _friendlyArtilleryZones[_friendlyArtilleryZoneCount++] = new ActiveBarragePocket
+                        {
+                            Position = sq.radioRequestPosition,
+                            Radius = 42.0f,
+                            Faction = sqSnap.Faction,
+                            ExpireTime = exp,
+                            IsFriendlyRadioStrike = true
+                        };
+                    }
+                }
+                catch { }
+            }
+        }
+
+        internal static void RecordHeavyArtilleryShellingImpact(Vector3 impactPos, float explosionRadius, string sourceFaction)
+        {
+            float now = Time.time;
+            float pocketRadius = Mathf.Clamp(explosionRadius * 3.8f, 24.0f, 34.0f);
+            float expire = now + 14.0f;
+
+            for (int i = 0; i < _activeShellingPockets.Length; i++)
+            {
+                ref ActiveBarragePocket existing = ref _activeShellingPockets[i];
+                if (now >= existing.ExpireTime)
+                    continue;
+
+                if ((existing.Position - impactPos).sqrMagnitude <= 24.0f * 24.0f)
+                {
+                    existing.Position = Vector3.Lerp(existing.Position, impactPos, 0.35f);
+                    existing.Radius = Mathf.Max(existing.Radius, pocketRadius);
+                    existing.ExpireTime = expire;
+                    if (!string.IsNullOrEmpty(sourceFaction))
+                        existing.Faction = sourceFaction;
+                    return;
+                }
+            }
+
+            _activeShellingPockets[_shellingPocketRingHead] = new ActiveBarragePocket
+            {
+                Position = impactPos,
+                Radius = pocketRadius,
+                Faction = sourceFaction,
+                ExpireTime = expire,
+                IsFriendlyRadioStrike = false
+            };
+            _shellingPocketRingHead = (_shellingPocketRingHead + 1) % _activeShellingPockets.Length;
+        }
+
+        internal static bool TryGetFriendlyBarrageHoldZone(
+            string myFaction,
+            Vector3 checkPos,
+            float now,
+            out Vector3 barrageCenter,
+            out float safeRadius)
+        {
+            barrageCenter = Vector3.zero;
+            safeRadius = 42.0f;
+            if (string.IsNullOrEmpty(myFaction) || _friendlyArtilleryZoneCount <= 0)
+                return false;
+
+            for (int i = 0; i < _friendlyArtilleryZoneCount; i++)
+            {
+                ref ActiveBarragePocket z = ref _friendlyArtilleryZones[i];
+                if (now >= z.ExpireTime || string.IsNullOrEmpty(z.Faction))
+                    continue;
+
+                if (!AiCore.AreSameSideFactions(myFaction, z.Faction))
+                    continue;
+
+                float dx = checkPos.x - z.Position.x;
+                float dy = checkPos.y - z.Position.y;
+                float dz = checkPos.z - z.Position.z;
+                if (dx * dx + dz * dz <= z.Radius * z.Radius && Mathf.Abs(dy) <= 35.0f)
+                {
+                    barrageCenter = z.Position;
+                    safeRadius = z.Radius;
+                    return true;
+                }
+            }
+
+            return false;
+        }
+
+        internal static bool TryGetActiveEnemyShellingPocket(
+            string myFaction,
+            Vector3 checkPos,
+            float now,
+            out Vector3 pocketCenter,
+            out float pocketRadius)
+        {
+            pocketCenter = Vector3.zero;
+            pocketRadius = 28.0f;
+
+            for (int i = 0; i < _activeShellingPockets.Length; i++)
+            {
+                ref ActiveBarragePocket p = ref _activeShellingPockets[i];
+                if (now >= p.ExpireTime)
+                    continue;
+
+                if (!string.IsNullOrEmpty(myFaction) &&
+                    !string.IsNullOrEmpty(p.Faction) &&
+                    AiCore.AreSameSideFactions(myFaction, p.Faction))
+                {
+                    continue;
+                }
+
+                float dx = checkPos.x - p.Position.x;
+                float dy = checkPos.y - p.Position.y;
+                float dz = checkPos.z - p.Position.z;
+                if (dx * dx + dz * dz <= 28.0f * 28.0f && Mathf.Abs(dy) <= 22.0f)
+                {
+                    pocketCenter = p.Position;
+                    pocketRadius = p.Radius > 0f ? p.Radius : 28.0f;
+                    return true;
+                }
+            }
+
+            return false;
+        }
+
         internal static void RunTeamNetGoapCoordinator(float now)
         {
             if (!VisionConfig.EnableTacticalGoapPlanner.Value)
@@ -441,6 +607,8 @@ namespace EasyRed2HumanAI
             int sqCount = AiCore.WorldSquadCount;
             if (sqCount < 1)
                 return;
+
+            RefreshFriendlyArtilleryZones(now);
 
             var connectedInfantrySquads = _reusableConnectedInfantrySquads;
             var activeVehicleAnvils = _reusableActiveVehicleAnvils;
@@ -1095,6 +1263,90 @@ namespace EasyRed2HumanAI
                         }
                         return;
                     }
+                }
+            }
+
+            // B3b. Friendly Artillery Barrage Hold & Post-Barrage Surge + Enemy Shelling Pocket Flank
+            if (board.IsConnectedToRadioNet && !AiCore.HasAnyHumanPlayerInSquad(sq))
+            {
+                bool hitFriendlyBarrage = TryGetFriendlyBarrageHoldZone(leader.faction, leaderPos, now, out Vector3 fBarrageCenter, out float fSafeRadius);
+                if (!hitFriendlyBarrage && board.HasActiveObjectiveTask && distToObj <= 85.0f)
+                {
+                    hitFriendlyBarrage = TryGetFriendlyBarrageHoldZone(leader.faction, board.ObjectivePosition, now, out fBarrageCenter, out fSafeRadius);
+                }
+
+                if (hitFriendlyBarrage)
+                {
+                    bool wasHolding = board.WasHoldingForFriendlyBarrage;
+                    board.WasHoldingForFriendlyBarrage = true;
+                    _squadBlackboards[sqPtr] = board;
+
+                    Vector3 away = leaderPos - fBarrageCenter;
+                    away.y = 0f;
+                    Vector3 awayDir = away.sqrMagnitude > 0.25f ? away.normalized : (-board.ThreatDirection);
+                    Vector3 rawHold = fBarrageCenter + awayDir * (fSafeRadius + 8.0f);
+                    bool hasHoldWater = AiCore.TryGetActiveWaterLevel(out float holdWaterLevel);
+                    Vector3 holdSpot = AiCore.TrySnapWalkableGroundProbe(leaderPos, rawHold, 8.0f, 16.0f, 0.55f, 3.0f, hasHoldWater, holdWaterLevel, out Vector3 snappedHold)
+                        ? snappedHold
+                        : rawHold;
+
+                    if (!issuedSquadCoverOrderThisTick &&
+                        (!wasHolding || (sq.moveOrderPosition - holdSpot).sqrMagnitude > 8.0f * 8.0f) &&
+                        (!syncOnline || AiCore.TryConsumeBotRpcBudget(0.45f)))
+                    {
+                        try
+                        {
+                            sq.HoldArea(holdSpot, 10.0f, false);
+                            issuedSquadCoverOrderThisTick = true;
+                        }
+                        catch { }
+                    }
+                }
+                else if (board.WasHoldingForFriendlyBarrage)
+                {
+                    board.WasHoldingForFriendlyBarrage = false;
+                    board.BarrageSurgeUntil = now + 10.0f;
+                    _squadBlackboards[sqPtr] = board;
+
+                    if (sq.currentTask != null &&
+                        !issuedSquadCoverOrderThisTick &&
+                        (!syncOnline || AiCore.TryConsumeBotRpcBudget(0.45f)))
+                    {
+                        try
+                        {
+                            sq.Leader_OrderAttackCurrentTask(leader);
+                            issuedSquadCoverOrderThisTick = true;
+                            TrySayTacticalVoice(leader, sq, VoiceManager.VoiceClip.charge, 0.10f);
+                        }
+                        catch { }
+                    }
+                }
+            }
+
+            if (!issuedSquadCoverOrderThisTick &&
+                !board.IsDefendingObjective &&
+                !AiCore.HasAnyHumanPlayerInSquad(sq) &&
+                sq.currentTask != null &&
+                TryGetActiveEnemyShellingPocket(leader.faction, leaderPos, now, out Vector3 shellCenter, out _))
+            {
+                Vector3 fwdAxis = board.ThreatDirection.sqrMagnitude > 0.01f ? board.ThreatDirection : leader.transform.forward;
+                Vector3 perp = Vector3.Cross(Vector3.up, fwdAxis);
+                perp.y = 0f;
+                Vector3 latDir = perp.sqrMagnitude > 0.01f ? perp.normalized : leader.transform.right;
+                if (Vector3.Dot(leaderPos - shellCenter, latDir) < 0f)
+                    latDir = -latDir;
+
+                Vector3 flankDest = shellCenter + latDir * 32.0f;
+                if ((sq.moveOrderPosition - flankDest).sqrMagnitude > 14.0f * 14.0f &&
+                    (!syncOnline || AiCore.TryConsumeBotRpcBudget(0.45f)))
+                {
+                    try
+                    {
+                        sq.AttackFromSide(latDir, flankDest, 14.0f);
+                        issuedSquadCoverOrderThisTick = true;
+                        TrySayTacticalVoice(leader, sq, VoiceManager.VoiceClip.keepYourHeadDown, 0.10f);
+                    }
+                    catch { }
                 }
             }
 
@@ -2119,61 +2371,113 @@ namespace EasyRed2HumanAI
 
         internal static void NotifySquadMemberKilled(Soldier victim)
         {
-            if (victim == null || victim.Pointer == IntPtr.Zero)
-                return;
+            NotifyFriendlyHitOrCasualty(victim, Vector3.zero, false, isFatalOrDown: true);
+        }
 
-            Squad sq = victim.joinedSquad;
-            if (sq == null || sq.Pointer == IntPtr.Zero || AiCore.IsTrueVehicleCrewSquad(sq))
+        internal static void NotifyFriendlyHitOrCasualty(
+            Soldier victim,
+            Vector3 shooterOrOrigin,
+            bool hasShooterOrigin,
+            bool isFatalOrDown)
+        {
+            if (victim == null || victim.Pointer == IntPtr.Zero)
                 return;
 
             Transform vTr = victim.transform;
             if (vTr == null)
                 return;
 
-            IntPtr sqPtr = sq.Pointer;
-            Vector3 deathPos = vTr.position;
-            float now = Time.time;
-
-            _squadBlackboards.TryGetValue(sqPtr, out SquadBlackboard board);
-            float dt = board.LastDeathDecayUpdateTime > 0f ? Mathf.Max(0f, now - board.LastDeathDecayUpdateTime) : 0f;
-            board.DecayedRecentDeaths = board.DecayedRecentDeaths * Mathf.Exp(-dt * 0.05f) + 1.0f;
-            board.LastDeathDecayUpdateTime = now;
-            board.LastCasualtyPos = deathPos;
-            board.LastCasualtyTime = now;
-            _squadBlackboards[sqPtr] = board;
-
-            // Nearby locally owned AI squadmates (<= 14m) witness their comrade drop and immediately re-evaluate their plan!
-            var units = sq.units;
-            if (units == null)
+            IntPtr victimPtr = victim.Pointer;
+            Vector3 hitPos = vTr.position;
+            string victimFac = AiCore.GetCachedFaction(victim);
+            if (string.IsNullOrEmpty(victimFac))
                 return;
 
-            IntPtr victimPtr = victim.Pointer;
-            int count = units.Count;
-            for (int i = 0; i < count; i++)
+            float now = Time.time;
+            Squad victimSq = victim.joinedSquad;
+            IntPtr victimSqPtr = (victimSq != null && victimSq.Pointer != IntPtr.Zero) ? victimSq.Pointer : IntPtr.Zero;
+
+            if (isFatalOrDown && victimSqPtr != IntPtr.Zero && !AiCore.IsTrueVehicleCrewSquad(victimSq))
             {
-                Soldier ally = units[i];
-                if (ReferenceEquals(ally, null) || ally == null || ally.Pointer == victimPtr || !ally.IsAlive || !ally.IsAI() || !AiCore.IsLocallyOwnedBot(ally))
-                    continue;
+                _squadBlackboards.TryGetValue(victimSqPtr, out SquadBlackboard board);
+                float dt = board.LastDeathDecayUpdateTime > 0f ? Mathf.Max(0f, now - board.LastDeathDecayUpdateTime) : 0f;
+                board.DecayedRecentDeaths = board.DecayedRecentDeaths * Mathf.Exp(-dt * 0.05f) + 1.0f;
+                board.LastDeathDecayUpdateTime = now;
+                board.LastCasualtyPos = hitPos;
+                board.LastCasualtyTime = now;
+                _squadBlackboards[victimSqPtr] = board;
+            }
 
-                AiCore.SoldierFastHandles ah = AiCore.GetOrCreateSoldierHandles(ally);
-                if (ah == null || ah.Tr == null)
-                    continue;
+            if (!isFatalOrDown &&
+                victim.IsAlive &&
+                AiCore.IsLocallyOwnedBot(victim) &&
+                VisionConfig.EnableTacticalVoiceCallouts.Value &&
+                (AiCore.GetDeterministicHash(victimPtr, Mathf.RoundToInt(now * 10f)) & 15) < 7)
+            {
+                VoiceManager.VoiceClip hitClip = victim.isBleeding
+                    ? VoiceManager.VoiceClip.iVeBeenHit
+                    : VoiceManager.VoiceClip.imUnderFire;
+                TrySayTacticalVoice(victim, victimSq, hitClip, 0.06f);
+            }
 
-                if ((ah.Tr.position - deathPos).sqrMagnitude > 14.0f * 14.0f)
-                    continue;
+            // Cross-squad witness reaction: nearby friendly infantry (<= 14m same squad, <= 12m adjacent squads)
+            // flinch under realistic suppression caps, cancel open-ground halts, and replan into cover!
+            AiCore.EnsureWorldSnapshot();
+            int wCount = AiCore.WorldSoldierCount;
+            var soldiers = AiCore.WorldSoldiers;
+            int addCapBase = isFatalOrDown ? 28 : 22;
 
-                float startle = 0.14f + (AiCore.GetDeterministicHash(ah.Ptr, victimPtr.GetHashCode()) & 15) * 0.018f;
-                if (now < ah.Goap.Plan.PlanExpireTime)
+            for (int i = 0; i < wCount; i++)
+            {
+                ref AiCore.SoldierSnapshot s = ref soldiers[i];
+                if (s.IsPlayer ||
+                    s.Ref == null ||
+                    s.Ptr == victimPtr ||
+                    s.IsOnVehicle ||
+                    s.IsInjured ||
+                    s.HasSurrendered)
                 {
-                    ah.Goap.Plan.NextReplanTime = Mathf.Min(ah.Goap.Plan.NextReplanTime, now + startle);
+                    continue;
                 }
 
-                if (!ally.IsOnCover() && ah.Combat.FireAndMovement.PhaseStartTime > 0f && !ah.Combat.FireAndMovement.InFiringHalt)
+                if (!AiCore.AreSameSideFactions(victimFac, s.Faction))
+                    continue;
+
+                bool sameSquad = victimSqPtr != IntPtr.Zero && s.SquadPtr == victimSqPtr;
+                float maxR = sameSquad ? 14.0f : 12.0f;
+                if ((s.Pos - hitPos).sqrMagnitude > maxR * maxR)
+                    continue;
+
+                AiCore.SoldierFastHandles ah = s.Handles ?? AiCore.GetOrCreateSoldierHandles(s.Ref);
+                if (ah == null || now < ah.NextWitnessReactTime || !AiCore.IsLocallyOwnedBot(ah))
+                    continue;
+
+                ah.NextWitnessReactTime = now + 3.5f;
+
+                int addSupp = Mathf.Min(addCapBase, Mathf.Max(0, 58 - Mathf.RoundToInt(s.Ref.GetSuppressionValue())));
+                if (addSupp > 0)
                 {
-                    ah.Combat.FireAndMovement.InFiringHalt = true;
-                    ah.Combat.FireAndMovement.PhaseStartTime = now;
-                    ah.Combat.FireAndMovement.PhaseEndTime = now + 1.65f;
-                    ah.Combat.FireAndMovement.HaltLostSightTime = 0f;
+                    s.Ref.Suppress(addSupp, null);
+                }
+
+                ah.Goap.Plan.NextReplanTime = Mathf.Min(ah.Goap.Plan.NextReplanTime, now + 0.08f + (i % 5) * 0.05f);
+                if (ah.Combat.FireAndMovement.InFiringHalt)
+                {
+                    ah.Combat.FireAndMovement.InFiringHalt = false;
+                }
+
+                if (hasShooterOrigin &&
+                    s.SquadPtr != IntPtr.Zero &&
+                    _squadBlackboards.TryGetValue(s.SquadPtr, out SquadBlackboard wBoard) &&
+                    (!wBoard.HasActiveThreat || now - wBoard.LastKnownThreatTime > 2.0f))
+                {
+                    wBoard.LastKnownThreatPos = shooterOrOrigin;
+                    wBoard.LastKnownThreatTime = now;
+                    Vector3 d = shooterOrOrigin - s.Pos;
+                    d.y = 0f;
+                    if (d.sqrMagnitude > 0.01f)
+                        wBoard.ThreatDirection = d.normalized;
+                    _squadBlackboards[s.SquadPtr] = wBoard;
                 }
             }
         }

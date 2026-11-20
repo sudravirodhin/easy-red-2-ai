@@ -1031,7 +1031,7 @@ namespace EasyRed2HumanAI
                 {
                     _vehiclesSeekingRepairStation.Remove(vehPtr);
                     Squad sq = aiVeh.squadInside;
-                    if (sq != null && !sq.IsPlayerInSquad() && sq.Leader != null)
+                    if (sq != null && !AiCore.HasAnyHumanPlayerInSquad(sq) && sq.Leader != null)
                     {
                         sq.Leader_OrderAttackCurrentTask(sq.Leader);
                     }
@@ -1110,7 +1110,7 @@ namespace EasyRed2HumanAI
             }
 
             Squad crewSq = aiVeh.squadInside;
-            if (crewSq != null && !crewSq.IsPlayerInSquad())
+            if (crewSq != null && !AiCore.HasAnyHumanPlayerInSquad(crewSq))
             {
                 if (crewSq.order == Order.follow)
                     crewSq.order = Order.defend;
@@ -1202,7 +1202,7 @@ namespace EasyRed2HumanAI
             {
                 if (_vehiclesAnsweringTankSupport.Remove(vehPtr))
                 {
-                    if (crewSq != null && !crewSq.IsPlayerInSquad() && crewSq.Leader != null &&
+                    if (crewSq != null && !AiCore.HasAnyHumanPlayerInSquad(crewSq) && crewSq.Leader != null &&
                         (!Photon.Pun.PhotonNetwork.InRoom || AiCore.TryConsumeBotRpcBudget(0.45f)))
                     {
                         crewSq.Leader_OrderAttackCurrentTask(crewSq.Leader);
@@ -1236,7 +1236,7 @@ namespace EasyRed2HumanAI
             if (destChanged || !_vehiclesAnsweringTankSupport.Contains(vehPtr))
             {
                 _vehiclesAnsweringTankSupport.Add(vehPtr);
-                if (crewSq != null && !crewSq.IsPlayerInSquad())
+                if (crewSq != null && !AiCore.HasAnyHumanPlayerInSquad(crewSq))
                 {
                     bool isTank = veh.TryCast<VehicleTank>() != null;
                     if (crewSq.order == Order.follow)
@@ -1356,7 +1356,7 @@ namespace EasyRed2HumanAI
 
                 veh.DropInfantry(false);
                 Squad sqInside = veh.GetSquadInside();
-                if (sqInside != null && !sqInside.IsPlayerInSquad())
+                if (sqInside != null && !AiCore.HasAnyHumanPlayerInSquad(sqInside))
                 {
                     sqInside.OrderLeaveVehicle(veh, false);
                 }
@@ -1365,6 +1365,140 @@ namespace EasyRed2HumanAI
                 if (VisionConfig.DebugLogging.Value)
                 {
                     AiCore.LogDebug("ApcDismount", $"Transport vehicle dismounted infantry passengers under combat threat.");
+                }
+            }
+        }
+
+        // =====================================================================
+        // Tank Rock / Rubble Belly High-Center Crawl Assist (VehicleTank.FixedUpdate)
+        // =====================================================================
+        [HarmonyPatch(typeof(VehicleTank), nameof(VehicleTank.FixedUpdate))]
+        public static class VehicleTank_FixedUpdate_Patch
+        {
+            public static void Prefix(out long __state)
+            {
+                __state = HitchProfiler.Begin();
+            }
+
+            public static void Postfix(VehicleTank __instance, long __state)
+            {
+                try
+                {
+                    if (!VisionConfig.EnableMod.Value ||
+                        !VisionConfig.EnableTankRockUnstickAssist.Value ||
+                        ReferenceEquals(__instance, null) ||
+                        __instance == null ||
+                        __instance.Pointer == IntPtr.Zero)
+                    {
+                        return;
+                    }
+
+                    AiCore.VehicleFastHandles vh = AiCore.GetOrCreateVehicleHandles(__instance);
+                    if (vh == null)
+                        return;
+
+                    // Evaluate raycasts & damage/input state at most once per rendered frame per tank;
+                    // replay only cached AddForce on subsequent FixedUpdate physics substeps.
+                    int curFrame = Time.frameCount;
+                    if (vh.UnstickLastFrame == curFrame)
+                    {
+                        if (vh.UnstickApplyForce)
+                        {
+                            Rigidbody cachedRb = __instance.rb;
+                            if (cachedRb != null && !cachedRb.isKinematic)
+                                cachedRb.AddForce(vh.UnstickForceVec, ForceMode.Acceleration);
+                        }
+                        return;
+                    }
+
+                    vh.UnstickLastFrame = curFrame;
+
+                    if (!__instance.OwnDriverOrVehicle() ||
+                        !__instance.engineStarted ||
+                        __instance.IsDisabled() ||
+                        __instance.transform == null)
+                    {
+                        vh.UnstickApplyForce = false;
+                        return;
+                    }
+
+                    float throttleY = __instance.GetMovingDir().y;
+                    if (Mathf.Abs(throttleY) <= 0.25f ||
+                        __instance.GetPercentageDamageFor(VehicleInternalPart.tracks) >= 0.98f ||
+                        __instance.GetPercentageDamageFor(VehicleInternalPart.engine) >= 0.98f)
+                    {
+                        vh.HighCenteredDuration = 0f;
+                        vh.UnstickApplyForce = false;
+                        return;
+                    }
+
+                    Rigidbody rb = __instance.rb;
+                    if (rb == null || rb.isKinematic)
+                    {
+                        vh.UnstickApplyForce = false;
+                        return;
+                    }
+
+                    float speedSq = rb.velocity.sqrMagnitude;
+                    if (speedSq > 2.25f * 2.25f)
+                    {
+                        vh.HighCenteredDuration = 0f;
+                        vh.UnstickApplyForce = false;
+                        return;
+                    }
+
+                    if (speedSq < 0.85f * 0.85f)
+                    {
+                        vh.HighCenteredDuration += Mathf.Min(Time.deltaTime, 0.10f);
+                    }
+                    else if (vh.HighCenteredDuration < 1.40f)
+                    {
+                        vh.UnstickApplyForce = false;
+                        return;
+                    }
+
+                    if (vh.HighCenteredDuration < 1.40f)
+                    {
+                        vh.UnstickApplyForce = false;
+                        return;
+                    }
+
+                    Vector3 tankPos = __instance.transform.position;
+                    Vector3 driveDir = throttleY >= 0f ? __instance.transform.forward : -__instance.transform.forward;
+                    driveDir.y = 0f;
+                    if (driveDir.sqrMagnitude < 0.001f)
+                    {
+                        vh.UnstickApplyForce = false;
+                        return;
+                    }
+                    driveDir.Normalize();
+
+                    if (AiCore.IsDirectionBlockedByEnvironment(tankPos + Vector3.up * 1.55f, driveDir, 4.2f, __instance.transform.root))
+                    {
+                        vh.UnstickApplyForce = false;
+                        return;
+                    }
+
+                    Vector3 forceVec = driveDir * 5.8f + Vector3.up * 1.35f;
+                    vh.UnstickApplyForce = true;
+                    vh.UnstickForceVec = forceVec;
+                    rb.AddForce(forceVec, ForceMode.Acceleration);
+
+                    float now = Time.time;
+                    if (now >= vh.NextUnstickCountTime)
+                    {
+                        vh.NextUnstickCountTime = now + 5.0f;
+                        TankRockUnsticksCount++;
+                        if (VisionConfig.DebugLogging.Value)
+                        {
+                            AiCore.LogDebug("TankUnstick", $"Applied sprocket/track rock-crawl assist to '{__instance.name}'.");
+                        }
+                    }
+                }
+                catch { }
+                finally
+                {
+                    HitchProfiler.End(HitchBucket.VehFixedUpdate, __state);
                 }
             }
         }

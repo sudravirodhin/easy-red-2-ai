@@ -76,6 +76,7 @@ namespace EasyRed2HumanAI
                     {
                         TryCreditDestroyedVehicleCasualty(__instance, __state);
                         TryCreditEnemyVehicleDisableToLocalPlayer(__instance, directPlayerHit: false);
+                        RecordVehicleDisabledAttribution(__instance);
                     }
                 }
                 catch { }
@@ -118,6 +119,7 @@ namespace EasyRed2HumanAI
                     {
                         TryCreditDestroyedVehicleCasualty(__instance, __state);
                         TryCreditEnemyVehicleDisableToLocalPlayer(__instance, directPlayerHit: false);
+                        RecordVehicleDisabledAttribution(__instance);
                     }
                 }
                 catch { }
@@ -289,7 +291,7 @@ namespace EasyRed2HumanAI
             }
 
             Soldier leader = crewSq.Leader;
-            if (!crewSq.IsPlayerInSquad() && leader != null && leader.IsAlive && AiCore.IsLocallyOwnedBot(leader))
+            if (!AiCore.HasAnyHumanPlayerInSquad(crewSq) && leader != null && leader.IsAlive && AiCore.IsLocallyOwnedBot(leader))
             {
                 TrySayTacticalVoice(leader, crewSq, VoiceManager.VoiceClip.timeToRetreat, 0.25f);
                 crewSq.HoldArea(retreatPos, 15.0f, false);
@@ -1173,7 +1175,7 @@ namespace EasyRed2HumanAI
                             ? veh.transform.position
                             : (crewSq.Leader != null && crewSq.Leader.transform != null ? crewSq.Leader.transform.position : Vector3.zero);
 
-                        if (crewSq.IsPlayerInSquad() || !ShouldGroundedTankCrewStayAndJoinInfantry(crewSq, fac, originPos))
+                        if (AiCore.HasAnyHumanPlayerInSquad(crewSq) || !ShouldGroundedTankCrewStayAndJoinInfantry(crewSq, fac, originPos))
                         {
                             AssignCrewSquadRetreatTask(crewSq, fac, originPos, allowWaterSurface: false, replaceExistingIfFar: false);
                         }
@@ -1246,7 +1248,65 @@ namespace EasyRed2HumanAI
             return maxArmor;
         }
 
-        private static bool HasTurretWeaponAmmoInSlot(
+        /// <summary>
+        /// Returns true if a weapon <paramref name="turret"/> possesses an available munition capable of
+        /// penetrating or disabling <paramref name="targetVeh"/> at <paramref name="dist"/> meters.
+        /// Commander cupolas (<c>TurretCommander</c>) always return true so commanders keep spotting armor,
+        /// while bow/coax MGs or out-of-AP light guns return false so they stop fruitlessly plinking heavy tanks.
+        /// </summary>
+        internal static bool CanTurretEffectivelyDamageArmoredVehicle(Turret turret, Vehicle targetVeh, float dist)
+        {
+            if (targetVeh == null || targetVeh.Pointer == IntPtr.Zero || targetVeh.IsAirVehicle())
+                return true;
+
+            float armorMm = GetVehicleMaxHullArmorMm(targetVeh);
+            if (armorMm < 8.0f)
+                return true;
+
+            if (turret == null || turret.Pointer == IntPtr.Zero || turret.TryCast<TurretCommander>() != null)
+                return true;
+
+            TurretGun tg = turret.TryCast<TurretGun>();
+            if (tg == null || tg.weapons == null || tg.weapons.Length == 0)
+                return true;
+
+            Vehicle rootVeh = tg.rootVehicle;
+            InventoryManager inv = rootVeh != null ? rootVeh.GetInventory() : null;
+            float penNeed = armorMm * 0.65f;
+            float checkDist = Mathf.Max(5.0f, dist);
+            var weapons = tg.weapons;
+
+            for (int wIdx = 0; wIdx < weapons.Length; wIdx++)
+            {
+                TurretWeapon w = weapons[wIdx];
+                if (w == null || w.ammos == null)
+                    continue;
+
+                bool refreshedInv = false;
+                var ammos = w.ammos;
+                for (int aIdx = 0; aIdx < ammos.Length; aIdx++)
+                {
+                    if (!HasTurretWeaponAmmoInSlot(w, aIdx, inv, ref refreshedInv))
+                        continue;
+
+                    BulletData bd = w.GetBulletDataFor(aIdx) ?? w.BulletData;
+                    if (bd == null)
+                        continue;
+
+                    float effPen = Mathf.Max(bd.CalculateMmPenetrationWithFallof(checkDist), bd.explosion_penetration);
+                    if (effPen >= penNeed)
+                        return true;
+
+                    // Heavy >= 50mm HE shells can still track/de-crew armor when AP rounds run dry.
+                    if (bd.caliber >= 50.0f && IsTrueHeOrAntiInfantryRound(bd))
+                        return true;
+                }
+            }
+
+            return false;
+        }
+
+        internal static bool HasTurretWeaponAmmoInSlot(
             TurretWeapon w,
             int aIdx,
             InventoryManager inv,

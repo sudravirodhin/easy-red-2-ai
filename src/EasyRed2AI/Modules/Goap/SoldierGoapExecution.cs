@@ -787,6 +787,67 @@ namespace EasyRed2HumanAI
                 return true;
             }
 
+            // Pass 1b: Intermediate 18-24m detour hop for chronically stalled bots ("rubble-zombie") whose long vanilla
+            // A* path repeatedly failed to route across dense ruins/rubble toward a distant (>25m) destination.
+            if (!onVehicleHull &&
+                !isOnBridge &&
+                !ai.IsMoving() &&
+                st.ConsecutiveUnsticks >= 2 &&
+                toEndFlat.sqrMagnitude > 25.0f * 25.0f)
+            {
+                Vector3 hopFwd = new Vector3(toEndFlat.x, 0f, toEndFlat.y).normalized;
+                Vector3 hopRight = new Vector3(hopFwd.z, 0f, -hopFwd.x);
+                float hopDist = Mathf.Clamp(toEndFlat.magnitude * 0.45f, 18.0f, 24.0f);
+
+                for (int hIdx = 0; hIdx < 5; hIdx++)
+                {
+                    float cosA;
+                    float sinA;
+                    switch (hIdx)
+                    {
+                        case 0: cosA = 1.0f; sinA = 0.0f; break;
+                        case 1: cosA = 0.848048f; sinA = 0.529919f * sideSign; break;
+                        case 2: cosA = 0.848048f; sinA = -0.529919f * sideSign; break;
+                        case 3: cosA = 0.529919f; sinA = 0.848048f * sideSign; break;
+                        default: cosA = 0.529919f; sinA = -0.848048f * sideSign; break;
+                    }
+
+                    Vector3 candDir = hopFwd * cosA + hopRight * sinA;
+                    if (!AiCore.TrySnapWalkableGroundProbe(
+                            myPos,
+                            myPos + candDir * hopDist,
+                            6.0f,
+                            12.0f,
+                            0.55f,
+                            2.2f,
+                            hasWater && !alreadyInShallowWater,
+                            waterLevel,
+                            out Vector3 hopPos,
+                            2.4f))
+                    {
+                        continue;
+                    }
+
+                    if (hasWater && hopPos.y <= minAllowedWaterY)
+                        continue;
+
+                    if (AiCore.TryGetNearbyKnownMine(hopPos, 4.0f, false, out _))
+                        continue;
+
+                    st.UnstickDest = hopPos;
+                    st.UnstickOverrideUntil = now + 4.5f;
+                    st.NextUnstickTime = now + 4.8f;
+                    if (stuckH != null)
+                    {
+                        stuckH.Goap.FootStuck = st;
+                        AiCore.SetBotMoveOverride(stuckH, AiCore.BotMoveOverrideKind.UnstickSidestep, hopPos, now + 4.5f);
+                    }
+                    AiCore.SetBotMoveDestinationAndRefreshPath(ai, hopPos, 0.25f);
+                    FootBotUnsticksCount++;
+                    return true;
+                }
+            }
+
             // Pass 2: Steep > 18.8 deg hillside or +0.34m curb fallback — route a 4.5m radial contour step through CPathFinding
             // (and if CPathFinding cannot bridge a >= 0.85m ledge drop, allow direct drop-off override onto the validated ground).
             if (!isOnBridge)
@@ -1231,7 +1292,8 @@ namespace EasyRed2HumanAI
                 return false;
 
             if (!AiCore.IsConfirmedPlaneCrewSquad(sq) &&
-                sq.IsPlayerInSquad() &&
+                AiCore.HasAnyHumanPlayerInSquad(sq) &&
+                !AiCore.IsHumanSoldierAfk(sq.Leader, Time.time, 25.0f) &&
                 (!IsSquadOnRetreatTask(sq) ||
                  (sq.Leader != null && sq.Leader.IsAlive && sq.Leader.IsPlayer())))
             {
@@ -1349,6 +1411,17 @@ namespace EasyRed2HumanAI
                     if (sq != null && sq.Leader != null && sq.Leader.IsAlive && sq.Leader.transform != null)
                     {
                         Vector3 leaderPos = sq.Leader.transform.position;
+                        if (board.HasActiveObjectiveTask)
+                        {
+                            float leaderObjDistSq = (leaderPos - board.ObjectivePosition).sqrMagnitude;
+                            float myObjDistSq = (myPos - board.ObjectivePosition).sqrMagnitude;
+                            if (leaderObjDistSq > myObjDistSq + 25.0f * 25.0f &&
+                                (leaderPos - myPos).sqrMagnitude > 60.0f * 60.0f)
+                            {
+                                break;
+                            }
+                        }
+
                         if (soldier.HasDestinationAssigned && soldier.targetDestination != null)
                         {
                             Vector3 covPos = soldier.targetDestination.GetCoverPosition();
@@ -1549,12 +1622,13 @@ namespace EasyRed2HumanAI
         {
             bool onNarrowBridge = (ws & GoapStateBits.OnBridgeOrNarrow) != 0;
             bool inMultiSidedOrIndoors = IsPositionInMultiSidedOrIndoorShelter(myPos, out bool isIndoorRoofed, out _);
+            bool underShelling = TryGetActiveEnemyShellingPocket(soldier.faction, myPos, now, out _, out _);
             if (TrySeekNearbyCover(ai, soldier))
             {
                 plan.LockUnitCoverChange = true;
                 if (soldier.IsOnCover())
                 {
-                    SoldierPose coverPose = (!onNarrowBridge && !ai.HasEnemyAndCanFireAtHim && (isIndoorRoofed || inMultiSidedOrIndoors || suppression >= 28f))
+                    SoldierPose coverPose = (!onNarrowBridge && !ai.HasEnemyAndCanFireAtHim && (isIndoorRoofed || inMultiSidedOrIndoors || underShelling || suppression >= 28f))
                         ? SoldierPose.Prone
                         : SoldierPose.Crouch;
                     SetBotPose(ai, soldier, coverPose);
@@ -1615,7 +1689,7 @@ namespace EasyRed2HumanAI
                     }
                     else
                     {
-                        SoldierPose dropPose = (!onNarrowBridge && suppression >= 25f) ? SoldierPose.Prone : SoldierPose.Crouch;
+                        SoldierPose dropPose = (!onNarrowBridge && (underShelling || suppression >= 25f)) ? SoldierPose.Prone : SoldierPose.Crouch;
                         SetBotPose(ai, soldier, dropPose, true);
                         plan.PlanExpireTime = Mathf.Min(plan.PlanExpireTime, now + 1.8f);
                     }

@@ -168,19 +168,31 @@ namespace EasyRed2HumanAI
                     for (int s = 0; s < sqCount; s++)
                     {
                         ref AiCore.SquadSnapshot sqSnap = ref squads[s];
-                        if (!sqSnap.IsVehicleCrew || !sqSnap.LeaderIsAlive || sqSnap.IsPlayerInSquad || sqSnap.LeaderOnVehicle || sqSnap.UnitCount < 2)
+                        if (!sqSnap.IsVehicleCrew || !sqSnap.LeaderIsAlive || sqSnap.LeaderOnVehicle)
+                            continue;
+
+                        bool isPlayerSq = sqSnap.IsPlayerInSquad;
+                        bool afkPlayerCrew = isPlayerSq &&
+                                             sqSnap.Leader != null &&
+                                             sqSnap.Leader.IsPlayer() &&
+                                             AiCore.IsHumanSoldierAfk(sqSnap.Leader, now, 25.0f) &&
+                                             !AiCore.IsVehicleReservedByNearbyActiveHuman(veh, now);
+                        if (isPlayerSq && !afkPlayerCrew)
+                            continue;
+                        if (!afkPlayerCrew && sqSnap.UnitCount < 2)
                             continue;
 
                         if (occupantFaction != null && AiCore.AreEnemyFactions(occupantFaction, sqSnap.Faction))
                             continue;
 
                         float dSq = (sqSnap.RefPos - vehPos).sqrMagnitude;
-                        if (dSq >= bestCrewDistSq)
+                        float maxRemountSq = afkPlayerCrew ? (45.0f * 45.0f) : bestCrewDistSq;
+                        if (dSq >= maxRemountSq)
                             continue;
 
                         Squad sq = sqSnap.Ref;
                         Soldier leader = sqSnap.Leader;
-                        if (sq == null || sq.SomeoneIsRepairing() || !AiCore.IsLocallyOwnedBot(leader))
+                        if (sq == null || sq.SomeoneIsRepairing() || (!afkPlayerCrew && !AiCore.IsLocallyOwnedBot(leader)))
                             continue;
 
                         if (vehNeedsRepair)
@@ -194,10 +206,10 @@ namespace EasyRed2HumanAI
                         int uEnd = sqSnap.UnitStartIndex + sqSnap.UnitCount;
                         for (int cIdx = sqSnap.UnitStartIndex; cIdx < uEnd; cIdx++)
                         {
-                            if (!soldiers[cIdx].IsOnVehicle)
+                            if (!soldiers[cIdx].IsPlayer && !soldiers[cIdx].IsOnVehicle && AiCore.IsLocallyOwnedBot(soldiers[cIdx].Ref))
                                 aliveFootCrew++;
                         }
-                        if (aliveFootCrew < 2)
+                        if (aliveFootCrew < (afkPlayerCrew ? 1 : 2))
                             continue;
 
                         bestCrewDistSq = dSq;
@@ -221,7 +233,8 @@ namespace EasyRed2HumanAI
                                 }
                             }
                             StaticGunsStaffedCount++;
-                            TrySayTacticalVoice(bestBailedCrew.Leader, bestBailedCrew, VoiceManager.VoiceClip.illTakeHisSeat, 0.15f);
+                            if (bestBailedCrew.Leader != null && !bestBailedCrew.Leader.IsPlayer())
+                                TrySayTacticalVoice(bestBailedCrew.Leader, bestBailedCrew, VoiceManager.VoiceClip.illTakeHisSeat, 0.15f);
                         }
                         catch { }
                         continue;
@@ -1552,10 +1565,18 @@ namespace EasyRed2HumanAI
                     }
 
                     Squad sq = __0.joinedSquad;
-                    bool isPlayerSquad = sq != null && sq.IsPlayerInSquad();
+                    bool isPlayerSquad = sq != null && AiCore.HasAnyHumanPlayerInSquad(sq);
                     if (isPlayerSquad)
                     {
                         ClearEmplacementAssignment(__0.Pointer, markUnreachable: false);
+                        bool isExplicitRemount = sq != null &&
+                                                 _squadOrderedToVehicle.TryGetValue(sq.Pointer, out IntPtr rVehPtr) &&
+                                                 rVehPtr == __instance.Pointer;
+                        if (isExplicitRemount && __instance.TryCast<MovableVehicle>() != null && !__instance.HasDriver() && TryGetAvailableDriverSeatIndex(__instance, out int pDriverIdx))
+                        {
+                            __instance.GetOnVehicle(pDriverIdx, __0);
+                            return false;
+                        }
                         return true;
                     }
 
@@ -1676,7 +1697,7 @@ namespace EasyRed2HumanAI
                     if (!VisionConfig.EnableMod.Value || __1 == null || __1.Pointer == IntPtr.Zero)
                         return true;
 
-                    if (__1.PlayerIsInside())
+                    if (AiCore.IsVehicleReservedByNearbyActiveHuman(__1, Time.time))
                         return false;
 
                     if (!AiCore.IsLocallyOwnedVehicle(__1))
@@ -2033,6 +2054,78 @@ namespace EasyRed2HumanAI
                     }
                 }
                 catch { }
+            }
+        }
+
+        // =====================================================================
+        // Vanilla Co-op Fix: VehicleSpawner Reservation Lock (Double-Booking Prevention)
+        // Prevents a second player in Co-op from spawning into the same freshly spawned
+        // plane/tank during the Photon RespondSpawnOnvehicle -> SyncUnitOnVehicle round-trip.
+        // =====================================================================
+        private static readonly Dictionary<IntPtr, float> _spawnerReserveUntil = new Dictionary<IntPtr, float>(32);
+
+        internal static void ResetSpawnerReservations()
+        {
+            _spawnerReserveUntil.Clear();
+        }
+
+        [HarmonyPatch(typeof(VehicleSpawner), nameof(VehicleSpawner.SpawnVehicle))]
+        public static class VehicleSpawner_SpawnVehicle_Patch
+        {
+            public static void Postfix(VehicleSpawner __instance, Vehicle __result)
+            {
+                try
+                {
+                    if (!VisionConfig.EnableMod.Value ||
+                        __instance == null ||
+                        __instance.Pointer == IntPtr.Zero ||
+                        __result == null ||
+                        __result.Pointer == IntPtr.Zero)
+                    {
+                        return;
+                    }
+
+                    if (Photon.Pun.PhotonNetwork.InRoom && AiCore.IsMasterClient())
+                    {
+                        _spawnerReserveUntil[__instance.Pointer] = Time.time + 3.5f;
+                    }
+                }
+                catch { }
+            }
+        }
+
+        [HarmonyPatch(typeof(VehicleSpawner), nameof(VehicleSpawner.IsAvailable))]
+        public static class VehicleSpawner_IsAvailable_Patch
+        {
+            public static bool Prefix(VehicleSpawner __instance, ref bool __result)
+            {
+                try
+                {
+                    if (!VisionConfig.EnableMod.Value ||
+                        !Photon.Pun.PhotonNetwork.InRoom ||
+                        !AiCore.IsMasterClient() ||
+                        __instance == null ||
+                        __instance.Pointer == IntPtr.Zero)
+                    {
+                        return true;
+                    }
+
+                    if (_spawnerReserveUntil.TryGetValue(__instance.Pointer, out float reserveUntil))
+                    {
+                        if (Time.time < reserveUntil)
+                        {
+                            Vehicle sv = __instance.spawnedVehicle;
+                            if (sv != null && sv.Pointer != IntPtr.Zero && sv.IsOperative() && !sv.IsDisabled())
+                            {
+                                __result = false;
+                                return false;
+                            }
+                        }
+                        _spawnerReserveUntil.Remove(__instance.Pointer);
+                    }
+                }
+                catch { }
+                return true;
             }
         }
     }

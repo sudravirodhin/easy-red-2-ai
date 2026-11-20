@@ -2206,7 +2206,7 @@ namespace EasyRed2HumanAI
                         SoldierFastHandles refHandles = leaderAlive ? leaderHandles : null;
                         int unitStart = WorldSoldierCount;
                         int addedUnits = 0;
-                        bool isPlayerInSq = sq.IsPlayerInSquad();
+                        bool isPlayerInSq = HasAnyHumanPlayerInSquad(sq);
                         bool hasAliveRadiomanNear = false;
                         float maxRadDistSq = isPlayerInSq ? (95f * 95f) : (60f * 60f);
                         Vector3 leaderPos = leaderAlive ? leaderHandles.Tr.position : Vector3.zero;
@@ -2253,6 +2253,34 @@ namespace EasyRed2HumanAI
                             }
 
                             Vector3 uPos = uHandles.Tr.position;
+                            bool isHuman = u.IsPlayer();
+                            bool isOnVeh = u.IsOnVehicle();
+                            if (isHuman)
+                            {
+                                float curYaw = uHandles.Tr.eulerAngles.y;
+                                bool vehActive = isOnVeh && !u.IsAI();
+                                if (uHandles.LastHumanActiveTime <= 0f ||
+                                    now < uHandles.LastHumanActiveTime ||
+                                    (uPos - uHandles.LastHumanActivePos).sqrMagnitude > 0.75f * 0.75f ||
+                                    Mathf.Abs(Mathf.DeltaAngle(curYaw, uHandles.LastHumanActiveYaw)) > 10.0f ||
+                                    u.isInHandsAnimation ||
+                                    u.isInBodyAnimation)
+                                {
+                                    uHandles.LastHumanActivePos = uPos;
+                                    uHandles.LastHumanActiveYaw = curYaw;
+                                    uHandles.LastHumanActiveTime = now;
+                                }
+                                if (vehActive)
+                                {
+                                    Vehicle curV = u.GetCurrentVehicle();
+                                    VehicleFastHandles curVh = GetOrCreateVehicleHandles(curV);
+                                    if (curVh != null)
+                                    {
+                                        curVh.LastHumanOccupant = u;
+                                        curVh.LastHumanInsideTime = now;
+                                    }
+                                }
+                            }
                             bool uSurr = IsTrueSurrenderedPrisoner(u, uHandles);
                             if (radioNetEnabled && !hasAliveRadiomanNear && u.IsRadioman() && !uSurr)
                             {
@@ -2272,8 +2300,8 @@ namespace EasyRed2HumanAI
                                 SquadPtr = sq.Pointer,
                                 Pos = uPos,
                                 Faction = GetCachedFaction(uHandles, now),
-                                IsPlayer = u.IsPlayer(),
-                                IsOnVehicle = u.IsOnVehicle(),
+                                IsPlayer = isHuman,
+                                IsOnVehicle = isOnVeh,
                                 IsSquadLeader = leaderAlive && uHandles.Ptr == leaderHandles.Ptr,
                                 HasSurrendered = uSurr,
                                 IsSpotted = u.IsSpotted,
@@ -2587,7 +2615,7 @@ namespace EasyRed2HumanAI
                     if (eligibleZombieAudit)
                     {
                         Squad wdSq = GetCachedSquad(h, now);
-                        if (wdSq != null && wdSq.IsPlayerInSquad())
+                        if (wdSq != null && HasAnyHumanPlayerInSquad(wdSq))
                             eligibleZombieAudit = false;
                     }
 

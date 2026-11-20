@@ -127,6 +127,12 @@ namespace EasyRed2HumanAI
             public Vector3 WatchdogAnchorPos;
             public float WatchdogStationarySince;
             public float NextAnomalyAlertTime;
+            public Vector3 LastHumanActivePos;
+            public float LastHumanActiveYaw;
+            public float LastHumanActiveTime;
+            public float NextWitnessReactTime;
+            public bool InSmokeCached;
+            public float NextInSmokeCheckTime;
 
             internal BotMoveOverrideState MoveOverride;
             internal SoldierVeterancyState Veterancy;
@@ -363,6 +369,14 @@ namespace EasyRed2HumanAI
             public float EmplacementHazardCooldownUntil;
             public float LastCrewLossTime;
             public int LastObservedPeopleInside;
+
+            public int UnstickLastFrame = -1;
+            public bool UnstickApplyForce;
+            public Vector3 UnstickForceVec;
+            public float HighCenteredDuration;
+            public float NextUnstickCountTime;
+            public Soldier LastHumanOccupant;
+            public float LastHumanInsideTime;
         }
 
         public struct TurretFastTraits
@@ -1805,6 +1819,131 @@ namespace EasyRed2HumanAI
             Soldier leader = sq.Leader;
             isLeader = leader != null && leader.Pointer == localPlayer.Pointer;
             return true;
+        }
+
+        /// <summary>
+        /// Co-op-safe equivalent of vanilla <c>Squad.IsPlayerInSquad()</c>, which only checks the
+        /// local client's <c>PlayerController</c>. Returns true on Host or Client whenever ANY alive
+        /// human player (<c>u.IsPlayer()</c>) belongs to <paramref name="sq"/>.
+        /// </summary>
+        public static bool HasAnyHumanPlayerInSquad(Squad sq)
+        {
+            if (sq == null || sq.Pointer == IntPtr.Zero)
+                return false;
+
+            if (sq.IsPlayerInSquad())
+                return true;
+
+            try
+            {
+                var units = sq.units;
+                if (units != null)
+                {
+                    int c = units.Count;
+                    for (int i = 0; i < c; i++)
+                    {
+                        Soldier u = units[i];
+                        if (!ReferenceEquals(u, null) && u != null && u.IsAlive && u.IsPlayer())
+                            return true;
+                    }
+                }
+            }
+            catch { }
+            return false;
+        }
+
+        public static bool IsHumanSoldierAfk(Soldier player, float now, float afkSeconds = 25.0f)
+        {
+            if (ReferenceEquals(player, null) || player == null || !player.IsAlive || !player.IsPlayer())
+                return false;
+
+            if (!TryGetSoldierHandles(player.Pointer, out SoldierFastHandles h) || h.LastHumanActiveTime <= 0f)
+                return false;
+
+            if (now < h.LastHumanActiveTime)
+                return false;
+
+            return (now - h.LastHumanActiveTime) >= afkSeconds;
+        }
+
+        public static bool IsVehicleReservedByNearbyActiveHuman(Vehicle veh, float now)
+        {
+            if (veh == null || veh.Pointer == IntPtr.Zero)
+                return false;
+
+            if (veh.PlayerIsInside())
+                return true;
+
+            if (!_vehicleHandlesByPtr.TryGetValue(veh.Pointer, out VehicleFastHandles vh) || vh == null || vh.LastHumanInsideTime <= 0f)
+                return false;
+
+            if (now < vh.LastHumanInsideTime || (now - vh.LastHumanInsideTime) > 90.0f)
+                return false;
+
+            Soldier human = vh.LastHumanOccupant;
+            if (ReferenceEquals(human, null) || human == null || !human.IsAlive || !human.IsPlayer() || human.IsOnVehicle() || human.transform == null || veh.transform == null)
+                return false;
+
+            if ((human.transform.position - veh.transform.position).sqrMagnitude > 25.0f * 25.0f)
+                return false;
+
+            return !IsHumanSoldierAfk(human, now, 25.0f);
+        }
+
+        private static readonly List<MissionObjective> _reusableFallbackObjectives = new List<MissionObjective>(12);
+
+        public static bool TryFindFallbackObjectiveOrFriendlyPos(string faction, Vector3 fromPos, out Vector3 fallbackPos)
+        {
+            fallbackPos = Vector3.zero;
+            float bestDistSq = float.MaxValue;
+            bool found = false;
+
+            try
+            {
+                BattleManager bm = BattleManager.instance;
+                BattlePhase phase = (bm != null && bm.phases != null && bm.currentPhaseNum >= 0 && bm.currentPhaseNum < bm.phases.Length)
+                    ? bm.phases[bm.currentPhaseNum]
+                    : null;
+                if (phase != null)
+                {
+                    CollectActiveMissionObjectives(phase, _reusableFallbackObjectives);
+                    for (int i = 0; i < _reusableFallbackObjectives.Count; i++)
+                    {
+                        MissionObjective obj = _reusableFallbackObjectives[i];
+                        if (obj == null || obj.transform == null)
+                            continue;
+                        Vector3 oPos = obj.transform.position;
+                        float dSq = (oPos - fromPos).sqrMagnitude;
+                        if (dSq < bestDistSq)
+                        {
+                            bestDistSq = dSq;
+                            fallbackPos = oPos;
+                            found = true;
+                        }
+                    }
+                    _reusableFallbackObjectives.Clear();
+                }
+
+                if (!found && !string.IsNullOrEmpty(faction))
+                {
+                    EnsureWorldSnapshot();
+                    for (int s = 0; s < WorldSquadCount; s++)
+                    {
+                        ref SquadSnapshot sqSnap = ref WorldSquads[s];
+                        if (!sqSnap.LeaderIsAlive || sqSnap.RefOnPlane || sqSnap.IsPlayerInSquad || !AreSameSideFactions(faction, sqSnap.Faction))
+                            continue;
+                        float dSq = (sqSnap.RefPos - fromPos).sqrMagnitude;
+                        if (dSq < bestDistSq)
+                        {
+                            bestDistSq = dSq;
+                            fallbackPos = sqSnap.RefPos;
+                            found = true;
+                        }
+                    }
+                }
+            }
+            catch { }
+            return found;
         }
 
         private static readonly Dictionary<int, float> _nextTargetedPlayerChatTime = new Dictionary<int, float>(16);

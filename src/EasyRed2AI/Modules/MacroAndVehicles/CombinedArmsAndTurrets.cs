@@ -125,6 +125,7 @@ namespace EasyRed2HumanAI
             _kamikazeDecisionByPlane.Clear();
             _nextKamikazeTargetSearchTime.Clear();
             _lastKnownVehicleCrewSquad.Clear();
+            ResetSpawnerReservations();
             _nextGroundedCrewRetreatCheckTime = 0f;
             _hotStartedPlayerPlanes.Clear();
             _turretAiByTurretPtr.Clear();
@@ -905,13 +906,15 @@ namespace EasyRed2HumanAI
             {
                 Spottable cmdCand = vh.CommanderSpottedTarget;
                 bool cmdIsVeh = cmdCand.IsWheeledVehicleOrTank();
+                Vehicle cmdVeh = cmdIsVeh ? cmdCand.TryCast<Vehicle>() : null;
                 if (!cmdCand.IsAirVehicle() && (!cmdIsVeh || canDamageLightVehicles))
                 {
                     Vector3 cmdPos = cmdCand.GetCenterOfUnit();
                     Vector3 toCmd = cmdPos - firePos;
                     float cmdDist = toCmd.magnitude;
                     float cmdMaxDist = cmdIsVeh ? 550.0f : 320.0f;
-                    if (cmdDist >= 6.0f && cmdDist <= cmdMaxDist && turret.CanShootInDirection(toCmd / cmdDist, 1.0f))
+                    bool canDamageCmdVeh = cmdVeh == null || CanTurretEffectivelyDamageArmoredVehicle(turret, cmdVeh, cmdDist);
+                    if (canDamageCmdVeh && cmdDist >= 6.0f && cmdDist <= cmdMaxDist && turret.CanShootInDirection(toCmd / cmdDist, 1.0f))
                     {
                         bool cmdSafe = true;
                         if (checkFF && hasHe && caliber >= 50.0f &&
@@ -988,6 +991,13 @@ namespace EasyRed2HumanAI
                     float maxDist = isVehCand ? 550.0f : (isIndirectOrArty ? 650.0f : 320.0f);
                     if (dist < (isIndirectOrArty ? 34.0f : 8.0f) || dist > maxDist)
                         continue;
+
+                    if (isVehCand)
+                    {
+                        Vehicle candVeh = cand.TryCast<Vehicle>();
+                        if (candVeh != null && !CanTurretEffectivelyDamageArmoredVehicle(turret, candVeh, dist))
+                            continue;
+                    }
 
                     Vector3 dirToCand = toCand / dist;
 

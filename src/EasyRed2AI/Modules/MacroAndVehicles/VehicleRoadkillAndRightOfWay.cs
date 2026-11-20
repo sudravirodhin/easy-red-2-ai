@@ -613,6 +613,15 @@ namespace EasyRed2HumanAI
                     if (veh == null || veh.Pointer == IntPtr.Zero)
                         return;
 
+                    float now = Time.time;
+                    if (!veh.PlayerIsInside() && AiCore.IsVehicleReservedByNearbyActiveHuman(veh, now))
+                    {
+                        float pauseUntil = now + 0.45f;
+                        if (__instance.resumeDriveTime < pauseUntil)
+                            __instance.resumeDriveTime = pauseUntil;
+                        return;
+                    }
+
                     if (_vehiclesSeekingRepairStation.TryGetValue(veh.Pointer, out RepairStation st) &&
                         st != null && st.Pointer != IntPtr.Zero && st.transform != null && veh.transform != null)
                     {
