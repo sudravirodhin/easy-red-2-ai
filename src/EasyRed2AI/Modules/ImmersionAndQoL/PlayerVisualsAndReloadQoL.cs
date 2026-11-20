@@ -16,7 +16,7 @@ namespace EasyRed2HumanAI
         //  - Decouples tactical overlays from CinematicCameraGUI.GUIVisible() so hiding
         //    the Free Camera UI banner does not wipe out Bot Stats or Objectives.
         //  - Pressing 'F' in Free Camera / Auto-Spectator cycles:
-        //      Full Tactical -> Objectives Only -> Clean Cinema
+        //      Full Tactical -> Objectives Only -> Clean Cinema -> Command Net Overhead
         //  - Keeps both MissionStatusGUI (top bar) and ObjectiveGUI (3D A/B/C markers)
         //    live in Spectator Mode while filtering out private MissionTaskRetreat tasks.
         //  - Displays human-readable Faction + Side labels (e.g. "Germany (Axis)",
@@ -26,7 +26,8 @@ namespace EasyRed2HumanAI
         {
             FullTactical = 0,
             ObjectivesOnly = 1,
-            CleanCinema = 2
+            CleanCinema = 2,
+            CommandNetOverview = 3
         }
 
         internal static SpectatorTacticalHudMode ActiveSpectatorHudMode = SpectatorTacticalHudMode.FullTactical;
@@ -59,9 +60,28 @@ namespace EasyRed2HumanAI
             _lastRightFacStr = null;
         }
 
+        internal static bool IsCommandNetOverviewAllowed()
+        {
+            if (!IsSpectatorCameraModeActive(out _, out bool canShowOverlays) || !canShowOverlays)
+                return false;
+
+            // Anti-ESP guard in Multiplayer: only allow Command Net Overhead when not controlling a living soldier
+            if (PhotonNetwork.InRoom)
+            {
+                Soldier controlled = Soldier.CurrentControlledSoldierOrNull();
+                if (controlled != null && controlled.IsAlive)
+                    return false;
+            }
+
+            return true;
+        }
+
         internal static string CycleSpectatorTacticalHudMode()
         {
-            ActiveSpectatorHudMode = (SpectatorTacticalHudMode)(((int)ActiveSpectatorHudMode + 1) % 3);
+            ActiveSpectatorHudMode = (SpectatorTacticalHudMode)(((int)ActiveSpectatorHudMode + 1) % 4);
+            if (ActiveSpectatorHudMode == SpectatorTacticalHudMode.CommandNetOverview && !IsCommandNetOverviewAllowed())
+                ActiveSpectatorHudMode = SpectatorTacticalHudMode.FullTactical;
+
             MaintainSpectatorHudVisibility();
             switch (ActiveSpectatorHudMode)
             {
@@ -69,6 +89,8 @@ namespace EasyRed2HumanAI
                     return "[Battle Hardened] Spectator View (F): FULL TACTICAL (Objectives + Bot GOAP Inspector)";
                 case SpectatorTacticalHudMode.ObjectivesOnly:
                     return "[Battle Hardened] Spectator View (F): OBJECTIVES ONLY (Objective Bar + 3D Markers)";
+                case SpectatorTacticalHudMode.CommandNetOverview:
+                    return "[Battle Hardened] Spectator View (F): COMMAND NET OVERHEAD (Yellow/Red Meshes + Cyan Routes + Net/SL Readout)";
                 default:
                     return "[Battle Hardened] Spectator View (F): CLEAN CINEMA (All Tactical Overlays Hidden)";
             }
@@ -112,7 +134,7 @@ namespace EasyRed2HumanAI
 
         public static void MaintainSpectatorHudVisibility()
         {
-            if (!VisionConfig.EnableMod.Value || !VisionConfig.EnableSpectatorHudRetention.Value)
+            if (!VisionConfig.EnableSpectatorHudRetention.Value)
                 return;
 
             if (CinematicCameraGUI.instance == null || !CinematicCameraGUI.cinematicCameraEnabled)
@@ -401,14 +423,19 @@ namespace EasyRed2HumanAI
             {
                 try
                 {
-                    if (!VisionConfig.EnableMod.Value ||
-                        __instance == null ||
-                        __instance.panel == null)
+                    bool modEnabled = VisionConfig.EnableMod.Value;
+                    if (__instance == null || __instance.panel == null)
                     {
                         return;
                     }
 
-                    if (IsSpectatorCameraModeActive(out _, out bool canShowOverlays))
+                    bool isSpectator = IsSpectatorCameraModeActive(out _, out bool canShowOverlays);
+                    if (!modEnabled && !isSpectator)
+                    {
+                        return;
+                    }
+
+                    if (isSpectator)
                     {
                         bool showSpecBar = canShowOverlays &&
                                            VisionConfig.EnableSpectatorHudRetention.Value &&
@@ -469,7 +496,7 @@ namespace EasyRed2HumanAI
                             __instance.panelGroup.alpha = 0.95f;
                     }
 
-                    if (__instance.panel.activeSelf)
+                    if ((modEnabled || isSpectator) && __instance.panel.activeSelf)
                     {
                         UpdateMissionStatusFactionLabels(__instance);
                     }
@@ -488,9 +515,7 @@ namespace EasyRed2HumanAI
             {
                 try
                 {
-                    if (!VisionConfig.EnableMod.Value ||
-                        __instance == null ||
-                        __instance.guiPanel == null)
+                    if (__instance == null || __instance.guiPanel == null)
                     {
                         return;
                     }

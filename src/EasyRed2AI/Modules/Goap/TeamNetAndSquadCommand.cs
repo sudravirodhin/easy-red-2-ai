@@ -447,6 +447,10 @@ namespace EasyRed2HumanAI
         private static readonly ActiveBarragePocket[] _activeShellingPockets = new ActiveBarragePocket[8];
         private static int _shellingPocketRingHead;
 
+        internal static ActiveBarragePocket[] FriendlyArtilleryZones => _friendlyArtilleryZones;
+        internal static int FriendlyArtilleryZoneCount => _friendlyArtilleryZoneCount;
+        internal static ActiveBarragePocket[] ActiveShellingPockets => _activeShellingPockets;
+
         internal static void ClearBarrageCoordinationCaches()
         {
             _friendlyArtilleryZoneCount = 0;

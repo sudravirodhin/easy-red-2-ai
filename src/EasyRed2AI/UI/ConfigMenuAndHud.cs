@@ -165,7 +165,7 @@ namespace EasyRed2HumanAI
                             VeteranAndTacticsPatches.RefreshBottomLeftSquadRosterVisuals();
                             string state = VisionConfig.EnableMod.Value
                                 ? $"ENABLED (Stand:{VisionConfig.StandingSightRange.Value}m, Crouch:{VisionConfig.CrouchingSightRange.Value}m, Prone:{VisionConfig.ProneSightRange.Value}m)"
-                                : "DISABLED (Vanilla AI)";
+                                : "DISABLED (Vanilla AI — Spectator F-View stays active for A/B)";
                             ShowToast($"[Battle Hardened v{Plugin.PluginVersion}] Mod {state}");
                         }
                         else if (input.GetKeyDown(KeyCode.F9))
@@ -283,6 +283,7 @@ namespace EasyRed2HumanAI
                     // because GuiExtension.OutlinedLabel uses raw Screen.width / Screen.height pixel coordinates
                     // matching PlayerController.OnGUI (0x1807CBD20).
                     VeteranAndTacticsPatches.DrawInWorldSquadMemberNames();
+                    VeteranAndTacticsPatches.DrawSpectatorCommandNetWorldOverlay();
 
                     float uiScale = GetEffectiveImGuiScale(out float virtualW, out float virtualH);
                     if (Mathf.Abs(uiScale - 1.0f) > 0.001f)
@@ -739,7 +740,7 @@ namespace EasyRed2HumanAI
                         DrawToggleButton(colRightX, ref yR, colW, rowH, "Death Screen Kill Attribution + Age", VisionConfig.EnableDeathScreenAttribution);
                         DrawToggleButton(colRightX, ref yR, colW, rowH, "Dogtag Collection Archive (F7)", VisionConfig.EnableDogTagArchive);
                         DrawToggleButton(colRightX, ref yR, colW, rowH, "Objective Bar Faction + Side Names", VisionConfig.EnableObjectiveBarFactionNames);
-                        DrawToggleButton(colRightX, ref yR, colW, rowH, "Spectator Tactical HUD + 3D Markers (F Cycles)", VisionConfig.EnableSpectatorHudRetention);
+                        DrawToggleButton(colRightX, ref yR, colW, rowH, "Spectator Tactical HUD + Overhead Net (F Cycles)", VisionConfig.EnableSpectatorHudRetention);
                         DrawToggleButton(colRightX, ref yR, colW, rowH, "Spectator Hovered-Bot GOAP Inspector (F Cycles)", VisionConfig.EnableSpectatorBotInspector);
                         DrawToggleButton(colRightX, ref yR, colW, rowH, "64-Char Multiplayer Room Names", VisionConfig.EnableExtendedRoomNames);
                         DrawToggleButton(colRightX, ref yR, colW, rowH, "Host Lobby Welcome MOTD (Joiners)", VisionConfig.EnableLobbyJoinMotd);
@@ -1009,21 +1010,27 @@ namespace EasyRed2HumanAI
 
         internal static void DrawSpectatorBotInspectorGui(float virtualW, float virtualH, float toastBottomY)
         {
-            if (!VisionConfig.EnableMod.Value ||
-                !VisionConfig.EnableSpectatorBotInspector.Value ||
+            if (ActiveSpectatorHudMode == SpectatorTacticalHudMode.CommandNetOverview)
+            {
+                DrawSpectatorCommandNetHudCard(virtualW, virtualH, toastBottomY);
+                return;
+            }
+
+            if (!VisionConfig.EnableSpectatorBotInspector.Value ||
                 !_specIsFreeCamera ||
                 ActiveSpectatorHudMode != SpectatorTacticalHudMode.FullTactical)
             {
                 return;
             }
 
-            // Subtle 4x4 center reticle pip in Free Camera so hovering a specific bot is effortless
-            float cx = virtualW * 0.5f;
-            float cy = virtualH * 0.5f;
-            GUI.color = _specHasValidTarget
-                ? new Color(1.0f, 0.88f, 0.32f, 0.80f)
-                : new Color(0.90f, 0.94f, 1.0f, 0.42f);
-            GUI.Box(new Rect(cx - 2f, cy - 2f, 4f, 4f), "");
+            // Subtle minimal reticle pip in Free Camera so hovering a specific bot is effortless
+            DrawSpectatorCenterReticle(
+                virtualW * 0.5f,
+                virtualH * 0.5f,
+                _specHasValidTarget
+                    ? new Color(1.0f, 0.88f, 0.32f, 0.90f)
+                    : new Color(0.92f, 0.96f, 1.0f, 0.45f),
+                _specHasValidTarget);
 
             if (!_specHasValidTarget || string.IsNullOrEmpty(_specHeaderLine))
             {
@@ -1098,7 +1105,8 @@ namespace EasyRed2HumanAI
                 return;
             }
 
-            bool wantVetIcons = VisionConfig.EnableVeteranSystem.Value &&
+            bool wantVetIcons = VisionConfig.EnableMod.Value &&
+                                VisionConfig.EnableVeteranSystem.Value &&
                                 VisionConfig.ShowVeteran3DIcons.Value &&
                                 (SavableData.Settings == null ||
                                  SavableData.Settings.system == null ||
@@ -1284,6 +1292,12 @@ namespace EasyRed2HumanAI
             {
                 _specSb.Append("State: SURRENDERED (Awaiting Comrade Liberation)");
             }
+            else if (!VisionConfig.EnableMod.Value)
+            {
+                if (sq != null)
+                    _specSb.Append("Squad: ").Append(sq.order.ToString()).Append("  |  ");
+                _specSb.Append("GOAP: [VANILLA ER2 AI \u2014 Mod Disabled via F8]");
+            }
             else
             {
                 bool hasPlan = TryGetBotGoapSummary(
@@ -1388,34 +1402,34 @@ namespace EasyRed2HumanAI
 
         public static void RenderVeteran3DMarkersAndCleanup()
         {
-            if (!VisionConfig.EnableMod.Value)
+            bool modEnabled = VisionConfig.EnableMod.Value;
+            if (modEnabled)
             {
-                _specHasValidTarget = false;
-                _specIsFreeCamera = false;
-                return;
-            }
+                if (VisionConfig.EnableDeathScreenAttribution.Value)
+                    MaintainInstantDeathPanel();
 
-            if (VisionConfig.EnableDeathScreenAttribution.Value)
-                MaintainInstantDeathPanel();
+                if ((Time.time > _nextStateCleanupTime || Time.time + 2.0f < _nextStateCleanupTime) && AiCore.TryClaimHeavyFrameWorkSlot())
+                {
+                    _nextStateCleanupTime = Time.time + 2.0f;
+                    CleanupDictionaries(false);
+                }
+            }
 
             MaintainSpectatorHudVisibility();
 
-            if ((Time.time > _nextStateCleanupTime || Time.time + 2.0f < _nextStateCleanupTime) && AiCore.TryClaimHeavyFrameWorkSlot())
-            {
-                _nextStateCleanupTime = Time.time + 2.0f;
-                CleanupDictionaries(false);
-            }
-
             if (IsSpectatorCameraModeActive(out bool isFreeCamera, out bool specGuiVisible))
             {
+                UpdateAndRenderSpectatorCommandNet3D(isFreeCamera, specGuiVisible);
                 UpdateSpectatorMarkersAndInspector(isFreeCamera, specGuiVisible);
                 return;
             }
 
             _specHasValidTarget = false;
             _specIsFreeCamera = false;
+            _specCommandNetActive = false;
+            _cmdNetHasHoveredSquad = false;
 
-            if (!VisionConfig.EnableVeteranSystem.Value || !VisionConfig.ShowVeteran3DIcons.Value)
+            if (!modEnabled || !VisionConfig.EnableVeteranSystem.Value || !VisionConfig.ShowVeteran3DIcons.Value)
                 return;
 
             PlayerController pc = PlayerController.currentController;
