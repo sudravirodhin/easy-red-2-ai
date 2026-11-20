@@ -5,6 +5,25 @@ For pre-compiled downloads, see **[GitHub Releases](https://github.com/sudraviro
 
 ---
 
+## `v0.9.12` — Spectator Mode 4 Command Net & Vanilla F8 A/B Observer, Co-op Match Transitions & 2-Tab F5 Settings, Armor AP Gating, 3D LOS Cover, Barrage Coordination & Full Co-op Death Attribution
+* **Spectator Mode 4: Command Net Overhead & Vanilla `F8` A/B Observer (`SpectatorCommandNetOverlay.cs`, `ConfigMenuAndHud.cs`, `PlayerVisualsAndReloadQoL.cs`, `TeamNetAndSquadCommand.cs`)**:
+  * Added a 4th Spectator HUD cycle mode (`CommandNetOverview`, cycled via `F` in Free Cam / Auto-Spectator) with an anti-ESP multiplayer guard when controlling a living soldier.
+  * Rendered high-contrast Yellow/Red 3D unlit beacons, directional vehicle chevrons, through-canopy screen pips, Cyan squad macro route arrows (with offshore static turret/ship route filtering and clean `Point A/B/C` unnamed objective labels), hovered squad live Cyan `A*` path polylines, pulsing artillery barrage zone rings, and a minimal texture center reticle.
+  * Added a top-center Team Command Net summary bar and hovered Squad Leader Command readout card (`SL` archetype, `HQ-NET`/`CUT OFF` radio status, active directive, order, objective distance, losses, suppression, threat, and live `A*` path count).
+  * Kept read-only Spectator HUD, 3D objective markers, and Mode 4 A/B Observer active when the AI overhaul is toggled OFF via **`F8`**, enabling instant side-by-side Vanilla vs. Battle Hardened comparison on the same mission and frame.
+* **Co-op Match Transitions, 2-Tab `F5` Difficulty/Match Settings Picker & Spawner Lock (`MapPickerMenu.cs`, `CoopSessionAndScoreboard.cs`, `Plugin.cs`)**:
+  * Added a `16s` MP end-of-match anthem cap + smooth fadeout (`EndBattleGUI_WaitAnthemEnd_Patch`), a clean room transition banner (`MpTransitionBannerBehaviour` via `BattleLoader_ConnectToNextMatch_Patch`), a `3.5s` Host Co-op spawner reservation lock, and a `45s` join-MOTD fallback timeout.
+  * Upgraded **`F5`** into a **2-Tab Map & Match Settings Picker** syncing vanilla `Difficulty` and `Match` settings directly in-game.
+* **Armor AP Penetration Gating, Tank Unstick & Active Repair vs. AFK Leader Release (`GroundVehicleTactics.cs`, `AircraftTactics.cs`, `TurretAmmoAndBailout.cs`, `EmplacementAndCrewBoarding.cs`, `CombinedArmsAndTurrets.cs`, `VehicleRoadkillAndRightOfWay.cs`, `AiCore.cs`)**:
+  * Restored `VehicleTank_FixedUpdate_Patch` on `VehicleFastHandles` for reliable tank movement/unstick handling, and gated turret and aircraft anti-armor engagement on actual AP penetration capability (`CanTurretEffectivelyDamageArmoredVehicle` / `HasAircraftAntiArmorCannons`).
+  * Updated Co-op player squad detection to use `HasAnyHumanPlayerInSquad`, protected active vehicle repair seats, and released crew/squad locks when a leader is AFK `>= 25s`.
+* **3D LOS-Break Cover Scoring, Witness Reactions, Friendly Barrage Coordination & Smoke Vision Block (`StanceAndCoverTactics.cs`, `TeamNetAndSquadCommand.cs`, `SoldierGoapExecution.cs`, `GoapDefinitionsAndPlanner.cs`, `VisionRangeAndCamo.cs`, `AiCore.WorldQuery.cs`)**:
+  * Added top-3 3D line-of-sight break cover scoring, fixed crowded-cover fallbacks, capped `ExposedSideOfWall` checks at `140m`, and added Pass 1b `18m–24m` rubble detour hops.
+  * Added cross-squad witness suppression & replan reactions (`NotifyFriendlyHitOrCasualty`), Team Net friendly artillery hold/surge & shelling-pocket flank coordination, Radioman objective-progress guards, and cached inside-smoke vision blocking.
+* **Expanded Co-op Cause-of-Death Attribution & Healed/Surrendered Animator Cleanup (`DeathScreenAndAttribution.cs`, `CloseCombatAndSupport.cs`, `Plugin.cs`)**:
+  * Expanded obituary cause-of-death attribution with utility-item filtering, `BodyPart.HitPart`, `DamageWithAnimation`, vehicle cook-off/crash detection, Co-op Host->Client Photon Event `197` sync, and clean bleedout/fallback labels.
+  * Cleared lingering `StartInjured`/`Injured` Animator triggers on healed and surrendered soldiers so revived troops never freeze in injured poses.
+
 ## `v0.9.11` — Emplacement Takeover From Bots, Solo HUD Flash Fix, Joiner MOTD Fixes & Rain Acoustic Masking
 * **Human Emplacement Seat Takeover (`EmplacementAndCrewBoarding.cs`, `Plugin.cs`)**:
   * Patched `VehicleDamagablePart.GetInteractions`, `Vehicle.HasSpace`, and `Vehicle.GetOnVehicleBestPos` so human players on foot see the `[F]` prompt and can directly take over the gunner seat of friendly bot-manned static emplacements (including full 1/1 MGs and 2/2 AT/AA guns), never displacing other human players.
