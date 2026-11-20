@@ -5,6 +5,9 @@
 
 ---
 
+![Vanilla Easy Red 2 AI vs. Battle Hardened — Beach Landing A/B Comparison](docs/images/ab-beach-comparison.jpg)
+*Live `F8` A/B comparison on the same mission and minute (Top: Vanilla ER2 AI static line & single-file beach push · Bottom: Battle Hardened wide dune skirmish line, dual smoke screens, Command Net flank, live artillery zones & radio tracking).*
+
 ## What Is Battle Hardened
 
 ***Battle Hardened*** is a **zero-cheat tactical AI, Co-op, and combat immersion overhaul** for *Easy Red 2* (BepInEx 6 IL2CPP).
@@ -30,6 +33,9 @@ To make battles that large run smoothly, however, vanilla's AI relied on lightwe
 | **Sight Cones, Footsteps & Stealth** | When hidden, prone visibility is `37m`. The instant *any* squadmate fires (`IsEnemyAwareOfThisSquad`), every member jumps to **`300m` detection** and alerted bots skip FOV checks completely (**360° eyes in the back of their head**, even inside buttoned tanks!). | Preserves stance stealth (`150m` Standing / `80m` Crouched / `40m` Prone), reveals **only the soldier who fired** for `4.0s`, applies a continuous human **"Squint" cone** (`12m` close awareness narrowing smoothly to `±32°` long range), adds **`<= 20m` footstep & gunfire hearing** (crouch/prone silent, masked by explosions), and gives enclosed tank gunners narrow optical slits fed by a **`0.65s–1.48s` Commander Intercom handoff**. |
 | **Self-Preservation** | Bots holster rifles to bandage in front of shooters, stand on the *enemy-facing side* of walls, walk upright or `prone`-roll randomly in open fields, ignore `Layer 14` walls when vaulting, and mag-dump rifles & frag grenades at Tiger armor. | **Survival comes first**: gunfire-driven leeward walls, cover-before-bandaging (`CanSafelyBandageNow`), `Layer 14` parapet/trench vaulting + direct trench drop-in, threat-arc Tank Fear evasion, smoke-screened retreats, and isolated shell-shock surrender & liberation. |
 | **Teamwork & Macro Play** | Squads fight with static distance checks, abandon flags the second they're captured, camp *outside* capture circles, charge blindly into fatal funnels, and never depend on a Radioman to talk to HQ or tanks. | **3-Tier GOAP Chain of Command** where Radiomen carry the team's intel link, squads fight *inside* cap circles and garrison rear flags, NCOs balk at suicidal orders, and tank/air/artillery support actively screens for **you**. |
+
+![Vanilla Easy Red 2 AI vs. Battle Hardened — Open-Terrain Hilltop Assault A/B](docs/images/ab-hilltop-comparison.jpg)
+*Open-terrain hilltop assault `F8` A/B comparison (Top: Vanilla 7-bot straight-line open-field march into Point A · Bottom: Battle Hardened squads flanking through right-hand orchard cover, bounding across walls/craters, and continuing autonomously when cut off from HQ radio).*
 
 ---
 

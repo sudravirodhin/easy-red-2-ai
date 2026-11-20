@@ -15,6 +15,7 @@ backups/
 docs/*
 !docs/design-and-justifications.md
 !docs/MACOS_EXPERIMENTAL.md
+!docs/images/
 tools/*
 !tools/verify_patches/
 tools/verify_patches/*.dll
