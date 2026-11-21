@@ -1132,7 +1132,8 @@ namespace EasyRed2HumanAI
             // Fix vanilla RefreshTargets quirk (0x180832b3e): allow on-map HE/Smoke artillery/howitzers/mortars and tanks
             // to answer friendly Team Net radio support requests both when idle (curTarget == null) and when only
             // a low-priority unmarked lone infantryman was spotted far away (including allied coalition factions & rear-line pits).
-            if ((hasHe || isIndirectOrArty) && (curTarget == null || curScore < 26.0f) && !turretAi.HasRadioSupportRequest)
+            bool hasSmoke = HasTurretSmokeShellAmmo(turret);
+            if ((hasHe || hasSmoke || isIndirectOrArty) && (curTarget == null || curScore < 26.0f) && !turretAi.HasRadioSupportRequest)
             {
                 turretAi.FindBestArtilleryRequest();
                 if (!turretAi.HasRadioSupportRequest &&
@@ -1153,7 +1154,7 @@ namespace EasyRed2HumanAI
                             continue;
                         }
 
-                        if (!isIndirectOrArty && req.RequestType == RadioRequest.artillerySmoke)
+                        if (!hasSmoke && req.RequestType == RadioRequest.artillerySmoke)
                             continue;
                         if (!hasHe && req.RequestType == RadioRequest.artilleryHE)
                             continue;
@@ -1162,6 +1163,19 @@ namespace EasyRed2HumanAI
                         float reqDist = toReq.magnitude;
                         if (reqDist < 20.0f || reqDist >= bestReqDist)
                             continue;
+
+                        if (!isIndirectOrArty && req.RequestType == RadioRequest.artillerySmoke)
+                        {
+                            if (reqDist < 25.0f || reqDist > 380.0f)
+                                continue;
+                            Vector3 toSmokeTarget = (req.Position + Vector3.up * 2.0f) - firePos;
+                            float smokeRayDist = toSmokeTarget.magnitude;
+                            if (smokeRayDist > 6.0f &&
+                                AiCore.RaycastEnvironment(firePos, toSmokeTarget / smokeRayDist, smokeRayDist - 5.5f, veh.transform.root, out _))
+                            {
+                                continue;
+                            }
+                        }
 
                         if (!turret.CanShootInDirection(toReq / reqDist, 1.0f))
                             continue;
@@ -1206,7 +1220,9 @@ namespace EasyRed2HumanAI
                         bool ammoOk = true;
                         if (turretAi.supportedSquad != null)
                         {
-                            ammoOk = turret.SelectBestAmmo(turretAi.supportedSquad.radioRequest) || hasHe;
+                            ammoOk = isSmokeReq
+                                ? (hasSmoke && turret.SelectBestAmmo(RadioRequest.artillerySmoke))
+                                : (turret.SelectBestAmmo(turretAi.supportedSquad.radioRequest) || hasHe);
                         }
                         if (!ammoOk)
                         {
@@ -1220,7 +1236,9 @@ namespace EasyRed2HumanAI
                         {
                             AiCore.LogDebug(
                                 "CombArmsRadio",
-                                $"{myFaction} HE turret answering friendly radio support request ({rDist:F0}m).");
+                                isSmokeReq
+                                    ? $"{myFaction} Smoke turret answering friendly radio smoke request ({rDist:F0}m)."
+                                    : $"{myFaction} HE turret answering friendly radio support request ({rDist:F0}m).");
                         }
                     }
                     else

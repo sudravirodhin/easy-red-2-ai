@@ -335,6 +335,8 @@ namespace EasyRed2HumanAI
             public Vehicle Ref;
             public Transform Tr;
             public Transform RootTr;
+            public float NextDefensiveSmokeShellTime;
+            public float ActiveSmokeShellFireUntil;
             public SyncVehicle Syncher;
             public bool SyncherChecked;
             public bool IsAir;

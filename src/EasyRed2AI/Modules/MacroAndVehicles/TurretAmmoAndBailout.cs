@@ -1218,6 +1218,41 @@ namespace EasyRed2HumanAI
                    bd.IsFlak();
         }
 
+        internal static bool IsSmokeShellRound(BulletData bd)
+        {
+            return bd != null && (bd.shellType == ShellType.Smoke || bd.IsSmoke());
+        }
+
+        internal static bool HasTurretSmokeShellAmmo(Turret turret)
+        {
+            TurretGun tg = turret != null ? turret.TryCast<TurretGun>() : null;
+            if (tg == null || tg.weapons == null || tg.weapons.Length == 0)
+                return false;
+
+            Vehicle rootVeh = tg.rootVehicle;
+            InventoryManager inv = rootVeh != null ? rootVeh.GetInventory() : null;
+            var weapons = tg.weapons;
+            for (int wIdx = 0; wIdx < weapons.Length; wIdx++)
+            {
+                TurretWeapon w = weapons[wIdx];
+                if (w == null || w.ammos == null)
+                    continue;
+
+                bool refreshedInv = false;
+                var ammos = w.ammos;
+                for (int aIdx = 0; aIdx < ammos.Length; aIdx++)
+                {
+                    if (!HasTurretWeaponAmmoInSlot(w, aIdx, inv, ref refreshedInv))
+                        continue;
+
+                    BulletData bd = w.GetBulletDataFor(aIdx) ?? w.BulletData;
+                    if (IsSmokeShellRound(bd))
+                        return true;
+                }
+            }
+            return false;
+        }
+
         internal static float GetVehicleMaxHullArmorMm(Vehicle veh)
         {
             if (veh == null || veh.Pointer == IntPtr.Zero)
@@ -1363,29 +1398,26 @@ namespace EasyRed2HumanAI
                     bool isAirTarget = __0.IsAirVehicle();
                     bool isArmoredTarget = false;
                     float targetArmorMm = 0f;
+                    Soldier targetSol = !isAirTarget ? __0.TryCast<Soldier>() : null;
 
                     if (!isAirTarget)
                     {
                         Vehicle targetVeh = __0.TryCast<Vehicle>();
-                        if (targetVeh == null)
+                        if (targetVeh == null && targetSol != null && targetSol.IsOnVehicle())
                         {
-                            Soldier targetSol = __0.TryCast<Soldier>();
-                            if (targetSol != null && targetSol.IsOnVehicle())
+                            Vehicle seatVeh = targetSol.GetCurrentVehicle();
+                            if (seatVeh != null && seatVeh.Pointer != IntPtr.Zero)
                             {
-                                Vehicle seatVeh = targetSol.GetCurrentVehicle();
-                                if (seatVeh != null && seatVeh.Pointer != IntPtr.Zero)
+                                if (seatVeh.IsAirVehicle())
                                 {
-                                    if (seatVeh.IsAirVehicle())
-                                    {
-                                        isAirTarget = true;
-                                    }
-                                    else
-                                    {
-                                        Seats seat = targetSol.GetCurrentVehicleSeat();
-                                        bool exposedSeat = seat != null && seat.showUnitSet;
-                                        if (!exposedSeat)
-                                            targetVeh = seatVeh;
-                                    }
+                                    isAirTarget = true;
+                                }
+                                else
+                                {
+                                    Seats seat = targetSol.GetCurrentVehicleSeat();
+                                    bool exposedSeat = seat != null && seat.showUnitSet;
+                                    if (!exposedSeat)
+                                        targetVeh = seatVeh;
                                 }
                             }
                         }
@@ -1452,6 +1484,9 @@ namespace EasyRed2HumanAI
                             : 100f;
                         float penThreshold = Mathf.Max(8f, targetArmorMm * 0.85f);
                         float bestArmorScore = -1f;
+                        float bestArmorEffPen = 0f;
+                        int bestSmokeW = -1;
+                        int bestSmokeA = -1;
 
                         for (int wIdx = 0; wIdx < weapons.Length; wIdx++)
                         {
@@ -1470,8 +1505,20 @@ namespace EasyRed2HumanAI
                                 if (bd == null)
                                     continue;
 
+                                if (IsSmokeShellRound(bd))
+                                {
+                                    if (bestSmokeW < 0)
+                                    {
+                                        bestSmokeW = wIdx;
+                                        bestSmokeA = aIdx;
+                                    }
+                                    continue;
+                                }
+
                                 float kinPen = bd.CalculateMmPenetrationWithFallof(dist);
                                 float effPen = Mathf.Max(kinPen, bd.explosion_penetration);
+                                if (effPen > bestArmorEffPen)
+                                    bestArmorEffPen = effPen;
                                 ShellType st = bd.shellType;
 
                                 float score;
@@ -1508,14 +1555,37 @@ namespace EasyRed2HumanAI
                                 }
                             }
                         }
+
+                        // Blinding smoke vs. uncounterable heavy armor: fire 1 smoke shell to blind optics,
+                        // then revert to AP/HEAT/flanking for 20s.
+                        if (bestSmokeW >= 0 &&
+                            rootVeh != null &&
+                            !rootVeh.IsAirVehicle() &&
+                            !rootVeh.IsStatic() &&
+                            targetArmorMm >= 55.0f &&
+                            bestArmorEffPen < targetArmorMm * 0.65f &&
+                            dist >= 25.0f &&
+                            dist <= 320.0f)
+                        {
+                            AiCore.VehicleFastHandles vh = AiCore.GetOrCreateVehicleHandles(rootVeh);
+                            if (vh != null && (now < vh.ActiveSmokeShellFireUntil || now >= vh.NextDefensiveSmokeShellTime))
+                            {
+                                if (now >= vh.NextDefensiveSmokeShellTime)
+                                {
+                                    vh.ActiveSmokeShellFireUntil = now + 2.8f;
+                                    vh.NextDefensiveSmokeShellTime = now + 20.0f;
+                                }
+                                targetW = bestSmokeW;
+                                targetA = bestSmokeA;
+                            }
+                        }
                     }
                     else
                     {
                         // Soft target (Foot Infantry, Exposed Crew, Static Gun Emplacement, or Unarmored Truck/Jeep):
                         // 1) Find best True HE / Frag / Flak / Fire / Shotgun slot (both ready-now and reloading).
-                        // 2) Find best rapid-fire Coaxial / Wing MG (< 20mm) for firing while a tank's main gun reloads
-                        //    or when the main gun has no true HE left (never waste AP/APHE/HEAT cannon shells on foot infantry
-                        //    when HE or a Coaxial MG is available!).
+                        // 2) Find best rapid-fire Coaxial / Wing MG (< 20mm) for lone exposed infantry, firing while
+                        //    a tank's main gun reloads, or when the main gun has no true HE left.
                         int bestReadyHeW = -1, bestReadyHeA = -1;
                         float bestReadyHeScore = -1f;
 
@@ -1541,7 +1611,7 @@ namespace EasyRed2HumanAI
                                     continue;
 
                                 BulletData bd = w.GetBulletDataFor(aIdx) ?? w.BulletData;
-                                if (bd == null)
+                                if (bd == null || IsSmokeShellRound(bd))
                                     continue;
 
                                 if (IsTrueHeOrAntiInfantryRound(bd))
@@ -1573,31 +1643,91 @@ namespace EasyRed2HumanAI
                             }
                         }
 
-                        // If a cannon has a True HE slot available (bestAnyHeW >= 0) but currently has AP/APHE/HEAT loaded,
-                        // trigger Reload(bestAnyHeA) on that cannon immediately so the breech loads HE for the next shot!
-                        if (bestAnyHeW >= 0)
+                        bool preferCoaxMg = false;
+                        float softDist = 80f;
+                        if (rootVeh != null &&
+                            !rootVeh.IsAirVehicle() &&
+                            !rootVeh.IsStatic() &&
+                            bestMgW >= 0 &&
+                            targetSol != null &&
+                            !targetSol.IsOnVehicle())
                         {
-                            TurretWeapon heWeap = weapons[bestAnyHeW];
-                            if (heWeap != null && heWeap.loadedAmmo_id != bestAnyHeA)
+                            Vector3 softPos = targetSol.transform != null ? targetSol.transform.position : __0.GetPosition();
+                            softDist = __instance.transform != null
+                                ? Vector3.Distance(__instance.transform.position, softPos)
+                                : 80f;
+
+                            if (softDist <= 155.0f &&
+                                !targetSol.IsOnCover() &&
+                                !HasUsableAntiTankCapability(targetSol))
                             {
-                                heWeap.Reload((short)bestAnyHeA, inv, null, false, false);
+                                string targetFac = AiCore.GetCachedFaction(targetSol);
+                                AiCore.EnsureWorldSnapshot();
+                                int clusterCount = 0;
+                                var soldiers = AiCore.WorldSoldiers;
+                                int count = AiCore.WorldSoldierCount;
+                                for (int sIdx = 0; sIdx < count; sIdx++)
+                                {
+                                    ref AiCore.SoldierSnapshot ws = ref soldiers[sIdx];
+                                    if (ws.HasSurrendered || string.IsNullOrEmpty(ws.Faction))
+                                        continue;
+                                    if (!string.IsNullOrEmpty(targetFac) && !AiCore.AreSameSideFactions(targetFac, ws.Faction))
+                                        continue;
+                                    if ((ws.Pos - softPos).sqrMagnitude <= 72.25f)
+                                    {
+                                        clusterCount++;
+                                        if (clusterCount >= 2)
+                                            break;
+                                    }
+                                }
+                                if (clusterCount < 2)
+                                    preferCoaxMg = true;
                             }
                         }
 
-                        if (bestReadyHeW >= 0)
+                        if (preferCoaxMg)
                         {
-                            targetW = bestReadyHeW;
-                            targetA = bestReadyHeA;
+                            bool mgReady = weapons[bestMgW].nextReloadEnd <= now;
+                            if (mgReady || softDist > 35.0f || bestReadyHeW < 0)
+                            {
+                                targetW = bestMgW;
+                                targetA = bestMgA;
+                            }
+                            else
+                            {
+                                targetW = bestReadyHeW;
+                                targetA = bestReadyHeA;
+                            }
                         }
-                        else if (bestMgW >= 0)
+                        else
                         {
-                            targetW = bestMgW;
-                            targetA = bestMgA;
-                        }
-                        else if (bestAnyHeW >= 0)
-                        {
-                            targetW = bestAnyHeW;
-                            targetA = bestAnyHeA;
+                            // Grouped/entrenched infantry, AT threats, emplacements, or vehicles:
+                            // if a cannon has a True HE slot available but currently has AP/APHE/HEAT loaded,
+                            // trigger Reload(bestAnyHeA) on that cannon immediately so the breech loads HE for the next shot!
+                            if (bestAnyHeW >= 0)
+                            {
+                                TurretWeapon heWeap = weapons[bestAnyHeW];
+                                if (heWeap != null && heWeap.loadedAmmo_id != bestAnyHeA)
+                                {
+                                    heWeap.Reload((short)bestAnyHeA, inv, null, false, false);
+                                }
+                            }
+
+                            if (bestReadyHeW >= 0)
+                            {
+                                targetW = bestReadyHeW;
+                                targetA = bestReadyHeA;
+                            }
+                            else if (bestMgW >= 0)
+                            {
+                                targetW = bestMgW;
+                                targetA = bestMgA;
+                            }
+                            else if (bestAnyHeW >= 0)
+                            {
+                                targetW = bestAnyHeW;
+                                targetA = bestAnyHeA;
+                            }
                         }
                     }
 
