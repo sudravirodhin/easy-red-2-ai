@@ -5,6 +5,21 @@ For pre-compiled downloads, see **[GitHub Releases](https://github.com/sudraviro
 
 ---
 
+## `v0.10.3` — Anti-Wall-Shooting Discipline, `[PVM]` Difficulty Crash Fix, Corpse Blood Smoke Occlusion, Emergent Survival & Qualitative Simulation Scorecard
+* **Anti-Wall-Shooting & Occlusion Discipline (`VisionRangeAndCamo.cs`, `FriendlyFireAndYield.cs`, `StanceAndCoverTactics.cs`, `ThreatMemoryAndWatchSectors.cs`, `CombinedArmsAndTurrets.cs`)**:
+  * Tightened LOS/muzzle-obstruction checks and blind-suppression gating against solid cover and walls.
+* **Difficulty-Apply `[PVM]` Crash Fix (`MapPickerMenu.cs`)**:
+  * Fixed `staminaMultiplier = 0.0f` divide-by-zero (`+Infinity`) and unsafe `ProtectedFloat` construction with XOR-validated helpers and `[0.25f, 3.00f]` stamina clamping.
+* **Corpse Blood Decal X-Ray Through Smoke & Death Attribution Fixes (`PlayerVisualsAndReloadQoL.cs`, `DeathScreenAndAttribution.cs`, `Plugin.cs`)**:
+  * Normalized `LimbLeftoverManager` (`BloodLeftoverDecalMat` -> `renderQueue = 2910`, `sortingOrder = -20`) and `CorvoDecal` ground blood puddles (`2940`, `sortingOrder = -20`) so smoke properly obscures blood decals.
+  * Stopped prepending `"Bleeding •"` onto direct lethal hits (`hitAge <= 3.0s`) on the Death Screen while preserving `"Bled out"` for true delayed bleed-out deaths (`hitAge > 3.0s`).
+* **Emergent Combat Survival & Live Log-Audit Fixes (`EmergentDecisionCore.cs`, `AiCore.cs`, `AiCore.WorldQuery.cs`, `LocomotionAndVaulting.cs`, `CloseCombatAndSupport.cs`)**:
+  * Fixed covered high-harm `SelfBandage`, exposed heavy-fire `SeekCover`/`AdvanceObjective` gating, `< 9m` CQB bleed reflex guard, inland `AmphibiousBeachhead` false positives (`Road to Creully`, `Pointe du Hoc Counterattack`, `Cisterna`, `Kos Airport`), door/melee RPC budget pacing, and post-capture `idle_in_open_zombie` watchdog resets.
+* **Qualitative Simulation Scorecard & Regression Tests (`BattleLossModelCore.cs`, `VerifyEmergentEngine.ps1`)**:
+  * Added zero-allocation Death Autopsy + Decision → Outcome Conversion Scorecard across all 687 battles (`98.3%` plausible combat deaths, `0` loss events, `8/8` determinism), 9-case `BattleAtmosphere` regression sweep, and CQB/bleed/heavy-fire unit tests (`52/52`).
+* **Patch Consolidation & Dead-Code Cleanup (`Plugin.cs`, `VeterancyAndPersonalities.cs`, `PlayerVisualsAndReloadQoL.cs`, `CloseCombatAndSupport.cs`, `VisionConfig.cs`, `ConfigMenuAndHud.cs`, `AiCore.cs`)**:
+  * Consolidated 3 stacked `Soldier.Throw` patches into 1 ordered controller (`196 → 194` hooks), replaced fragile `Soldier._MeleeDamageCR_d__489.MoveNext` coroutine hook with direct `Soldier.MeleeDamageCR` (`6 → 5` coroutine watch-list hooks), wired `EnableBoundingOverwatch` into `SoldierAI.IsMoveTime`, removed orphaned `EnableTankStandoffAndReverse` + stale `"1. GOAP & Bot Behaviors"` tab label, and pruned 4 dead telemetry counters, 5 unused struct fields, and 6 unreferenced methods.
+
 ## `v0.10.2` — 9 Battle Atmosphere Directives & `[HQ Dispatch]` Chat Broadcast, Co-op Remote Plane Sync Fix, Blood Smoke/Water Occlusion & Firefight Target Hysteresis
 * **9 Historical Battle Atmosphere Directives & Default `[HQ Dispatch]` Broadcast (`AiCore.cs`, `GoapDefinitionsAndPlanner.cs`, `VeterancyAndPersonalities.cs`, `CloseCombatAndSupport.cs`, `CoopSessionAndScoreboard.cs`, `VisionConfig.cs`, `ConfigMenuAndHud.cs`)**:
   * Resolved once per battle from mission `Gamemap`, localized map/location title, year, time of day, faction, and battalion ID into **9 historical theater directives** (**Order No. 227 ("Not One Step Back")**, **Kessel / Encircled Pocket**, **Urban Fortress**, **Amphibious Beachhead Assault**, **Siege of Bastogne ("NUTS!")**, **Pacific Bunker & Night Gyokusai**, **Mountain / Ridge Grind**, **Blitzkrieg / Schwerpunkt**, and **Night Coup de Main / Airborne**) applying bounded `±10–25%` modifiers to bravery aura multiplier (`LeaderAuraMult`), surrender thresholds (`SurrenderSuppDelta`), smoke/grenade/flank/overwatch weights, garrison ratios, and emplacement staffing.

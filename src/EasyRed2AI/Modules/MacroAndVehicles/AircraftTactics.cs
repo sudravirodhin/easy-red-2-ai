@@ -1587,11 +1587,6 @@ namespace EasyRed2HumanAI
                 vh.PlaneHotStarted = true;
         }
 
-        internal static void TryHotStartAirbornePlane(VehiclePlane vp, bool allowAiPilot)
-        {
-            BeginPlaneHotStartWindow(vp, allowAiPilot, false);
-        }
-
         [HarmonyPatch(typeof(VehiclePlane), nameof(VehiclePlane.OnSquadSpawnInside))]
         public static class VehiclePlane_OnSquadSpawnInside_Patch
         {

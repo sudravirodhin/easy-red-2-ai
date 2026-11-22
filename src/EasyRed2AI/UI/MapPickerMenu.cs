@@ -1628,7 +1628,7 @@ namespace EasyRed2HumanAI
             private static float _draftPlayerDmg = 1.0f;
             private static float _draftSuppShake = 0.15f;
             private static float _draftExpRadius = 1.0f;
-            private static float _draftStamina = 1.0f;
+            private static float _draftStamina = 3.0f;
             private static float _draftBarrelOverheat = 1.0f;
             private static float _draftNightLight = 1.0f;
             private static bool _draftFriendlyInd;
@@ -1636,6 +1636,75 @@ namespace EasyRed2HumanAI
             private static bool _draftAutoSurrender;
             private static bool _draftSimpleVehUi = true;
             private static bool _draftDmgAnim = true;
+
+            private static float ReadSafeProtectedFloat(ProtectedFloat pf, float fallback)
+            {
+                float decoded = BitConverter.Int32BitsToSingle(pf.hiddenValue ^ pf.cryptoKey);
+                if (!float.IsNaN(decoded) && !float.IsInfinity(decoded) && Mathf.Approximately(decoded, pf.fakeValue))
+                    return decoded;
+                if (!float.IsNaN(pf.fakeValue) && !float.IsInfinity(pf.fakeValue))
+                    return pf.fakeValue;
+                return fallback;
+            }
+
+            private static bool ReadSafeProtectedBool(ProtectedBool pb)
+            {
+                bool decoded = ((pb.hiddenValue ^ pb.cryptoKey) & 1) != 0;
+                return decoded == pb.fakeValue ? decoded : pb.fakeValue;
+            }
+
+            private static ProtectedFloat MakeSafeProtectedFloat(float value)
+            {
+                if (float.IsNaN(value) || float.IsInfinity(value))
+                    value = 1.0f;
+
+                ProtectedFloat pf = value;
+                int bits = BitConverter.SingleToInt32Bits(value);
+                if (pf.fakeValue != value || (pf.hiddenValue ^ pf.cryptoKey) != bits)
+                {
+                    int key = unchecked((int)(0x5A3C96E1u ^ (uint)Environment.TickCount));
+                    if (key == 0)
+                        key = 0x13579BDF;
+                    pf.cryptoKey = key;
+                    pf.fakeValue = value;
+                    pf.hiddenValue = bits ^ key;
+                }
+                return pf;
+            }
+
+            private static ProtectedBool MakeSafeProtectedBool(bool value)
+            {
+                ProtectedBool pb = value;
+                int expected = value ? 1 : 0;
+                if (pb.fakeValue != value || ((pb.hiddenValue ^ pb.cryptoKey) & 1) != expected)
+                {
+                    int key = unchecked((int)(0x4B2D85F0u ^ (uint)Environment.TickCount)) & 0x7FFFFFFF;
+                    if (key == 0)
+                        key = 0x2468ACE1;
+                    pb.cryptoKey = key;
+                    pb.fakeValue = value;
+                    pb.hiddenValue = expected ^ key;
+                }
+                return pb;
+            }
+
+            private static void LoadDraftFromDifficultySettings(MatchDifficultySettings settings)
+            {
+                _draftAiAcc = Mathf.Clamp(ReadSafeProtectedFloat(settings.aiAccuracyMultiplier, 1.0f), 0.25f, 2.50f);
+                _draftAiAccStatic = Mathf.Clamp(ReadSafeProtectedFloat(settings.aiAccuracyMultiplierStatic, 0.63f), 0.25f, 2.50f);
+                _draftAiAirAggro = Mathf.Clamp(ReadSafeProtectedFloat(settings.aiAircraftAggressivnessMultiplier, 3.0f), 0.25f, 3.00f);
+                _draftPlayerDmg = Mathf.Clamp(ReadSafeProtectedFloat(settings.playerDamageMultiplier, 1.0f), 0.25f, 2.50f);
+                _draftSuppShake = Mathf.Clamp(ReadSafeProtectedFloat(settings.suppressionShakeMultiplier, 0.15f), 0.00f, 2.50f);
+                _draftExpRadius = Mathf.Clamp(ReadSafeProtectedFloat(settings.explosionRadiusMultiplier, 1.0f), 0.50f, 2.00f);
+                _draftStamina = Mathf.Clamp(ReadSafeProtectedFloat(settings.staminaMultiplier, 3.0f), 0.25f, 3.00f);
+                _draftBarrelOverheat = Mathf.Clamp(settings.barrellOverheatMultiplier, 0.00f, 2.50f);
+                _draftNightLight = Mathf.Clamp(settings.nighLightMultiplier, 0.25f, 2.00f);
+                _draftFriendlyInd = ReadSafeProtectedBool(settings.showFriendlyUnitsIndicator);
+                _draftSuppDir = ReadSafeProtectedBool(settings.suppressionDirectionIndicatorOn);
+                _draftAutoSurrender = ReadSafeProtectedBool(settings.allowPlayerAutoSurrender);
+                _draftSimpleVehUi = ReadSafeProtectedBool(settings.simplifiedVehicleDamageUi);
+                _draftDmgAnim = ReadSafeProtectedBool(settings.playerDamageAnimationOn);
+            }
 
             private static void SyncMatchSettingsDraftFromMatchData(bool force = false)
             {
@@ -1657,20 +1726,7 @@ namespace EasyRed2HumanAI
                     _matchSettingsDraftDirty = false;
                     _draftDiffPresetName = "Synced";
 
-                    _draftAiAcc = Mathf.Clamp(diff.aiAccuracyMultiplier.Value, 0.25f, 2.50f);
-                    _draftAiAccStatic = Mathf.Clamp(diff.aiAccuracyMultiplierStatic.Value, 0.25f, 2.50f);
-                    _draftAiAirAggro = Mathf.Clamp(diff.aiAircraftAggressivnessMultiplier.Value, 0.25f, 3.00f);
-                    _draftPlayerDmg = Mathf.Clamp(diff.playerDamageMultiplier.Value, 0.25f, 2.50f);
-                    _draftSuppShake = Mathf.Clamp(diff.suppressionShakeMultiplier.Value, 0.00f, 2.50f);
-                    _draftExpRadius = Mathf.Clamp(diff.explosionRadiusMultiplier.Value, 0.50f, 2.00f);
-                    _draftStamina = Mathf.Clamp(diff.staminaMultiplier.Value, 0.00f, 2.50f);
-                    _draftBarrelOverheat = Mathf.Clamp(diff.barrellOverheatMultiplier, 0.25f, 2.50f);
-                    _draftNightLight = Mathf.Clamp(diff.nighLightMultiplier, 0.25f, 2.00f);
-                    _draftFriendlyInd = diff.showFriendlyUnitsIndicator.Value;
-                    _draftSuppDir = diff.suppressionDirectionIndicatorOn.Value;
-                    _draftAutoSurrender = diff.allowPlayerAutoSurrender.Value;
-                    _draftSimpleVehUi = diff.simplifiedVehicleDamageUi.Value;
-                    _draftDmgAnim = diff.playerDamageAnimationOn.Value;
+                    LoadDraftFromDifficultySettings(diff);
 
                     MatchBattle cb = md != null ? md.CurrentBattle : null;
                     if (cb != null && cb.ticketsMultiplier > 0.05f)
@@ -1685,20 +1741,7 @@ namespace EasyRed2HumanAI
                 {
                     MatchDifficultySettings temp = new MatchDifficultySettings();
                     temp.SetDifficultyPresed(preset);
-                    _draftAiAcc = Mathf.Clamp(temp.aiAccuracyMultiplier.Value, 0.25f, 2.50f);
-                    _draftAiAccStatic = Mathf.Clamp(temp.aiAccuracyMultiplierStatic.Value, 0.25f, 2.50f);
-                    _draftAiAirAggro = Mathf.Clamp(temp.aiAircraftAggressivnessMultiplier.Value, 0.25f, 3.00f);
-                    _draftPlayerDmg = Mathf.Clamp(temp.playerDamageMultiplier.Value, 0.25f, 2.50f);
-                    _draftSuppShake = Mathf.Clamp(temp.suppressionShakeMultiplier.Value, 0.00f, 2.50f);
-                    _draftExpRadius = Mathf.Clamp(temp.explosionRadiusMultiplier.Value, 0.50f, 2.00f);
-                    _draftStamina = Mathf.Clamp(temp.staminaMultiplier.Value, 0.00f, 2.50f);
-                    _draftBarrelOverheat = Mathf.Clamp(temp.barrellOverheatMultiplier, 0.25f, 2.50f);
-                    _draftNightLight = Mathf.Clamp(temp.nighLightMultiplier, 0.25f, 2.00f);
-                    _draftFriendlyInd = temp.showFriendlyUnitsIndicator.Value;
-                    _draftSuppDir = temp.suppressionDirectionIndicatorOn.Value;
-                    _draftAutoSurrender = temp.allowPlayerAutoSurrender.Value;
-                    _draftSimpleVehUi = temp.simplifiedVehicleDamageUi.Value;
-                    _draftDmgAnim = temp.playerDamageAnimationOn.Value;
+                    LoadDraftFromDifficultySettings(temp);
                     _draftDiffPresetName = label;
                     _matchSettingsDraftInitialized = true;
                     _matchSettingsDraftDirty = true;
@@ -1712,23 +1755,33 @@ namespace EasyRed2HumanAI
                 if (md == null)
                     return;
 
+                _draftAiAcc = Mathf.Clamp(_draftAiAcc, 0.25f, 2.50f);
+                _draftAiAccStatic = Mathf.Clamp(_draftAiAccStatic, 0.25f, 2.50f);
+                _draftAiAirAggro = Mathf.Clamp(_draftAiAirAggro, 0.25f, 3.00f);
+                _draftPlayerDmg = Mathf.Clamp(_draftPlayerDmg, 0.25f, 2.50f);
+                _draftSuppShake = Mathf.Clamp(_draftSuppShake, 0.00f, 2.50f);
+                _draftExpRadius = Mathf.Clamp(_draftExpRadius, 0.50f, 2.00f);
+                _draftStamina = Mathf.Clamp(_draftStamina, 0.25f, 3.00f);
+                _draftBarrelOverheat = Mathf.Clamp(_draftBarrelOverheat, 0.00f, 2.50f);
+                _draftNightLight = Mathf.Clamp(_draftNightLight, 0.25f, 2.00f);
+
                 MatchDifficultySettings diff = MatchData.Difficulty != null
                     ? MatchData.Difficulty.ShallowClone()
                     : new MatchDifficultySettings();
-                diff.aiAccuracyMultiplier = new ProtectedFloat(_draftAiAcc);
-                diff.aiAccuracyMultiplierStatic = new ProtectedFloat(_draftAiAccStatic);
-                diff.aiAircraftAggressivnessMultiplier = new ProtectedFloat(_draftAiAirAggro);
-                diff.playerDamageMultiplier = new ProtectedFloat(_draftPlayerDmg);
-                diff.suppressionShakeMultiplier = new ProtectedFloat(_draftSuppShake);
-                diff.explosionRadiusMultiplier = new ProtectedFloat(_draftExpRadius);
-                diff.staminaMultiplier = new ProtectedFloat(_draftStamina);
+                diff.aiAccuracyMultiplier = MakeSafeProtectedFloat(_draftAiAcc);
+                diff.aiAccuracyMultiplierStatic = MakeSafeProtectedFloat(_draftAiAccStatic);
+                diff.aiAircraftAggressivnessMultiplier = MakeSafeProtectedFloat(_draftAiAirAggro);
+                diff.playerDamageMultiplier = MakeSafeProtectedFloat(_draftPlayerDmg);
+                diff.suppressionShakeMultiplier = MakeSafeProtectedFloat(_draftSuppShake);
+                diff.explosionRadiusMultiplier = MakeSafeProtectedFloat(_draftExpRadius);
+                diff.staminaMultiplier = MakeSafeProtectedFloat(_draftStamina);
                 diff.barrellOverheatMultiplier = _draftBarrelOverheat;
                 diff.nighLightMultiplier = _draftNightLight;
-                diff.showFriendlyUnitsIndicator = new ProtectedBool(_draftFriendlyInd);
-                diff.suppressionDirectionIndicatorOn = new ProtectedBool(_draftSuppDir);
-                diff.allowPlayerAutoSurrender = new ProtectedBool(_draftAutoSurrender);
-                diff.simplifiedVehicleDamageUi = new ProtectedBool(_draftSimpleVehUi);
-                diff.playerDamageAnimationOn = new ProtectedBool(_draftDmgAnim);
+                diff.showFriendlyUnitsIndicator = MakeSafeProtectedBool(_draftFriendlyInd);
+                diff.suppressionDirectionIndicatorOn = MakeSafeProtectedBool(_draftSuppDir);
+                diff.allowPlayerAutoSurrender = MakeSafeProtectedBool(_draftAutoSurrender);
+                diff.simplifiedVehicleDamageUi = MakeSafeProtectedBool(_draftSimpleVehUi);
+                diff.playerDamageAnimationOn = MakeSafeProtectedBool(_draftDmgAnim);
                 MatchData.Difficulty = diff;
                 _lastSyncedDiffPtr = MatchData.Difficulty != null ? MatchData.Difficulty.Pointer : IntPtr.Zero;
 
@@ -1868,8 +1921,8 @@ namespace EasyRed2HumanAI
                 d |= DrawFloatSettingRow(new Rect(col1X, gridY + rowH * 4f, colW, rowH), "Suppression Shake", ref _draftSuppShake, 0.00f, 2.50f, 0.10f, $"{Mathf.RoundToInt(_draftSuppShake * 100f)}%", canControlMatch);
 
                 d |= DrawFloatSettingRow(new Rect(col2X, gridY, colW, rowH), "Explosion Radius", ref _draftExpRadius, 0.50f, 2.00f, 0.05f, $"{Mathf.RoundToInt(_draftExpRadius * 100f)}%", canControlMatch);
-                d |= DrawFloatSettingRow(new Rect(col2X, gridY + rowH, colW, rowH), "Stamina Drain (0=Inf)", ref _draftStamina, 0.00f, 2.50f, 0.10f, _draftStamina <= 0.01f ? "Infinite" : $"{Mathf.RoundToInt(_draftStamina * 100f)}%", canControlMatch);
-                d |= DrawFloatSettingRow(new Rect(col2X, gridY + rowH * 2f, colW, rowH), "Barrel Overheat Rate", ref _draftBarrelOverheat, 0.25f, 2.50f, 0.10f, $"{Mathf.RoundToInt(_draftBarrelOverheat * 100f)}%", canControlMatch);
+                d |= DrawFloatSettingRow(new Rect(col2X, gridY + rowH, colW, rowH), "Stamina Pool (300%=Inf)", ref _draftStamina, 0.25f, 3.00f, 0.25f, _draftStamina >= 2.99f ? "Infinite (300%)" : $"{Mathf.RoundToInt(_draftStamina * 100f)}%", canControlMatch);
+                d |= DrawFloatSettingRow(new Rect(col2X, gridY + rowH * 2f, colW, rowH), "Barrel Overheat Rate", ref _draftBarrelOverheat, 0.00f, 2.50f, 0.10f, _draftBarrelOverheat <= 0.01f ? "Off (0%)" : $"{Mathf.RoundToInt(_draftBarrelOverheat * 100f)}%", canControlMatch);
                 d |= DrawFloatSettingRow(new Rect(col2X, gridY + rowH * 3f, colW, rowH), "Night Brightness", ref _draftNightLight, 0.25f, 2.00f, 0.05f, $"{Mathf.RoundToInt(_draftNightLight * 100f)}%", canControlMatch);
 
                 // Toggles row

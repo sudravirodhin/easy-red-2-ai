@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using Corvostudio.CinematicCamera;
+using Corvostudio.CorvoDecals;
 using Corvostudio.Weapons;
 using HarmonyLib;
 using Photon.Pun;
@@ -767,10 +768,16 @@ namespace EasyRed2HumanAI
         //     pooled "ImpactFX_flesh_noBlood" preserves 100% of bullet-flesh impact audio.
         //  3) Ambient Map, Burning Vehicle & Explosion Smoke Depth Sorting: Normalizes
         //     pooled ImpactFX_flesh ParticleSystemRenderers once per pooled instance
-        //     (renderQueue = 2990 [Transparent-10], sortingOrder = -10, sortingFudge = +40m)
+        //     (renderQueue = 2950 [Transparent-50], sortingOrder = -20, sortingFudge = +50m)
         //     so blood still renders in the Transparent pass after all opaque/cutout world
         //     geometry (<= 2450), while every Queue=3000 smoke/fire/dust/water particle
         //     system is guaranteed to draw AFTER (over) blood mist regardless of emitter distance.
+        //  4) Corpse Dismemberment Decals & Ground Blood Puddles: Normalizes vanilla
+        //     LimbLeftoverManager blood decals (KriptoFX/FPS_Pack/Decal at Queue=3000,
+        //     ZTest=Always, Cull=Front, DstColor*Zero blend -> renderQueue = 2910,
+        //     sortingOrder = -20) and CorvoDecal blood_puddle_* pools (2990 -> 2940,
+        //     sortingOrder = -20) so corpse blood renders after opaque depth copy (<= 2500)
+        //     but strictly before Queue=3000 smoke particles, preventing X-ray blood over smoke.
         // ============================================================================
         private struct OriginalBloodRendererState
         {
@@ -794,16 +801,17 @@ namespace EasyRed2HumanAI
         private static Il2CppSystem.Action<GameObject> _cachedBloodFxShowCallback;
         private static Il2CppSystem.Action<GameObject> _cachedBloodFxSuppressCallback;
         private static bool _loggedBloodRendererNormalization;
+        private static bool _loggedBloodDecalNormalization;
 
-        private static void NormalizeSingleBloodMaterial(Material mat)
+        private static void NormalizeSingleBloodMaterial(Material mat, int targetQueue = 2950, bool trackForRestore = true)
         {
             if (mat == null || mat.Pointer == IntPtr.Zero)
                 return;
 
             int origQueue = mat.renderQueue;
-            if (origQueue > 2950 && origQueue <= 4000)
+            if (origQueue > targetQueue && origQueue <= 4000)
             {
-                if (_inspectedBloodMatPtrs.Add(mat.Pointer) && _modifiedBloodMaterials.Count < 256)
+                if (trackForRestore && _inspectedBloodMatPtrs.Add(mat.Pointer) && _modifiedBloodMaterials.Count < 256)
                 {
                     _modifiedBloodMaterials.Add(new OriginalBloodMaterialState
                     {
@@ -811,7 +819,72 @@ namespace EasyRed2HumanAI
                         RenderQueue = origQueue
                     });
                 }
-                mat.renderQueue = 2950;
+                mat.renderQueue = targetQueue;
+            }
+        }
+
+        private static bool IsTempMaterialInstance(Material mat)
+        {
+            return mat != null &&
+                   !string.IsNullOrEmpty(mat.name) &&
+                   mat.name.IndexOf("(Instance)", StringComparison.Ordinal) >= 0;
+        }
+
+        private static bool IsBloodLeftoverDecalMaterial(Material mat)
+        {
+            if (mat == null || mat.Pointer == IntPtr.Zero)
+                return false;
+
+            if (!string.IsNullOrEmpty(mat.name) &&
+                mat.name.IndexOf("BloodLeftover", StringComparison.OrdinalIgnoreCase) >= 0)
+            {
+                return true;
+            }
+
+            Shader sh = mat.shader;
+            return sh != null && string.Equals(sh.name, "KriptoFX/FPS_Pack/Decal", StringComparison.Ordinal);
+        }
+
+        private static void NormalizeBloodDecalRenderer(Renderer r, int targetQueue)
+        {
+            if (r == null || r.Pointer == IntPtr.Zero)
+                return;
+
+            Material sm = r.sharedMaterial;
+            var mats = r.sharedMaterials;
+            bool matched = IsBloodLeftoverDecalMaterial(sm);
+            if (!matched && mats != null)
+            {
+                for (int m = 0; m < mats.Length; m++)
+                {
+                    if (IsBloodLeftoverDecalMaterial(mats[m]))
+                    {
+                        matched = true;
+                        break;
+                    }
+                }
+            }
+
+            if (!matched)
+                return;
+
+            if (r.sortingOrder > -20)
+                r.sortingOrder = -20;
+
+            NormalizeSingleBloodMaterial(sm, targetQueue, trackForRestore: !IsTempMaterialInstance(sm));
+            if (mats != null)
+            {
+                for (int m = 0; m < mats.Length; m++)
+                    NormalizeSingleBloodMaterial(mats[m], targetQueue, trackForRestore: !IsTempMaterialInstance(mats[m]));
+            }
+
+            if (!_loggedBloodDecalNormalization)
+            {
+                _loggedBloodDecalNormalization = true;
+                AiCore.LogDebug(
+                    "BloodVfx",
+                    $"Normalized corpse blood decal renderer '{r.name}' -> queue {targetQueue}, order -20",
+                    10.0f);
             }
         }
 
@@ -1096,6 +1169,90 @@ namespace EasyRed2HumanAI
             }
         }
 
+        [HarmonyPatch(typeof(LimbLeftoverManager), nameof(LimbLeftoverManager.Start))]
+        public static class LimbLeftoverManager_Start_Patch
+        {
+            public static void Postfix(LimbLeftoverManager __instance)
+            {
+                try
+                {
+                    if (!VisionConfig.EnableMod.Value ||
+                        !VisionConfig.EnableBloodSmokeWaterOcclusion.Value ||
+                        __instance == null ||
+                        __instance.Pointer == IntPtr.Zero)
+                    {
+                        return;
+                    }
+
+                    if (__instance.blood_decal != null && __instance.blood_decal.Pointer != IntPtr.Zero)
+                    {
+                        NormalizeSingleBloodMaterial(
+                            __instance.blood_decal,
+                            targetQueue: 2910,
+                            trackForRestore: !IsTempMaterialInstance(__instance.blood_decal));
+                    }
+
+                    if (__instance.materialToClone != null && __instance.materialToClone.Pointer != IntPtr.Zero)
+                    {
+                        NormalizeBloodDecalRenderer(__instance.materialToClone, 2910);
+                    }
+
+                    var renderers = __instance.GetComponentsInChildren<Renderer>(true);
+                    if (renderers != null)
+                    {
+                        for (int i = 0; i < renderers.Length; i++)
+                            NormalizeBloodDecalRenderer(renderers[i], 2910);
+                    }
+                }
+                catch { }
+            }
+        }
+
+        [HarmonyPatch(typeof(CorvoDecal), nameof(CorvoDecal.ApplyMeshData))]
+        public static class CorvoDecal_ApplyMeshData_Patch
+        {
+            public static void Postfix(CorvoDecal __instance, Material assignedMaterial)
+            {
+                try
+                {
+                    if (!VisionConfig.EnableMod.Value ||
+                        !VisionConfig.EnableBloodSmokeWaterOcclusion.Value ||
+                        __instance == null ||
+                        __instance.Pointer == IntPtr.Zero ||
+                        assignedMaterial == null ||
+                        assignedMaterial.Pointer == IntPtr.Zero)
+                    {
+                        return;
+                    }
+
+                    bool isBloodPuddle = _inspectedBloodMatPtrs.Contains(assignedMaterial.Pointer);
+                    if (!isBloodPuddle)
+                    {
+                        string matName = assignedMaterial.name;
+                        if (string.IsNullOrEmpty(matName) ||
+                            !matName.StartsWith("blood_puddle", StringComparison.OrdinalIgnoreCase))
+                        {
+                            return;
+                        }
+                        isBloodPuddle = true;
+                    }
+
+                    if (isBloodPuddle)
+                    {
+                        NormalizeSingleBloodMaterial(
+                            assignedMaterial,
+                            targetQueue: 2940,
+                            trackForRestore: !IsTempMaterialInstance(assignedMaterial));
+
+                        MeshRenderer mr = __instance.GetComponent<MeshRenderer>();
+                        if (mr != null && mr.Pointer != IntPtr.Zero && mr.sortingOrder > -20)
+                            mr.sortingOrder = -20;
+                    }
+                }
+                catch { }
+            }
+        }
+
         // ============================================================================
         // 7. TACTICAL RELOAD & BIPOD ANIMATION CANCEL (LOCAL HUMAN PLAYER ONLY)
         // Allows emergency interrupting reloads or mounted bipod states via weapon switch,
@@ -1337,18 +1494,14 @@ namespace EasyRed2HumanAI
             }
         }
 
-        [HarmonyPatch(typeof(Soldier), nameof(Soldier.Throw))]
-        public static class Soldier_Throw_ReloadCancel_Patch
+        internal static void TryCancelLocalPlayerReloadOnThrow(Soldier soldier, VirtualItem item)
         {
-            public static void Prefix(Soldier __instance, VirtualItem item)
+            try
             {
-                try
-                {
-                    if (__instance != null && item != null && IsSoldierCurrentlyReloading(__instance, out _))
-                        TryCancelLocalPlayerReload(__instance, undeployBipodIfMounted: true, restoreHoldPose: false);
-                }
-                catch { }
+                if (soldier != null && item != null && IsSoldierCurrentlyReloading(soldier, out _))
+                    TryCancelLocalPlayerReload(soldier, undeployBipodIfMounted: true, restoreHoldPose: false);
             }
+            catch { }
         }
 
         [HarmonyPatch(typeof(Soldier), nameof(Soldier.Vault))]

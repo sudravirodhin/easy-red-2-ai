@@ -1212,28 +1212,6 @@ namespace EasyRed2HumanAI
             }
         }
 
-        // =====================================================================
-        // Tier 2: Squad Tactical Blackboard (Computed 1x per Squad per 0.6s)
-        // =====================================================================
-        private static SquadBlackboard GetOrUpdateSquadBlackboardBudgeted(
-            Squad sq,
-            Soldier fallbackSoldier,
-            float now,
-            ref int refreshedBoardsThisTick,
-            int maxRefreshPerTick = 3)
-        {
-            if (sq == null || sq.Pointer == IntPtr.Zero)
-                return default;
-
-            bool hadCached = _squadBlackboards.TryGetValue(sq.Pointer, out SquadBlackboard prevBoard);
-            bool needsRefresh = !hadCached || now >= prevBoard.NextRefreshTime;
-            bool allowRefresh = refreshedBoardsThisTick < maxRefreshPerTick;
-            SquadBlackboard result = GetOrUpdateSquadBlackboard(sq, fallbackSoldier, allowRefresh);
-            if (needsRefresh && (!hadCached || allowRefresh))
-                refreshedBoardsThisTick++;
-            return result;
-        }
-
         internal static void TriggerSquadLeaderLossShock(Squad sq, ref SquadBlackboard board, IntPtr fallenLeaderPtr, float now)
         {
             if (sq == null || sq.Pointer == IntPtr.Zero)

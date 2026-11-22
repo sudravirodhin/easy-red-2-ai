@@ -1,4 +1,4 @@
-# Easy Red 2: Battle Hardened (`v0.10.2`)
+# Easy Red 2: Battle Hardened (`v0.10.3`)
 *H.A.R.M. 3-Tier Emergent Decision Engine, Humanized Vision & Footstep Hearing, 9 Battle Atmosphere Directives, Asymmetric Danger Stamps, Radioman Intel Nets, 15-Minute Veterancy, 30 Personalities & Combined-Arms Overhaul*
 
 **[What Is Battle Hardened](#what-is-battle-hardened)** · **[Why Vanilla Needed That Push](#why-vanilla-easy-red-2-needed-that-extra-push)** · **[Install & Mod Compatibility](#installation-and-mod-compatibility)** · **[Multiplayer Matrix](#multiplayer-compatibility-matrix)** · **[What Changes In-Game](#what-changes-on-the-battlefield)** · **[H.A.R.M. Architecture & Personalities](#harm-emergent-decision-engine-and-personalities)** · **[Hotkeys](#in-game-hotkeys-and-menus)** · **[Verification & Performance](#automated-verification-and-performance-profiling)** · **[Engineering Deep-Dive](docs/design-and-justifications.md)** · **[Changelog](CHANGELOG.md)**
@@ -7,14 +7,14 @@
 
 ## What Is Battle Hardened
 
-***Battle Hardened*** is a **zero-cheat tactical AI, Co-op, and combat immersion overhaul** for *Easy Red 2* (BepInEx 6 IL2CPP).
+***Battle Hardened*** is a **tactical AI realism, Co-op, and combat immersion overhaul** for *Easy Red 2* (BepInEx 6 IL2CPP).
 
-**Zero aimbots. Zero X-ray wallhacks. Zero artificial HP buffs.**  
-Instead of making bots cheat, *Battle Hardened* runs a custom **3-Tier Emergent Decision Engine — H.A.R.M. (*Heuristic Action & Risk Model*)** — paired with realistic human vision, footstep acoustics, cover discipline, and combined-arms support so every rifleman, NCO, medic, radioman, tanker, and pilot fights to **survive and win** (the previous legacy GOAP architecture is archived on the `GOAP` git tag).
+**Built for realism, not artificial difficulty — zero aimbots, zero 360° ESP, zero HP bloat.**  
+*Battle Hardened* is not a "hardcore laser-bot" mod. Powered by **H.A.R.M. (*Heuristic Action & Risk Model*)**, our custom 3-Tier Emergent Decision Engine gives bots real human sight cones, footstep acoustics, reaction delays, fear, and self-preservation—so sneaking, flanking armor, and knocking out enemy Radiomen or Officers genuinely pay off while your own teammates fight smarter beside you (the previous legacy GOAP architecture is archived on the `GOAP` git tag).
 
 * **Co-op Host-Only Friendly**: Host for **unmodded vanilla friends** (they experience the upgraded AI, resurrected vanilla voice lines, Host-Assist wood/top-attack penetration, and targeted radio/welcome briefings with zero install) or play **100% client-side** on vanilla servers.
 * **Built for `140+` Bot Battles (`60 FPS` Target + Live Self-Verification)**: Zero-allocation bit-packed stimulus & world structs, chunked world/inventory snapshots, `43`-bucket `Stopwatch` flight recording, `80/80` leak-audited scene-reset caches, automatic `< 40 FPS` brain-tick backoff, and an opt-in **Live Performance & Mod CPU Overlay** (`F6 -> Tab 5`) so you can verify exact `ms/frame` cost mid-battle against `F8` Vanilla.
-* **100% Live-Configurable (`F6`) & Toggleable (`F8`)**: Tune or disable **`112` options** across **5 tabs** mid-match from the `F6` menu (`BepInEx\config\com.antigravity.easyred2.humanai.cfg`), or press **`F8`** at any moment to switch cleanly back to 100% vanilla behavior without restarting.
+* **100% Live-Configurable (`F6`) & Toggleable (`F8`)**: Tune or disable **`111` options** across **5 tabs** mid-match from the `F6` menu (`BepInEx\config\com.antigravity.easyred2.humanai.cfg`), or press **`F8`** at any moment to switch cleanly back to 100% vanilla behavior without restarting.
 
 ---
 
@@ -47,20 +47,20 @@ Download **[`Launch-BattleHardened.bat`](Launch-BattleHardened.bat)** (run it fr
 * Automatically locates your Steam `Easy Red 2` folder, checks GitHub Releases for the latest version (`SHA-256` & version verified in `< 1s`), updates `EasyRed2HumanAI.dll` only when a newer release is available (or installs the full `*-with-BepInEx.zip` bundle on a fresh vanilla install), and **launches *Easy Red 2* via Steam automatically**.
 * If you only want to update without launching the game, run **[`Update-BattleHardened.bat`](Update-BattleHardened.bat)** instead.
 
-### Option A: With BepInEx Included (`EasyRed2HumanAI-v0.10.2-with-BepInEx.zip`) — *For Manual Fresh Installs*
+### Option A: With BepInEx Included (`EasyRed2HumanAI-v0.10.3-with-BepInEx.zip`) — *For Manual Fresh Installs*
 Includes **[BepInEx 6.0.0-be.791 (Unity.IL2CPP-win-x64)](https://builds.bepinex.dev/projects/bepinex_be)**, the `.NET 6` runtime, Unity `2022.3.62` base libraries, pre-generated IL2CPP `interop` assemblies for Easy Red 2 Build `921`, `EasyRed2HumanAI.dll`, and `Launch-BattleHardened.bat` / `Update-BattleHardened.bat` (with no other third-party mods).
 1. Open your **Easy Red 2** installation folder (e.g. `Steam\steamapps\common\Easy Red 2`, where `Easy Red 2.exe` is located).
-2. Extract all contents of `EasyRed2HumanAI-v0.10.2-with-BepInEx.zip` directly into the `Easy Red 2` folder.
+2. Extract all contents of `EasyRed2HumanAI-v0.10.3-with-BepInEx.zip` directly into the `Easy Red 2` folder.
 3. Launch the game via Steam or `Launch-BattleHardened.bat`!
 
-### Option B: Without BepInEx / Plugin Only (`EasyRed2HumanAI-v0.10.2-Plugin-Only.zip` or `EasyRed2HumanAI.dll`)
+### Option B: Without BepInEx / Plugin Only (`EasyRed2HumanAI-v0.10.3-Plugin-Only.zip` or `EasyRed2HumanAI.dll`)
 For users who already have **[BepInEx 6 Bleeding Edge (`BepInEx-Unity.IL2CPP-win-x64`)](https://builds.bepinex.dev/projects/bepinex_be)** installed:
-1. Download `EasyRed2HumanAI-v0.10.2-Plugin-Only.zip` (or `EasyRed2HumanAI.dll` directly).
+1. Download `EasyRed2HumanAI-v0.10.3-Plugin-Only.zip` (or `EasyRed2HumanAI.dll` directly).
 2. Place `EasyRed2HumanAI.dll` into:
    ```text
    Easy Red 2\BepInEx\plugins\EasyRed2HumanAI.dll
    ```
-   *(Using **[Quartermaster - ER2 Mod Manager](https://www.nexusmods.com/easyred2/mods/107)**? Import `EasyRed2HumanAI-v0.10.2-Plugin-Only.zip` directly in Quartermaster's Mods tab—do not import `with-BepInEx.zip`.)*
+   *(Using **[Quartermaster - ER2 Mod Manager](https://www.nexusmods.com/easyred2/mods/107)**? Import `EasyRed2HumanAI-v0.10.3-Plugin-Only.zip` directly in Quartermaster's Mods tab—do not import `with-BepInEx.zip`.)*
 
 ### Linux & Steam Deck Setup (via Steam Proton)
 `EasyRed2HumanAI` works out of the box on **Linux Desktop** and **SteamOS / Steam Deck** with 100% Windows Co-op cross-play compatibility by running the Windows IL2CPP build under **Proton**:
@@ -69,16 +69,16 @@ For users who already have **[BepInEx 6 Bleeding Edge (`BepInEx-Unity.IL2CPP-win
    * Check **"Force the use of a specific Steam Play compatibility tool"** and select **Proton Experimental** or **Proton 9.0+**. Let Steam finish downloading `Easy Red 2.exe`.
 2. **Extract the Mod**:
    * Right-click **Easy Red 2** → **Manage** → **Browse local files** (`~/.steam/steam/steamapps/common/Easy Red 2/`).
-   * Extract **`EasyRed2HumanAI-v0.10.2-with-BepInEx.zip`** directly into that folder (`winhttp.dll`, `doorstop_config.ini`, `dotnet/`, and `BepInEx/` next to `Easy Red 2.exe`).
+   * Extract **`EasyRed2HumanAI-v0.10.3-with-BepInEx.zip`** directly into that folder (`winhttp.dll`, `doorstop_config.ini`, `dotnet/`, and `BepInEx/` next to `Easy Red 2.exe`).
 3. **Add the Wine DLL Override Launch Option** *(Required on Linux/Proton so Wine loads BepInEx's `winhttp.dll` proxy)*:
    * In Steam → **Easy Red 2** → **Properties** → **General** → **Launch Options**, paste:
      ```bash
      WINEDLLOVERRIDES="winhttp=n,b" %command%
      ```
-4. Launch the game! Verify `BepInEx/LogOutput.log` shows `Easy Red 2 - Battle Hardened v0.10.2 loaded!`. Both Windows and Linux/Proton players can Host or Join each other's Co-op lobbies. *(Also see [docs/MACOS_EXPERIMENTAL.md](docs/MACOS_EXPERIMENTAL.md) for Apple Silicon macOS testing.)*
+4. Launch the game! Verify `BepInEx/LogOutput.log` shows `Easy Red 2 - Battle Hardened v0.10.3 loaded!`. Both Windows and Linux/Proton players can Host or Join each other's Co-op lobbies. *(Also see [docs/MACOS_EXPERIMENTAL.md](docs/MACOS_EXPERIMENTAL.md) for Apple Silicon macOS testing.)*
 
 ### Switching to Vanilla or Uninstalling (`Uninstall-BepInEx-Mod.bat`)
-Included in `EasyRed2HumanAI-v0.10.2-with-BepInEx.zip` (and in the root of this repository) is **[`Uninstall-BepInEx-Mod.bat`](Uninstall-BepInEx-Mod.bat)**. Run it inside your `Easy Red 2` folder when the game is closed to:
+Included in `EasyRed2HumanAI-v0.10.3-with-BepInEx.zip` (and in the root of this repository) is **[`Uninstall-BepInEx-Mod.bat`](Uninstall-BepInEx-Mod.bat)**. Run it inside your `Easy Red 2` folder when the game is closed to:
 * **`[1] Play Vanilla Temporarily`**: Backs up `BepInEx`, `dotnet`, and `winhttp.dll` into `_BepInEx_Disabled_Backup\` so the game runs 100% vanilla without losing configs or plugins.
 * **`[2] Restore Modded Game`**: Restores everything from `_BepInEx_Disabled_Backup\` in one click.
 * **`[3] Uninstall Completely`**: Permanently deletes BepInEx and installed files.
@@ -97,7 +97,7 @@ Whether you are **joining a 100% vanilla server as a modded client**, **hosting 
 | Feature / System | Category | Joining a Vanilla Server (Client-Only Mod) | Hosting for Vanilla Friends (Host-Only Mod) | Host + Clients Both Modded |
 | :--- | :--- | :--- | :--- | :--- |
 | **Plane Engine Loop De-Throbber** (`EnablePlaneAudioSmoothing`) & **Individualistic Voice Pitch** (`EnableDynamicSoldierVoicePitch`) | **100% Client-Side Audio** | **Works 100%** for you | Host hears smoothed plane audio & deterministic soldier voice pitch; vanilla clients hear vanilla audio | **Everyone** hears smoothed plane audio & per-bot pitch |
-| **Death Screen Kill Attribution (`Bleeding` vs. `Bled out`) + Age & `F7` Dogtag Archive** | **100% Client-Side** | **Works 100%** for you | Host sees full obituary & archive; vanilla clients see vanilla death screen | **Everyone** sees full obituary & archive |
+| **Death Screen Kill Attribution (`Bled out` on delayed bleed-outs, clean weapon/hit-zone cause on direct kills) + Age & `F7` Dogtag Archive** | **100% Client-Side** | **Works 100%** for you | Host sees full obituary & archive; vanilla clients see vanilla death screen | **Everyone** sees full obituary & archive |
 | **Quick-Tap `Tab` Spotting & 64-Char Room Names** | **Client UI / Host Room Name** | **Works 100%** for you | Vanilla clients see your full 64-char server name! | **Works 100%** for everyone |
 | **3D Veteran Badges, Revived Roster Fix, `[RISEN SL]`/`[SL SHOCK]`, Spectator HUD (`F`), Free-Cam Stabilization, 4K UI Scale & `F5`–`F10`** | **100% Client-Side UI / Camera** | **Works 100%** on your HUD | Host only (vanilla clients see **3D uniform shoulder rank decals** synced by Host) | **Everyone** sees HUD tags, 3D badges & decals |
 | **Macro Objective Director, Garrisons, Attrition Pivots, Emplacements & Smart APCs** | **Host-Driven (Synced to All)** | Inactive (Host controls autonomous squads) | **Vanilla clients experience 100%!** Host assigns squad tasks and Photon syncs movements & dismounts to vanilla players. | **Works 100%** for everyone |
@@ -130,15 +130,15 @@ Whether you are **joining a 100% vanilla server as a modded client**, **hosting 
 
 ### 4. Fair Human Vision, Tank Commander Periscope & Realistic Ballistics ([`Modules/Vision/`](src/EasyRed2AI/Modules/Vision/) & [`Modules/ImmersionAndQoL/`](src/EasyRed2AI/Modules/ImmersionAndQoL/))
 * **Fair Vision & Window-Aperture Alignment**: Preserves `150m` Standing / `80m` Crouched / `40m` Prone stealth with `4.0s` individual shooter reveals, continuous human "squint" cones (`<= 12m` -> `±32°`), `0.18s–0.65s+` human reaction timing, optic zoom scaling (`<= 2.25x`), native `AngleToDirection` `90°` gaze fix, window-opening alignment for indoor defenders, and `15m` vocal threat callouts.
-* **360° Tank Periscope, Intercoms & Armor Realism**: `TurretCommander` sweeps (`55°/s`) or tracks gunfire (`<= 185m`) with `11.5m` hull dead zones and **`0.65s–1.48s` Commander & infantry-escort intercom handoffs** into narrow gunner slits (`±15°–34°`); protects buttoned crew against external frags and collider clips; filters `0`-armor tent/soft-prop tank collisions; grants Molotov track immunity; adds diving aircraft **top-attack AP roof normalization** + armored plane bellies; adds thin-cover wood penetration (`Host-Assist` included); and occludes underwater/smoke blood effects.
+* **360° Tank Periscope, Intercoms & Armor Realism**: `TurretCommander` sweeps (`55°/s`) or tracks gunfire (`<= 185m`) with `11.5m` hull dead zones and **`0.65s–1.48s` Commander & infantry-escort intercom handoffs** into narrow gunner slits (`±15°–34°`); protects buttoned crew against external frags and collider clips; filters `0`-armor tent/soft-prop tank collisions; grants Molotov track immunity; adds diving aircraft **top-attack AP roof normalization** + armored plane bellies; adds thin-cover wood penetration (`Host-Assist` included); and occludes underwater/smoke blood impacts and corpse/ground blood decals (`LimbLeftoverManager` + `CorvoDecal`).
 
 ### 5. Combined Arms: Armor, Emplacements, Moving-Tank Corridors & Bailouts ([`Modules/MacroAndVehicles/`](src/EasyRed2AI/Modules/MacroAndVehicles/))
 * **Moving-Vehicle Forward Danger Corridors**: Refreshes up to `32` moving vehicle danger corridors at `10 Hz` so friendly infantry step sideways out of rolling tank tracks (`VehicleEvade` fast reflex, undeploying bipods/cover cleanly) and never pick `CombatCover` inside a moving friendly tank's forward lane.
-* **Tank `RepairStation` Health Fix, Standoff & True Munition Selection**: Keeps vanilla driving (`UpdatePath`), flight physics (`FlightModel`), and Photon vehicle sync 100% pure while layering personality standoff (`50m–95m`), `<= 35m` AT reverse, facade shelling, coax MG vs. true `APHE`/`HE`/`Flak` selection (`TurretGun.SelectBestAmmo` + `TurretWeapon.Reload`), and accurate remaining-health `RepairStation` routing (`1.0 - MovableVehicle.GetPercentageDamageFor()`, resolving inverted `dmg:100%` flip-flops with `Order.defend` + `24s` stalled-route watchdog).
+* **Tank `RepairStation` Health Fix, Munition Selection & Pure Vanilla Driving/Flight**: Keeps vanilla driving (`UpdatePath`), flight physics (`FlightModel`), and Photon vehicle sync 100% pure while layering facade shelling, coax MG vs. true `APHE`/`HE`/`Flak` selection (`TurretGun.SelectBestAmmo` + `TurretWeapon.Reload`), hull/blast displacement, and accurate remaining-health `RepairStation` routing (`1.0 - MovableVehicle.GetPercentageDamageFor()`, resolving inverted `dmg:100%` flip-flops with `Order.defend` + `24s` stalled-route watchdog).
 * **Emplacements, Anti-Armor & Air/Crew Bailouts**: Proactively crews 2-seat static guns (and assists player guns within `32m`) while bailing gunners when flanked/rushed; keeps stowed AT launchers ready against halftracks/armored cars; enforces threat-arc Tank Fear + blind-side stalking; restores `2200m`/`4000m` air detection, carrier `NeedRefill` rescue, and H.A.R.M. CAS/CAP air tasking; restricts *Tokkōtai* dives to crippled planes; and runs staggered crew bailouts (`0.15s–0.45s` hatch queue + shock scramble + sea-ditching retreat).
 
 ### 6. Immersion, Free-Cam Stability, Obituary, `F5`/`F6`/`F7` UI & 60 FPS Co-op Polish ([`Modules/ImmersionAndQoL/`](src/EasyRed2AI/Modules/ImmersionAndQoL/) & [`UI/`](src/EasyRed2AI/UI/))
-* **Audio, Free Cam & HUD Clarity**: Individualistic deterministic **Soldier Voice Pitch**; **Plane Engine Loop De-Throbber**; **Free-Cam Plane/Vehicle Stabilization** (disables jittery `TrackingRigidbody`, cancels `ShakeCameraRoutine` in cinematic cam, normalizes lock-on targets to root vehicle transforms, zeroes camera roll); **Revived Squadmate HUD Sync** (fixes red downed name colors & cleans `SquadSoldierLabel` states); **Death Screen Obituary** (explicit **`"Bleeding"`** vs. delayed **`"Bled out"`**, caliber/hit zone, Age, Event `197` MP sync) & searchable **`F7` Dogtag Archive**; Bottom-left Squad Roster (`[RISEN SL]`, `[SL SHOCK]` / `[RALLIED]` / `[BRAVERY +X%]`) & Gold/White squad letters; **Tactical Reload/Bipod Canceling**; **64-char room names**, quick-tap `Tab` spot, localized Welcome MOTD, `16s` MP anthem fade, **4K UI scaling**, Spectator **`F` Command Net Overhead (`Mode 4`)** & **`F8` Vanilla A/B Observer**, standalone **`F5` Campaign/Playlist/Difficulty Picker**, **`45 FPS` unfocused Host cap**, and **Host Ping Governor**.
+* **Audio, Free Cam & HUD Clarity**: Individualistic deterministic **Soldier Voice Pitch**; **Plane Engine Loop De-Throbber**; **Free-Cam Plane/Vehicle Stabilization** (disables jittery `TrackingRigidbody`, cancels `ShakeCameraRoutine` in cinematic cam, normalizes lock-on targets to root vehicle transforms, zeroes camera roll); **Revived Squadmate HUD Sync** (fixes red downed name colors & cleans `SquadSoldierLabel` states); **Death Screen Obituary** (`"Bled out"` on delayed bleed-outs, clean weapon/hit-zone cause on direct kills, caliber, Age, Event `197` MP sync) & searchable **`F7` Dogtag Archive**; Bottom-left Squad Roster (`[RISEN SL]`, `[SL SHOCK]` / `[RALLIED]` / `[BRAVERY +X%]`) & Gold/White squad letters; **Tactical Reload/Bipod Canceling**; **64-char room names**, quick-tap `Tab` spot, localized Welcome MOTD, `16s` MP anthem fade, **4K UI scaling**, Spectator **`F` Command Net Overhead (`Mode 4`)** & **`F8` Vanilla A/B Observer**, standalone **`F5` Campaign/Playlist/Difficulty Picker**, **`45 FPS` unfocused Host cap**, and **Host Ping Governor**.
 
 ---
 
@@ -183,7 +183,7 @@ No two soldiers of the same nation fight identically: MurmurHash3 bit-mixing gen
 | **5. Marksman / Sniper** | **`[Deadeye]`**: `12%` tighter accuracy when firing from `Crouch` or `Prone`. | **`[Stalker]`**: `35%` shorter firing-reveal duration from concealed cover. | **`[Spotter]`**: `+5°` wider scoped optic cone for counter-sniping. |
 | **6. Anti-Tank / Sapper** | **`[Tank Hunter]`**: Stalks armor in crouch stealth and aims for tracks/weak spots. | **`[Ambusher]`**: Holds fire behind cover until armor enters kill range (`< 68m`). | **`[Demo]`**: High suppression grit (`>= 60`) when closing for AT/satchel/grenade attacks. |
 | **7. Field Medic** | **`[Heroic]`**: Braver under fire (`<= 52` suppression) and searches `1.5x` wider (`45m`) to rescue/liberate. | **`[Combat Medic]`**: Balanced combat-first medic (`35` suppression); clears close threats before treating. | **`[Triage]`**: High self-preservation (`20` suppression, longer cover-seek) to stay alive for the squad. |
-| **8. Tank / Armor Crew** | **`[Brawler Crew]`**: `20%` faster turret target switching and `50m` close-support standoff. | **`[Sniper Crew]`**: `+5°` wider long-range turret optic cone and `95m` armor-duel standoff. | **`[Support Crew]`**: Prioritizes infantry support (`72m` standoff) and fast radio-request response. |
+| **8. Tank / Armor Crew** | **`[Brawler Crew]`**: `20%` faster turret target switching, higher H.A.R.M. close-support risk tolerance & fastest bailout recovery. | **`[Sniper Crew]`**: `+5°` wider long-range turret optic cone & standoff-weighted fire discipline. | **`[Support Crew]`**: Faster radio-request target switching & infantry-support repair/bailout discipline. |
 | **9. Light Vehicle / AA** | **`[Outrider]`**: Fast-reacting mobile gunner/driver (`20%` faster turret refresh). | **`[Escort]`**: Cautious standoff support and higher self-preservation when repairing. | **`[Flak Watch]`**: `+12°` wider scan sector in `TurretAI.CanSee` for tracking aircraft. |
 | **10. Aircraft Pilot** | **`[Ace]`**: Extended dogfight pursuit leash (`fighterDogfightExtraLeash = 450m`). | **`[Daredevil]`**: Commits closer on CAS dive-bombing runs (`0.90x diveAlignDistance`). | **`[Disciplined]`**: Pulls out of dives earlier (`1.08x diveAlignDistance`) for safer bomb releases. |
 
@@ -195,11 +195,11 @@ For native `GameAssembly.dll` RVAs, architecture notes, and settled invariants a
 
 ## In-Game Hotkeys and Menus
 
-Every feature is organized into **5 Tabs** (`1. GOAP & Bot Behaviors` *[housing H.A.R.M. & Macro Command]*, `2. Vanilla Fixes`, `3. Vision & Realism`, `4. Vets & Roles`, `5. Optimizations & QoL`) with one-click **`[ALL]` / `[OFF]`** section buttons in **`F6`** (`BepInEx\config\com.antigravity.easyred2.humanai.cfg`):
+Every feature is organized into **5 Tabs** (`1. H.A.R.M. & Bot Behaviors`, `2. Vanilla Fixes`, `3. Vision & Realism`, `4. Vets & Roles`, `5. Optimizations & QoL`) with one-click **`[ALL]` / `[OFF]`** section buttons in **`F6`** (`BepInEx\config\com.antigravity.easyred2.humanai.cfg`):
 
 * **`F` (in Free Camera / Auto-Spectator)**: Cycle Spectator Tactical View (**`Full Tactical`** $\rightarrow$ **`Objectives Only`** $\rightarrow$ **`Clean Cinema`** $\rightarrow$ **`Command Net Overhead`** + live **`F8`** Vanilla A/B Observer), independent of Photo Mode's camera UI toggle.
 * **`F5`**: Open/Close the standalone **2-Tab Campaign, Multi-Map Playlist & Match Settings Picker** (SP & MP Host: build `[+]`/`[#N]` playlists, **`Campaign From Here`**, synced vanilla `Difficulty` & `Match` settings, `25%–300%` Allies/Axis Bot Scale, and `???` unlock masking).
-* **`F6`**: Open/Close the **5-Tab Modular Feature Menu** (live-toggle all `112` config options mid-match + 1440p/4K UI scaling).
+* **`F6`**: Open/Close the **5-Tab Modular Feature Menu** (live-toggle all `111` config options mid-match + 1440p/4K UI scaling).
 * **`F7`**: Open/Close the **Searchable Dogtag Collection Archive** (`Brought Home` vs. `Enemy Trophy`, `My Kills`, Age, rarity, and battle filter).
 * **`F8`**: Master Toggle Mod **ENABLED / DISABLED** live in-game.
 * **`F9`**: **Hot-Reload** `.cfg` from disk without restarting.
@@ -214,11 +214,11 @@ Every edit compiles through a two-stage verification pipeline and has been teste
 ### 1. Static Signature Checks, Memory-Leak Audit & Headless Simulations (`.\build.ps1 -Test`)
 | Verification Stage | Scope | Verified Result |
 | :--- | :--- | :--- |
-| **IL2CPP Harmony & Animator Verifier** ([`VerifyPatches.cs`](tools/verify_patches/VerifyPatches.cs)) | All `[HarmonyPatch]` classes, `Plugin.Load` `SafePatch` registration CIL audit, `6` `_d__` coroutine targets, and Animator parameter/state literals vs. native `Soldier.asm` | **`194` HarmonyPatch signatures verified (`0` mismatches)**; **`16` Animator string literals verified (`0` mismatches)** |
+| **IL2CPP Harmony & Animator Verifier** ([`VerifyPatches.cs`](tools/verify_patches/VerifyPatches.cs)) | All `[HarmonyPatch]` classes, `Plugin.Load` `SafePatch` registration CIL audit, `5` `_d__` coroutine targets, and Animator parameter/state literals vs. native `Soldier.asm` | **`194` HarmonyPatch signatures verified (`0` mismatches)**; **`16` Animator string literals verified (`0` mismatches)** |
 | **Static Memory-Leak & IL2CPP Safety Audit** ([`VerifyPatches.cs`](tools/verify_patches/VerifyPatches.cs)) | All static `Dictionary<IntPtr, ...>` caches checked for `Clear`/`Remove`/`Prune` eviction paths + forbidden stripped/generic IL2CPP traps | **`80/80` static `IntPtr` dictionaries verified (`0` leaks)**; **`0` IL2CPP footguns** |
-| **Emergent H.A.R.M. Core Suite** ([`VerifyEmergentEngine.ps1`](tools/verify_patches/VerifyEmergentEngine.ps1)) | `19` test groups covering doorway conga-line reflexes, `DangerStamp` harm relief, `CanHarm` armor immunity, `Safe(x,T)` gating, 2–3 ply chains, `IntentBoard`, `CanAid`, SL Bravery Aura & SL-death shock, doctrines, CQB lock, air CAS/CAP, crew weapon upgrades, scavenging | **`48 passed, 0 failed`** |
+| **Emergent H.A.R.M. Core Suite** ([`VerifyEmergentEngine.ps1`](tools/verify_patches/VerifyEmergentEngine.ps1)) | `19` test groups covering doorway conga-line reflexes, `DangerStamp` harm relief, `CanHarm` armor immunity, `Safe(x,T)` gating, 2–3 ply chains, `IntentBoard`, `CanAid`, SL Bravery Aura & SL-death shock, doctrines, CQB lock, air CAS/CAP, crew weapon upgrades, scavenging | **`52 passed, 0 failed`** |
 | **Acoustic Ring, Ground Probe, CQB & Atmosphere Suite** ([`VerifyPhysicsAndAcoustics.ps1`](tools/verify_patches/VerifyPhysicsAndAcoustics.ps1)) | Zero-allocation footstep/explosion masking ring buffer, terrain vs. non-terrain ground probes, CQB standoff capsules, 9 Battle Atmosphere archetype modifiers | **`41 assertions passed (0 failures)`** |
-| **Deterministic Battle Loss & Emergence Model** ([`Run-BattleLossModel.ps1`](tools/verify_patches/Run-BattleLossModel.ps1)) | **`687` battles** (`229` scenarios × `3` seeds across **`215` real campaign missions**, Conquest, Wave Defense, Demolition, Breakout, **`21/21` doctrines**, **`9` atmosphere directives**) | **`9,213,548` Emergent plans**; **`0` across all `8` zero-tolerance loss counters** (`9,267` live-state audits); **`8/8` determinism**; **`229/229` cross-seed emergence**; `2.56` concurrent distinct Emergent actions / engaged squad |
+| **Deterministic Battle Loss & Emergence Model** ([`Run-BattleLossModel.ps1`](tools/verify_patches/Run-BattleLossModel.ps1)) | **`687` battles** (`229` scenarios × `3` seeds across **`215` real campaign missions**, Conquest, Wave Defense, Demolition, Breakout, **`21/21` doctrines**, **`9` atmosphere directives**) + **Qualitative Simulation Scorecard** | **`9,279,145` Emergent plans**; **`0` across all `8` zero-tolerance loss counters** (`8,947` live-state audits); **`8/8` determinism**; **`229/229` cross-seed emergence**; `2.57` actions/engaged squad; **`98.3%` plausible combat deaths** (`385,240` deaths, `0` wasted action plans) |
 
 ### 2. In-Game Flight Recorder Telemetry (`HitchAutopsy` & `BotActionTrace`)
 Profiled across long live matches (`~35`-minute full-battle `HitchAutopsy` + `BotActionTrace.jsonl` traces with `32,063` recorded events and `89,120` HARM decisions):

@@ -46,7 +46,7 @@ $cqbUnbayStandoff     = Extract-CqbFloat $cqbText 'standoffDist\s*=\s*([0-9]+\.[
 $cqbUnbayStrike       = Extract-CqbFloat $cqbText 'const float unbayonetedStrikeRange\s*=\s*([0-9]+\.[0-9]+)f;' 'unbayonetedStrikeRange'
 $cqbKnifeStrike       = Extract-CqbFloat $cqbText 'const float meleeWeaponStrikeRange\s*=\s*([0-9]+\.[0-9]+)f;' 'meleeWeaponStrikeRange'
 $cqbPistolCeaseFire   = Extract-CqbFloat $cqbText 'isPistol && !gunEmptyOrReloading && !hasBayonet\)\s*\{[^}]*?ceaseFireRange\s*=\s*([0-9]+\.[0-9]+)f;' 'pistolCeaseFireRange'
-$cqbPatchedCapsule    = Extract-CqbFloat $cqbText '__instance\.mountedBlade\s*==\s*null[\s\S]*?float minReach\s*=\s*([0-9]+\.[0-9]+)f' 'patchedAiCapsuleDist'
+$cqbPatchedCapsule    = Extract-CqbFloat $cqbText 'mountedBlade\s*==\s*null[\s\S]*?float minReach\s*=\s*([0-9]+\.[0-9]+)f' 'patchedAiCapsuleDist'
 $cqbBayonetStrike     = Extract-CqbFloat $cqbText 'strikeRange\s*=\s*hasBayonet\s*\?\s*([0-9]+\.[0-9]+)f\s*:\s*unbayonetedStrikeRange;' 'bayonetStrikeRange'
 
 $harnessCs = @"

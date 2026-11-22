@@ -84,7 +84,6 @@ namespace EasyRed2HumanAI
         public static ConfigEntry<bool> EnableMacroObjectiveDirector;
         public static ConfigEntry<bool> EnableProactiveEmplacementStaffing;
         public static ConfigEntry<bool> EnableSmartApcDismount;
-        public static ConfigEntry<bool> EnableTankStandoffAndReverse;
         public static ConfigEntry<bool> EnableFriendlyVehicleRightOfWay;
         public static ConfigEntry<bool> PreventSmallArmsFireAtTanks;
         public static ConfigEntry<bool> EnablePointBlankMelee;
@@ -543,12 +542,6 @@ namespace EasyRed2HumanAI
                 "EnableSmartApcDismount",
                 true,
                 "Infantry riding in AI-driven APCs, halftracks, and trucks dismount immediately when the transport is suppressed, takes hull damage under fire, or comes within 48m of enemy AT/infantry threats rather than riding into point-blank destruction.");
-
-            EnableTankStandoffAndReverse = config.Bind(
-                "6. Tactical Self-Preservation & Muzzle Discipline",
-                "EnableTankStandoffAndReverse",
-                true,
-                "AI tanks with a clear main-gun line of sight hold practical standoff distance (scaled by Brawler/Support/Sniper crew personality) instead of driving into infantry AT-grenade range, and reverse (MoveTankRetro) when threats get too close.");
 
             EnableFriendlyVehicleRightOfWay = config.Bind(
                 "6. Tactical Self-Preservation & Muzzle Discipline",

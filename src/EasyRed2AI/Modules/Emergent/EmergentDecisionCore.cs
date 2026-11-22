@@ -1132,7 +1132,7 @@ namespace EasyRed2HumanAI
                 return true;
             }
 
-            if (inp.SmoothedHarmNow >= 0.78f && !inp.InCover && !cqbLoaded &&
+            if (inp.SmoothedHarmNow >= 0.72f && !inp.InCover && !cqbLoaded &&
                 inp.CurrentStep0 != EmergentActionId.SeekCover &&
                 inp.CurrentStep0 != EmergentActionId.PopSmoke &&
                 inp.CurrentStep0 != EmergentActionId.FallbackRegroup &&
@@ -1142,7 +1142,7 @@ namespace EasyRed2HumanAI
                 return true;
             }
 
-            if (inp.IsBleeding && inp.HasBandage && !inp.InCover && inp.SmoothedHarmNow >= 0.45f &&
+            if (inp.IsBleeding && inp.HasBandage && !inp.InCover && !cqbLoaded && inp.SmoothedHarmNow >= 0.45f &&
                 inp.CurrentStep0 != EmergentActionId.SeekCover &&
                 inp.CurrentStep0 != EmergentActionId.PopSmoke &&
                 inp.CurrentStep0 != EmergentActionId.SelfBandage &&
@@ -1352,9 +1352,11 @@ namespace EasyRed2HumanAI
                 else if (!cqbImmediate && !safeInCover && curHarm >= 0.28f)
                 {
                     float coverHarmDrop = curHarm * (inp.CoverAvailable ? 0.26f : 0.48f);
-                    float urgency = (curHarm >= 0.48f && !inp.SmokeActive && !inp.AllyPinningThreat)
-                        ? 0.18f
-                        : (curHarm >= 0.32f ? 0.10f : -0.05f);
+                    float urgency = inp.SmoothedHarmNow >= 0.62f
+                        ? 0.28f
+                        : ((curHarm >= 0.48f && !inp.SmokeActive && !inp.AllyPinningThreat)
+                            ? 0.18f
+                            : (curHarm >= 0.32f ? 0.10f : -0.05f));
                     ConsiderCandidate(
                         EmergentActionId.SeekCover,
                         EmergentActionId.None,
@@ -1367,10 +1369,12 @@ namespace EasyRed2HumanAI
                 }
 
                 // 2. SelfBandage (+ 2-3 ply SeekCover / Smoke prerequisite chain)
-                if (inp.IsBleeding && inp.HasBandage && !prereqBandageBlocked)
+                if (inp.IsBleeding && inp.HasBandage && (safeInCover || !prereqBandageBlocked))
                 {
-                    float bleedThreat = safeInCover ? curHarm * 0.38f : curHarm;
-                    if (IsSafeForDuration(bleedThreat, 5.0f, w.RiskThreshold) && !inp.PointBlankThreat)
+                    float bleedThreat = safeInCover ? curHarm * 0.25f : curHarm;
+                    bool canBandageNow = !inp.PointBlankThreat &&
+                                         (safeInCover ? !cqbImmediate : (!cqbImmediate && IsSafeForDuration(bleedThreat, 5.0f, w.RiskThreshold)));
+                    if (canBandageNow)
                     {
                         ConsiderCandidate(
                             EmergentActionId.SelfBandage,
@@ -1379,12 +1383,12 @@ namespace EasyRed2HumanAI
                             0.18f,
                             0f,
                             bleedThreat,
-                            0.42f,
+                            safeInCover ? 0.56f : 0.42f,
                             "bandage_safe");
                     }
-                    else if (!safeInCover)
+                    else if (!safeInCover && !cqbImmediate)
                     {
-                        float afterCoverHarm = curHarm * (inp.CoverAvailable ? 0.28f : 0.45f);
+                        float afterCoverHarm = curHarm * (inp.CoverAvailable ? 0.22f : 0.42f);
                         if (inp.CoverAvailable && IsSafeForDuration(afterCoverHarm, 5.0f, w.RiskThreshold))
                         {
                             ConsiderCandidate(
@@ -1800,7 +1804,9 @@ namespace EasyRed2HumanAI
                             ? 0.10f
                             : 0f;
                         float advHarm = Mathf.Clamp01(curHarm * coverFactor + visPen + openAdvHarmPen - inp.EnemyRelief * 0.25f);
-                        if (advHarm <= w.RiskThreshold + 0.14f || inp.SmokeActive || inp.AllyPinningThreat || inp.SectorDesperationBias >= 0.20f)
+                        bool underHeavyDirectFireExposed = !safeInCover && inp.SmoothedHarmNow >= 0.62f;
+                        if ((!underHeavyDirectFireExposed && (advHarm <= w.RiskThreshold + 0.14f || inp.SmokeActive || inp.AllyPinningThreat)) ||
+                            inp.SectorDesperationBias >= (underHeavyDirectFireExposed ? 0.30f : 0.20f))
                         {
                             float timeFactor = 1.0f / (1.0f + inp.ObjectiveDist * 0.006f);
                             float winGain = (0.42f + effObjUrgency * 0.50f) * timeFactor + inp.EnemyRelief * 0.25f + (inp.ObjectiveTickingAgainstUs ? 0.14f : 0f);

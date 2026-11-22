@@ -84,7 +84,6 @@ namespace EasyRed2HumanAI
         public static int WallsVaulted;
         public static int ComradesLiberated;
         public static int ShelteredRepairsCount;
-        public static int WallSideRepositionsCount;
         public static int ThreatSectorOrientationsCount;
         public static int UselessTankFirePrevented;
         public static int ExposedCrewTargeted;
@@ -97,7 +96,6 @@ namespace EasyRed2HumanAI
         public static int MacroObjectivePivotsCount;
         public static int StaticGunsStaffedCount;
         public static int SmartApcDismountsCount;
-        public static int TankStandoffHoldsCount;
         public static int FriendlyRoadkillsPreventedCount;
         public static int BridgeCrossingsAssistedCount;
         public static int GrenadesKickedCount;
@@ -609,77 +607,6 @@ namespace EasyRed2HumanAI
             if (!string.IsNullOrEmpty(persStr))
                 return $" [{persStr}]";
             return "";
-        }
-
-        private static float GetEffectiveProneSuppressionThreshold(Soldier s, float vet01)
-        {
-            float threshold = 35f;
-            SoldierPersonality p = GetPersonality(s);
-            switch (p)
-            {
-                case SoldierPersonality.Assaulter_Shock:
-                    threshold = 68f;
-                    break;
-                case SoldierPersonality.AT_Demolitionist:
-                case SoldierPersonality.Gunner_Anchor:
-                    threshold = 60f;
-                    break;
-                case SoldierPersonality.Assaulter_Breacher:
-                case SoldierPersonality.Medic_Heroic:
-                case SoldierPersonality.Leader_Spearhead:
-                    threshold = 50f;
-                    break;
-                case SoldierPersonality.Assaulter_Skirmisher:
-                case SoldierPersonality.Gunner_AssaultMG:
-                    threshold = 45f;
-                    break;
-                case SoldierPersonality.Medic_Triage:
-                    threshold = 20f;
-                    break;
-                case SoldierPersonality.Rifleman_Cautious:
-                    threshold = VisionConfig.VeterancyCuresSkittishness.Value
-                        ? Mathf.Lerp(18f, 36f, vet01)
-                        : 18f;
-                    break;
-            }
-
-            // Squad Leader Leadership Suppression Grit (+12 Spearhead / +8 Old Guard / +4 Tactician within 22m)
-            // minus decaying SL-death shock penalty when officer leadership falls
-            if (!ReferenceEquals(s, null) && s != null && s.joinedSquad != null)
-            {
-                Squad sq = s.joinedSquad;
-                Soldier leader = sq.Leader;
-                if (leader != null && leader.IsAlive && !leader.IsInjured && !leader.HasSurrended() && leader.Pointer != s.Pointer)
-                {
-                    SoldierPersonality leaderPers = GetPersonality(leader);
-                    float auraBonus = leaderPers == SoldierPersonality.Leader_Spearhead
-                        ? 12f
-                        : (leaderPers == SoldierPersonality.Leader_OldGuard
-                            ? 8f
-                            : (leaderPers == SoldierPersonality.Leader_Tactician ? 4f : 0f));
-                    if (auraBonus > 0f)
-                    {
-                        AiCore.SoldierFastHandles sh = AiCore.GetOrCreateSoldierHandles(s);
-                        AiCore.SoldierFastHandles lh = AiCore.GetOrCreateSoldierHandles(leader);
-                        if (sh != null && lh != null && sh.Tr != null && lh.Tr != null &&
-                            (lh.Tr.position - sh.Tr.position).sqrMagnitude <= 22f * 22f)
-                        {
-                            threshold += auraBonus;
-                        }
-                    }
-                }
-
-                if (sq.Pointer != IntPtr.Zero &&
-                    _squadBlackboards.TryGetValue(sq.Pointer, out SquadBlackboard b) &&
-                    Time.time < b.LeaderShockUntil &&
-                    b.LeaderShockPeak > 0.001f)
-                {
-                    float shockFrac = Mathf.Clamp01((b.LeaderShockUntil - Time.time) / 20.0f);
-                    threshold = Mathf.Max(12f, threshold - 8f * shockFrac * Mathf.Lerp(1.0f, 0.55f, vet01));
-                }
-            }
-
-            return threshold;
         }
 
         private static void GetEffectivePeekParameters(Soldier s, float vet01, out float maxPeekSuppression, out float duckBackSuppression, out float peekCooldown)
@@ -1207,13 +1134,15 @@ namespace EasyRed2HumanAI
         [HarmonyPatch(typeof(Soldier), nameof(Soldier.Throw))]
         public static class Soldier_Throw_Patch
         {
-            public static bool Prefix(Soldier __instance, VirtualItem __0, Spottable __1, out float __state)
+            public static bool Prefix(Soldier __instance, VirtualItem __0, ref Spottable __1, out float __state)
             {
                 __state = (!ReferenceEquals(__instance, null) && __instance.Pointer != IntPtr.Zero)
                     ? __instance.stopHandsAnim_end
                     : -1f;
                 try
                 {
+                    TryCancelLocalPlayerReloadOnThrow(__instance, __0);
+
                     if (!VisionConfig.EnableMod.Value ||
                         ReferenceEquals(__instance, null) ||
                         __instance.Pointer == IntPtr.Zero ||
@@ -1228,10 +1157,11 @@ namespace EasyRed2HumanAI
                         return true;
 
                     // Allow non-lethal smoke grenades to be thrown near friendlies and for screening armor
-                    if (__0 == null || __0.TryCast<VirtualSmokeGrenade>() != null)
-                    {
+                    if (__0 == null)
                         return true;
-                    }
+
+                    if (__0.TryCast<VirtualSmokeGrenade>() != null)
+                        return TryHandleBotSmokeThrowAim(__instance, __0, ref __1);
 
                     // AT/AP pressure mines are planted onto the ground (target == null), never thrown as hand grenades at targets
                     if (AiCore.IsPressureMineItem(__0, out bool isAtMine))

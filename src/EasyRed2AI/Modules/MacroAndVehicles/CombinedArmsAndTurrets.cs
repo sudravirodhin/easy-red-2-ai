@@ -31,9 +31,7 @@ namespace EasyRed2HumanAI
         internal static readonly Dictionary<IntPtr, Squad> _lastKnownVehicleCrewSquad = new Dictionary<IntPtr, Squad>(32);
         private static float _nextGroundedCrewRetreatCheckTime;
         public static int CombinedArmsPriorityAssistsCount;
-        public static int ArmoredDispersionAdjustmentsCount;
         public static int KamikazeDivesTriggeredCount;
-        public static int RemoteClientRoadkillsAssistedCount;
         public static int TankRockUnsticksCount;
         public static int SmartAmmoSwitchesCount;
 
@@ -1509,6 +1507,20 @@ namespace EasyRed2HumanAI
                 dangerCloseBlastRadius = 12.0f;
             else if (caliber >= 20.0f)
                 dangerCloseBlastRadius = 6.5f;
+
+            // 0. Block direct-fire tank/MG turrets whose barrel/muzzle has clipped through a solid wall or berm
+            if (!isIndirect && VisionConfig.EnableWallShootingPrevention.Value &&
+                rootVeh != null && !rootVeh.IsAirVehicle() && turret.transform != null)
+            {
+                Vector3 pivotPos = turret.transform.position;
+                if ((firePos - pivotPos).sqrMagnitude > 0.04f &&
+                    Physics.Linecast(pivotPos, firePos, AiCore.GetSolidEnvironmentMask(), QueryTriggerInteraction.Ignore))
+                {
+                    _turretFFBlockedUntil[turretPtr] = now + 0.30f;
+                    WallsBlocked++;
+                    return true;
+                }
+            }
 
             // 1. Prevent direct-fire cannons/AT guns from detonating HE shells on a low wall or sandbag right in front of the muzzle
             if (isExplosive && !isIndirect && VisionConfig.EnableWallShootingPrevention.Value)

@@ -89,9 +89,68 @@ namespace EasyRed2HumanAI
         // =====================================================================
         // Muzzle Obstruction, Friendly Fire & Anti-Stacking Helpers
         // =====================================================================
+        internal static void IncrementWallsBlocked() => WallsBlocked++;
+
+        /// <summary>
+        /// Catches rifle/SMG barrels clipping through thin walls (including leaning around corners into a wall)
+        /// without falsely blocking legitimate shots over waist-high sandbags or window sills where face-to-muzzle is clear.
+        /// </summary>
+        internal static bool IsBotGunClippedThroughWall(Soldier shooter)
+        {
+            if (shooter == null || AiCore.IsSoldierInVehicleOrTransition(shooter))
+                return false;
+
+            GenericGun heldGun = shooter.GetHeldGun();
+            if (heldGun == null)
+                return false;
+
+            Vector3 muzzlePos = heldGun.GetBulletGenerationPosition();
+            if (muzzlePos.sqrMagnitude < 0.01f)
+                muzzlePos = shooter.GunPosition();
+
+            Vector3 basePos = shooter.transform.position;
+            Vector3 unleanedTorso = basePos + Vector3.up * AiCore.GetBarrelHeightForPose(shooter.m_pose);
+            Vector3 facePos = shooter.FacePosition();
+            Vector3 leanedTorso = new Vector3(facePos.x, unleanedTorso.y, facePos.z);
+            int envMask = AiCore.GetSolidEnvironmentMask();
+
+            if (Mathf.Abs(shooter.LeanAngle) >= 0.45f &&
+                Physics.Linecast(unleanedTorso, leanedTorso, envMask, QueryTriggerInteraction.Ignore))
+            {
+                return true;
+            }
+
+            if (Physics.Linecast(leanedTorso, muzzlePos, envMask, QueryTriggerInteraction.Ignore) &&
+                Physics.Linecast(facePos, muzzlePos, envMask, QueryTriggerInteraction.Ignore))
+            {
+                return true;
+            }
+
+            return false;
+        }
+
+        private static bool IsTargetFullyOccludedBySolidWall(Soldier shooter, Spottable target, Vector3 targetCenterPos, float distToTarget)
+        {
+            if (shooter == null || target == null || distToTarget <= 0.45f || target.IsAirVehicle())
+                return false;
+
+            int envMask = AiCore.GetSolidEnvironmentMask();
+            Vector3 eyePos = shooter.FacePosition();
+            Vector3 targetSpot = target.SpotPosition();
+
+            if (!Physics.Linecast(eyePos, targetSpot, envMask, QueryTriggerInteraction.Ignore))
+                return false;
+
+            Vector3 barrelPos = shooter.transform.position + Vector3.up * AiCore.GetBarrelHeightForPose(shooter.m_pose);
+            if (!Physics.Linecast(barrelPos, targetCenterPos, envMask, QueryTriggerInteraction.Ignore))
+                return false;
+
+            return true;
+        }
+
         private static bool IsMuzzleBlockedByWall(Soldier shooter, Vector3 targetPos, float distToTarget)
         {
-            if (shooter == null || distToTarget <= 1.2f)
+            if (shooter == null || distToTarget <= 0.30f)
                 return false;
 
             if (AiCore.HorizontalAngleToDirection(shooter, targetPos - shooter.transform.position) > 35f)
@@ -100,6 +159,9 @@ namespace EasyRed2HumanAI
             float leanAngle = shooter.LeanAngle;
             bool activelyLeaning = Mathf.Abs(leanAngle) >= 0.45f;
             if (!activelyLeaning && shooter.IsTowardWall())
+                return true;
+
+            if (IsBotGunClippedThroughWall(shooter))
                 return true;
 
             Transform myRoot = shooter.transform.root;

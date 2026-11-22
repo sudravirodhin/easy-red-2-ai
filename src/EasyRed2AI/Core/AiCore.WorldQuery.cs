@@ -3101,23 +3101,34 @@ namespace EasyRed2HumanAI
                                  !IsSoldierInVehicleOrTransition(u))
                         {
                             SoldierAI ai = h.Ai != null ? h.Ai : u.aiController;
-                            if (ai != null && !ai.HasEnemyAndCanFireAtHim && !ai.IsMoving())
+                            if (ai != null)
                             {
-                                Vector3 effDest = VeteranAndTacticsPatches.GetCachedMoveEndpoint(h, ai, u, out _);
-                                float destDistSq = (effDest - ws.Pos).sqrMagnitude;
-                                if (destDistSq > 20.0f * 20.0f)
+                                if (ai.HasEnemyAndCanFireAtHim || ai.IsMoving())
                                 {
-                                    h.NextAnomalyAlertTime = now + 15.0f;
-                                    AnomalyZombieCount++;
-                                    if (traceEnabled)
+                                    h.WatchdogStationarySince = now;
+                                }
+                                else
+                                {
+                                    Vector3 effDest = VeteranAndTacticsPatches.GetCachedMoveEndpoint(h, ai, u, out _);
+                                    float destDistSq = (effDest - ws.Pos).sqrMagnitude;
+                                    if (destDistSq > 20.0f * 20.0f)
                                     {
-                                        string whyDetail = $"idle_in_open_zombie:p={(ai.HasPath ? 1 : 0)},r={(ai.HasPathRequest ? 1 : 0)},lk={(ai.PathCalculationLocked ? 1 : 0)},td={(u.HasDestinationAssigned ? 1 : 0)}";
-                                        BotActionTrace.RecordEvent(
-                                            u,
-                                            BotTraceEventKind.AnomalyAlert,
-                                            whyDetail,
-                                            Mathf.Sqrt(destDistSq),
-                                            now - h.WatchdogStationarySince);
+                                        h.NextAnomalyAlertTime = now + 15.0f;
+                                        AnomalyZombieCount++;
+                                        if (traceEnabled)
+                                        {
+                                            string whyDetail = $"idle_in_open_zombie:p={(ai.HasPath ? 1 : 0)},r={(ai.HasPathRequest ? 1 : 0)},lk={(ai.PathCalculationLocked ? 1 : 0)},td={(u.HasDestinationAssigned ? 1 : 0)}";
+                                            BotActionTrace.RecordEvent(
+                                                u,
+                                                BotTraceEventKind.AnomalyAlert,
+                                                whyDetail,
+                                                Mathf.Sqrt(destDistSq),
+                                                now - h.WatchdogStationarySince);
+                                        }
+                                    }
+                                    else
+                                    {
+                                        h.WatchdogStationarySince = now;
                                     }
                                 }
                             }

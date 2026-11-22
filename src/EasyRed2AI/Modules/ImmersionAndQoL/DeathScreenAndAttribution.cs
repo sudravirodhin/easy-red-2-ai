@@ -1866,10 +1866,6 @@ namespace EasyRed2HumanAI
                 {
                     detailParts.Add("Bled out");
                 }
-                else if (victim.isBleeding)
-                {
-                    detailParts.Add("Bleeding");
-                }
 
                 string cleanWep = CleanDisplayLabel(attr.WeaponOrSource);
                 if (!string.IsNullOrEmpty(cleanWep))

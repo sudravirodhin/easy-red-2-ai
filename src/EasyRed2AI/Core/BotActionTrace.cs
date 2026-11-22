@@ -666,19 +666,6 @@ namespace EasyRed2HumanAI
             PushRecord(ref rec);
         }
 
-        private static string GetOverrideTraceReason(AiCore.BotMoveOverrideKind kind)
-        {
-            switch (kind)
-            {
-                case AiCore.BotMoveOverrideKind.CasualtyDrag: return "ovr_drag";
-                case AiCore.BotMoveOverrideKind.UnstickSidestep: return "ovr_unstick";
-                case AiCore.BotMoveOverrideKind.SapperStepBack: return "ovr_sapper_back";
-                case AiCore.BotMoveOverrideKind.EmergencyFallback: return "ovr_fallback";
-                case AiCore.BotMoveOverrideKind.VehicleEvade: return "ovr_veh_evade";
-                default: return "ovr_active";
-            }
-        }
-
         private static void WriterThreadLoop()
         {
             StringBuilder sb = new StringBuilder(512);

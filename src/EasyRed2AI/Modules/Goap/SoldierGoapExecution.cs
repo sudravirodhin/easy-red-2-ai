@@ -42,17 +42,6 @@ namespace EasyRed2HumanAI
             return false;
         }
 
-        internal static bool HasPendingAtWeaponScavenge(IntPtr soldierPtr, Vector3 myPos, float maxDist = 24.0f)
-        {
-            if (!AiCore.TryGetSoldierHandles(soldierPtr, out AiCore.SoldierFastHandles h))
-                return false;
-
-            ref BotScavengeCache sc = ref h.Goap.Scavenge;
-            return sc.IsAtWeaponPickup &&
-                   (sc.TargetFloorItem != null || sc.TargetRefillCrate != null || sc.TargetInventory != null) &&
-                   (sc.TargetPosition - myPos).sqrMagnitude <= maxDist * maxDist;
-        }
-
         internal static bool TryGetProtectedBotMoveOverride(IntPtr soldierPtr, float now, out Vector3 overrideDest)
         {
             overrideDest = Vector3.zero;
@@ -3375,48 +3364,6 @@ namespace EasyRed2HumanAI
             }
 
             return nearestSquad != null;
-        }
-
-        private static bool TryFindNearestRadioHubPosition(
-            Squad selfSq,
-            Vector3 myPos,
-            string myFaction,
-            float maxRadius,
-            out Vector3 hubPos)
-        {
-            hubPos = Vector3.zero;
-            if (selfSq == null)
-                return false;
-
-            AiCore.EnsureWorldSnapshot();
-            int sqCount = AiCore.WorldSquadCount;
-            if (sqCount == 0)
-                return false;
-
-            float bestSq = maxRadius * maxRadius;
-            bool found = false;
-            IntPtr selfPtr = selfSq.Pointer;
-            var squads = AiCore.WorldSquads;
-
-            for (int i = 0; i < sqCount; i++)
-            {
-                ref AiCore.SquadSnapshot other = ref squads[i];
-                if (!other.LeaderIsAlive || other.Ptr == selfPtr || other.Faction != myFaction)
-                    continue;
-
-                if (!other.HasIntrinsicRadio && !other.LeaderOnGroundVehicle && !other.IsPlayerInSquad)
-                    continue;
-
-                float dSq = (other.RefPos - myPos).sqrMagnitude;
-                if (dSq < bestSq && dSq > 45f * 45f)
-                {
-                    bestSq = dSq;
-                    hubPos = other.RefPos;
-                    found = true;
-                }
-            }
-
-            return found;
         }
     }
 }

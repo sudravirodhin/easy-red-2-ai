@@ -3287,7 +3287,7 @@ namespace EasyRed2HumanAI
                             float angleToTarget = AiCore.HorizontalAngleToDirection(soldier, __0 - myPos);
                             if (angleToTarget <= 35f)
                             {
-                                h.Stance.NextWallCheckTime = now + 0.25f;
+                                h.Stance.NextWallCheckTime = now + 0.15f;
                                 if (IsMuzzleBlockedByWall(soldier, __0, dist))
                                 {
                                     h.Stance.WallBlockedUntil = now + 0.28f;
@@ -3381,6 +3381,12 @@ namespace EasyRed2HumanAI
                                             TrySidestepWallObstruction(__instance, soldier, __0, dist);
                                         }
                                     }
+                                }
+                                else if (__instance.visibleTarget != null &&
+                                         IsTargetFullyOccludedBySolidWall(soldier, __instance.visibleTarget, __0, dist))
+                                {
+                                    h.Stance.WallBlockedUntil = now + 0.22f;
+                                    WallsBlocked++;
                                 }
                             }
                         }

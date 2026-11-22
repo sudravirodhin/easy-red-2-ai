@@ -745,6 +745,48 @@ $partB
                     spikeDec.Reflex == EmergentEngine.EmergentReflexKind.SuddenPenetratingFire &&
                     spikeDec.Step0 == EmergentEngine.EmergentActionId.SeekCover,
                     $"got={gotSpike} {spikeDec.Reflex}/{spikeDec.Step0}");
+
+                var bleedCqbInp = new EmergentEngine.EmergentInput
+                {
+                    Now = 95f, IsBleeding = true, HasBandage = true, InCover = false, CoverAvailable = true,
+                    HasVisibleEnemy = true, AmmoEmpty = false, CanHarmTarget = 0.85f, VisibleEnemyDist = 5f,
+                    SmoothedHarmNow = 0.70f, ProjectedHarm = 0.15f
+                };
+                bool gotBleedCqb = EmergentEngine.EvaluateFastReflex(in bleedCqbInp, in wDefault, 95f, out var bleedCqbDec);
+                Check("Bleeding bot in <9m CQB does not turn away via reflex_bleed_seek_cover",
+                    !gotBleedCqb,
+                    $"got={gotBleedCqb} {bleedCqbDec.Reflex}/{bleedCqbDec.Step0}");
+
+                var bleedFarInp = bleedCqbInp;
+                bleedFarInp.VisibleEnemyDist = 35f;
+                bool gotBleedFar = EmergentEngine.EvaluateFastReflex(in bleedFarInp, in wDefault, 95f, out var bleedFarDec);
+                Check("Bleeding bot outside CQB still triggers LethalBleedExposed SeekCover reflex",
+                    gotBleedFar &&
+                    bleedFarDec.Reflex == EmergentEngine.EmergentReflexKind.LethalBleedExposed &&
+                    bleedFarDec.Step0 == EmergentEngine.EmergentActionId.SeekCover,
+                    $"got={gotBleedFar} {bleedFarDec.Reflex}/{bleedFarDec.Step0}");
+
+                var covBleedHighHarmInp = new EmergentEngine.EmergentInput
+                {
+                    Now = 96f, InCover = true, IsBleeding = true, HasBandage = true,
+                    SmoothedHarmNow = 0.85f, ProjectedHarm = 0.25f,
+                    HasVisibleEnemy = true, VisibleEnemyDist = 35f, CanHarmTarget = 0.80f
+                };
+                var decCovBleed = EmergentEngine.EvaluateDeliberative(in covBleedHighHarmInp, in wDefault, default, 96f);
+                Check("Covered bleeding soldier under high harm bandages instead of peeking",
+                    decCovBleed.Step0 == EmergentEngine.EmergentActionId.SelfBandage,
+                    $"{decCovBleed.Step0} ({decCovBleed.Reason})");
+
+                var expHeavyFireInp = new EmergentEngine.EmergentInput
+                {
+                    Now = 97f, InCover = false, CoverAvailable = true,
+                    SmoothedHarmNow = 0.66f, AllyPinningThreat = true,
+                    HasObjectiveTask = true, ObjectiveDist = 55f, ObjectiveUrgency = 0.60f
+                };
+                var decExpHeavy = EmergentEngine.EvaluateDeliberative(in expHeavyFireInp, in wDefault, default, 97f);
+                Check("Exposed soldier under heavy direct fire seeks cover instead of advancing",
+                    decExpHeavy.Step0 == EmergentEngine.EmergentActionId.SeekCover,
+                    $"{decExpHeavy.Step0} ({decExpHeavy.Reason})");
             }
 
             // 19. Battlefield Scavenging: Bandages, AT Weapons, Grenades & Lull Priority

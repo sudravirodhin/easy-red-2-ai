@@ -106,6 +106,9 @@ namespace EasyRed2HumanAI
                         return false;
                     }
 
+                    if (!VisionConfig.EnableBoundingOverwatch.Value)
+                        return true;
+
                     Vector3 orderAnchor = __instance.MoveDestination;
                     int botHash = AiCore.GetDeterministicHash(ptr, 131);
                     FireAndMovementState st = h.Combat.FireAndMovement;
@@ -1178,29 +1181,40 @@ namespace EasyRed2HumanAI
                         {
                             if (info.IsWindowShutter)
                             {
-                                if (!onCooldown &&
-                                    !isShutterVulnerable &&
-                                    distSq <= 6.76f &&
-                                    AiCore.TryConsumeBotRpcBudget(0.25f, AiCore.BotRpcPriority.Low))
+                                if (!onCooldown && !isShutterVulnerable && distSq <= 6.76f)
                                 {
-                                    door.SetDoor(true);
-                                    _nextDoorToggleTime[doorPtr] = now + 3.5f;
-                                    InvalidateWatchWindowCache(botPtr);
+                                    if (AiCore.TryConsumeBotRpcBudget(0.25f, AiCore.BotRpcPriority.Low))
+                                    {
+                                        door.SetDoor(true);
+                                        _nextDoorToggleTime[doorPtr] = now + 3.5f;
+                                        InvalidateWatchWindowCache(botPtr);
+                                    }
+                                    else
+                                    {
+                                        _nextDoorToggleTime[doorPtr] = now + 1.5f;
+                                    }
                                 }
                             }
                             else
                             {
                                 bool walkingThrough = isMoving && Vector3.Dot(moveDir, toDoorDir) > 0.20f;
                                 bool facingClose = distSq <= 1.96f && Vector3.Dot(botFwd, toDoorDir) > 0.35f;
-                                bool clearingFiringLane = !isMoving &&
-                                                          !onCooldown &&
-                                                          !isDoorVulnerable &&
-                                                          distSq <= 6.25f &&
-                                                          threatDir.sqrMagnitude > 0.01f &&
-                                                          Vector3.Dot(toDoorDir, threatDir) > 0.45f &&
-                                                          Vector3.Dot(botFwd, toDoorDir) > 0.35f &&
-                                                          AiCore.TryConsumeBotRpcBudget(0.25f, AiCore.BotRpcPriority.Low);
-                                if (walkingThrough || facingClose || clearingFiringLane)
+                                bool openDoor = walkingThrough || facingClose;
+                                if (!openDoor &&
+                                    !isMoving &&
+                                    !onCooldown &&
+                                    !isDoorVulnerable &&
+                                    distSq <= 6.25f &&
+                                    threatDir.sqrMagnitude > 0.01f &&
+                                    Vector3.Dot(toDoorDir, threatDir) > 0.45f &&
+                                    Vector3.Dot(botFwd, toDoorDir) > 0.35f)
+                                {
+                                    if (AiCore.TryConsumeBotRpcBudget(0.25f, AiCore.BotRpcPriority.Low))
+                                        openDoor = true;
+                                    else
+                                        _nextDoorToggleTime[doorPtr] = now + 1.5f;
+                                }
+                                if (openDoor)
                                 {
                                     door.SetDoor(true);
                                     _nextDoorToggleTime[doorPtr] = now + 3.5f;
@@ -1241,19 +1255,26 @@ namespace EasyRed2HumanAI
                                 }
                             }
 
-                            if (shouldClose && AiCore.TryConsumeBotRpcBudget(0.35f, AiCore.BotRpcPriority.Low))
+                            if (shouldClose)
                             {
-                                door.SetDoor(false);
-                                _nextDoorToggleTime[doorPtr] = now + (info.IsWindowShutter ? 4.0f : 10.0f);
-                                if (info.IsWindowShutter)
+                                if (AiCore.TryConsumeBotRpcBudget(0.35f, AiCore.BotRpcPriority.Low))
                                 {
-                                    InvalidateWatchWindowCache(botPtr);
+                                    door.SetDoor(false);
+                                    _nextDoorToggleTime[doorPtr] = now + (info.IsWindowShutter ? 4.0f : 10.0f);
+                                    if (info.IsWindowShutter)
+                                    {
+                                        InvalidateWatchWindowCache(botPtr);
+                                    }
+                                    DoorsStrategicallyClosedCount++;
+                                    if (VisionConfig.DebugLogging.Value)
+                                    {
+                                        string kind = info.IsWindowShutter ? "window shutter" : "door";
+                                        AiCore.LogDebug("DoorDiscipline", $"{__instance.faction} soldier strategically closed {kind} for cover/concealment.");
+                                    }
                                 }
-                                DoorsStrategicallyClosedCount++;
-                                if (VisionConfig.DebugLogging.Value)
+                                else
                                 {
-                                    string kind = info.IsWindowShutter ? "window shutter" : "door";
-                                    AiCore.LogDebug("DoorDiscipline", $"{__instance.faction} soldier strategically closed {kind} for cover/concealment.");
+                                    _nextDoorToggleTime[doorPtr] = now + 1.5f;
                                 }
                             }
                         }

@@ -219,13 +219,10 @@ namespace EasyRed2HumanAI
             public float NextPeekAllowedTime;
             public float PoseLockUntil;
             public float BipodStandUntil;
-            public float NextBipodSeekTime;
             public float NextBipodDeployCheckTime;
-            public float NextWallSideCheckTime;
             public float NextWallSidestepTime;
             public float LocalCoverProtectedUntil;
             public float NextLocalCoverSeekTime;
-            public IntPtr LastSettledCoverPtr;
             public float CoverSettledUntil;
             public float NextStandCrouchLofCheckTime;
             public float NextIndoorCeilingCountTime;
@@ -243,7 +240,6 @@ namespace EasyRed2HumanAI
             public float FFBlockedUntil;
             public float NextAntiStackTime;
             public float NextVaultCheckTime;
-            public float NextLiberateCheckTime;
             public float LiberateMoveStartTime;
             public float LiberateMoveCooldownUntil;
             public float NextBayonetCheckTime;
@@ -387,7 +383,6 @@ namespace EasyRed2HumanAI
             public float LastTurretFiredTime;
             public short LastObservedDamage;
             public float LastDamageTime;
-            public float EvasiveMoveUntil;
             public Vector3 LastHazardPos;
             public float BombsDepletedAt;
             public float FlyingAroundAreaSince;
@@ -2712,7 +2707,7 @@ namespace EasyRed2HumanAI
                 locationLower.Contains("gold") ||
                 locationLower.Contains("juno") ||
                 locationLower.Contains("sword") ||
-                locationLower.Contains("pointe du hoc") ||
+                (locationLower.Contains("pointe du hoc") && !locationLower.Contains("counterattack")) ||
                 locationLower.Contains("beach") ||
                 locationLower.Contains("landing") ||
                 locationLower.Contains("amphib") ||
@@ -2722,7 +2717,7 @@ namespace EasyRed2HumanAI
                 locationLower.Contains("red 1") ||
                 locationLower.Contains("red 2") ||
                 locationLower.Contains("blue 1") ||
-                (isBeach && (mapLower.Contains("kos") || locationLower.Contains("invasion") || mapLower.Contains("normandy"))))
+                (isBeach && (locationLower.Contains("invasion") || locationLower.Contains("harbor") || locationLower.Contains("harbour"))))
             {
                 return BattleAtmosphereArchetype.AmphibiousBeachhead;
             }
@@ -2837,7 +2832,7 @@ namespace EasyRed2HumanAI
                 string defBat = ((bd.defendersBatalion_id ?? string.Empty) + " " + (bd.defendersBatalion ?? string.Empty)).Trim().ToLowerInvariant();
                 string locDisplay = string.Empty;
                 try { locDisplay = bd.GetLocationName() ?? string.Empty; } catch { }
-                string locLower = (locDisplay + " " + (bd.location_name ?? string.Empty) + " " + (bd.location_name_id ?? string.Empty) + " " + (bd.battle_id ?? string.Empty)).Trim().ToLowerInvariant();
+                string locLower = (locDisplay + " " + (bd.location_name ?? string.Empty) + " " + (bd.location_name_id ?? string.Empty)).Trim().ToLowerInvariant();
                 string mapLower = map.ToString().ToLowerInvariant();
                 bool isNightStart = bd.TimeHH >= 20 || bd.TimeHH <= 5;
 

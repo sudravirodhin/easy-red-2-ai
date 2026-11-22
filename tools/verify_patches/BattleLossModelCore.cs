@@ -255,7 +255,7 @@ namespace EasyRed2HumanAI
                 locationLower.Contains("gold") ||
                 locationLower.Contains("juno") ||
                 locationLower.Contains("sword") ||
-                locationLower.Contains("pointe du hoc") ||
+                (locationLower.Contains("pointe du hoc") && !locationLower.Contains("counterattack")) ||
                 locationLower.Contains("beach") ||
                 locationLower.Contains("landing") ||
                 locationLower.Contains("amphib") ||
@@ -265,7 +265,7 @@ namespace EasyRed2HumanAI
                 locationLower.Contains("red 1") ||
                 locationLower.Contains("red 2") ||
                 locationLower.Contains("blue 1") ||
-                (isBeach && (mapLower.Contains("kos") || locationLower.Contains("invasion") || mapLower.Contains("normandy"))))
+                (isBeach && (locationLower.Contains("invasion") || locationLower.Contains("harbor") || locationLower.Contains("harbour"))))
                 return BattleAtmosphereArchetype.AmphibiousBeachhead;
 
             if (pacificIsland && hasJapan)
@@ -533,6 +533,20 @@ namespace EasyRed2HumanAI
             public int AmmoShotsRemaining = 60;
             public bool EmergentRunningBandage;
             public float NextMedicHealTime;
+            public EmergentEngine.EmergentActionId QualEpAction;
+            public float QualEpStartTime;
+            public UnityEngine.Vector3 QualEpStartPos;
+            public float QualEpStartObjDist;
+            public float QualEpStartHarm;
+            public bool QualEpStartedInCover;
+            public bool QualEpStartedBleeding;
+            public bool QualEpReachedCover;
+            public bool QualEpHarmDropped;
+            public bool QualEpHealed;
+            public bool QualEpActive;
+            public float BleedingSince = -1f;
+            public float QualEpHarmAtDecision;
+            public float QualEpEnemyDistAtDecision = 999f;
         }
 
         private sealed class SimSquad
@@ -633,6 +647,43 @@ namespace EasyRed2HumanAI
             public int EmergentEnemyReliefStamps;
             public int EmergentMiaTimeouts;
             public int EmergentTier3Levers;
+            public int QualTotalDeaths;
+            public int QualDeathsInCover;
+            public int QualDeathsInOpen;
+            public int QualDeathsByFire;
+            public int QualDeathsByFireWhileBleeding;
+            public int QualDeathsByBleedout;
+            public int QualRedFlagDeaths;
+            public int QualDeathBandageInOpen;
+            public int QualDeathCqbTurnedAway;
+            public int QualDeathStaringAtArmor;
+            public int QualDeathExposedHeavyFire;
+            public int QualDeathBleedoutWithBandage;
+            public int QualDeathBledIgnored8s;
+            public int QualDeathWhileStuck;
+            public int QualSeekCoverTotal;
+            public int QualSeekCoverReached;
+            public int QualSeekCoverHarmDrop;
+            public int QualSeekCoverDied;
+            public int QualSeekCoverFailed;
+            public int QualBandageTotal;
+            public int QualBandageHealed;
+            public int QualBandageDiedOpen;
+            public int QualBandageDiedCover;
+            public int QualBandageInterrupted;
+            public int QualAdvanceTotal;
+            public int QualAdvanceProgressed;
+            public int QualAdvanceDied;
+            public int QualAdvanceStalled;
+            public int QualFlankTotal;
+            public int QualFlankProgressed;
+            public int QualFlankDied;
+            public int QualFlankStalled;
+            public int QualSmokeDeployed;
+            public int QualFragThrown;
+            public int QualMedicHealsCompleted;
+            public int QualResupplyCompleted;
+            public int QualWastedActionPlans;
             public List<BattleIssueSample> Issues = new List<BattleIssueSample>(4);
         }
 
@@ -1668,9 +1719,47 @@ namespace EasyRed2HumanAI
                         sol.HasClearLof = sol.CachedFarLof;
                     }
                     if (sol.Suppression > 0f) sol.Suppression = MathF.Max(0f, sol.Suppression - 6.0f * dt);
+                    float hpBeforeBleed = sol.Health;
                     if (sol.IsBleeding) sol.Health -= 2.2f * dt;
+                    bool diedFromBleedTick = sol.IsBleeding && hpBeforeBleed > 0f && sol.Health <= 0f;
                     if (sol.Health <= 0f)
                     {
+                        float deathObjDist = UnityEngine.Vector3.Distance(sol.Pos, sq.Board.ObjectivePosition);
+                        CloseQualEpisode(sol, res, died: true, now, deathObjDist);
+                        res.QualTotalDeaths++;
+                        if (sol.InCover) res.QualDeathsInCover++;
+                        else res.QualDeathsInOpen++;
+                        if (diedFromBleedTick) res.QualDeathsByBleedout++;
+                        else
+                        {
+                            res.QualDeathsByFire++;
+                            if (sol.IsBleeding) res.QualDeathsByFireWhileBleeding++;
+                        }
+
+                        var dStep0 = sol.Emergent.HasDecision ? sol.Emergent.CurrentDecision.Step0 : EmergentEngine.EmergentActionId.None;
+                        bool rfBandageOpen = !sol.InCover && dStep0 == EmergentEngine.EmergentActionId.SelfBandage && sol.Suppression >= 15f;
+                        bool rfCqbTurnAway = sol.HasTarget && sol.TargetDist <= 9.0f && sol.QualEpEnemyDistAtDecision <= 9.0f && sol.AmmoShotsRemaining > 0 &&
+                            (dStep0 == EmergentEngine.EmergentActionId.SeekCover || dStep0 == EmergentEngine.EmergentActionId.FallbackRegroup || dStep0 == EmergentEngine.EmergentActionId.SelfBandage);
+                        bool rfStareArmor = !sol.InCover && sq.Board.ThreatIsArmor && !sol.IsAtRole && !sol.HasAtWeapon &&
+                            (dStep0 == EmergentEngine.EmergentActionId.HoldAndFight || dStep0 == EmergentEngine.EmergentActionId.SuppressPin);
+                        bool rfExposedHeavy = !sol.InCover && sol.Suppression >= 40f && sol.QualEpHarmAtDecision >= 0.65f &&
+                            !(sol.HasTarget && sol.TargetDist <= 12.0f) &&
+                            (dStep0 == EmergentEngine.EmergentActionId.AdvanceObjective || dStep0 == EmergentEngine.EmergentActionId.HoldAndFight);
+                        bool rfBleedoutBandage = diedFromBleedTick && sol.HasBandage && sol.BleedingSince >= 0f && (now - sol.BleedingSince) >= 4.0f;
+                        bool rfBledIgnored8s = !diedFromBleedTick && sol.IsBleeding && sol.HasBandage && sol.BleedingSince >= 0f &&
+                            (now - sol.BleedingSince) >= 8.0f && !(sol.HasTarget && sol.TargetDist <= 9.0f);
+                        bool rfStuck = sol.StuckTimer >= 5.0f;
+
+                        if (rfBandageOpen) res.QualDeathBandageInOpen++;
+                        if (rfCqbTurnAway) res.QualDeathCqbTurnedAway++;
+                        if (rfStareArmor) res.QualDeathStaringAtArmor++;
+                        if (rfExposedHeavy) res.QualDeathExposedHeavyFire++;
+                        if (rfBleedoutBandage) res.QualDeathBleedoutWithBandage++;
+                        if (rfBledIgnored8s) res.QualDeathBledIgnored8s++;
+                        if (rfStuck) res.QualDeathWhileStuck++;
+                        if (rfBandageOpen || rfCqbTurnAway || rfStareArmor || rfExposedHeavy || rfBleedoutBandage || rfBledIgnored8s || rfStuck)
+                            res.QualRedFlagDeaths++;
+
                         sol.Alive = false;
                         if (sol.Side == 0)
                             invTickets--;
@@ -1908,10 +1997,38 @@ namespace EasyRed2HumanAI
                             hash *= 1099511628211UL;
                         }
 
+                        if (decidedThisTick)
+                        {
+                            sol.QualEpHarmAtDecision = sol.Emergent.SmoothedHarmNow;
+                            sol.QualEpEnemyDistAtDecision = sol.TargetDist;
+                        }
+                        if (decidedThisTick && (!sol.QualEpActive || sol.QualEpAction != dec.Step0))
+                        {
+                            CloseQualEpisode(sol, res, died: false, now, objDist);
+                            sol.QualEpAction = dec.Step0;
+                            sol.QualEpStartTime = now;
+                            sol.QualEpStartPos = sol.Pos;
+                            sol.QualEpStartObjDist = objDist;
+                            sol.QualEpStartHarm = sol.Emergent.SmoothedHarmNow;
+                            sol.QualEpStartedInCover = sol.InCover;
+                            sol.QualEpStartedBleeding = sol.IsBleeding;
+                            sol.QualEpReachedCover = false;
+                            sol.QualEpHarmDropped = false;
+                            sol.QualEpHealed = false;
+                            sol.QualEpActive = true;
+                        }
+
                         sol.Emergent.HasDecision = true;
                         sol.Emergent.CurrentDecision = dec;
                         sol.EmergentRunningBandage = dec.Step0 == EmergentEngine.EmergentActionId.SelfBandage;
                         ExecuteSimEmergentStep(sol, sq, covers, ref sq.Board, intents[sol.Side], in dec, decidedThisTick, now, sc, res);
+
+                        if (sol.QualEpActive)
+                        {
+                            if (sol.InCover) sol.QualEpReachedCover = true;
+                            if (sol.Emergent.SmoothedHarmNow <= sol.QualEpStartHarm - 0.12f) sol.QualEpHarmDropped = true;
+                            if (sol.QualEpStartedBleeding && !sol.IsBleeding) sol.QualEpHealed = true;
+                        }
                     }
 
                     // Chronic Foot-Stuck Recovery Check (Surf + Unreachable Flank Cover Eviction)
@@ -1970,12 +2087,13 @@ namespace EasyRed2HumanAI
                         float d = delta.magnitude;
                         bool fightingInsideObjective = d <= 14.0f && sol.HasTarget;
                         bool holdingDefendedCap = sq.Board.IsDefendingObjective && d <= 16.0f && !sq.Board.HasActiveThreat;
-                        bool holdFireStep = sol.Emergent.CurrentDecision.Step0 == EmergentEngine.EmergentActionId.HoldAndFight ||
-                                            sol.Emergent.CurrentDecision.Step0 == EmergentEngine.EmergentActionId.SuppressPin;
+                        var curStep0 = sol.Emergent.CurrentDecision.Step0;
+                        bool holdFireStep = curStep0 == EmergentEngine.EmergentActionId.HoldAndFight ||
+                                            curStep0 == EmergentEngine.EmergentActionId.SuppressPin;
                         bool holdingFireCover = holdingDefendedCap ||
                                                 (sol.InCover && (fightingInsideObjective ||
                                                  (sol.HasTarget && sol.TargetDist <= 55f && holdFireStep)));
-                        sol.IsMoving = !holdingFireCover;
+                        sol.IsMoving = !holdingFireCover && d > 2.0f;
                         if (sol.IsMoving && d > 2.0f && !sol.AssignedCoverUnreachable && !sol.InShallowSurf)
                         {
                             sol.InCover = false;
@@ -2005,7 +2123,12 @@ namespace EasyRed2HumanAI
                         {
                             visTarget.Health -= rng.Range(18f, 45f);
                             visTarget.Suppression = MathF.Min(100f, visTarget.Suppression + 28f);
-                            if (rng.Next01() < 0.35f) visTarget.IsBleeding = true;
+                            bool bleedRoll = rng.Next01() < 0.35f;
+                            if (visTarget.Health > 0f && bleedRoll)
+                            {
+                                if (!visTarget.IsBleeding) visTarget.BleedingSince = now;
+                                visTarget.IsBleeding = true;
+                            }
                             if (useEmergent)
                             {
                                 rings[visTarget.Side].StampIncomingFireLane(visTarget.Pos, sol.Pos, visTarget.SquadIndex + 1L, true, sol.IsAtRole ? EmergentEngine.DangerWeaponClass.AntiTank : EmergentEngine.DangerWeaponClass.SmallArms, 0.42f, now);
@@ -2136,6 +2259,11 @@ namespace EasyRed2HumanAI
                                 m.Emergent = default;
                                 m.EmergentRunningBandage = false;
                                 m.NextMedicHealTime = 0f;
+                                m.QualEpActive = false;
+                                m.QualEpAction = EmergentEngine.EmergentActionId.None;
+                                m.BleedingSince = -1f;
+                                m.QualEpHarmAtDecision = 0f;
+                                m.QualEpEnemyDistAtDecision = 999f;
                                 m.Pos = new UnityEngine.Vector3(rng.Range(-90f, 90f), 2f, rZ + rng.Range(-12f, 12f));
                                 m.AnchorPos = m.Pos;
                             }
@@ -2230,6 +2358,62 @@ namespace EasyRed2HumanAI
 
         private static bool ModeIsConquest(this SimSquad sq, SimGameMode mode) => mode == SimGameMode.DynamicConquest;
 
+        private static void CloseQualEpisode(SimSoldier sol, BattleSimResult res, bool died, float now, float currentObjDist)
+        {
+            if (!sol.QualEpActive) return;
+
+            switch (sol.QualEpAction)
+            {
+                case EmergentEngine.EmergentActionId.SeekCover:
+                    if (!sol.QualEpStartedInCover)
+                    {
+                        res.QualSeekCoverTotal++;
+                        if (died) res.QualSeekCoverDied++;
+                        else if (sol.QualEpReachedCover)
+                        {
+                            res.QualSeekCoverReached++;
+                            if (sol.QualEpHarmDropped) res.QualSeekCoverHarmDrop++;
+                        }
+                        else res.QualSeekCoverFailed++;
+                    }
+                    break;
+
+                case EmergentEngine.EmergentActionId.SelfBandage:
+                    if (sol.QualEpStartedBleeding)
+                    {
+                        res.QualBandageTotal++;
+                        if (sol.QualEpHealed && !died) res.QualBandageHealed++;
+                        else if (died && !sol.InCover) res.QualBandageDiedOpen++;
+                        else if (died) res.QualBandageDiedCover++;
+                        else res.QualBandageInterrupted++;
+                    }
+                    break;
+
+                case EmergentEngine.EmergentActionId.AdvanceObjective:
+                    {
+                        res.QualAdvanceTotal++;
+                        float movedObj = sol.QualEpStartObjDist - currentObjDist;
+                        float movedDist = (sol.Pos - sol.QualEpStartPos).magnitude;
+                        if (movedObj >= 3.0f || movedDist >= 3.0f) res.QualAdvanceProgressed++;
+                        else if (died) res.QualAdvanceDied++;
+                        else if ((now - sol.QualEpStartTime) >= 2.0f && movedDist < 1.0f) res.QualAdvanceStalled++;
+                    }
+                    break;
+
+                case EmergentEngine.EmergentActionId.FlankManeuver:
+                    {
+                        res.QualFlankTotal++;
+                        float movedDist = (sol.Pos - sol.QualEpStartPos).magnitude;
+                        if (movedDist >= 3.0f) res.QualFlankProgressed++;
+                        else if (died) res.QualFlankDied++;
+                        else if ((now - sol.QualEpStartTime) >= 2.0f && movedDist < 1.0f) res.QualFlankStalled++;
+                    }
+                    break;
+            }
+
+            sol.QualEpActive = false;
+        }
+
         private static void ExecuteSimEmergentStep(
             SimSoldier sol,
             SimSquad sq,
@@ -2255,8 +2439,13 @@ namespace EasyRed2HumanAI
                     if (sol.IsBleeding && sol.HasBandage)
                     {
                         sol.IsBleeding = false;
+                        sol.BleedingSince = -1f;
                         sol.HasBandage = false;
                         sol.Health = MathF.Min(100f, sol.Health + 25f);
+                    }
+                    else if (decidedThisTick)
+                    {
+                        res.QualWastedActionPlans++;
                     }
                     break;
 
@@ -2265,11 +2454,24 @@ namespace EasyRed2HumanAI
                     {
                         sol.HasSmokeGrenade = false;
                         board.SmokeActiveUntil = now + 10f;
+                        if (decidedThisTick) res.QualSmokeDeployed++;
+                    }
+                    else if (decidedThisTick)
+                    {
+                        res.QualWastedActionPlans++;
                     }
                     break;
 
                 case EmergentEngine.EmergentActionId.FragFlush:
-                    sol.HasFragGrenade = false;
+                    if (sol.HasFragGrenade)
+                    {
+                        sol.HasFragGrenade = false;
+                        if (decidedThisTick) res.QualFragThrown++;
+                    }
+                    else if (decidedThisTick)
+                    {
+                        res.QualWastedActionPlans++;
+                    }
                     break;
 
                 case EmergentEngine.EmergentActionId.SuppressPin:
@@ -2306,8 +2508,10 @@ namespace EasyRed2HumanAI
                             if (mate != sol && mate.Alive && (mate.IsBleeding || mate.Health < 45f) && (mate.Pos - sol.Pos).sqrMagnitude <= 14f * 14f)
                             {
                                 mate.IsBleeding = false;
+                                mate.BleedingSince = -1f;
                                 mate.Health = MathF.Min(100f, mate.Health + 18f);
                                 sol.NextMedicHealTime = now + 10.0f;
+                                res.QualMedicHealsCompleted++;
                                 break;
                             }
                         }
@@ -2317,6 +2521,7 @@ namespace EasyRed2HumanAI
                 case EmergentEngine.EmergentActionId.ResupplyAmmo:
                     if (decidedThisTick)
                     {
+                        res.QualResupplyCompleted++;
                         if (sol.NearDroppedRadio) { sol.NearDroppedRadio = false; sol.IsRadioman = true; }
                         if (sol.NearAtMinePickup && sc.HasArmor) { sol.NearAtMinePickup = false; sol.PlacedPressureMine = true; res.SapperMineCount++; }
                         sol.NearAmmoBox = false;
@@ -2453,6 +2658,13 @@ namespace EasyRed2HumanAI
             long[] emActions = new long[24];
             long[] emReflex = new long[8];
             long emPrereqChains = 0, emUnsafeRejects = 0, emDangerStamps = 0, emReliefStamps = 0, emMiaTimeouts = 0, emT3Levers = 0;
+            long qTotalDeaths = 0, qDeathsInCover = 0, qDeathsInOpen = 0, qDeathsFire = 0, qDeathsFireBleed = 0, qDeathsBleedout = 0, qRedFlagDeaths = 0;
+            long qRfBandageOpen = 0, qRfCqbTurn = 0, qRfStareArmor = 0, qRfExposedHeavy = 0, qRfBleedBandage = 0, qRfBledIgn8s = 0, qRfStuck = 0;
+            long qScTotal = 0, qScReach = 0, qScHarmDrop = 0, qScDied = 0, qScFail = 0;
+            long qBdTotal = 0, qBdHealed = 0, qBdDiedOpen = 0, qBdDiedCov = 0, qBdInt = 0;
+            long qAdvTotal = 0, qAdvProg = 0, qAdvDied = 0, qAdvStall = 0;
+            long qFlkTotal = 0, qFlkProg = 0, qFlkDied = 0, qFlkStall = 0;
+            long qSmoke = 0, qFrag = 0, qMedHeal = 0, qResup = 0, qWasted = 0;
             double minConqBuf = 1.0, sumDiv = 0;
             var allIssues = new List<BattleIssueSample>();
             var byMode = new Dictionary<SimGameMode, (int count, int inv, int def, int st)>();
@@ -2487,6 +2699,43 @@ namespace EasyRed2HumanAI
                 emReliefStamps += r.EmergentEnemyReliefStamps;
                 emMiaTimeouts += r.EmergentMiaTimeouts;
                 emT3Levers += r.EmergentTier3Levers;
+                qTotalDeaths += r.QualTotalDeaths;
+                qDeathsInCover += r.QualDeathsInCover;
+                qDeathsInOpen += r.QualDeathsInOpen;
+                qDeathsFire += r.QualDeathsByFire;
+                qDeathsFireBleed += r.QualDeathsByFireWhileBleeding;
+                qDeathsBleedout += r.QualDeathsByBleedout;
+                qRedFlagDeaths += r.QualRedFlagDeaths;
+                qRfBandageOpen += r.QualDeathBandageInOpen;
+                qRfCqbTurn += r.QualDeathCqbTurnedAway;
+                qRfStareArmor += r.QualDeathStaringAtArmor;
+                qRfExposedHeavy += r.QualDeathExposedHeavyFire;
+                qRfBleedBandage += r.QualDeathBleedoutWithBandage;
+                qRfBledIgn8s += r.QualDeathBledIgnored8s;
+                qRfStuck += r.QualDeathWhileStuck;
+                qScTotal += r.QualSeekCoverTotal;
+                qScReach += r.QualSeekCoverReached;
+                qScHarmDrop += r.QualSeekCoverHarmDrop;
+                qScDied += r.QualSeekCoverDied;
+                qScFail += r.QualSeekCoverFailed;
+                qBdTotal += r.QualBandageTotal;
+                qBdHealed += r.QualBandageHealed;
+                qBdDiedOpen += r.QualBandageDiedOpen;
+                qBdDiedCov += r.QualBandageDiedCover;
+                qBdInt += r.QualBandageInterrupted;
+                qAdvTotal += r.QualAdvanceTotal;
+                qAdvProg += r.QualAdvanceProgressed;
+                qAdvDied += r.QualAdvanceDied;
+                qAdvStall += r.QualAdvanceStalled;
+                qFlkTotal += r.QualFlankTotal;
+                qFlkProg += r.QualFlankProgressed;
+                qFlkDied += r.QualFlankDied;
+                qFlkStall += r.QualFlankStalled;
+                qSmoke += r.QualSmokeDeployed;
+                qFrag += r.QualFragThrown;
+                qMedHeal += r.QualMedicHealsCompleted;
+                qResup += r.QualResupplyCompleted;
+                qWasted += r.QualWastedActionPlans;
                 if (r.Mode == SimGameMode.DynamicConquest && r.ConquestMinPlayerBufferRatio < minConqBuf)
                     minConqBuf = r.ConquestMinPlayerBufferRatio;
                 sumDiv += r.AvgSquadActionDiversity;
@@ -2528,6 +2777,38 @@ namespace EasyRed2HumanAI
                 if (prof.SuppressionThresholdBase > 0f && prof.RadioRelayRadius > 0f) docVerified++;
             }
 
+            var atmoCases = new (string map, string loc, bool isBeach, bool expectedBeachhead)[]
+            {
+                ("normandy", "road to creully", true, false),
+                ("normandy", "pointe du hoc counterattack", true, false),
+                ("anzio", "breakout: clearing cisterna", true, false),
+                ("kos", "kos airport", true, false),
+                ("normandy", "juno beach", true, true),
+                ("normandy", "cliffs of pointe du hoc", true, true),
+                ("anzio", "shores east of nettuno", true, true),
+                ("kos", "marmari invasion", true, true),
+                ("kos", "kos harbor", true, true)
+            };
+            foreach (var ac in atmoCases)
+            {
+                var gotAtmo = AiCore.ResolveBattleAtmosphere(
+                    ac.map, ac.loc, "UnitedStates_allies", "Germany_axis", "", "", 1944,
+                    false, ac.isBeach, false, false, false);
+                bool gotBeachhead = gotAtmo == AiCore.BattleAtmosphereArchetype.AmphibiousBeachhead;
+                if (gotBeachhead != ac.expectedBeachhead)
+                {
+                    docBug++;
+                    allIssues.Add(new BattleIssueSample
+                    {
+                        Category = "Atmosphere",
+                        MissionKey = $"{ac.map}/{ac.loc}",
+                        Seed = 0,
+                        TimeSec = 0f,
+                        Detail = $"Expected Beachhead={ac.expectedBeachhead}, got {gotAtmo}"
+                    });
+                }
+            }
+
             sw.Stop();
             double stalematePct = results.Length > 0 ? (stalemates * 100.0 / results.Length) : 0.0;
             double avgDiv = results.Length > 0 ? (sumDiv / results.Length) : 0.0;
@@ -2561,6 +2842,57 @@ namespace EasyRed2HumanAI
                 Console.WriteLine($"   * Fast Reflexes : DoorCas={emReflex[(int)EmergentEngine.EmergentReflexKind.DoorwayFreshCasualty]:N0} | HeavyFire={emReflex[(int)EmergentEngine.EmergentReflexKind.SuddenPenetratingFire]:N0} | CQB={emReflex[(int)EmergentEngine.EmergentReflexKind.PointBlankAmbush]:N0} | BleedCov={emReflex[(int)EmergentEngine.EmergentReflexKind.LethalBleedExposed]:N0} | Prereqs={emPrereqChains:N0} (UnsafeRej:{emUnsafeRejects:N0})");
                 Console.WriteLine($"   * Shared Net    : DangerStamps={emDangerStamps:N0} | EnemyRelief={emReliefStamps:N0} | MIA_Timeouts={emMiaTimeouts:N0} | T3_LeverSwitches={emT3Levers:N0}");
             }
+
+            double qPlausiblePct = qTotalDeaths > 0 ? ((qTotalDeaths - qRedFlagDeaths) * 100.0 / qTotalDeaths) : 100.0;
+            double qRedFlagPct = qTotalDeaths > 0 ? (qRedFlagDeaths * 100.0 / qTotalDeaths) : 0.0;
+            double qInCovPct = qTotalDeaths > 0 ? (qDeathsInCover * 100.0 / qTotalDeaths) : 0.0;
+            double qInOpenPct = qTotalDeaths > 0 ? (qDeathsInOpen * 100.0 / qTotalDeaths) : 0.0;
+            double qFirePct = qTotalDeaths > 0 ? (qDeathsFire * 100.0 / qTotalDeaths) : 0.0;
+            double qBleedoutPct = qTotalDeaths > 0 ? (qDeathsBleedout * 100.0 / qTotalDeaths) : 0.0;
+            Console.WriteLine(" [QUALITATIVE SIMULATION SCORECARD]");
+            Console.WriteLine($"   * Death Autopsy     : Total={qTotalDeaths:N0} | InCover={qDeathsInCover:N0} ({qInCovPct:F1}%) | InOpen={qDeathsInOpen:N0} ({qInOpenPct:F1}%) | Plausible={qPlausiblePct:F1}% | RedFlags={qRedFlagDeaths:N0} ({qRedFlagPct:F1}%)");
+            Console.WriteLine($"   * Death Cause       : Gunshot={qDeathsFire:N0} ({qFirePct:F1}% | whileBleeding={qDeathsFireBleed:N0}) | BleedoutTick={qDeathsBleedout:N0} ({qBleedoutPct:F1}%)");
+            Console.WriteLine($"   * Red-Flag Breakdown: ExposedHeavy={qRfExposedHeavy:N0} | StareArmor={qRfStareArmor:N0} | CqbTurnAway={qRfCqbTurn:N0} | BandageOpen={qRfBandageOpen:N0} | BleedoutWBandage={qRfBleedBandage:N0} | BledIgnored>=8s={qRfBledIgn8s:N0} | Stuck={qRfStuck:N0}");
+            if (qScTotal > 0)
+                Console.WriteLine($"   * SeekCover (exp)   : {qScTotal:N0} ep -> Reached={qScReach * 100.0 / qScTotal:F1}% | HarmDrop={qScHarmDrop * 100.0 / qScTotal:F1}% | DiedEnRoute={qScDied * 100.0 / qScTotal:F1}% | Failed={qScFail * 100.0 / qScTotal:F1}%");
+            if (qBdTotal > 0)
+                Console.WriteLine($"   * SelfBandage(bleed): {qBdTotal:N0} ep -> Healed={qBdHealed * 100.0 / qBdTotal:F1}% | DiedOpen={qBdDiedOpen * 100.0 / qBdTotal:F1}% | DiedCov={qBdDiedCov * 100.0 / qBdTotal:F1}% | Interrupted={qBdInt * 100.0 / qBdTotal:F1}%");
+            if (qAdvTotal > 0)
+                Console.WriteLine($"   * AdvanceObjective  : {qAdvTotal:N0} ep -> Progressed>=3m={qAdvProg * 100.0 / qAdvTotal:F1}% | Died={qAdvDied * 100.0 / qAdvTotal:F1}% | Stalled<1m={qAdvStall * 100.0 / qAdvTotal:F1}%");
+            if (qFlkTotal > 0)
+                Console.WriteLine($"   * FlankManeuver     : {qFlkTotal:N0} ep -> Progressed>=3m={qFlkProg * 100.0 / qFlkTotal:F1}% | Died={qFlkDied * 100.0 / qFlkTotal:F1}% | Stalled<1m={qFlkStall * 100.0 / qFlkTotal:F1}%");
+            Console.WriteLine($"   * Support / Hygiene : Smoke={qSmoke:N0} | Frag={qFrag:N0} | MedicHeal={qMedHeal:N0} | Resupply={qResup:N0} | WastedActionPlans={qWasted:N0}");
+
+            var outlierMissions = results
+                .GroupBy(r => r.MissionKey)
+                .Select(g => new
+                {
+                    Key = g.Key,
+                    Mode = g.First().Mode,
+                    Deaths = g.Sum(x => x.QualTotalDeaths),
+                    RedFlags = g.Sum(x => x.QualRedFlagDeaths),
+                    ExpHeavy = g.Sum(x => x.QualDeathExposedHeavyFire),
+                    StareArmor = g.Sum(x => x.QualDeathStaringAtArmor),
+                    CqbTurn = g.Sum(x => x.QualDeathCqbTurnedAway),
+                    BandageOpen = g.Sum(x => x.QualDeathBandageInOpen),
+                    BleedOut = g.Sum(x => x.QualDeathBleedoutWithBandage),
+                    Ign8s = g.Sum(x => x.QualDeathBledIgnored8s),
+                    Stuck = g.Sum(x => x.QualDeathWhileStuck)
+                })
+                .Where(x => x.Deaths >= 10 && x.RedFlags > 0)
+                .OrderByDescending(x => x.RedFlags * 100.0 / x.Deaths)
+                .ThenByDescending(x => x.RedFlags)
+                .Take(5)
+                .ToList();
+            if (outlierMissions.Count > 0)
+            {
+                Console.WriteLine("   * Top 5 Qualitative Outlier Missions (by Red-Flag Death %):");
+                foreach (var om in outlierMissions)
+                {
+                    double rfPct = om.RedFlags * 100.0 / om.Deaths;
+                    Console.WriteLine($"     -> {om.Key} ({om.Mode}): Deaths={om.Deaths}, Plausible={100.0 - rfPct:F1}%, RedFlags={om.RedFlags} ({rfPct:F1}%) [ExpHvy:{om.ExpHeavy}, Armor:{om.StareArmor}, CqbTurn:{om.CqbTurn}, BandOpen:{om.BandageOpen}, BleedOut:{om.BleedOut}, Ign8s:{om.Ign8s}, Stuck:{om.Stuck}]");
+                }
+            }
             foreach (var kv in byMode.OrderBy(k => k.Key))
                 Console.WriteLine($"   * Mode {kv.Key,-20} : {kv.Value.count,3} battles (Inv:{kv.Value.inv}, Def:{kv.Value.def}, Stalemate:{kv.Value.st})");
 
@@ -2573,7 +2905,7 @@ namespace EasyRed2HumanAI
 
             if (!string.IsNullOrEmpty(jsonOut))
             {
-                File.WriteAllText(jsonOut, $"{{\"battles\":{results.Length},\"realMissions\":{realCount},\"totalPlans\":{totalPlans},\"thrash\":{thrash},\"crisisFallthroughs\":{crisisFall},\"invalid2Step\":{bad2Step},\"stuck\":{stuck},\"slBugs\":{slBug},\"doctrineBugs\":{docBug},\"frozen\":{frozen},\"detMatched\":{detMatched},\"detChecked\":{detChecked},\"emergent\":{emergentTrios},\"railroaded\":{railroadedTrios},\"stalematePct\":{stalematePct:F2}}}");
+                File.WriteAllText(jsonOut, $"{{\"battles\":{results.Length},\"realMissions\":{realCount},\"totalPlans\":{totalPlans},\"thrash\":{thrash},\"crisisFallthroughs\":{crisisFall},\"invalid2Step\":{bad2Step},\"stuck\":{stuck},\"slBugs\":{slBug},\"doctrineBugs\":{docBug},\"frozen\":{frozen},\"detMatched\":{detMatched},\"detChecked\":{detChecked},\"emergent\":{emergentTrios},\"railroaded\":{railroadedTrios},\"stalematePct\":{stalematePct:F2},\"totalDeaths\":{qTotalDeaths},\"plausibleDeathPct\":{qPlausiblePct:F2},\"redFlagDeaths\":{qRedFlagDeaths},\"wastedActionPlans\":{qWasted}}}");
             }
 
             bool stalemateGateFail = catalog.Count >= 100

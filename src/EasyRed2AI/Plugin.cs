@@ -16,7 +16,7 @@ namespace EasyRed2HumanAI
     {
         public const string PluginGuid = "com.antigravity.easyred2.humanai";
         public const string PluginName = "Easy Red 2 - Battle Hardened";
-        public const string PluginVersion = "0.10.2";
+        public const string PluginVersion = "0.10.3";
 
         internal static Plugin Instance;
         internal static new ManualLogSource Log;
@@ -154,7 +154,7 @@ namespace EasyRed2HumanAI
             SafePatch(typeof(VeteranAndTacticsPatches.Soldier_SetAnimatorController_Patch));
             SafePatch(typeof(VeteranAndTacticsPatches.Soldier_OnRetreat_Patch));
             SafePatch(typeof(VeteranAndTacticsPatches.Soldier_UnSurrender_Patch));
-            SafePatch(typeof(VeteranAndTacticsPatches.Soldier_MeleeDamageCR_MoveNext_Patch));
+            SafePatch(typeof(VeteranAndTacticsPatches.Soldier_MeleeDamageCR_Patch));
             SafePatch(typeof(VeteranAndTacticsPatches.ResourcesManager_TrySpotSquad_Patch));
             SafePatch(typeof(VeteranAndTacticsPatches.SpawnManager_SpawnAISquadMoveNext_Patch));
             SafePatch(typeof(VeteranAndTacticsPatches.SpawnManager_SpawnUnitMoveNext_Patch));
@@ -237,14 +237,14 @@ namespace EasyRed2HumanAI
             SafePatch(typeof(VeteranAndTacticsPatches.ObjectiveGUI_LateUpdate_Patch));
             SafePatch(typeof(VeteranAndTacticsPatches.ObjectiveGUI_SetPhase_Patch));
             SafePatch(typeof(VeteranAndTacticsPatches.ResourcesManager_PlayImpactEffect_Patch));
+            SafePatch(typeof(VeteranAndTacticsPatches.LimbLeftoverManager_Start_Patch));
+            SafePatch(typeof(VeteranAndTacticsPatches.CorvoDecal_ApplyMeshData_Patch));
             SafePatch(typeof(VeteranAndTacticsPatches.GenericGun_ReloadCR_Patch));
             SafePatch(typeof(VeteranAndTacticsPatches.GenericGun_ReloadCRMoveNext_Patch));
             SafePatch(typeof(VeteranAndTacticsPatches.Soldier_SwitchTo_ReloadCancel_Patch));
             SafePatch(typeof(VeteranAndTacticsPatches.Soldier_Melee_ReloadCancel_Patch));
             SafePatch(typeof(VeteranAndTacticsPatches.Soldier_ToggleInventoryKnife_ReloadCancel_Patch));
             SafePatch(typeof(VeteranAndTacticsPatches.Soldier_CycleInventoryKnife_ReloadCancel_Patch));
-            SafePatch(typeof(VeteranAndTacticsPatches.Soldier_Throw_ReloadCancel_Patch));
-            SafePatch(typeof(VeteranAndTacticsPatches.Soldier_Throw_SmokeAim_Patch));
             SafePatch(typeof(VeteranAndTacticsPatches.Soldier_InstantiateAndThrowAfter_MoveNext_Patch));
             SafePatch(typeof(VeteranAndTacticsPatches.Soldier_CalculateBallisticThrow_Patch));
             SafePatch(typeof(VeteranAndTacticsPatches.Soldier_Vault_ReloadCancel_Patch));

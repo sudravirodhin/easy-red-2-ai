@@ -842,7 +842,10 @@ namespace EasyRed2HumanAI
                 return;
 
             if (!AiCore.TryConsumeBotRpcBudget(0.25f))
+            {
+                meleeH.Combat.NextMeleeAttemptTime = Time.time + 0.12f;
                 return;
+            }
 
             meleeH.Combat.NextMeleeAttemptTime = Time.time + 0.45f;
             soldier.SetGunTriggerPressed(false);
@@ -928,30 +931,27 @@ namespace EasyRed2HumanAI
             return true;
         }
 
-        [HarmonyPatch(typeof(Soldier._MeleeDamageCR_d__489), nameof(Soldier._MeleeDamageCR_d__489.MoveNext))]
-        public static class Soldier_MeleeDamageCR_MoveNext_Patch
+        [HarmonyPatch(typeof(Soldier), nameof(Soldier.MeleeDamageCR))]
+        public static class Soldier_MeleeDamageCR_Patch
         {
-            public static void Prefix(Soldier._MeleeDamageCR_d__489 __instance)
+            public static void Prefix(Soldier __instance, ref float dist, Transform mountedBlade)
             {
                 try
                 {
                     if (!VisionConfig.EnableMod.Value || !VisionConfig.EnablePointBlankMelee.Value || __instance == null)
                         return;
 
-                    if (__instance.__1__state == 1 &&
-                        __instance.mountedBlade == null &&
-                        __instance.__4__this != null &&
-                        !__instance.__4__this.IsPlayer())
+                    if (mountedBlade == null && !__instance.IsPlayer())
                     {
                         float minReach = 0.95f;
-                        if (__instance.__4__this.aiController != null &&
-                            TryResolvePointBlankTargetSoldier(__instance.__4__this.aiController, out _, out bool isEmpGunner) &&
+                        if (__instance.aiController != null &&
+                            TryResolvePointBlankTargetSoldier(__instance.aiController, out _, out bool isEmpGunner) &&
                             isEmpGunner)
                         {
                             minReach = 1.45f;
                         }
-                        if (__instance.dist < minReach)
-                            __instance.dist = minReach;
+                        if (dist < minReach)
+                            dist = minReach;
                     }
                 }
                 catch { }
@@ -1758,47 +1758,43 @@ namespace EasyRed2HumanAI
         private static bool _activeSmokeBallisticOverride;
         private static Vector3 _activeSmokeBallisticTarget;
 
-        [HarmonyPatch(typeof(Soldier), nameof(Soldier.Throw))]
-        public static class Soldier_Throw_SmokeAim_Patch
+        internal static bool TryHandleBotSmokeThrowAim(Soldier soldier, VirtualItem item, ref Spottable aimTarget)
         {
-            public static bool Prefix(Soldier __instance, VirtualItem item, ref Spottable aimTarget)
+            try
             {
-                try
+                if (!VisionConfig.EnableMod.Value || soldier == null || item == null)
+                    return true;
+
+                AiCore.SoldierFastHandles h = AiCore.GetOrCreateSoldierHandles(soldier);
+                if (!AiCore.IsLocallyOwnedBot(h))
+                    return true;
+
+                if (item.TryCast<VirtualSmokeGrenade>() == null)
+                    return true;
+
+                float now = Time.time;
+                if (now <= h.Combat.PendingSmokeAimUntil)
                 {
-                    if (!VisionConfig.EnableMod.Value || __instance == null || item == null)
-                        return true;
-
-                    AiCore.SoldierFastHandles h = AiCore.GetOrCreateSoldierHandles(__instance);
-                    if (!AiCore.IsLocallyOwnedBot(h))
-                        return true;
-
-                    if (item.TryCast<VirtualSmokeGrenade>() == null)
-                        return true;
-
-                    float now = Time.time;
-                    if (now <= h.Combat.PendingSmokeAimUntil)
-                    {
-                        if (aimTarget == null || !AiCore.IsValidAliveSpottable(aimTarget) || aimTarget.IsAirVehicle())
-                            aimTarget = __instance.Cast<Spottable>();
-                        return true;
-                    }
-
-                    Vector3 myPos = h.Tr != null ? h.Tr.position : (__instance.transform != null ? __instance.transform.position : Vector3.zero);
-                    if (!TryResolveBotSmokeThreatPosition(__instance, h, myPos, now, aimTarget, out Vector3 threatPos, out Spottable resolvedTarget))
-                        return false;
-
-                    bool isDefensive = __instance.GetSuppressionValue() >= 55f ||
-                                       (h.Ai != null && !h.Ai.HasEnemyAndCanFireAtHim);
-                    if (!TryPrepareBotSmokeThrowAim(__instance, h, item, threatPos, isDefensive, now, checkRpcBudget: false))
-                        return false;
-
-                    aimTarget = resolvedTarget ?? __instance.Cast<Spottable>();
+                    if (aimTarget == null || !AiCore.IsValidAliveSpottable(aimTarget) || aimTarget.IsAirVehicle())
+                        aimTarget = soldier.Cast<Spottable>();
                     return true;
                 }
-                catch
-                {
-                    return true;
-                }
+
+                Vector3 myPos = h.Tr != null ? h.Tr.position : (soldier.transform != null ? soldier.transform.position : Vector3.zero);
+                if (!TryResolveBotSmokeThreatPosition(soldier, h, myPos, now, aimTarget, out Vector3 threatPos, out Spottable resolvedTarget))
+                    return false;
+
+                bool isDefensive = soldier.GetSuppressionValue() >= 55f ||
+                                   (h.Ai != null && !h.Ai.HasEnemyAndCanFireAtHim);
+                if (!TryPrepareBotSmokeThrowAim(soldier, h, item, threatPos, isDefensive, now, checkRpcBudget: false))
+                    return false;
+
+                aimTarget = resolvedTarget ?? soldier.Cast<Spottable>();
+                return true;
+            }
+            catch
+            {
+                return true;
             }
         }
 

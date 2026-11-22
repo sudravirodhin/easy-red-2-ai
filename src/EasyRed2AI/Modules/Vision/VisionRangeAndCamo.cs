@@ -745,11 +745,34 @@ namespace EasyRed2HumanAI
         [HarmonyPatch(typeof(Soldier), nameof(Soldier.StartFire))]
         public static class Soldier_StartFire_Patch
         {
-            public static void Postfix(Soldier __instance)
+            public static bool Prefix(Soldier __instance, out bool __state)
+            {
+                __state = true;
+                try
+                {
+                    if (!VisionConfig.EnableMod.Value || !VisionConfig.EnableWallShootingPrevention.Value || __instance == null)
+                        return true;
+
+                    if (__instance.IsPlayer() || __instance.IsOnVehicle() || !AiCore.IsLocallyOwnedBot(__instance))
+                        return true;
+
+                    if (VeteranAndTacticsPatches.IsBotGunClippedThroughWall(__instance))
+                    {
+                        __instance.SetGunTriggerPressed(false);
+                        VeteranAndTacticsPatches.IncrementWallsBlocked();
+                        __state = false;
+                        return false;
+                    }
+                }
+                catch { }
+                return true;
+            }
+
+            public static void Postfix(Soldier __instance, bool __state)
             {
                 try
                 {
-                    if (!VisionConfig.EnableMod.Value || __instance == null) return;
+                    if (!__state || !VisionConfig.EnableMod.Value || __instance == null) return;
                     RecordSoldierFired(__instance);
                     VeteranAndTacticsPatches.AddCombatExperienceBonus(__instance, 0.75f);
                 }
@@ -1084,6 +1107,16 @@ namespace EasyRed2HumanAI
                             runVanillaLinecast = false;
                             return false;
                         }
+                    }
+
+                    // Vanilla Creature.CanSee starts its linecast at observerPos + dir * 0.40f,
+                    // skipping thin walls (<= 0.35m) pressed right in front of the observer's eyes.
+                    if (dist > 0.30f &&
+                        Physics.Raycast(observerPos, toTarget / dist, Mathf.Min(0.50f, dist - 0.15f), AiCore.GetSolidEnvironmentMask(), QueryTriggerInteraction.Ignore))
+                    {
+                        __result = false;
+                        runVanillaLinecast = false;
+                        return false;
                     }
 
                     return true;
