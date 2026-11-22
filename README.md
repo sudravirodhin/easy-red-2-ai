@@ -251,7 +251,7 @@ powershell -ExecutionPolicy Bypass -File .\build.ps1 -Test -Deploy
 ## Development Methodology, AI Disclosure, and Credits
 
 > **Disclosure — AI-Assisted Development:**  
-> AI / LLMs were used in the development of this mod. I'm a developer by trade and worked on this with an LLM in my free time alongside hours of testing and polish. Putting this upfront in case you prefer to avoid AI-assisted mods.
+> AI / LLMs were used in the development of this mod. I'm a developer by trade and worked on this with an LLM in my free time alongside hours of testing and polish. Included here for transparency — the full source, tests, and benchmarks are open to inspect.
 
 **Credit & Inspiration:**  
 Special credit and thanks to **[AtlasActual (`Easy-Red-2-Realism-Overhaul`)](https://github.com/AtlasActual/Easy-Red-2-Realism-Overhaul)** for pioneering several of the combined-arms, objective-coordination, and tactical realism concepts that inspired parts of this project's roadmap and feature sets.
