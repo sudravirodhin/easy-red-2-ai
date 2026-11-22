@@ -448,7 +448,7 @@ namespace EasyRed2HumanAI
             Soldier localPlayer = Soldier.CurrentControlledSoldierOrNull();
             if (localPlayer != null && localPlayer.Pointer == s.Pointer)
             {
-                string msg = $"Rise to the Occasion! Command forged you into a {archLabel} leader.";
+                string msg = $"Command Succession: You stepped up as a {archLabel} leader.";
                 try { PlayerController.HintToPlayer(msg, false); } catch { }
                 VisionPatches.ShowToast($"[Battle Hardened] {msg}", 5.0f);
             }
@@ -457,7 +457,7 @@ namespace EasyRed2HumanAI
                 string cleanName = string.IsNullOrEmpty(rec.BaseName) ? "Your new Squad Leader" : rec.BaseName;
                 AiCore.TryShowLocalPlayerRadioHint(
                     sq,
-                    $"Chain of Command: {cleanName} rose to the occasion ({archLabel})!",
+                    $"Command Succession: {cleanName} stepped up to lead ({archLabel})!",
                     requireLeader: false,
                     minInterval: 4.0f);
             }

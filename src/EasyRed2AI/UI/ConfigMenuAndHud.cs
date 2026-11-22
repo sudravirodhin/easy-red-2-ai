@@ -612,7 +612,7 @@ namespace EasyRed2HumanAI
                 switch (_activeConfigTab)
                 {
                     case 0: // 1. H.A.R.M. & Bot Behaviors
-                        DrawSectionHeaderWithBundle(colLeftX, ref yL, colW, "H.A.R.M. 3-Tier Emergent AI & Macro Command",
+                        DrawSectionHeaderWithBundle(colLeftX, ref yL, colW, "H.A.R.M. 3-Tier Emergent AI & HQ Command Net",
                             VisionConfig.EnableEmergentDecisionEngine,
                             VisionConfig.EnableTacticalVoiceCallouts,
                             VisionConfig.EnableRadiomanIntelNet,
@@ -621,7 +621,7 @@ namespace EasyRed2HumanAI
                             VisionConfig.EnableCombinedArmsPrioritySupport);
                         DrawToggleButton(colLeftX, ref yL, colW, rowH, "H.A.R.M. 3-Tier Emergent Decision Engine", VisionConfig.EnableEmergentDecisionEngine);
                         DrawToggleButton(colLeftX, ref yL, colW, rowH, "Audible Tactical Voice Callouts", VisionConfig.EnableTacticalVoiceCallouts);
-                        DrawToggleButton(colLeftX, ref yL, colW, rowH, "Radioman-Gated Team Intel Net", VisionConfig.EnableRadiomanIntelNet);
+                        DrawToggleButton(colLeftX, ref yL, colW, rowH, "Radioman-Gated Command Net", VisionConfig.EnableRadiomanIntelNet);
                         DrawToggleButton(colLeftX, ref yL, colW, rowH, "Objective Garrison, Pivot & Counterattack", VisionConfig.EnableMacroObjectiveDirector);
                         DrawToggleButton(colLeftX, ref yL, colW, rowH, "Proactive Static Gun & Halftrack Staffing", VisionConfig.EnableProactiveEmplacementStaffing);
                         DrawToggleButton(colLeftX, ref yL, colW, rowH, "Combined-Arms Known Target Priority", VisionConfig.EnableCombinedArmsPrioritySupport);
@@ -1360,7 +1360,7 @@ namespace EasyRed2HumanAI
             if (s.IsRadioman() && classLabel.IndexOf("Radio", StringComparison.OrdinalIgnoreCase) < 0)
                 _specSb.Append("  [RADIO]");
             if (HasSoldierRisenToOccasion(s))
-                _specSb.Append("  [RISEN SL]");
+                _specSb.Append("  [RALLIED SL]");
             if (sq != null &&
                 sq.Pointer != IntPtr.Zero &&
                 _squadBlackboards.TryGetValue(sq.Pointer, out SquadBlackboard spB) &&

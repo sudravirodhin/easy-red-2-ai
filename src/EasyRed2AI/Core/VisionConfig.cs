@@ -529,7 +529,7 @@ namespace EasyRed2HumanAI
                 "6. Tactical Self-Preservation & Muzzle Discipline",
                 "EnableMacroObjectiveDirector",
                 true,
-                "6.0s MasterClient Macro Director: keeps ~20% of autonomous squads garrisoning newly captured objectives (prioritizing contested/threatened points) while directing remaining squads to attack or counterattack uncaptured objectives.");
+                "6.0s MasterClient HQ Objective Command: keeps ~20% of autonomous squads garrisoning newly captured objectives (prioritizing contested/threatened points) while directing remaining squads to attack or counterattack uncaptured objectives.");
 
             EnableProactiveEmplacementStaffing = config.Bind(
                 "6. Tactical Self-Preservation & Muzzle Discipline",
@@ -595,7 +595,7 @@ namespace EasyRed2HumanAI
                 "6. Tactical Self-Preservation & Muzzle Discipline",
                 "EnableRadiomanIntelNet",
                 true,
-                "Radioman-Gated Team Intel & Combined-Arms Net: squads only broadcast distant enemy contacts/armor sightings to friendly Tanks, CAS Aircraft, Artillery, and HQ Reserve Squads if they have an alive Radioman within 30m of their Squad Leader or are within 45m voice/visual contact of friendly forces.");
+                "Radioman-Gated Command & Combined-Arms Net: squads only broadcast distant enemy contacts/armor sightings to friendly Tanks, CAS Aircraft, Artillery, and HQ Reserve Squads if they have an alive Radioman within 30m of their Squad Leader or are within 45m voice/visual contact of friendly forces.");
 
             EnableTacticalVoiceCallouts = config.Bind(
                 "6. Tactical Self-Preservation & Muzzle Discipline",
@@ -607,7 +607,7 @@ namespace EasyRed2HumanAI
                 "6. Tactical Self-Preservation & Muzzle Discipline",
                 "EnableFactionNetDoctrines",
                 true,
-                "Nation-Specific Team Net & GOAP Doctrines: gives all 20 Easy Red 2 factions (USA, Germany, USSR, UK, Japan, France, Italy, Poland, China, Finland, Mongolia, Manchukuo, Canada, Australia, New Zealand, India, Gurkha, Greece, Romania, Hungary + balanced default fallback) historically authentic radio net, flanking, emplacement, and GOAP cost habits.");
+                "Nation-Specific Command Net & Tactical Doctrines: gives all 20 Easy Red 2 factions (USA, Germany, USSR, UK, Japan, France, Italy, Poland, China, Finland, Mongolia, Manchukuo, Canada, Australia, New Zealand, India, Gurkha, Greece, Romania, Hungary + balanced default fallback) historically authentic radio net, flanking, emplacement, and GOAP cost habits.");
 
             EnableBattleAtmosphereDirectives = config.Bind(
                 "6. Tactical Self-Preservation & Muzzle Discipline",
@@ -667,7 +667,7 @@ namespace EasyRed2HumanAI
                 "6. Tactical Self-Preservation & Muzzle Discipline",
                 "EnableEmergentWearableScavenge",
                 true,
-                "Emergent GOAP Radio Inheritance & Helmet Recovery: squads that lost their Radioman can loot and equip (SetWerable) a fallen friendly or enemy radio backpack to reconnect to the Team Radio Net, and helmetless bots pick up knocked-off or player-gifted helmets.");
+                "Emergent GOAP Radio Inheritance & Helmet Recovery: squads that lost their Radioman can loot and equip (SetWerable) a fallen friendly or enemy radio backpack to reconnect to the HQ Command Net, and helmetless bots pick up knocked-off or player-gifted helmets.");
 
             EnableBuddyCasualtyDragging = config.Bind(
                 "6. Tactical Self-Preservation & Muzzle Discipline",
@@ -679,7 +679,7 @@ namespace EasyRed2HumanAI
                 "6. Tactical Self-Preservation & Muzzle Discipline",
                 "EnableTacticalRetreatsAndRegroup",
                 true,
-                "3-Tier Tactical Retreats & Regroup: enables TeamNet sector withdrawals for shattered squads, Squad Leader fighting withdrawals (smoke + 'Retreat!' callout + fallback rally point) when mauled or facing uncounterable close armor, and individual 'Oh Shit' break-contact sprints before surrendering.");
+                "3-Tier Tactical Retreats & Regroup: enables Command Net sector withdrawals for shattered squads, Squad Leader fighting withdrawals (smoke + 'Retreat!' callout + fallback rally point) when mauled or facing uncounterable close armor, and individual 'Oh Shit' break-contact sprints before surrendering.");
 
             EnableSpecialMunitionsAndSappers = config.Bind(
                 "6. Tactical Self-Preservation & Muzzle Discipline",

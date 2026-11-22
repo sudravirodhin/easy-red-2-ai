@@ -1372,7 +1372,7 @@ namespace EasyRed2HumanAI
                 TrySayTacticalVoice(leader, sq, VoiceManager.VoiceClip.radiomanIsDead, 0.35f);
                 if (VisionConfig.DebugLogging.Value)
                 {
-                    AiCore.LogDebug("RadioNet", $"{leader.faction} squad '{sq.squadName}' lost its Radioman! Cut off from distant Team Net.");
+                    AiCore.LogDebug("RadioNet", $"{leader.faction} squad '{sq.squadName}' lost its Radioman! Cut off from distant Command Net.");
                 }
             }
             else if (hasAliveRadNow)
@@ -1409,7 +1409,7 @@ namespace EasyRed2HumanAI
                         board.NextRadioNetStatusToastTime = now + 16.0f;
                         board.EverNotifiedRadioCutoff = !liveRadioLink;
                         string lostMsg = !liveRadioLink
-                            ? "Squad Radio: Radioman down \u2014 squad cut off from HQ Net! (Loot a radio or stay near friendly squads)"
+                            ? "Squad Radio: Radioman down \u2014 squad cut off from Command Net! (Loot a radio or stay near friendly squads)"
                             : "Squad Radio: Radioman down \u2014 squad holding HQ link via nearby friendly relay";
                         AiCore.TryShowLocalPlayerRadioHint(sq, lostMsg, requireLeader: false, minInterval: 6.0f);
                     }
@@ -1423,8 +1423,8 @@ namespace EasyRed2HumanAI
                             Soldier lp = Soldier.CurrentControlledSoldierOrNull();
                             bool playerIsRad = lp != null && lp.IsAlive && lp.joinedSquad != null && lp.joinedSquad.Pointer == sqPtr && lp.IsRadioman();
                             string recMsg = playerIsRad
-                                ? "Squad Radio: You recovered a field radio \u2014 squad reconnected to HQ Radio Net!"
-                                : "Squad Radio: Field radio recovered \u2014 squad reconnected to HQ Radio Net!";
+                                ? "Squad Radio: You recovered a field radio \u2014 squad reconnected to HQ Command Net!"
+                                : "Squad Radio: Field radio recovered \u2014 squad reconnected to HQ Command Net!";
                             AiCore.TryShowLocalPlayerRadioHint(sq, recMsg, requireLeader: false, minInterval: 6.0f);
                         }
                         board.EverNotifiedRadioCutoff = false;
@@ -1451,7 +1451,7 @@ namespace EasyRed2HumanAI
                                         board.EverNotifiedRadioCutoff = true;
                                         AiCore.TryShowLocalPlayerRadioHint(
                                             sq,
-                                            "Squad Radio: Squad out of friendly relay range \u2014 cut off from HQ Radio Net",
+                                            "Squad Radio: Squad out of friendly relay range \u2014 cut off from HQ Command Net",
                                             requireLeader: false,
                                             minInterval: 6.0f);
                                     }
@@ -1460,7 +1460,7 @@ namespace EasyRed2HumanAI
                                         board.EverNotifiedRadioCutoff = false;
                                         AiCore.TryShowLocalPlayerRadioHint(
                                             sq,
-                                            "Squad Radio: Squad back in friendly relay range \u2014 reconnected to HQ Radio Net",
+                                            "Squad Radio: Squad back in friendly relay range \u2014 reconnected to HQ Command Net",
                                             requireLeader: false,
                                             minInterval: 6.0f);
                                     }
@@ -2955,16 +2955,16 @@ namespace EasyRed2HumanAI
             switch (newLever)
             {
                 case EmergentEngine.Tier3NetLever.FireBrigade:
-                    msg = "HQ Radio Net: Defense buckling \u2014 reinforce threatened point";
+                    msg = "HQ Command Net: Defense buckling \u2014 reinforce threatened point";
                     break;
                 case EmergentEngine.Tier3NetLever.SmokeBarrage:
-                    msg = "HQ Radio Net: Heavy fire across line \u2014 smoke & maneuver";
+                    msg = "HQ Command Net: Heavy fire across line \u2014 smoke & maneuver";
                     break;
                 case EmergentEngine.Tier3NetLever.MassAssault:
-                    msg = "HQ Radio Net: Enemy defense softening \u2014 press the assault";
+                    msg = "HQ Command Net: Enemy defense softening \u2014 press the assault";
                     break;
                 default:
-                    msg = "HQ Radio Net: Friendly element MIA \u2014 shift attack axis";
+                    msg = "HQ Command Net: Friendly element MIA \u2014 shift attack axis";
                     break;
             }
 
@@ -3080,7 +3080,7 @@ namespace EasyRed2HumanAI
                             string infLabel = AiCore.FormatInfantrySupportCallsign(bestHammerSq, vehPos);
                             AiCore.TryShowLocalPlayerRadioHint(
                                 vehSq,
-                                $"Radio Net: {infLabel} flanking enemy contact to support your position",
+                                $"Command Net: {infLabel} flanking enemy contact to support your position",
                                 requireLeader: false,
                                 minInterval: 20.0f);
                         }

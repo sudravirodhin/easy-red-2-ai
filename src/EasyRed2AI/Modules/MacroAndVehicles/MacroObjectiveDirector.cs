@@ -1046,7 +1046,7 @@ namespace EasyRed2HumanAI
                         stalledName = GetObjectiveDebugLabel(worstStalledObj);
                     AiCore.LogDebug(
                         "AttritionPivot",
-                        $"{faction} Team Net pivoted squad '{sq.squadName}' off high-loss '{stalledName}' (losses:{worstState.DecayedLosses:F1} >= {threshold:F1}) -> '{GetObjectiveDebugLabel(pivotObj)}'.",
+                        $"{faction} Command Net pivoted squad '{sq.squadName}' off high-loss '{stalledName}' (losses:{worstState.DecayedLosses:F1} >= {threshold:F1}) -> '{GetObjectiveDebugLabel(pivotObj)}'.",
                         3.0f);
                 }
             }
