@@ -153,7 +153,7 @@ flowchart TD
     CUT["Autonomous Cut-Off Mode (Local Flank or Seek Fallen Radio)"]
     T2["Tier 2: Squad Blackboard + SL Bravery Aura / SL-Death Shock / Strict Missing-SL Command Succession"]
     BALK{"Casualties or Pinned H_proj Too High?"}
-    REFLEX{"Two-Speed Survival Reflex? (LiveGrenade, VehicleEvade, DoorwayCasualty, HeavyFire, HullDoom, Bleed)"]
+    REFLEX{"Two-Speed Survival Reflex? (LiveGrenade, VehicleEvade, DoorwayCasualty, HeavyFire, HullDoom, Bleed)"}
     T1["Tier 1: H.A.R.M. 2-3 Ply Chains + Safe(x,T) + IntentBoard Mutexes"]
     MOD["30 Locked Spawn Personalities, 21 Historical Doctrines, 15-Min Veterancy & Micro-Variance"]
 
