@@ -2,7 +2,7 @@
 set -euo pipefail
 
 # ==============================================================================
-# Easy Red 2: Battle Hardened (v0.10.1) - Experimental macOS Terminal Launcher
+# Easy Red 2: Battle Hardened (v0.10.3) - Experimental macOS Terminal Launcher
 # Runs ./run_bepinex.sh directly in Terminal so dyld/Doorstop/BepInEx logs
 # are visible immediately during testing.
 # ==============================================================================
@@ -78,7 +78,7 @@ chmod +x "$GAME_DIR/run_bepinex.sh"
 cd "$GAME_DIR"
 
 echo "============================================================================"
-echo "  Easy Red 2: Battle Hardened (v0.10.1) - Experimental macOS Launcher"
+echo "  Easy Red 2: Battle Hardened (v0.10.3) - Experimental macOS Launcher"
 echo "  Game Dir : $GAME_DIR"
 echo "============================================================================"
 echo ""

@@ -2,7 +2,7 @@
 set -euo pipefail
 
 # ==============================================================================
-# Easy Red 2: Battle Hardened (v0.10.1) - Experimental macOS Installer
+# Easy Red 2: Battle Hardened (v0.10.3) - Experimental macOS Installer
 # Installs BepInEx 6 (BE 791 macOS x64) + EasyRed2HumanAI.dll alongside
 # Easy Red 2.app without modifying anything inside Easy Red 2.app.
 # ==============================================================================
@@ -68,7 +68,7 @@ resolve_game_dir() {
 }
 
 echo "============================================================================"
-echo "  Easy Red 2: Battle Hardened (v0.10.1) - Experimental macOS Installer"
+echo "  Easy Red 2: Battle Hardened (v0.10.3) - Experimental macOS Installer"
 echo "============================================================================"
 echo ""
 
@@ -253,7 +253,7 @@ for target in \
 done
 
 echo ""
-echo "[OK] Installed Battle Hardened (v0.10.1 Experimental macOS) into:"
+echo "[OK] Installed Battle Hardened (v0.10.3 Experimental macOS) into:"
 echo "     $GAME_DIR"
 echo ""
 echo "Next steps:"
