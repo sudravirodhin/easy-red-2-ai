@@ -170,6 +170,133 @@ namespace EasyRed2HumanAI
         internal static readonly Dictionary<IntPtr, (Marker3DGUI.Entry Entry, UnityEngine.UI.Text Txt)> _activeSquad3DLabels =
             new Dictionary<IntPtr, (Marker3DGUI.Entry Entry, UnityEngine.UI.Text Txt)>(32);
         private static Font _cachedSquad3DFont;
+        private static IntPtr _lastLocalHudVehiclePtr;
+        private static IntPtr _lastLocalHudVehicleTaskPtr;
+
+        private static bool HasActiveVehicleSquadObjectiveTask(Squad sq)
+        {
+            return sq != null &&
+                   sq.currentTask != null &&
+                   sq.currentTask.Pointer != IntPtr.Zero &&
+                   sq.currentTask.TryCast<MissionTaskRetreat>() == null;
+        }
+
+        private static void RefreshVehicleSquadOrderIcon()
+        {
+            if (!VisionConfig.EnableMod.Value)
+                return;
+
+            PlayerGUI gui = PlayerGUI.instance;
+            PlayerController pc = PlayerController.currentController;
+            Squad sq = PlayerGUI.squad;
+            if (gui == null ||
+                gui.squadOrderPosIcon == null ||
+                pc == null ||
+                pc.ControlledCharacter == null ||
+                pc.ControlledVehicle == null ||
+                sq == null ||
+                sq.Leader == null)
+            {
+                return;
+            }
+
+            if (sq.order == Order.follow && !sq.InChargeTime())
+            {
+                if (HasActiveVehicleSquadObjectiveTask(sq))
+                {
+                    if (!gui.squadOrderPosIcon.enabled)
+                        gui.squadOrderPosIcon.enabled = true;
+
+                    Sprite taskSprite = null;
+                    try { taskSprite = sq.currentTask.GetTaskIcon(); } catch { }
+                    if (taskSprite == null)
+                    {
+                        try { taskSprite = ItemsDatabase.LoadAndCacheSprite("order_move", "er2gui", null); } catch { }
+                    }
+                    if (taskSprite != null)
+                        gui.squadOrderPosIcon.sprite = taskSprite;
+                }
+                else
+                {
+                    if (gui.squadOrderPosIcon.enabled)
+                        gui.squadOrderPosIcon.enabled = false;
+                }
+            }
+        }
+
+        [HarmonyPatch(typeof(PlayerGUI), nameof(PlayerGUI.UpdateSquadGUI))]
+        public static class PlayerGUI_UpdateSquadGUI_Patch
+        {
+            public static void Postfix()
+            {
+                try
+                {
+                    RefreshVehicleSquadOrderIcon();
+                }
+                catch { }
+            }
+        }
+
+        [HarmonyPatch(typeof(PlayerGUI), nameof(PlayerGUI.GetSquadOrderPosition))]
+        public static class PlayerGUI_GetSquadOrderPosition_Patch
+        {
+            public static void Postfix(ref Vector2 __0, ref bool __result)
+            {
+                try
+                {
+                    if (__result || !VisionConfig.EnableMod.Value)
+                        return;
+
+                    PlayerController pc = PlayerController.currentController;
+                    if (pc == null || pc.ControlledCharacter == null || pc.ControlledVehicle == null)
+                        return;
+
+                    Squad sq = PlayerGUI.squad;
+                    if (sq == null || sq.Leader == null)
+                        return;
+
+                    Vector3 worldPos;
+                    if (sq.order != Order.follow)
+                    {
+                        Soldier cc = pc.ControlledCharacter;
+                        if (cc.HasDestinationAssigned &&
+                            cc.targetDestination != null &&
+                            (!sq.Leader.IsPlayer() || cc.targetDestination.TryCast<DestinationWaypoint>() != null))
+                        {
+                            worldPos = cc.targetDestination.GetCoverPosition() + Vector3.up;
+                        }
+                        else
+                        {
+                            worldPos = sq.moveOrderPosition + (Vector3.up * 0.7f);
+                        }
+                    }
+                    else if (HasActiveVehicleSquadObjectiveTask(sq))
+                    {
+                        worldPos = sq.currentTask.GetTaskDestination() + (Vector3.up * 1.5f);
+                    }
+                    else
+                    {
+                        return;
+                    }
+
+                    Camera cam = ResourcesManager.mainCamera;
+                    if (cam == null || cam.transform == null)
+                        return;
+
+                    Vector3 localPos = cam.transform.InverseTransformPoint(worldPos);
+                    if (localPos.z <= 0f)
+                    {
+                        __0 = new Vector2(-2000f, -2000f);
+                        __result = true;
+                        return;
+                    }
+
+                    __0 = ResourcesManager.GetCanvasPosition(worldPos);
+                    __result = true;
+                }
+                catch { }
+            }
+        }
 
         private static Font GetSquad3DLabelFont()
         {
@@ -387,8 +514,30 @@ namespace EasyRed2HumanAI
         {
             public static void Postfix()
             {
+                long profStart = HitchProfiler.BeginModScope();
                 try
                 {
+                    if (VisionConfig.EnableMod.Value)
+                    {
+                        PlayerController pcHud = PlayerController.currentController;
+                        IntPtr curVehPtr = (pcHud != null && pcHud.ControlledVehicle != null)
+                            ? pcHud.ControlledVehicle.Pointer
+                            : IntPtr.Zero;
+                        Squad hudSq = PlayerGUI.squad;
+                        IntPtr curTaskPtr = (curVehPtr != IntPtr.Zero && hudSq != null && hudSq.currentTask != null)
+                            ? hudSq.currentTask.Pointer
+                            : IntPtr.Zero;
+
+                        if (curVehPtr != _lastLocalHudVehiclePtr ||
+                            (curVehPtr != IntPtr.Zero && curTaskPtr != _lastLocalHudVehicleTaskPtr))
+                        {
+                            _lastLocalHudVehiclePtr = curVehPtr;
+                            _lastLocalHudVehicleTaskPtr = curTaskPtr;
+                            if (PlayerGUI.instance != null)
+                                PlayerGUI.UpdateSquadGUI();
+                        }
+                    }
+
                     if (_activeSquad3DLabels.Count == 0)
                         return;
 
@@ -423,6 +572,10 @@ namespace EasyRed2HumanAI
                     }
                 }
                 catch { }
+                finally
+                {
+                    HitchProfiler.EndModScope(HitchBucket.UiMarkers, profStart);
+                }
             }
         }
 
@@ -440,6 +593,7 @@ namespace EasyRed2HumanAI
             {
                 _insideMiniMapUpdate = false;
                 _lastUnitMarkerTextComp = null;
+                long profStart = HitchProfiler.BeginModScope();
                 try
                 {
                     if (!VisionConfig.EnableMod.Value || __instance == null || !MiniMapGUI.MiniMapOpened)
@@ -498,6 +652,10 @@ namespace EasyRed2HumanAI
                     rt.localScale = Vector3.one * (0.78f / Mathf.Max(1.0f, mapScale));
                 }
                 catch { }
+                finally
+                {
+                    HitchProfiler.EndModScope(HitchBucket.UiMarkers, profStart);
+                }
             }
         }
 
@@ -536,6 +694,10 @@ namespace EasyRed2HumanAI
                     {
                         return;
                     }
+
+                    Soldier lp = Soldier.CurrentControlledSoldierOrNull();
+                    if (lp == null || !lp.IsAlive || lp.IsInjured || lp.HasSurrended() || !lp.IsSquadLeader())
+                        return;
 
                     if (!TryGetActivePendingPlayerHqOrder(out PlayerPendingHqOrderState pending))
                         return;

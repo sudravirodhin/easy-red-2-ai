@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Globalization;
 using HarmonyLib;
 using UnityEngine;
 
@@ -346,49 +347,6 @@ namespace EasyRed2HumanAI
             return true;
         }
 
-        internal static void EvaluateSoldierBandageStateForTick(
-            SoldierAI ai,
-            Soldier soldier,
-            AiCore.SoldierFastHandles h,
-            float now,
-            out bool isBleedingWithBandage,
-            out bool canSafelyBandage,
-            out string blockReason,
-            out float gunfireDist)
-        {
-            blockReason = null;
-            gunfireDist = -1f;
-            if (soldier == null || !soldier.isBleeding)
-            {
-                isBleedingWithBandage = false;
-                canSafelyBandage = false;
-                return;
-            }
-
-            int frame = Time.frameCount;
-            if (h != null && frame > 0 && h.Stance.LastBandageEvalFrame == frame)
-            {
-                isBleedingWithBandage = h.Stance.CachedHasBandage;
-                canSafelyBandage = h.Stance.CachedCanSafelyBandage;
-                blockReason = h.Stance.CachedBandageBlockReason;
-                gunfireDist = h.Stance.CachedBandageGunfireDist;
-                return;
-            }
-
-            isBleedingWithBandage = soldier.inventory != null &&
-                                    soldier.inventory.FindItemOfType<VirtualBandages>() != null;
-            canSafelyBandage = isBleedingWithBandage && CanSafelyBandageNow(ai, soldier, now, out blockReason, out gunfireDist);
-
-            if (h != null && frame > 0)
-            {
-                h.Stance.LastBandageEvalFrame = frame;
-                h.Stance.CachedHasBandage = isBleedingWithBandage;
-                h.Stance.CachedCanSafelyBandage = canSafelyBandage;
-                h.Stance.CachedBandageBlockReason = blockReason;
-                h.Stance.CachedBandageGunfireDist = gunfireDist;
-            }
-        }
-
         private static void CountBandageBlocked(IntPtr ptr, float now)
         {
             if (AiCore.TryGetSoldierHandles(ptr, out var h) && now >= h.Combat.NextBandageBlockCountTime)
@@ -414,6 +372,29 @@ namespace EasyRed2HumanAI
 
                     float now = Time.time;
                     Soldier soldier = h.Ref;
+
+                    if (VisionConfig.EnableEmergentDecisionEngine.Value)
+                    {
+                        if (!h.Emergent.HasDecision || h.Emergent.CurrentDecision.Step0 != EmergentEngine.EmergentActionId.SelfBandage)
+                            return false;
+
+                        if (__instance.visibleTarget != null && __instance.distFromTarget <= 4.5f)
+                        {
+                            CountBandageBlocked(h.Ptr, now);
+                            BotActionTrace.RecordEvent(soldier, BotTraceEventKind.BandageBlocked, "enemy_melee_range", __instance.distFromTarget);
+                            return false;
+                        }
+
+                        BotActionTrace.RecordEvent(
+                            soldier,
+                            BotTraceEventKind.BandageStart,
+                            soldier.IsOnCover() ? "in_cover" : "harm_approved",
+                            __instance.distFromTarget);
+
+                        ApplyBandageLowPose(__instance, soldier, h, now);
+                        return true;
+                    }
+
                     if (!CanSafelyBandageNow(__instance, soldier, now, out string blockReason, out float gfDist))
                     {
                         CountBandageBlocked(h.Ptr, now);
@@ -780,6 +761,7 @@ namespace EasyRed2HumanAI
                 if (swingNow >= meleeH.NextAnomalyAlertTime)
                 {
                     meleeH.NextAnomalyAlertTime = swingNow + 8.0f;
+                    AiCore.AnomalyMeleeCount++;
                     BotActionTrace.RecordEvent(soldier, BotTraceEventKind.AnomalyAlert, "melee_whiff_loop", Mathf.Sqrt(toEnemy.sqrMagnitude), 3f);
                 }
             }
@@ -924,58 +906,6 @@ namespace EasyRed2HumanAI
             return false;
         }
 
-        internal static void TryLiberateNearbyComrade(SoldierAI ai, Soldier rescuer, SoldierPersonality personality)
-        {
-            AiCore.EnsureWorldSnapshot();
-            int solCount = AiCore.WorldSoldierCount;
-            if (solCount == 0) return;
-
-            IntPtr rescuerPtr = rescuer.Pointer;
-            string myFaction = rescuer.faction;
-            Vector3 myPos = rescuer.transform.position;
-            float searchRadius = VisionConfig.LiberateSearchRadius.Value;
-            if (personality == SoldierPersonality.Medic_Heroic || personality == SoldierPersonality.Leader_OldGuard)
-                searchRadius *= 1.50f;
-            else if (personality == SoldierPersonality.Rifleman_Cautious || personality == SoldierPersonality.Medic_Triage)
-                searchRadius *= 0.60f;
-
-            float bestDistSq = searchRadius * searchRadius;
-            Soldier bestSurrendered = null;
-            var soldiers = AiCore.WorldSoldiers;
-
-            for (int i = 0; i < solCount; i++)
-            {
-                ref AiCore.SoldierSnapshot sol = ref soldiers[i];
-                if (!sol.HasSurrendered || sol.Ptr == rescuerPtr || !AiCore.AreSameSideFactions(myFaction, sol.Faction))
-                    continue;
-
-                // Ignore surrendered teammates on a different building floor or cliff level, allowing sloped outdoor terrain
-                float dx = sol.Pos.x - myPos.x;
-                float dz = sol.Pos.z - myPos.z;
-                float horizDist = Mathf.Sqrt(dx * dx + dz * dz);
-                if (Mathf.Abs(sol.Pos.y - myPos.y) > 2.6f + horizDist * 0.55f)
-                    continue;
-
-                float dSq = (sol.Pos - myPos).sqrMagnitude;
-                if (dSq < bestDistSq && AiCore.IsTrueSurrenderedPrisoner(sol.Ref, sol.Handles))
-                {
-                    bestDistSq = dSq;
-                    bestSurrendered = sol.Ref;
-                }
-            }
-
-            if (bestSurrendered != null)
-            {
-                AiCore.SoldierFastHandles rescH = AiCore.GetOrCreateSoldierHandles(rescuer);
-                bool canApproach = !rescuer.IsSquadLeader() && !rescuer.IsOnCover() && !ai.HasEnemyAndCanFireAtHim;
-                TryExecuteComradeLiberationStep(ai, rescuer, rescH, bestSurrendered, bestDistSq, 9.5f * 9.5f, 5.5f, canApproach, Time.time, out _);
-            }
-            else if (AiCore.TryGetSoldierHandles(rescuerPtr, out var clearRescH))
-            {
-                clearRescH.Combat.LiberateMoveStartTime = 0f;
-            }
-        }
-
         // =====================================================================
         // Shell-Shocked & Skittish Dynamic Surrender Helper
         // =====================================================================
@@ -1034,7 +964,8 @@ namespace EasyRed2HumanAI
 
             bool isGreenRookie = !isSkittish && vet01 < 0.20f;
             bool isDryRegular = !isSkittish && !isGreenRookie && isCompletelyOutOfAmmo && vet01 < 0.45f;
-            if (!isSkittish && !isGreenRookie && !isDryRegular)
+            bool isEncircledRegular = !isSkittish && !isGreenRookie && !isDryRegular && vet01 < 0.60f && !isFanaticDoctrine;
+            if (!isSkittish && !isGreenRookie && !isDryRegular && !isEncircledRegular)
             {
                 return false;
             }
@@ -1048,6 +979,10 @@ namespace EasyRed2HumanAI
             else if (isDryRegular)
             {
                 reqSupp = 62f + (vet01 * 20f);
+            }
+            else if (isEncircledRegular)
+            {
+                reqSupp = isBleedingOrDry ? 55f : 72f;
             }
             else
             {
@@ -1158,7 +1093,13 @@ namespace EasyRed2HumanAI
                 return false;
             }
 
-            bool isOverrun = enemyCloseCount > friendlyCloseCount ||
+            if (isEncircledRegular && (enemyCloseCount < 4 || friendlyCloseCount > 0 || closestEnemyDistSq > 12.0f * 12.0f))
+            {
+                return false;
+            }
+
+            bool isOverrun = isEncircledRegular ||
+                             enemyCloseCount > friendlyCloseCount ||
                              (closestEnemyDistSq <= 10.5f * 10.5f && isBleedingOrDry);
             if (!isOverrun)
             {
@@ -1186,7 +1127,9 @@ namespace EasyRed2HumanAI
 
             if (VisionConfig.DebugLogging.Value)
             {
-                string reason = isSkittish ? "Skittish/Shell-Shocked" : "Green Rookie Overrun";
+                string reason = isEncircledRegular
+                    ? "Encircled Regular"
+                    : (isSkittish ? "Skittish/Shell-Shocked" : "Green Rookie Overrun");
                 AiCore.LogDebug("Surrender", $"{soldier.faction} soldier surrendered ({reason}, supp={suppression:F0}, enemiesWithin18m={enemyCloseCount}).");
             }
 
@@ -1385,7 +1328,8 @@ namespace EasyRed2HumanAI
             Animator anim = s.m_Animator;
             if (anim != null)
             {
-                anim.SetLayerWeight(1, 1.0f);
+                if (anim.layerCount > 1)
+                    anim.SetLayerWeight(1, 1.0f);
                 anim.ResetTrigger("StartInjured");
                 anim.SetBool("Injured", false);
                 anim.SetBool("Surrended", true);
@@ -1476,6 +1420,7 @@ namespace EasyRed2HumanAI
 
                     if (__instance.HasSurrended())
                     {
+                        NotifySquadLeaderLost(__instance, Time.time);
                         BotActionTrace.RecordEvent(
                             __instance,
                             BotTraceEventKind.Surrender,
@@ -1483,6 +1428,7 @@ namespace EasyRed2HumanAI
                     }
 
                     EnsureSurrenderedPrisonerAnimatorAndPose(__instance);
+                    VeteranAndTacticsPatches.RefreshSquadSoldierLabelIfShown(__instance);
                 }
                 catch { }
             }
@@ -1509,11 +1455,13 @@ namespace EasyRed2HumanAI
                         // clear Animator "Surrended", and force Injured/LayerWeight(1, 0f) even when downed in a vehicle seat.
                         __instance.suppressionValue = 0;
                         VeteranAndTacticsPatches.NotifyFriendlyHitOrCasualty(__instance, Vector3.zero, false, isFatalOrDown: true);
+                        VeteranAndTacticsPatches.NotifySquadLeaderLost(__instance, Time.time);
                         if (__instance.m_Animator != null)
                         {
                             __instance.m_Animator.SetBool("Surrended", false);
                             __instance.m_Animator.SetBool("Injured", true);
-                            __instance.m_Animator.SetLayerWeight(1, 0f);
+                            if (__instance.m_Animator.layerCount > 1)
+                                __instance.m_Animator.SetLayerWeight(1, 0f);
                             if (!__instance.IsOnVehicle())
                             {
                                 __instance.m_Animator.ResetTrigger("StartInjured");
@@ -1534,6 +1482,8 @@ namespace EasyRed2HumanAI
                             EnsureSurrenderedPrisonerAnimatorAndPose(__instance);
                         }
                     }
+
+                    VeteranAndTacticsPatches.RefreshSquadSoldierLabelIfShown(__instance);
                 }
                 catch { }
             }
@@ -1557,7 +1507,8 @@ namespace EasyRed2HumanAI
                     {
                         anim.SetBool("Surrended", false);
                         anim.SetBool("Injured", true);
-                        anim.SetLayerWeight(1, 0f);
+                        if (anim.layerCount > 1)
+                            anim.SetLayerWeight(1, 0f);
                         if (!__instance.IsOnVehicle())
                         {
                             anim.ResetTrigger("StartInjured");
@@ -1578,7 +1529,8 @@ namespace EasyRed2HumanAI
                             else
                             {
                                 anim.SetBool("Surrended", true);
-                                anim.SetLayerWeight(1, 1.0f);
+                                if (anim.layerCount > 1)
+                                    anim.SetLayerWeight(1, 1.0f);
                             }
                         }
                     }
@@ -1624,12 +1576,21 @@ namespace EasyRed2HumanAI
         [HarmonyPatch(typeof(Soldier), nameof(Soldier.OnRetreat))]
         public static class Soldier_OnRetreat_Patch
         {
-            public static void Prefix(Soldier __instance)
+            public static bool Prefix(Soldier __instance)
             {
                 try
                 {
                     if (__instance == null || __instance.Pointer == IntPtr.Zero)
-                        return;
+                        return true;
+
+                    if (VisionConfig.EnableMod.Value &&
+                        AiCore.IsInMultiplayerRoom() &&
+                        !__instance.IsPlayer() &&
+                        (!AiCore.IsLocallyOwnedSoldier(__instance) ||
+                         (__instance.joinedSquad != null && AiCore.IsSquadOwnedOrOccupiedByRemoteHuman(__instance.joinedSquad))))
+                    {
+                        return false;
+                    }
 
                     AiCore.SoldierFastHandles h = AiCore.GetOrCreateSoldierHandles(__instance);
                     if (h != null)
@@ -1640,6 +1601,7 @@ namespace EasyRed2HumanAI
                     BotActionTrace.RecordEvent(__instance, BotTraceEventKind.RetreatDespawn, "mission_task_retreat");
                 }
                 catch { }
+                return true;
             }
         }
 
@@ -1659,10 +1621,147 @@ namespace EasyRed2HumanAI
                         h.IsRetreatDespawning = false;
                         h.RetreatDespawnForceCleanupAt = 0f;
                         h.EnemySyringeCaptureUntil = 0f;
+                        h.Goap.FootStuck.SurrenderedFromTrap = false;
+                        h.Goap.FootStuck.RoomTrapSince = 0f;
+                        h.Goap.FootStuck.CliffStepOffUntil = 0f;
                     }
                     BotActionTrace.RecordEvent(__instance, BotTraceEventKind.UnSurrender, "liberated");
                 }
                 catch { }
+            }
+        }
+
+        // =====================================================================
+        // Tactical Smoke Aim & Ballistic Arc Intercept (Vanilla + Mod Unified)
+        // Native Soldier.Throw -> InstantiateAndThrowAfter (<>d__594) falls back to
+        // Soldier.LookRotation() whenever aimTarget == null OR CalculateBallisticThrow
+        // returns false (>max range). Guarantee every AI smoke throw targets between
+        // thrower and ground threat via CalculateBallisticThrow instead of backwards!
+        // =====================================================================
+        private static bool _activeSmokeBallisticOverride;
+        private static Vector3 _activeSmokeBallisticTarget;
+
+        [HarmonyPatch(typeof(Soldier), nameof(Soldier.Throw))]
+        public static class Soldier_Throw_SmokeAim_Patch
+        {
+            public static bool Prefix(Soldier __instance, VirtualItem item, ref Spottable aimTarget)
+            {
+                try
+                {
+                    if (!VisionConfig.EnableMod.Value || __instance == null || item == null)
+                        return true;
+
+                    AiCore.SoldierFastHandles h = AiCore.GetOrCreateSoldierHandles(__instance);
+                    if (!AiCore.IsLocallyOwnedBot(h))
+                        return true;
+
+                    if (item.TryCast<VirtualSmokeGrenade>() == null)
+                        return true;
+
+                    float now = Time.time;
+                    if (now <= h.Combat.PendingSmokeAimUntil)
+                    {
+                        if (aimTarget == null || !AiCore.IsValidAliveSpottable(aimTarget) || aimTarget.IsAirVehicle())
+                            aimTarget = __instance.Cast<Spottable>();
+                        return true;
+                    }
+
+                    Vector3 myPos = h.Tr != null ? h.Tr.position : (__instance.transform != null ? __instance.transform.position : Vector3.zero);
+                    if (!TryResolveBotSmokeThreatPosition(__instance, h, myPos, now, aimTarget, out Vector3 threatPos, out Spottable resolvedTarget))
+                        return false;
+
+                    bool isDefensive = __instance.GetSuppressionValue() >= 55f ||
+                                       (h.Ai != null && !h.Ai.HasEnemyAndCanFireAtHim);
+                    if (!TryPrepareBotSmokeThrowAim(__instance, h, item, threatPos, isDefensive, now, checkRpcBudget: false))
+                        return false;
+
+                    aimTarget = resolvedTarget ?? __instance.Cast<Spottable>();
+                    return true;
+                }
+                catch
+                {
+                    return true;
+                }
+            }
+        }
+
+        [HarmonyPatch(typeof(Soldier._InstantiateAndThrowAfter_d__594), nameof(Soldier._InstantiateAndThrowAfter_d__594.MoveNext))]
+        public static class Soldier_InstantiateAndThrowAfter_MoveNext_Patch
+        {
+            public static void Prefix(Soldier._InstantiateAndThrowAfter_d__594 __instance)
+            {
+                try
+                {
+                    if (!VisionConfig.EnableMod.Value || __instance == null || __instance.__1__state != 2)
+                        return;
+
+                    Soldier thrower = __instance.__4__this;
+                    if (!AiCore.IsLocallyOwnedBot(thrower) ||
+                        !AiCore.TryGetSoldierHandles(thrower.Pointer, out AiCore.SoldierFastHandles h))
+                    {
+                        return;
+                    }
+
+                    if (Time.time > h.Combat.PendingSmokeAimUntil)
+                        return;
+
+                    if (h.Combat.PendingSmokePrefabPtr != IntPtr.Zero &&
+                        __instance.objPrefab != null &&
+                        __instance.objPrefab.Pointer != h.Combat.PendingSmokePrefabPtr)
+                    {
+                        return;
+                    }
+
+                    _activeSmokeBallisticOverride = true;
+                    _activeSmokeBallisticTarget = h.Combat.PendingSmokeAimPoint;
+                    h.Combat.PendingSmokeAimUntil = 0f;
+                    h.Combat.PendingSmokePrefabPtr = IntPtr.Zero;
+
+                    if (__instance.aimTarget == null ||
+                        !AiCore.IsValidAliveSpottable(__instance.aimTarget) ||
+                        __instance.aimTarget.IsAirVehicle())
+                    {
+                        __instance.aimTarget = thrower.Cast<Spottable>();
+                    }
+                }
+                catch { }
+            }
+
+            public static Exception Finalizer(Exception __exception)
+            {
+                _activeSmokeBallisticOverride = false;
+                return __exception;
+            }
+        }
+
+        [HarmonyPatch(typeof(Soldier), nameof(Soldier.CalculateBallisticThrow))]
+        public static class Soldier_CalculateBallisticThrow_Patch
+        {
+            public static bool Prefix(Vector3 __0, ref Vector3 __1, float __2)
+            {
+                if (!_activeSmokeBallisticOverride)
+                    return true;
+
+                try
+                {
+                    Vector3 target = _activeSmokeBallisticTarget;
+                    Vector3 flat = new Vector3(target.x - __0.x, 0f, target.z - __0.z);
+                    float flatDist = flat.magnitude;
+                    float g = Mathf.Max(1.0f, Mathf.Abs(Physics.gravity.y));
+                    float angleRad = Mathf.Clamp(Soldier.aiThrowAngleDeg, 15.0f, 75.0f) * Mathf.Deg2Rad;
+                    float safeMaxHoriz = Mathf.Max(4.0f, (__2 * __2 / g) * 0.68f * Mathf.Clamp(Mathf.Sin(2.0f * angleRad), 0.50f, 1.0f));
+                    float clampedDist = Mathf.Clamp(flatDist, 2.0f, safeMaxHoriz);
+                    Vector3 dir = flatDist > 0.001f ? (flat / flatDist) : Vector3.forward;
+
+                    float targetY = Mathf.Clamp(target.y, __0.y - 6.0f, __0.y + 1.25f);
+                    float maxCeilingY = __0.y + clampedDist * Mathf.Tan(angleRad) - Mathf.Max(1.0f, clampedDist * 0.25f);
+                    if (targetY > maxCeilingY)
+                        targetY = maxCeilingY;
+
+                    __1 = new Vector3(__0.x + dir.x * clampedDist, targetY, __0.z + dir.z * clampedDist);
+                }
+                catch { }
+                return true;
             }
         }
 
@@ -2063,6 +2162,705 @@ namespace EasyRed2HumanAI
                 catch { }
                 return true;
             }
+        }
+
+        // =====================================================================
+        // Live Grenade Kick-Back & Evasion Reflexes (Single-Kicker Auction + Co-op Sync)
+        // =====================================================================
+        internal const byte GrenadeKickPhotonEventCode = 198;
+
+        internal struct LiveGrenadeEntry
+        {
+            public IntPtr Ptr;
+            public ItemGrenade Ref;
+            public Vector3 Pos;
+            public Vector3 ThrowOrigin;
+            public string ThrowerFaction;
+            public float ActivatedTime;
+            public float ExpectedExplodeTime;
+            public float BlastRadius;
+            public float SpeedSq;
+            public bool IsKickable;
+            public bool CanDamageLocal;
+            public bool WasKicked;
+            public float NextKickAllowedTime;
+            public IntPtr AssignedKickerPtr;
+            public float AssignedKickerUntil;
+        }
+
+        private static readonly List<LiveGrenadeEntry> _activeLiveGrenades = new List<LiveGrenadeEntry>(16);
+        private static float _nextLiveGrenadeRefreshTime;
+
+        internal static void ClearActiveLiveGrenades()
+        {
+            _activeLiveGrenades.Clear();
+            _nextLiveGrenadeRefreshTime = 0f;
+        }
+
+        [HarmonyPatch(typeof(ItemGrenade), nameof(ItemGrenade.ActivateGrenade))]
+        public static class ItemGrenade_ActivateGrenade_Patch
+        {
+            public static void Postfix(ItemGrenade __instance, Soldier __0, bool __1)
+            {
+                try
+                {
+                    if (!VisionConfig.EnableMod.Value ||
+                        !VisionConfig.EnableLiveGrenadeReflexes.Value ||
+                        __instance == null ||
+                        __instance.Pointer == IntPtr.Zero)
+                    {
+                        return;
+                    }
+
+                    if (__instance.grenadeType == GrenadeType.smokeGrenade)
+                        return;
+
+                    FuseType fuse = __instance.fuseType;
+                    if (fuse != FuseType.TimeFuse &&
+                        fuse != FuseType.StickyTimeFuse &&
+                        fuse != FuseType.ExplodeOnImpact)
+                    {
+                        return;
+                    }
+
+                    float now = Time.time;
+                    Vector3 pos = __instance.transform != null ? __instance.transform.position : Vector3.zero;
+                    Vector3 throwOrigin = (__0 != null && __0.transform != null) ? __0.transform.position : pos;
+                    string throwerFaction = __0 != null ? AiCore.GetCachedFaction(__0) : string.Empty;
+
+                    float rawFuse = __instance.explodeAfter;
+                    float fuseSeconds = Mathf.Clamp(rawFuse > 0.1f ? rawFuse : 4.0f, 0.8f, 12.0f);
+                    float blastRadius = Mathf.Clamp(__instance.explosionRadius > 1.0f ? __instance.explosionRadius : 7.5f, 5.5f, 11.5f);
+
+                    IntPtr ptr = __instance.Pointer;
+                    for (int i = 0; i < _activeLiveGrenades.Count; i++)
+                    {
+                        if (_activeLiveGrenades[i].Ptr == ptr)
+                        {
+                            LiveGrenadeEntry existing = _activeLiveGrenades[i];
+                            existing.Ref = __instance;
+                            existing.Pos = pos;
+                            existing.ThrowOrigin = throwOrigin;
+                            existing.ThrowerFaction = throwerFaction;
+                            existing.ActivatedTime = now;
+                            existing.ExpectedExplodeTime = now + fuseSeconds;
+                            existing.BlastRadius = blastRadius;
+                            existing.IsKickable = fuse == FuseType.TimeFuse;
+                            existing.CanDamageLocal = __1;
+                            existing.WasKicked = false;
+                            existing.NextKickAllowedTime = 0f;
+                            existing.AssignedKickerPtr = IntPtr.Zero;
+                            existing.AssignedKickerUntil = 0f;
+                            _activeLiveGrenades[i] = existing;
+                            return;
+                        }
+                    }
+
+                    if (_activeLiveGrenades.Count >= 48)
+                        return;
+
+                    _activeLiveGrenades.Add(new LiveGrenadeEntry
+                    {
+                        Ptr = ptr,
+                        Ref = __instance,
+                        Pos = pos,
+                        ThrowOrigin = throwOrigin,
+                        ThrowerFaction = throwerFaction,
+                        ActivatedTime = now,
+                        ExpectedExplodeTime = now + fuseSeconds,
+                        BlastRadius = blastRadius,
+                        SpeedSq = 0f,
+                        IsKickable = fuse == FuseType.TimeFuse,
+                        CanDamageLocal = __1,
+                        WasKicked = false,
+                        NextKickAllowedTime = 0f,
+                        AssignedKickerPtr = IntPtr.Zero,
+                        AssignedKickerUntil = 0f
+                    });
+                }
+                catch (Exception ex)
+                {
+                    AiCore.ReportPatchException("Grenade.Activate", ex);
+                }
+            }
+        }
+
+        internal static void RefreshActiveLiveGrenadesIfDue()
+        {
+            if (_activeLiveGrenades.Count == 0)
+                return;
+
+            float now = Time.time;
+            if (now < _nextLiveGrenadeRefreshTime)
+                return;
+
+            _nextLiveGrenadeRefreshTime = now + 0.08f;
+
+            for (int i = _activeLiveGrenades.Count - 1; i >= 0; i--)
+            {
+                LiveGrenadeEntry g = _activeLiveGrenades[i];
+                if (ReferenceEquals(g.Ref, null) ||
+                    g.Ref == null ||
+                    g.Ref.gameObject == null ||
+                    !g.Ref.gameObject.activeInHierarchy ||
+                    now > g.ExpectedExplodeTime + 1.5f)
+                {
+                    _activeLiveGrenades.RemoveAt(i);
+                    continue;
+                }
+
+                if (g.Ref.transform != null)
+                    g.Pos = g.Ref.transform.position;
+
+                Rigidbody rb = g.Ref.RB;
+                g.SpeedSq = rb != null ? rb.velocity.sqrMagnitude : 0f;
+
+                if (g.AssignedKickerPtr != IntPtr.Zero &&
+                    (now > g.AssignedKickerUntil ||
+                     !AiCore.TryGetSoldierHandles(g.AssignedKickerPtr, out AiCore.SoldierFastHandles kh) ||
+                     kh.Ref == null ||
+                     !kh.Ref.IsAlive))
+                {
+                    g.AssignedKickerPtr = IntPtr.Zero;
+                    g.AssignedKickerUntil = 0f;
+                }
+
+                _activeLiveGrenades[i] = g;
+            }
+        }
+
+        private static Vector3 RotateHorizontalDirection(Vector3 dir, float cosAngle, float sinAngle)
+        {
+            return new Vector3(dir.x * cosAngle - dir.z * sinAngle, 0f, dir.x * sinAngle + dir.z * cosAngle);
+        }
+
+        private static bool IsKickCorridorClearOfFriendlies(Vector3 grenPos, Vector3 dir, string kickerFaction)
+        {
+            int solCount = AiCore.WorldSoldierCount;
+            var soldiers = AiCore.WorldSoldiers;
+            const float corridorRadiusSq = 4.2f * 4.2f;
+
+            for (int i = 0; i < solCount; i++)
+            {
+                ref AiCore.SoldierSnapshot solSnap = ref soldiers[i];
+                if (solSnap.Ref == null || string.IsNullOrEmpty(solSnap.Faction))
+                    continue;
+
+                if (!AiCore.AreSameSideFactions(kickerFaction, solSnap.Faction))
+                    continue;
+
+                float dx = solSnap.Pos.x - grenPos.x;
+                float dz = solSnap.Pos.z - grenPos.z;
+                float proj = dx * dir.x + dz * dir.z;
+                if (proj >= 2.5f && proj <= 14.0f)
+                {
+                    float perpSq = (dx * dx + dz * dz) - proj * proj;
+                    if (perpSq <= corridorRadiusSq)
+                        return false;
+                }
+            }
+
+            return true;
+        }
+
+        private static bool TryFindSafeGrenadeKickDirection(
+            Vector3 grenPos,
+            Vector3 kickerPos,
+            Vector3 throwOrigin,
+            string kickerFaction,
+            Transform ignoreRoot,
+            out Vector3 bestKickDir)
+        {
+            bestKickDir = Vector3.zero;
+            AiCore.EnsureWorldSnapshot();
+
+            Vector3 awayDir = AiCore.HorizontalDirectionOrFallback(kickerPos, grenPos, Vector3.forward);
+            Vector3 toThrower = throwOrigin - grenPos;
+            toThrower.y = 0f;
+            bool hasThrowerDir = toThrower.sqrMagnitude > 2.5f * 2.5f;
+            Vector3 throwerDir = hasThrowerDir ? toThrower.normalized : Vector3.zero;
+
+            const float cos60 = 0.5f;
+            const float sin60 = 0.8660254f;
+
+            Vector3 rayOrigin = grenPos + Vector3.up * 0.35f;
+            for (int i = 0; i < 4; i++)
+            {
+                Vector3 cand;
+                if (i == 0)
+                {
+                    if (!hasThrowerDir)
+                        continue;
+                    cand = throwerDir;
+                }
+                else if (i == 1)
+                {
+                    cand = awayDir;
+                }
+                else if (i == 2)
+                {
+                    cand = RotateHorizontalDirection(awayDir, cos60, sin60);
+                }
+                else
+                {
+                    cand = RotateHorizontalDirection(awayDir, cos60, -sin60);
+                }
+
+                if (AiCore.RaycastEnvironment(rayOrigin, cand, 5.2f, ignoreRoot, out _))
+                    continue;
+
+                if (!IsKickCorridorClearOfFriendlies(grenPos, cand, kickerFaction))
+                    continue;
+
+                bestKickDir = cand;
+                return true;
+            }
+
+            return false;
+        }
+
+        private static bool IsEligibleToKickGrenade(
+            ref LiveGrenadeEntry g,
+            SoldierAI ai,
+            Soldier soldier,
+            AiCore.SoldierFastHandles h,
+            SoldierPersonality personality,
+            float vet01,
+            string myFaction,
+            Vector3 myPos,
+            float dist,
+            float fuseRemaining,
+            float now,
+            out Vector3 kickDir)
+        {
+            kickDir = Vector3.zero;
+            bool alreadyClaimedByMe = g.AssignedKickerPtr == h.Ptr;
+            if (!g.IsKickable ||
+                g.WasKicked ||
+                now < g.NextKickAllowedTime ||
+                g.SpeedSq > 22.0f ||
+                (g.AssignedKickerPtr != IntPtr.Zero && !alreadyClaimedByMe) ||
+                !AiCore.CanBotMoveAutonomously(soldier) ||
+                soldier.IsCarryingBody() ||
+                soldier.isInBodyAnimation ||
+                soldier.isInHandsAnimation)
+            {
+                return false;
+            }
+
+            bool reachable = (dist <= 2.25f && fuseRemaining >= 0.70f) ||
+                             (dist <= 3.80f && fuseRemaining >= 1.35f);
+            if (!reachable)
+                return false;
+
+            if (!alreadyClaimedByMe)
+            {
+                int threshold;
+                if (soldier.isBleeding ||
+                    personality == SoldierPersonality.Rifleman_Cautious ||
+                    personality == SoldierPersonality.Medic_Triage ||
+                    personality == SoldierPersonality.TankCrew_Support ||
+                    personality == SoldierPersonality.LightCrew_Escort ||
+                    personality == SoldierPersonality.Pilot_Disciplined)
+                {
+                    if (dist > 1.85f)
+                        return false;
+                    threshold = 18;
+                }
+                else if (personality == SoldierPersonality.Assaulter_Shock ||
+                         personality == SoldierPersonality.Assaulter_Breacher ||
+                         personality == SoldierPersonality.Leader_Spearhead ||
+                         personality == SoldierPersonality.AT_Demolitionist ||
+                         vet01 >= 0.50f)
+                {
+                    threshold = dist <= 2.40f ? 78 : 55;
+                }
+                else
+                {
+                    threshold = dist <= 2.40f ? 48 : 28;
+                }
+
+                int salt = (int)(((long)g.Ptr >> 4) & 0x7FFFFFFF) ^ 733;
+                int roll = AiCore.GetDeterministicHash(h.Ptr, salt) % 100;
+                if (roll >= threshold)
+                    return false;
+            }
+
+            return TryFindSafeGrenadeKickDirection(g.Pos, myPos, g.ThrowOrigin, myFaction, h.Tr.root, out kickDir);
+        }
+
+        private static bool TryFindGrenadeEscapePosition(
+            Vector3 myPos,
+            Vector3 grenPos,
+            Vector3 awayDir,
+            float escapeDist,
+            bool isOnBridge,
+            out Vector3 bestEscPos,
+            out Vector3 bestEscDir)
+        {
+            bestEscPos = Vector3.zero;
+            bestEscDir = awayDir;
+            float bestScore = -999f;
+            bool found = false;
+
+            const float cos40 = 0.7660444f;
+            const float sin40 = 0.6427876f;
+            const float cos80 = 0.1736482f;
+            const float sin80 = 0.9848078f;
+
+            bool hasWater = AiCore.TryGetActiveWaterLevel(out float waterY);
+            Vector3 waist = myPos + Vector3.up * 0.55f;
+            Vector3 grenProbePos = grenPos + Vector3.up * 0.35f;
+
+            for (int a = 0; a < 5; a++)
+            {
+                Vector3 escDir = a == 0
+                    ? awayDir
+                    : (a == 1
+                        ? RotateHorizontalDirection(awayDir, cos40, sin40)
+                        : (a == 2
+                            ? RotateHorizontalDirection(awayDir, cos40, -sin40)
+                            : (a == 3
+                                ? RotateHorizontalDirection(awayDir, cos80, sin80)
+                                : RotateHorizontalDirection(awayDir, cos80, -sin80))));
+
+                if (AiCore.IsMovementBlockedByObstacle(waist, escDir, 1.8f))
+                    continue;
+
+                Vector3 rawCand = myPos + escDir * escapeDist;
+                Vector3 snappedEsc;
+                if (isOnBridge)
+                {
+                    if (!AiCore.IsSafeBridgeDeckStep(myPos, rawCand, out snappedEsc))
+                        continue;
+                }
+                else if (!AiCore.TrySnapWalkableGroundProbe(myPos, rawCand, 4.5f, 9.5f, 0.58f, 2.2f, hasWater, waterY, out snappedEsc))
+                {
+                    continue;
+                }
+
+                if (AiCore.TryGetNearbyKnownMine(snappedEsc, 4.0f, false, out _))
+                    continue;
+
+                Vector3 shieldOrigin = snappedEsc + Vector3.up * 0.75f;
+                Vector3 toGren = grenProbePos - shieldOrigin;
+                float gDist = toGren.magnitude;
+                bool shielded = gDist > 0.5f && AiCore.RaycastEnvironment(shieldOrigin, toGren / gDist, gDist, null, out _);
+
+                float score = (shielded ? 35.0f : 0f) + (snappedEsc - grenPos).sqrMagnitude * 0.15f - a * 1.2f;
+                if (score > bestScore)
+                {
+                    bestScore = score;
+                    bestEscPos = snappedEsc;
+                    bestEscDir = escDir;
+                    found = true;
+                }
+            }
+
+            return found;
+        }
+
+        private static void SendGrenadeKickPhotonEvent(Vector3 grenPos, Vector3 kickVel, Soldier kicker)
+        {
+            try
+            {
+                SyncSoldier syn = kicker != null ? kicker.soldierSyncher : null;
+                int kickerViewId = syn != null ? syn.ViewID : 0;
+
+                var payload = new Il2CppInterop.Runtime.InteropTypes.Arrays.Il2CppStringArray(new string[]
+                {
+                    grenPos.x.ToString("R", CultureInfo.InvariantCulture),
+                    grenPos.y.ToString("R", CultureInfo.InvariantCulture),
+                    grenPos.z.ToString("R", CultureInfo.InvariantCulture),
+                    kickVel.x.ToString("R", CultureInfo.InvariantCulture),
+                    kickVel.y.ToString("R", CultureInfo.InvariantCulture),
+                    kickVel.z.ToString("R", CultureInfo.InvariantCulture),
+                    kickerViewId.ToString(CultureInfo.InvariantCulture)
+                });
+
+                var opts = new Photon.Realtime.RaiseEventOptions
+                {
+                    Receivers = Photon.Realtime.ReceiverGroup.Others
+                };
+
+                Photon.Pun.PhotonNetwork.RaiseEvent(
+                    GrenadeKickPhotonEventCode,
+                    payload.Cast<Il2CppSystem.Object>(),
+                    opts,
+                    ExitGames.Client.Photon.SendOptions.SendReliable);
+            }
+            catch { }
+        }
+
+        internal static void HandleRemoteGrenadeKickPhotonEvent(ExitGames.Client.Photon.EventData ev)
+        {
+            try
+            {
+                if (ev == null || _activeLiveGrenades.Count == 0 || ev.CustomData == null)
+                    return;
+
+                var arr = ev.CustomData.TryCast<Il2CppInterop.Runtime.InteropTypes.Arrays.Il2CppStringArray>();
+                if (arr == null || arr.Length < 7)
+                    return;
+
+                if (!float.TryParse(arr[0], NumberStyles.Float, CultureInfo.InvariantCulture, out float px) ||
+                    !float.TryParse(arr[1], NumberStyles.Float, CultureInfo.InvariantCulture, out float py) ||
+                    !float.TryParse(arr[2], NumberStyles.Float, CultureInfo.InvariantCulture, out float pz) ||
+                    !float.TryParse(arr[3], NumberStyles.Float, CultureInfo.InvariantCulture, out float vx) ||
+                    !float.TryParse(arr[4], NumberStyles.Float, CultureInfo.InvariantCulture, out float vy) ||
+                    !float.TryParse(arr[5], NumberStyles.Float, CultureInfo.InvariantCulture, out float vz))
+                {
+                    return;
+                }
+
+                int.TryParse(arr[6], NumberStyles.Integer, CultureInfo.InvariantCulture, out int kickerViewId);
+                Vector3 eventPos = new Vector3(px, py, pz);
+                Vector3 kickVel = new Vector3(vx, vy, vz);
+
+                int bestIdx = -1;
+                float bestDistSq = 4.5f * 4.5f;
+                for (int i = 0; i < _activeLiveGrenades.Count; i++)
+                {
+                    LiveGrenadeEntry entry = _activeLiveGrenades[i];
+                    if (ReferenceEquals(entry.Ref, null) || entry.Ref == null)
+                        continue;
+
+                    Vector3 livePos = entry.Ref.transform != null ? entry.Ref.transform.position : entry.Pos;
+                    float dSq = (livePos - eventPos).sqrMagnitude;
+                    if (dSq < bestDistSq)
+                    {
+                        bestDistSq = dSq;
+                        bestIdx = i;
+                    }
+                }
+
+                if (bestIdx < 0)
+                    return;
+
+                LiveGrenadeEntry target = _activeLiveGrenades[bestIdx];
+                Rigidbody rb = target.Ref.RB;
+                if (rb != null)
+                    rb.velocity = kickVel;
+
+                if (kickerViewId > 0)
+                {
+                    AiCore.EnsureWorldSnapshot();
+                    int solCount = AiCore.WorldSoldierCount;
+                    var soldiers = AiCore.WorldSoldiers;
+                    for (int i = 0; i < solCount; i++)
+                    {
+                        Soldier s = soldiers[i].Ref;
+                        if (s == null)
+                            continue;
+                        SyncSoldier syn = s.soldierSyncher;
+                        if (syn != null && syn.ViewID == kickerViewId)
+                        {
+                            target.Ref.activator = s;
+                            target.ThrowerFaction = soldiers[i].Faction;
+                            target.ThrowOrigin = soldiers[i].Pos;
+                            break;
+                        }
+                    }
+                }
+
+                target.WasKicked = true;
+                target.AssignedKickerPtr = IntPtr.Zero;
+                target.NextKickAllowedTime = Time.time + 1.2f;
+                _activeLiveGrenades[bestIdx] = target;
+            }
+            catch (Exception ex)
+            {
+                AiCore.ReportPatchException("Grenade.RemoteKick", ex);
+            }
+        }
+
+        internal static bool TryHandleLiveGrenadeReflex(
+            SoldierAI ai,
+            Soldier soldier,
+            AiCore.SoldierFastHandles h,
+            SoldierPersonality personality,
+            float vet01,
+            bool isOnBridge,
+            float now)
+        {
+            if (!VisionConfig.EnableLiveGrenadeReflexes.Value ||
+                _activeLiveGrenades.Count == 0 ||
+                !VisionConfig.EnableMod.Value ||
+                ai == null ||
+                h == null ||
+                h.Tr == null ||
+                soldier == null ||
+                !soldier.IsAlive)
+            {
+                return false;
+            }
+
+            Vector3 myPos = h.Tr.position;
+            string myFaction = AiCore.GetCachedFaction(h, now);
+
+            int bestIdx = -1;
+            float bestDistSq = float.MaxValue;
+            float bestFuseRem = 0f;
+
+            for (int i = 0; i < _activeLiveGrenades.Count; i++)
+            {
+                LiveGrenadeEntry entry = _activeLiveGrenades[i];
+                if (ReferenceEquals(entry.Ref, null) || entry.Ref == null || now > entry.ExpectedExplodeTime + 0.5f)
+                    continue;
+
+                if (entry.Ptr == h.Combat.LastEvadedGrenadePtr && now < h.Combat.GrenadeReflexCooldownUntil)
+                    continue;
+
+                float dy = entry.Pos.y - myPos.y;
+                if (Mathf.Abs(dy) > 3.5f)
+                    continue;
+
+                float fuseRem = Mathf.Max(0f, entry.ExpectedExplodeTime - now);
+                if (dy > 2.4f && fuseRem > 1.2f)
+                    continue;
+
+                float dx = entry.Pos.x - myPos.x;
+                float dz = entry.Pos.z - myPos.z;
+                float dSq = dx * dx + dz * dz;
+                float maxThreat = entry.BlastRadius + 2.5f;
+                if (dSq > maxThreat * maxThreat)
+                    continue;
+
+                float reactDelay = Mathf.Lerp(0.75f, 0.32f, vet01);
+                if (dSq <= 2.2f * 2.2f)
+                    reactDelay *= 0.5f;
+                if (now < entry.ActivatedTime + reactDelay)
+                    continue;
+
+                if (!string.IsNullOrEmpty(entry.ThrowerFaction) &&
+                    AiCore.AreSameSideFactions(myFaction, entry.ThrowerFaction) &&
+                    dSq > (entry.BlastRadius * 0.85f) * (entry.BlastRadius * 0.85f))
+                {
+                    continue;
+                }
+
+                if (dSq < bestDistSq)
+                {
+                    bestDistSq = dSq;
+                    bestIdx = i;
+                    bestFuseRem = fuseRem;
+                }
+            }
+
+            if (bestIdx < 0)
+            {
+                AiCore.ClearBotMoveOverride(h, AiCore.BotMoveOverrideKind.GrenadeReflex);
+                return false;
+            }
+
+            LiveGrenadeEntry g = _activeLiveGrenades[bestIdx];
+            float dist = Mathf.Sqrt(bestDistSq);
+
+            if (IsEligibleToKickGrenade(ref g, ai, soldier, h, personality, vet01, myFaction, myPos, dist, bestFuseRem, now, out Vector3 kickDir))
+            {
+                g.AssignedKickerPtr = h.Ptr;
+                g.AssignedKickerUntil = now + 1.6f;
+                _activeLiveGrenades[bestIdx] = g;
+
+                TrySayTacticalVoice(soldier, soldier.joinedSquad, VoiceManager.VoiceClip.granade, 0.65f);
+
+                if (dist <= 2.25f)
+                {
+                    Vector3 kickVel = (kickDir + Vector3.up * 0.42f) * 14.5f;
+                    if (g.Ref.activated && g.Ref.gameObject != null)
+                        g.Ref.Kick(soldier.gameObject);
+
+                    Rigidbody rb = g.Ref.RB;
+                    if (rb != null)
+                        rb.velocity = kickVel;
+
+                    g.Ref.activator = soldier;
+                    g.WasKicked = true;
+                    g.NextKickAllowedTime = now + 1.2f;
+                    g.AssignedKickerPtr = IntPtr.Zero;
+                    g.AssignedKickerUntil = 0f;
+                    g.ThrowerFaction = myFaction;
+                    g.ThrowOrigin = myPos;
+                    _activeLiveGrenades[bestIdx] = g;
+
+                    if (AiCore.IsInMultiplayerRoom())
+                        SendGrenadeKickPhotonEvent(g.Pos, kickVel, soldier);
+
+                    GrenadesKickedCount++;
+                    BotActionTrace.RecordEvent(soldier, BotTraceEventKind.GrenadeKick, "kicked", dist, bestFuseRem);
+                    AiCore.ClearBotMoveOverride(h, AiCore.BotMoveOverrideKind.GrenadeReflex);
+                    h.Combat.LastEvadedGrenadePtr = g.Ptr;
+                    h.Combat.GrenadeReflexCooldownUntil = now + 0.65f;
+                    SetBotPose(ai, soldier, SoldierPose.Crouch, true);
+                    return true;
+                }
+
+                SetBotPose(ai, soldier, SoldierPose.Idle, true);
+                AiCore.SetBotMoveOverride(h, AiCore.BotMoveOverrideKind.GrenadeReflex, g.Pos, now + 1.2f);
+                AiCore.MoveBotTowardPosition(ai, soldier, g.Pos, 0.1f, 0.9f);
+                return true;
+            }
+
+            if (g.AssignedKickerPtr == h.Ptr)
+            {
+                g.AssignedKickerPtr = IntPtr.Zero;
+                g.AssignedKickerUntil = 0f;
+                _activeLiveGrenades[bestIdx] = g;
+            }
+
+            TrySayTacticalVoice(soldier, soldier.joinedSquad, VoiceManager.VoiceClip.granade, 0.55f);
+            h.Stance.LocalCoverProtectedUntil = 0f;
+            h.Goap.Plan.LockUnitCoverChange = false;
+
+            if (h.Combat.LastEvadedGrenadePtr != g.Ptr)
+            {
+                h.Combat.LastEvadedGrenadePtr = g.Ptr;
+                GrenadesEvadedCount++;
+                BotActionTrace.RecordEvent(
+                    soldier,
+                    BotTraceEventKind.GrenadeEvade,
+                    bestFuseRem <= 1.05f ? "dive_prone" : "sprint_evade",
+                    dist,
+                    bestFuseRem);
+            }
+
+            if (bestFuseRem <= 1.05f || !AiCore.CanBotMoveAutonomously(soldier))
+            {
+                AiCore.ClearBotMoveOverride(h, AiCore.BotMoveOverrideKind.GrenadeReflex);
+                if (ai.IsMoving())
+                    ai.Stop(false);
+                SetBotPose(ai, soldier, isOnBridge ? SoldierPose.Crouch : SoldierPose.Prone, true);
+                return true;
+            }
+
+            Vector3 awayDir = AiCore.HorizontalDirectionOrFallback(g.Pos, myPos, h.Tr.forward);
+            float escapeDist = Mathf.Clamp(g.BlastRadius + 3.5f - dist, 4.5f, 10.5f);
+            if (TryFindGrenadeEscapePosition(myPos, g.Pos, awayDir, escapeDist, isOnBridge, out Vector3 escPos, out Vector3 escDir))
+            {
+                SetBotPose(ai, soldier, SoldierPose.Idle, true);
+                AiCore.SetBotMoveOverride(
+                    h,
+                    AiCore.BotMoveOverrideKind.GrenadeReflex,
+                    escPos,
+                    Mathf.Min(g.ExpectedExplodeTime + 0.5f, now + 3.2f));
+
+                if ((ai.MoveDestination - escPos).sqrMagnitude > 1.5f * 1.5f ||
+                    (!ai.HasPath && !ai.HasPathRequest && ai.moveDirectlyToward_end <= now))
+                {
+                    AiCore.SetBotMoveDestinationAndRefreshPath(ai, escPos);
+                    Vector3 firstStep = (escPos - myPos).sqrMagnitude > 2.2f * 2.2f ? (myPos + escDir * 2.0f) : escPos;
+                    if (AiCore.TryValidateAndSnapDirectMicroStep(myPos, firstStep, out Vector3 microEsc, out _, 2.2f, 0.75f))
+                        ai.MoveDirectlyToward(microEsc, 0.45f);
+                }
+
+                return true;
+            }
+
+            AiCore.ClearBotMoveOverride(h, AiCore.BotMoveOverrideKind.GrenadeReflex);
+            if (ai.IsMoving())
+                ai.Stop(false);
+            SetBotPose(ai, soldier, isOnBridge ? SoldierPose.Crouch : SoldierPose.Prone, true);
+            return true;
         }
     }
 }

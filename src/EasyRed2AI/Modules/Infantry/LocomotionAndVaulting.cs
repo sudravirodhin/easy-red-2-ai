@@ -19,7 +19,7 @@ namespace EasyRed2HumanAI
         {
             public static bool Prefix(SoldierAI __instance, ref bool __result)
             {
-                long profStart = _inMovementRoutine ? 0L : HitchProfiler.Begin();
+                long profStart = _inMovementRoutine ? 0L : HitchProfiler.BeginModScope();
                 try
                 {
                     if (!VisionConfig.EnableMod.Value || ReferenceEquals(__instance, null))
@@ -85,7 +85,9 @@ namespace EasyRed2HumanAI
                         IsInIndividualOrGoapFallback(ptr, now) ||
                         (__instance.HasEnemyAndCanFireAtHim && __instance.distFromTarget > 0.1f && __instance.distFromTarget <= 8.5f) ||
                         (supp >= 18f && !soldier.IsOnCover() && destKind == AiCore.CachedDestKind.CombatCover && remDistSq <= 9.5f * 9.5f) ||
-                        (VisionConfig.EnableBridgeCrossingDiscipline.Value && !soldier.IsOnCover() && AiCore.IsOnBridgeOrNarrowCrossing(myPos));
+                        (VisionConfig.EnableBridgeCrossingDiscipline.Value && !soldier.IsOnCover() && AiCore.IsOnBridgeOrNarrowCrossing(myPos)) ||
+                        (h.MoveOverride.Kind == AiCore.BotMoveOverrideKind.VehicleEvade && now < h.MoveOverride.ExpireTime) ||
+                        (h.MoveOverride.Kind == AiCore.BotMoveOverrideKind.GrenadeReflex && now < h.MoveOverride.ExpireTime);
 
                     if (mustFinishMoveNow)
                     {
@@ -292,11 +294,14 @@ namespace EasyRed2HumanAI
                     __result = false;
                     return false;
                 }
-                catch { }
+                catch (Exception ex)
+                {
+                    AiCore.ReportPatchException("IsMoveTime", ex);
+                }
                 finally
                 {
                     if (profStart != 0L)
-                        HitchProfiler.End(HitchBucket.MovementRoutine, profStart);
+                        HitchProfiler.EndModScope(HitchBucket.MovementRoutine, profStart);
                 }
                 return true;
             }
@@ -408,24 +413,39 @@ namespace EasyRed2HumanAI
                 }
             }
 
-            // 2B. Validate & repair vanilla CanVault's vaultPos:
-            //     At 0x180742FD3 / 0x18074301C, if CanVault's landing raycast misses or exceeds height delta, vanilla leaves
-            //     vaultPos == Vector3.zero (0,0,0) AND still returns true! Always verify or re-sample a valid landing spot!
+            // 2B. Validate & repair vanilla CanVault's vaultPos (allow up to 6.2m drop when trapped inside an elevated
+            //     building shell with missing stairs, and wider trench-parapet slope tolerances when stuck in a trench):
+            AiCore.SoldierFastHandles vaultH = AiCore.GetOrCreateSoldierHandles(soldier);
+            float trapAge = (vaultH != null && vaultH.Goap.FootStuck.RoomTrapSince > 0f && now >= vaultH.Goap.FootStuck.RoomTrapSince)
+                ? (now - vaultH.Goap.FootStuck.RoomTrapSince)
+                : 0f;
+            bool isRoomOrTrenchTrapped = trapAge >= 8.0f;
+            bool stuckEscalated = isRoomOrTrenchTrapped || (vaultH != null && vaultH.Goap.FootStuck.ConsecutiveUnsticks >= 2);
+            float maxVaultDropY = (isRoomOrTrenchTrapped && !soldier.isBleeding) ? 6.2f : 1.68f;
+            bool hasVaultWater = AiCore.TryGetActiveWaterLevel(out float vaultWaterY);
+
             Vector2 landingHoriz = new Vector2(vaultPos.x - myPos.x, vaultPos.z - myPos.z);
+            float initRise = vaultPos.y - myPos.y;
+            float initDrop = myPos.y - vaultPos.y;
             bool landingValid = vaultPos.sqrMagnitude > 0.04f &&
                                 landingHoriz.sqrMagnitude >= 0.16f &&
                                 landingHoriz.sqrMagnitude <= 2.50f * 2.50f &&
-                                Mathf.Abs(vaultPos.y - myPos.y) <= 1.68f &&
+                                initRise <= 1.68f &&
+                                initDrop <= maxVaultDropY &&
+                                (!hasVaultWater || vaultPos.y > vaultWaterY + 0.15f) &&
                                 !Physics.CheckSphere(vaultPos + Vector3.up * 0.95f, 0.20f, vaultMask | AiCore.GetSolidEnvironmentMask(), QueryTriggerInteraction.Ignore);
             if (!landingValid)
             {
                 Vector3 landProbeStart = myPos + fwd * Mathf.Clamp(frontHit.distance + 0.68f, 0.95f, 1.55f) + Vector3.up * 1.68f;
-                if (!Physics.Raycast(landProbeStart, Vector3.down, out RaycastHit landHit, 3.20f, groundMask, QueryTriggerInteraction.Ignore) ||
+                float rayDist = maxVaultDropY > 2.0f ? (1.68f + maxVaultDropY + 0.60f) : 3.20f;
+                if (!Physics.Raycast(landProbeStart, Vector3.down, out RaycastHit landHit, rayDist, groundMask, QueryTriggerInteraction.Ignore) ||
                     landHit.normal.y < 0.62f ||
                     landHit.collider == null ||
                     landHit.collider.gameObject.layer == 4 ||
+                    (hasVaultWater && landHit.point.y <= vaultWaterY + 0.15f) ||
                     AiCore.IsVehicleCollider(landHit.collider) ||
-                    Mathf.Abs(landHit.point.y - myPos.y) > 1.68f ||
+                    (landHit.point.y - myPos.y) > 1.68f ||
+                    (myPos.y - landHit.point.y) > maxVaultDropY ||
                     Physics.CheckSphere(landHit.point + Vector3.up * 0.95f, 0.20f, vaultMask, QueryTriggerInteraction.Ignore))
                 {
                     vaultOrRejectReason = AiCore.IsVehicleCollider(landHit.collider) ? "vehicle_hull" : "no_landing";
@@ -445,20 +465,27 @@ namespace EasyRed2HumanAI
 
             if (frontIsTerrain)
             {
-                // Carved terrain trench walls are steep unwalkable cuts (|normal.y| <= 0.62f, >= ~52 deg)
-                // with a genuine step-up onto the parapet lip; ordinary hills/bumps are rejected.
-                if (Mathf.Abs(frontHit.normal.y) > 0.62f || vaultLandingRise < 0.45f)
+                // Carved terrain trench walls are steep unwalkable cuts (>= ~52 deg normally, widened to ~40 deg when
+                // stuck in a trench) with a genuine step-up onto the parapet lip; ordinary hills/bumps are rejected.
+                float maxTerrainNormalY = stuckEscalated ? 0.76f : 0.62f;
+                if (Mathf.Abs(frontHit.normal.y) > maxTerrainNormalY || vaultLandingRise < 0.45f)
                 {
                     vaultOrRejectReason = "terrain_slope";
                     return false;
                 }
             }
-            else if (Mathf.Abs(frontHit.normal.y) > (vaultLandingRise >= 0.45f ? 0.68f : 0.60f))
+            else
             {
-                // Allow vertical walls AND battered wooden/earth trench revetment walls (|normal.y| <= 0.68f when stepping
-                // up >= 0.45m onto a parapet lip), while rejecting walkable <= 45 deg sloped ramps (|normal.y| >= 0.707f).
-                vaultOrRejectReason = "sloped_surface";
-                return false;
+                float maxWallNormalY = vaultLandingRise >= 0.45f
+                    ? (stuckEscalated ? 0.78f : 0.68f)
+                    : 0.60f;
+                if (Mathf.Abs(frontHit.normal.y) > maxWallNormalY)
+                {
+                    // Allow vertical walls AND battered wooden/earth trench revetment walls when stepping up onto a parapet
+                    // lip, while rejecting walkable <= 45 deg sloped ramps.
+                    vaultOrRejectReason = "sloped_surface";
+                    return false;
+                }
             }
 
             // 3. Reject full-height walls (> 1.68m) and measure true obstacle crest height at BOTH +3cm (thin 4-12cm wooden
@@ -512,7 +539,6 @@ namespace EasyRed2HumanAI
             }
             if (IsBarbedWireCollider(frontCol) || IsBarbedWireCollider(crestCol))
             {
-                AiCore.SoldierFastHandles vaultH = AiCore.GetOrCreateSoldierHandles(soldier);
                 BarbedWireStuckState wireSt = vaultH != null ? vaultH.Combat.BarbedWireStuck : default;
                 if (wireSt.LastSeenTime <= 0f ||
                     now - wireSt.LastSeenTime > 2.2f ||
@@ -554,7 +580,7 @@ namespace EasyRed2HumanAI
                 return false;
             }
 
-            if (!HasClearVaultArcAndLanding(myPos, vaultPos, vaultMask, crestHeight, out vaultOrRejectReason))
+            if (!HasClearVaultArcAndLanding(myPos, vaultPos, vaultMask, crestHeight, out vaultOrRejectReason, maxVaultDropY))
                 return false;
 
             // 4. Far-side grade & trench-lip level-off check:
@@ -699,7 +725,7 @@ namespace EasyRed2HumanAI
         {
             public static void Postfix(SoldierAI __instance)
             {
-                long profStart = HitchProfiler.Begin();
+                long profStart = HitchProfiler.BeginModScope();
                 try
                 {
                     if (!VisionConfig.EnableMod.Value || !VisionConfig.EnableWallVaulting.Value || ReferenceEquals(__instance, null))
@@ -711,17 +737,20 @@ namespace EasyRed2HumanAI
 
                     IntPtr ptr = h.Ptr;
                     float now = Time.time;
-                    if (now < h.Combat.NextVaultCheckTime)
-                        return;
-
                     if (!AiCore.IsLocallyOwnedBot(h) || AiCore.IsSoldierInVehicleOrTransition(h.Ref))
                     {
-                        h.Combat.NextVaultCheckTime = now + 1.50f;
+                        if (now >= h.Combat.NextVaultCheckTime)
+                            h.Combat.NextVaultCheckTime = now + 1.50f;
                         return;
                     }
 
-                    h.Combat.NextVaultCheckTime = now + 0.50f;
                     Soldier soldier = h.Ref;
+                    TryPopVerticalDeadzonePathNode(__instance, h, soldier);
+
+                    if (now < h.Combat.NextVaultCheckTime)
+                        return;
+
+                    h.Combat.NextVaultCheckTime = now + 0.50f;
 
                     if (!__instance.IsMoving() ||
                         soldier.m_pose == SoldierPose.Prone ||
@@ -739,11 +768,27 @@ namespace EasyRed2HumanAI
                         if (!IsValidVaultObstacle(__instance, soldier, ptr, h.Tr, ref vaultPos, now, out string vaultOrRejectReason))
                         {
                             SlopedVaultsRejectedCount++;
-                            h.Combat.NextVaultCheckTime = now + (vaultOrRejectReason == "barbed_wire" ? 0.55f : 0.85f);
+                            if (vaultOrRejectReason == "sloped_surface" ||
+                                vaultOrRejectReason == "terrain_slope" ||
+                                vaultOrRejectReason == "uphill_ramp" ||
+                                vaultOrRejectReason == "no_solid_face")
+                            {
+                                byte streak = h.Combat.ConsecutiveSlopeVaultRejects;
+                                if (streak < 2)
+                                    h.Combat.ConsecutiveSlopeVaultRejects = (byte)(streak + 1);
+                                float cd = streak == 0 ? 0.85f : (streak == 1 ? 1.50f : 2.35f);
+                                h.Combat.NextVaultCheckTime = now + cd;
+                            }
+                            else
+                            {
+                                h.Combat.ConsecutiveSlopeVaultRejects = 0;
+                                h.Combat.NextVaultCheckTime = now + (vaultOrRejectReason == "barbed_wire" ? 0.55f : 0.85f);
+                            }
                             BotActionTrace.RecordEvent(soldier, BotTraceEventKind.VaultRejected, vaultOrRejectReason);
                             return;
                         }
 
+                        h.Combat.ConsecutiveSlopeVaultRejects = 0;
                         if (AiCore.TryConsumeBotRpcBudget(0.35f))
                         {
                             soldier.Vault(vaultPos);
@@ -754,12 +799,71 @@ namespace EasyRed2HumanAI
                         return;
                     }
 
+                    h.Combat.ConsecutiveSlopeVaultRejects = 0;
                     TryStepOffIntoTrench(__instance, soldier, h, now);
                 }
-                catch { }
+                catch (Exception ex)
+                {
+                    AiCore.ReportPatchException("UpdateMoveDir", ex);
+                }
                 finally
                 {
-                    HitchProfiler.End(HitchBucket.UpdateMoveDir, profStart);
+                    HitchProfiler.EndModScope(HitchBucket.UpdateMoveDir, profStart);
+                }
+            }
+
+            // Native SoldierAI.nodeReachedDist (0.30m) is 3D Euclidean; when terrain/rubble/trenches cause
+            // a >=0.22m..1.40m height difference at a node, pop it horizontally so bots do not orbit.
+            private static void TryPopVerticalDeadzonePathNode(SoldierAI ai, AiCore.SoldierFastHandles h, Soldier soldier)
+            {
+                if (h.Tr == null ||
+                    !ai.IsMoving() ||
+                    soldier.isInBodyAnimation ||
+                    soldier.IsCarryingBody() ||
+                    soldier.IsCarried() ||
+                    soldier.HasSurrended())
+                {
+                    return;
+                }
+
+                A.d path = ai.path;
+                if (ReferenceEquals(path, null) || path.Pointer == IntPtr.Zero || path.NodesCount <= 0)
+                    return;
+
+                A.g curNode = path.CurrentNode;
+                if (curNode == null)
+                    return;
+
+                Vector3 myPos = h.Tr.position;
+                Vector3 nodePos = curNode.point;
+                float dx = nodePos.x - myPos.x;
+                float dz = nodePos.z - myPos.z;
+                if (dx * dx + dz * dz > 0.48f * 0.48f)
+                    return;
+
+                float absDy = Mathf.Abs(nodePos.y - myPos.y);
+                if (absDy < 0.22f || absDy > 1.40f)
+                    return;
+
+                path.A(ai.Cast<AIUsingPath>());
+                A.d postPath = ai.path;
+                if (!ReferenceEquals(postPath, null) && postPath.Pointer != IntPtr.Zero && postPath.NodesCount > 0)
+                {
+                    A.g nextNode = postPath.CurrentNode;
+                    if (nextNode != null)
+                    {
+                        Vector3 nextPt = nextNode.point;
+                        ai.dir = nextPt - myPos;
+                        soldier.CheckInteractionInWalkRange(myPos, nextPt);
+                    }
+                }
+                else
+                {
+                    ai.Stop(true);
+                    if (ai.CloseToDest(myPos, 1.5f))
+                    {
+                        soldier.TryToGetToActualCover();
+                    }
                 }
             }
         }
@@ -790,7 +894,8 @@ namespace EasyRed2HumanAI
 
                     bool bridgeEnabled = VisionConfig.EnableBridgeCrossingDiscipline.Value;
                     bool ffEnabled = VisionConfig.EnableFriendlyFireAvoidance.Value;
-                    if (!bridgeEnabled && !ffEnabled)
+                    bool vehRowEnabled = VisionConfig.EnableFriendlyVehicleRightOfWay.Value;
+                    if (!bridgeEnabled && !ffEnabled && !vehRowEnabled)
                         return;
 
                     Soldier soldier = h.Ref;
@@ -800,13 +905,21 @@ namespace EasyRed2HumanAI
 
                     if (bridgeEnabled && (__result - moveDest).sqrMagnitude > 1.0f)
                     {
-                        // Cancel vanilla's 5m-35m sideways waypoint scatter ONLY when the soldier or destination
-                        // is actually on a bridge or narrow water causeway so hillside followers keep vanilla spacing.
+                        // Cancel vanilla's 5m-35m sideways waypoint scatter when on, targeting, or approaching a bridge,
+                        // OR when sideways scatter flings the waypoint into water or down an embankment/ravine below the roadbed.
                         bool isBridge =
-                            AiCore.IsOnBridgeOrNarrowCrossing(myPos) ||
-                            AiCore.IsOnBridgeOrNarrowCrossing(moveDest);
+                            AiCore.IsApproachingOrOnBridge(__instance, h, myPos, moveDest) ||
+                            AiCore.IsOnBridgeOrNarrowCrossing(__result);
 
-                        if (isBridge)
+                        bool dropOffEmbankment = false;
+                        if (!isBridge)
+                        {
+                            bool inWater = AiCore.TryGetActiveWaterLevel(out float scatterWaterY) && __result.y <= scatterWaterY + 0.15f;
+                            bool steepRavineDrop = __result.y < myPos.y - 2.6f && moveDest.y >= myPos.y - 1.5f;
+                            dropOffEmbankment = inWater || steepRavineDrop;
+                        }
+
+                        if (isBridge || dropOffEmbankment)
                         {
                             __result = moveDest;
                             onBridgeSpan = true;
@@ -816,7 +929,11 @@ namespace EasyRed2HumanAI
                                 BridgeCrossingsAssistedCount++;
                                 if (VisionConfig.DebugLogging.Value)
                                 {
-                                    AiCore.LogDebug("BridgeDiscipline", $"{soldier.faction} soldier kept on bridge/causeway centerline (cancelled 5-35m lateral squad scatter).");
+                                    AiCore.LogDebug(
+                                        "BridgeDiscipline",
+                                        dropOffEmbankment
+                                            ? $"{soldier.faction} soldier prevented ravine/water scatter drop-off (kept on bridge approach centerline)."
+                                            : $"{soldier.faction} soldier kept on bridge/causeway centerline (cancelled 5-35m lateral squad scatter).");
                                 }
                             }
                         }
@@ -868,6 +985,25 @@ namespace EasyRed2HumanAI
                         if (!onBridgeSpan || AiCore.IsSafeBridgeDeckStep(myPos, deflected, out deflected))
                         {
                             __result = deflected;
+                        }
+                    }
+
+                    // Keep squad-follower formation slots out of moving friendly vehicles' forward danger corridors!
+                    if (vehRowEnabled &&
+                        AiCore.TryGetBlockingFriendlyVehicleDangerCorridor(
+                            __result,
+                            AiCore.GetCachedFaction(h, now),
+                            0.35f,
+                            out AiCore.VehicleDangerCorridor vCorr,
+                            out _,
+                            out float vSignedLat,
+                            out Vector3 vClearDir))
+                    {
+                        float pushDist = Mathf.Max(2.2f, (vCorr.HalfWidth + 2.55f) - Mathf.Abs(vSignedLat));
+                        Vector3 deflectedVeh = __result + vClearDir * pushDist;
+                        if (!onBridgeSpan || AiCore.IsSafeBridgeDeckStep(myPos, deflectedVeh, out deflectedVeh))
+                        {
+                            __result = deflectedVeh;
                         }
                     }
                 }
@@ -1045,7 +1181,7 @@ namespace EasyRed2HumanAI
                                 if (!onCooldown &&
                                     !isShutterVulnerable &&
                                     distSq <= 6.76f &&
-                                    AiCore.TryConsumeBotRpcBudget(0.25f))
+                                    AiCore.TryConsumeBotRpcBudget(0.25f, AiCore.BotRpcPriority.Low))
                                 {
                                     door.SetDoor(true);
                                     _nextDoorToggleTime[doorPtr] = now + 3.5f;
@@ -1063,7 +1199,7 @@ namespace EasyRed2HumanAI
                                                           threatDir.sqrMagnitude > 0.01f &&
                                                           Vector3.Dot(toDoorDir, threatDir) > 0.45f &&
                                                           Vector3.Dot(botFwd, toDoorDir) > 0.35f &&
-                                                          AiCore.TryConsumeBotRpcBudget(0.25f);
+                                                          AiCore.TryConsumeBotRpcBudget(0.25f, AiCore.BotRpcPriority.Low);
                                 if (walkingThrough || facingClose || clearingFiringLane)
                                 {
                                     door.SetDoor(true);
@@ -1105,7 +1241,7 @@ namespace EasyRed2HumanAI
                                 }
                             }
 
-                            if (shouldClose && AiCore.TryConsumeBotRpcBudget(0.35f))
+                            if (shouldClose && AiCore.TryConsumeBotRpcBudget(0.35f, AiCore.BotRpcPriority.Low))
                             {
                                 door.SetDoor(false);
                                 _nextDoorToggleTime[doorPtr] = now + (info.IsWindowShutter ? 4.0f : 10.0f);
@@ -1157,6 +1293,8 @@ namespace EasyRed2HumanAI
                         sh.Stance.LocalCoverProtectedUntil = 0f;
                         sh.Combat.FFBlockedUntil = 0f;
                         sh.Stance.WallBlockedUntil = 0f;
+                        sh.Combat.PendingSmokeAimUntil = 0f;
+                        sh.Combat.PendingSmokePrefabPtr = IntPtr.Zero;
                         sh.Goap.Plan = default;
                         sh.Goap.Scavenge = default;
                         sh.MoveOverride = default;
@@ -1170,7 +1308,7 @@ namespace EasyRed2HumanAI
                             VehiclePlane vp = veh.TryCast<VehiclePlane>();
                             if (vp != null)
                             {
-                                TryHotStartAirbornePlane(vp, false);
+                                BeginPlaneHotStartWindow(vp, allowAiPilot: false, forceRecheck: true);
                             }
                         }
                     }
@@ -1184,16 +1322,19 @@ namespace EasyRed2HumanAI
             Vector3 vaultPos,
             int vaultMask,
             float crestHeight,
-            out string rejectReason)
+            out string rejectReason,
+            float maxDropDeltaY = 1.68f)
         {
             rejectReason = string.Empty;
             int solidMask = AiCore.GetSolidEnvironmentMask();
             int blockMask = vaultMask | solidMask;
 
             // Never trust vanilla's pre-filled (myPos + fwd * 1.12m) if there is no solid walkable landing surface beneath it.
-            if (!Physics.Raycast(vaultPos + Vector3.up * 1.15f, Vector3.down, out RaycastHit landFloorHit, 3.0f, solidMask, QueryTriggerInteraction.Ignore) ||
+            float downDist = maxDropDeltaY > 2.0f ? (1.15f + maxDropDeltaY + 0.35f) : 3.0f;
+            if (!Physics.Raycast(vaultPos + Vector3.up * 1.15f, Vector3.down, out RaycastHit landFloorHit, downDist, solidMask, QueryTriggerInteraction.Ignore) ||
                 landFloorHit.normal.y < 0.55f ||
-                Mathf.Abs(landFloorHit.point.y - myPos.y) > 1.68f)
+                (landFloorHit.point.y - myPos.y) > 1.68f ||
+                (myPos.y - landFloorHit.point.y) > maxDropDeltaY)
             {
                 rejectReason = "no_landing_floor";
                 return false;
@@ -1201,6 +1342,11 @@ namespace EasyRed2HumanAI
             if (AiCore.IsVehicleCollider(landFloorHit.collider))
             {
                 rejectReason = "vehicle_hull";
+                return false;
+            }
+            if (AiCore.TryGetActiveWaterLevel(out float arcWaterY) && landFloorHit.point.y <= arcWaterY + 0.15f)
+            {
+                rejectReason = "no_landing_floor";
                 return false;
             }
 
@@ -1268,9 +1414,14 @@ namespace EasyRed2HumanAI
                 return true;
 
             float now = Time.time;
+            bool isCliffStepOff = now < h.Goap.FootStuck.CliffStepOffUntil;
             bool isUnstickRecovery =
                 (h.MoveOverride.Kind == AiCore.BotMoveOverrideKind.UnstickSidestep && now < h.MoveOverride.ExpireTime) ||
+                (h.MoveOverride.Kind == AiCore.BotMoveOverrideKind.VehicleEvade && now < h.MoveOverride.ExpireTime) ||
                 now < h.Goap.FootStuck.UnstickOverrideUntil;
+            bool isRoomOrTrenchTrapped = isUnstickRecovery &&
+                                         h.Goap.FootStuck.RoomTrapSince > 0f &&
+                                         (now - h.Goap.FootStuck.RoomTrapSince) >= 8.0f;
             bool isTrenchOrLedgeStepDown = targetPos.y < myPos.y - 0.65f;
 
             if (AiCore.TryValidateAndSnapDirectMicroStep(
@@ -1278,9 +1429,9 @@ namespace EasyRed2HumanAI
                     targetPos,
                     out Vector3 snappedPos,
                     out _,
-                    isUnstickRecovery ? 4.8f : (isTrenchOrLedgeStepDown ? 3.6f : 2.8f),
-                    0.75f,
-                    isUnstickRecovery ? 2.95f : 2.65f))
+                    (isUnstickRecovery || isCliffStepOff) ? 4.8f : (isTrenchOrLedgeStepDown ? 3.6f : 2.8f),
+                    isRoomOrTrenchTrapped ? 1.35f : 0.75f,
+                    isCliffStepOff ? 6.2f : (isUnstickRecovery ? 2.95f : 2.65f)))
             {
                 targetPos = snappedPos;
                 return true;

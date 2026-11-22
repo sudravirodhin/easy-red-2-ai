@@ -68,6 +68,7 @@ namespace EasyRed2HumanAI
                 {
                     long p0 = HitchProfiler.Begin();
                     try { RunMacroObjectiveDirector(phase); }
+                    catch (Exception ex) { AiCore.ReportPatchException("MacroDir", ex); }
                     finally { HitchProfiler.End(HitchBucket.MacroDirector, p0); }
                 }
                 else if (_garrisonAssignedObjectiveBySquad.Count > 0)
@@ -89,6 +90,7 @@ namespace EasyRed2HumanAI
                 // Tier 3 Team Net GOAP Coordinator (Anvil & Hammer multi-squad tactics across Radio-Connected squads)
                 long p2 = HitchProfiler.Begin();
                 try { RunTeamNetGoapCoordinator(now); }
+                catch (Exception ex) { AiCore.ReportPatchException("TeamNet", ex); }
                 finally { HitchProfiler.End(HitchBucket.TeamNetGoap, p2); }
             }
         }
@@ -534,6 +536,7 @@ namespace EasyRed2HumanAI
                 // If this faction holds 1+ objectives while also having 1+ uncaptured/contested objectives to attack:
                 // Allocate faction-doctrine garrison share (e.g. 28% UK/France/Italy vs 22% default vs 16% USSR/Japan/Mongolia)
                 // to garrison held points, prioritizing held objectives that have enemy squads within 150m.
+                FactionForceSnapshot force = GetFactionForceSnapshot(faction);
                 if (heldObjectives.Count > 0 && unheldObjectives.Count > 0 && eligibleSquads.Count >= 2)
                 {
                     // Sort held objectives so threatened or actively back-capped objectives get garrisoned first
@@ -649,6 +652,13 @@ namespace EasyRed2HumanAI
                         {
                             ConsumeInitialHqSpawnBriefingIfNoRadio(sq);
                         }
+                    }
+
+                    if (force.SprawlFactor01 >= 0.25f)
+                    {
+                        TryDeploySurplusDefenseScreen(faction, heldObjectives, eligibleSquads, force, allEnemyLeaderPositions, now);
+                        if (unheldObjectives.Count >= 2 && eligibleSquads.Count >= 3)
+                            TrySpreadOversaturatedAttackers(faction, unheldObjectives, eligibleSquads, assignedGarrisonSquads, force, now);
                     }
 
                     if (unheldObjectives.Count >= 2 && eligibleSquads.Count >= 2)
@@ -814,6 +824,11 @@ namespace EasyRed2HumanAI
                             }
                         }
                     }
+
+                    if (force.SprawlFactor01 >= 0.25f)
+                    {
+                        TryDeploySurplusDefenseScreen(faction, heldObjectives, eligibleSquads, force, allEnemyLeaderPositions, now);
+                    }
                 }
                 else
                 {
@@ -849,6 +864,11 @@ namespace EasyRed2HumanAI
                             }
                         }
                         ConsumeInitialHqSpawnBriefingIfNoRadio(sq);
+                    }
+
+                    if (force.SprawlFactor01 >= 0.25f && unheldObjectives.Count >= 2 && eligibleSquads.Count >= 3)
+                    {
+                        TrySpreadOversaturatedAttackers(faction, unheldObjectives, eligibleSquads, null, force, now);
                     }
 
                     if (unheldObjectives.Count >= 2 && eligibleSquads.Count >= 2)
@@ -1015,7 +1035,6 @@ namespace EasyRed2HumanAI
                 }
 
                 _nextSquadAttritionPivotTime[sq.Pointer] = now + 135.0f;
-                _pincerOrderedTaskBySquad.Remove(sq.Pointer);
                 AssignAiSquadMacroTask(sq, pivotObj, now, 80.0f, releaseStaleCovers: true);
                 TrySayTacticalVoice(sq.Leader, sq, VoiceManager.VoiceClip.attackThere, 0.20f);
                 MacroObjectivePivotsCount++;
@@ -1168,6 +1187,27 @@ namespace EasyRed2HumanAI
             if (sq.HoldFire || sq.order != Order.defend)
                 return false;
 
+            if (_squadBlackboards.TryGetValue(sq.Pointer, out SquadBlackboard b) &&
+                b.IsOuterScreenSquad &&
+                Time.time < b.OuterScreenUntil)
+            {
+                BattleData bd = _currentDirectorBattleData ?? BattleManager.GetCurrentBattleData();
+                string fac = sq.Leader != null ? sq.Leader.faction : null;
+                if (!string.IsNullOrEmpty(fac) &&
+                    AiCore.ClassifyMissionObjectiveForFaction(heldObj, fac, bd, out bool isHeld, out _, out float capProg) &&
+                    isHeld &&
+                    capProg >= 0.35f &&
+                    b.CloserFriendlyUnitsToObjective < 5)
+                {
+                    b.IsOuterScreenSquad = false;
+                    b.OuterScreenUntil = 0f;
+                    _squadBlackboards[sq.Pointer] = b;
+                    return false;
+                }
+
+                return (sq.moveOrderPosition - b.OuterScreenAnchor).sqrMagnitude <= 14.0f * 14.0f;
+            }
+
             return (sq.moveOrderPosition - heldObj.missionTask.GetTaskDestination()).sqrMagnitude <= 4.0f ||
                    heldObj.missionTask.IsInsideTaskArea(sq.moveOrderPosition, 0.95f);
         }
@@ -1193,8 +1233,6 @@ namespace EasyRed2HumanAI
                 // returns FALSE for the invader-slot team on Dynamic Conquest even on their own held flags—rolling
                 // 68% AttackFromSide wide arcs and 20-40% SetHoldFireOrder(true)! Issue explicit HoldArea + fire-at-will.
                 IntPtr sqPtr = sq.Pointer;
-                _aiCovertHoldFireSquads.Remove(sqPtr);
-                _aiCovertHoldFireExpireTime.Remove(sqPtr);
                 if (sq.HoldFire)
                 {
                     try { sq.SetHoldFireOrder(false, false, false, Photon.Pun.PhotonNetwork.InRoom); } catch { }
@@ -1323,6 +1361,7 @@ namespace EasyRed2HumanAI
                     sq.currentTask == null ||
                     sq.currentTask.Pointer != p.ExpectedTaskPtr ||
                     IsSquadActivelyRetreating(p.SquadPtr, now) ||
+                    IsSquadVehicleSeekingRepairStation(sq) ||
                     sq.InChargeTime() ||
                     _squadOrderedToVehicle.ContainsKey(p.SquadPtr))
                 {
@@ -1362,7 +1401,20 @@ namespace EasyRed2HumanAI
             sq.currentTask = squadTask;
             _squadTaskCommittedUntil[sq.Pointer] = now + (sq.IsPlayerInSquad() ? Mathf.Max(commitDuration, 65.0f) : commitDuration);
 
-            if ((changed || needsGarrisonHold) && sq.timed_order_end > now && !sq.InChargeTime() && !IsSquadActivelyRetreating(sq.Pointer, now))
+            if (_squadBlackboards.TryGetValue(sq.Pointer, out SquadBlackboard clrBoard) && clrBoard.IsOuterScreenSquad)
+            {
+                clrBoard.IsOuterScreenSquad = false;
+                clrBoard.OuterScreenUntil = 0f;
+                _squadBlackboards[sq.Pointer] = clrBoard;
+            }
+
+            bool seekingRepair = IsSquadVehicleSeekingRepairStation(sq);
+
+            if ((changed || needsGarrisonHold) &&
+                !seekingRepair &&
+                sq.timed_order_end > now &&
+                !sq.InChargeTime() &&
+                !IsSquadActivelyRetreating(sq.Pointer, now))
             {
                 sq.timed_order_end = 0f;
             }
@@ -1372,6 +1424,7 @@ namespace EasyRed2HumanAI
             // so every pivoted/garrisoned squad executes on the next non-heavy frames!
             int frame = Time.frameCount;
             if ((changed || needsGarrisonHold) &&
+                !seekingRepair &&
                 sq.Leader != null &&
                 sq.Leader.IsAlive &&
                 !sq.Leader.IsPlayer() &&
@@ -1492,7 +1545,7 @@ namespace EasyRed2HumanAI
             }
 
             Soldier localPlayer = Soldier.CurrentControlledSoldierOrNull();
-            if (localPlayer == null || !localPlayer.IsAlive)
+            if (localPlayer == null || !localPlayer.IsAlive || localPlayer.IsInjured || localPlayer.HasSurrended() || !localPlayer.IsSquadLeader())
             {
                 _pendingPlayerHqOrder = default;
                 return false;
@@ -1564,7 +1617,10 @@ namespace EasyRed2HumanAI
             string mapBadgeText,
             float durationSeconds)
         {
+            Soldier localPlayer = Soldier.CurrentControlledSoldierOrNull();
             if (playerSq == null || playerSq.Pointer == IntPtr.Zero ||
+                localPlayer == null || !localPlayer.IsAlive || localPlayer.IsInjured || localPlayer.HasSurrended() ||
+                !localPlayer.IsSquadLeader() ||
                 !AiCore.IsLocalPlayerInSquad(playerSq, out bool isLocalLeader) ||
                 !isLocalLeader ||
                 !IsSquadConnectedToRadioNet(playerSq) ||
@@ -1650,7 +1706,10 @@ namespace EasyRed2HumanAI
 
             Soldier localPlayer = Soldier.CurrentControlledSoldierOrNull();
             Squad playerSq = localPlayer != null ? localPlayer.joinedSquad : null;
-            if (localPlayer == null || playerSq == null || playerSq.Pointer != state.SquadPtr)
+            if (localPlayer == null || !localPlayer.IsAlive || localPlayer.IsInjured || localPlayer.HasSurrended() ||
+                !localPlayer.IsSquadLeader() ||
+                playerSq == null || playerSq.Pointer != state.SquadPtr ||
+                playerSq.Leader == null || playerSq.Leader.Pointer != localPlayer.Pointer)
                 return;
 
             _pendingPlayerHqOrder = default;
@@ -2097,19 +2156,84 @@ namespace EasyRed2HumanAI
             }
         }
 
+        internal struct FactionForceSnapshot
+        {
+            public int FriendlyAliveGround;
+            public int EnemyAliveGround;
+            public int FriendlyGroundSquads;
+            public float ForceRatio;
+            public float SprawlFactor01;
+        }
+
+        internal static FactionForceSnapshot GetFactionForceSnapshot(string faction)
+        {
+            FactionForceSnapshot res = default;
+            if (string.IsNullOrEmpty(faction))
+                return res;
+
+            AiCore.EnsureWorldSnapshot();
+            int sqCount = AiCore.WorldSquadCount;
+            var worldSquads = AiCore.WorldSquads;
+            for (int i = 0; i < sqCount; i++)
+            {
+                ref AiCore.SquadSnapshot snap = ref worldSquads[i];
+                if (snap.Ptr == IntPtr.Zero || snap.UnitCount <= 0 || snap.RefOnPlane || string.IsNullOrEmpty(snap.Faction))
+                    continue;
+
+                if (AiCore.AreSameSideFactions(faction, snap.Faction))
+                {
+                    res.FriendlyAliveGround += snap.UnitCount;
+                    res.FriendlyGroundSquads++;
+                }
+                else
+                {
+                    res.EnemyAliveGround += snap.UnitCount;
+                }
+            }
+
+            res.ForceRatio = res.FriendlyAliveGround / Mathf.Max(1.0f, res.EnemyAliveGround);
+            if (res.FriendlyAliveGround < 28 || res.FriendlyGroundSquads < 4 || res.ForceRatio < 0.72f)
+            {
+                res.SprawlFactor01 = 0f;
+                return res;
+            }
+
+            float raw = Mathf.InverseLerp(28.0f, 78.0f, res.FriendlyAliveGround);
+            if (res.ForceRatio >= 1.15f)
+                raw += 0.15f;
+            else if (res.ForceRatio < 0.90f)
+                raw *= 0.65f;
+
+            float doctrineScale = GetFactionCommandProfile(faction).FlankLateralBias >= 0.85f ? 1.12f : 0.95f;
+            res.SprawlFactor01 = Mathf.Clamp01(raw * doctrineScale);
+            return res;
+        }
+
         private static int CountAlliedGroundSquadsOnObjective(
             string faction,
             IntPtr taskPtr,
             Vector3 objPos,
             bool includeNearbyPlayersAndArmor = true)
         {
+            CountAlliedGroundUnitsOnObjective(faction, taskPtr, objPos, out int squadCount, includeNearbyPlayersAndArmor);
+            return squadCount;
+        }
+
+        private static int CountAlliedGroundUnitsOnObjective(
+            string faction,
+            IntPtr taskPtr,
+            Vector3 objPos,
+            out int squadCount,
+            bool includeNearbyPlayersAndArmor = true)
+        {
+            squadCount = 0;
             if (taskPtr == IntPtr.Zero || string.IsNullOrEmpty(faction))
                 return 0;
 
             AiCore.EnsureWorldSnapshot();
             int sqCount = AiCore.WorldSquadCount;
             var worldSquads = AiCore.WorldSquads;
-            int count = 0;
+            int unitCount = 0;
             float now = Time.time;
 
             for (int i = 0; i < sqCount; i++)
@@ -2123,7 +2247,8 @@ namespace EasyRed2HumanAI
                 Squad sq = snap.Ref;
                 if (sq != null && sq.currentTask != null && sq.currentTask.Pointer == taskPtr)
                 {
-                    count++;
+                    squadCount++;
+                    unitCount += snap.UnitCount;
                     continue;
                 }
 
@@ -2137,11 +2262,12 @@ namespace EasyRed2HumanAI
                     {
                         continue;
                     }
-                    count++;
+                    squadCount++;
+                    unitCount += snap.UnitCount;
                 }
             }
 
-            return count;
+            return unitCount;
         }
 
         private static MissionObjective PickBestAttackObjectiveForSquad(
@@ -2156,6 +2282,8 @@ namespace EasyRed2HumanAI
                 return unheldObjectives[0];
 
             BattleData bd = _currentDirectorBattleData ?? BattleManager.GetCurrentBattleData();
+            FactionForceSnapshot force = GetFactionForceSnapshot(faction);
+            float idealUnitsPerObj = Mathf.Max(8.0f, force.FriendlyAliveGround / (float)unheldObjectives.Count);
             MissionObjective bestObj = null;
             float bestScore = float.MaxValue;
 
@@ -2167,16 +2295,25 @@ namespace EasyRed2HumanAI
 
                 IntPtr taskPtr = obj.missionTask.Pointer;
                 Vector3 objPos = obj.GetTaskPosition();
-                int assignedAttackers = CountAlliedGroundSquadsOnObjective(faction, taskPtr, objPos, true);
+                int assignedUnits = CountAlliedGroundUnitsOnObjective(faction, taskPtr, objPos, out int assignedAttackers, true);
 
                 float dist = Vector3.Distance(leaderPos, objPos) + 25.0f;
                 float weight = 1.0f;
 
-                // Ensure every open attack objective gets at least 1 pressuring squad instead of leaving a flank flag empty
-                if (assignedAttackers == 0)
-                    weight *= 0.52f;
+                // Ensure every open attack objective gets pressuring mass instead of funneling into a single lane
+                if (assignedAttackers == 0 || assignedUnits == 0)
+                {
+                    weight *= 0.48f;
+                }
+                else if (force.SprawlFactor01 > 0f && assignedUnits > idealUnitsPerObj * 1.25f)
+                {
+                    float excess = (assignedUnits / idealUnitsPerObj) - 1.25f;
+                    weight *= 1.0f + Mathf.Min(excess, 2.5f) * Mathf.Lerp(0.45f, 0.85f, force.SprawlFactor01);
+                }
                 else if (assignedAttackers >= 3)
-                    weight *= (1.0f + (assignedAttackers - 2) * 0.22f);
+                {
+                    weight *= 1.0f + (assignedAttackers - 2) * 0.22f;
+                }
 
                 // Reinforce flags where friendly troops are already ticking capture progress so caps finish decisively!
                 bool classified = AiCore.ClassifyMissionObjectiveForFaction(obj, faction, bd, out bool isHeld, out _, out float urgency);
@@ -2205,6 +2342,250 @@ namespace EasyRed2HumanAI
             }
 
             return bestObj ?? GetClosestObjectiveToPosition(leaderPos, faction, unheldObjectives);
+        }
+
+        private static void TrySpreadOversaturatedAttackers(
+            string faction,
+            List<MissionObjective> unheldObjectives,
+            List<Squad> eligibleSquads,
+            HashSet<IntPtr> garrisonSquads,
+            FactionForceSnapshot force,
+            float now)
+        {
+            float idealUnitsPerObj = Mathf.Max(8.0f, force.FriendlyAliveGround / (float)unheldObjectives.Count);
+            MissionObjective heavyObj = null;
+            int heavyUnits = 0;
+            MissionObjective lightObj = null;
+            float lightScore = float.MaxValue;
+
+            for (int i = 0; i < unheldObjectives.Count; i++)
+            {
+                MissionObjective obj = unheldObjectives[i];
+                if (obj == null || obj.missionTask == null || obj.missionTask.Pointer == IntPtr.Zero)
+                    continue;
+
+                IntPtr tPtr = obj.missionTask.Pointer;
+                int units = CountAlliedGroundUnitsOnObjective(faction, tPtr, obj.GetTaskPosition(), out int sqCnt, true);
+
+                if (sqCnt >= 2 && units >= 14 && units >= idealUnitsPerObj * 1.60f && units > heavyUnits)
+                {
+                    heavyUnits = units;
+                    heavyObj = obj;
+                }
+
+                bool avoidLight = _objectiveAttrition.TryGetValue(new ObjectiveAttritionKey { Faction = faction, TaskPtr = tPtr }, out ObjectiveAttritionState lAttr) &&
+                                  now < lAttr.AvoidUntil;
+                if (!avoidLight && units <= idealUnitsPerObj * 0.45f)
+                {
+                    float ls = units;
+                    if (ls < lightScore)
+                    {
+                        lightScore = ls;
+                        lightObj = obj;
+                    }
+                }
+            }
+
+            if (heavyObj == null || lightObj == null || heavyObj.missionTask.Pointer == lightObj.missionTask.Pointer)
+                return;
+
+            IntPtr heavyPtr = heavyObj.missionTask.Pointer;
+            Vector3 heavyPos = heavyObj.GetTaskPosition();
+            Vector3 lightPos = lightObj.GetTaskPosition();
+            Squad bestOuter = null;
+            float bestScore = float.MaxValue;
+
+            for (int s = 0; s < eligibleSquads.Count; s++)
+            {
+                Squad cand = eligibleSquads[s];
+                if (cand == null || cand.Leader == null || cand.Leader.transform == null || cand.IsPlayerInSquad())
+                    continue;
+                if (garrisonSquads != null && garrisonSquads.Contains(cand.Pointer))
+                    continue;
+                if (cand.currentTask == null || cand.currentTask.Pointer != heavyPtr)
+                    continue;
+                if (_squadTaskCommittedUntil.TryGetValue(cand.Pointer, out float cUntil) && now < cUntil)
+                    continue;
+                if (cand.InChargeTime() || _squadOrderedToVehicle.ContainsKey(cand.Pointer) || IsSquadLockedInCloseFirefight(cand))
+                    continue;
+                if ((cand.Leader.transform.position - heavyPos).sqrMagnitude <= 65.0f * 65.0f)
+                    continue;
+
+                float dLightSq = (cand.Leader.transform.position - lightPos).sqrMagnitude;
+                if (dLightSq < bestScore)
+                {
+                    bestScore = dLightSq;
+                    bestOuter = cand;
+                }
+            }
+
+            if (bestOuter != null)
+            {
+                AssignAiSquadMacroTask(bestOuter, lightObj, now, 55.0f);
+                ConsumeInitialHqSpawnBriefingIfNoRadio(bestOuter);
+                if (VisionConfig.DebugLogging.Value)
+                {
+                    AiCore.LogDebug(
+                        "TeamNetSprawl",
+                        $"{faction} spread excess attacker '{bestOuter.squadName}' off saturated '{GetObjectiveDebugLabel(heavyObj)}' ({heavyUnits}u) -> '{GetObjectiveDebugLabel(lightObj)}'.",
+                        3.5f);
+                }
+            }
+        }
+
+        private static void TryDeploySurplusDefenseScreen(
+            string faction,
+            List<MissionObjective> heldObjectives,
+            List<Squad> eligibleSquads,
+            FactionForceSnapshot force,
+            List<KeyValuePair<string, Vector3>> allEnemyLeaderPositions,
+            float now)
+        {
+            if (heldObjectives == null || heldObjectives.Count == 0 || eligibleSquads.Count < 3)
+                return;
+
+            BattleData bd = _currentDirectorBattleData ?? BattleManager.GetCurrentBattleData();
+            bool hasWater = AiCore.TryGetActiveWaterLevel(out float waterY);
+            bool syncOnline = Photon.Pun.PhotonNetwork.InRoom;
+
+            for (int h = 0; h < heldObjectives.Count; h++)
+            {
+                MissionObjective heldObj = heldObjectives[h];
+                if (heldObj == null || heldObj.missionTask == null || heldObj.missionTask.Pointer == IntPtr.Zero)
+                    continue;
+
+                if (AiCore.ClassifyMissionObjectiveForFaction(heldObj, faction, bd, out bool isHeld, out _, out float capProg) &&
+                    (!isHeld || capProg >= 0.25f))
+                {
+                    continue;
+                }
+
+                IntPtr taskPtr = heldObj.missionTask.Pointer;
+                Vector3 objPos = heldObj.GetTaskPosition();
+                int defUnits = CountAlliedGroundUnitsOnObjective(faction, taskPtr, objPos, out int defSqCount, false);
+                if (defSqCount < 2 || defUnits < 14)
+                    continue;
+
+                // Keep inner defender closest to flag on the cap; push 1 surplus unengaged squad to a 68-115m flank screen.
+                Squad closestInner = null;
+                float closestInnerSq = float.MaxValue;
+                Squad screenCand = null;
+                int existingScreens = 0;
+
+                for (int s = 0; s < eligibleSquads.Count; s++)
+                {
+                    Squad sq = eligibleSquads[s];
+                    if (sq == null || sq.Leader == null || sq.Leader.transform == null)
+                        continue;
+                    if (sq.currentTask == null || sq.currentTask.Pointer != taskPtr)
+                        continue;
+
+                    if (_squadBlackboards.TryGetValue(sq.Pointer, out SquadBlackboard b) &&
+                        b.IsOuterScreenSquad &&
+                        now < b.OuterScreenUntil)
+                    {
+                        existingScreens++;
+                        continue;
+                    }
+
+                    float dSq = (sq.Leader.transform.position - objPos).sqrMagnitude;
+                    if (dSq < closestInnerSq)
+                    {
+                        closestInnerSq = dSq;
+                        closestInner = sq;
+                    }
+                }
+
+                int maxScreens = (defSqCount >= 4 && force.SprawlFactor01 >= 0.55f) ? 2 : 1;
+                if (existingScreens >= maxScreens || closestInner == null)
+                    continue;
+
+                for (int s = 0; s < eligibleSquads.Count; s++)
+                {
+                    Squad sq = eligibleSquads[s];
+                    if (sq == null || sq.Pointer == closestInner.Pointer || sq.IsPlayerInSquad() || sq.Leader == null || sq.Leader.transform == null)
+                        continue;
+                    if (sq.currentTask == null || sq.currentTask.Pointer != taskPtr)
+                        continue;
+                    if (sq.InChargeTime() || _squadOrderedToVehicle.ContainsKey(sq.Pointer))
+                        continue;
+                    if (_squadBlackboards.TryGetValue(sq.Pointer, out SquadBlackboard sb) &&
+                        ((sb.IsOuterScreenSquad && now < sb.OuterScreenUntil) || sb.HasActiveThreat))
+                    {
+                        continue;
+                    }
+
+                    screenCand = sq;
+                    break;
+                }
+
+                if (screenCand == null)
+                    continue;
+
+                Vector3 enemyApproach = Vector3.zero;
+                float bestEnemySq = float.MaxValue;
+                for (int e = 0; e < allEnemyLeaderPositions.Count; e++)
+                {
+                    var kv = allEnemyLeaderPositions[e];
+                    if (AiCore.AreSameSideFactions(faction, kv.Key))
+                        continue;
+                    float eSq = (kv.Value - objPos).sqrMagnitude;
+                    if (eSq < bestEnemySq)
+                    {
+                        bestEnemySq = eSq;
+                        enemyApproach = kv.Value - objPos;
+                    }
+                }
+                enemyApproach.y = 0f;
+                if (enemyApproach.sqrMagnitude < 4.0f)
+                {
+                    if (!AiCore.TryGetEnemySpawnDirection(faction, objPos, out enemyApproach))
+                        enemyApproach = screenCand.Leader.transform.forward;
+                    enemyApproach.y = 0f;
+                }
+                if (enemyApproach.sqrMagnitude < 0.01f)
+                    continue;
+
+                Vector3 fwd = enemyApproach.normalized;
+                Vector3 right = new Vector3(fwd.z, 0f, -fwd.x);
+                float sideSign = ((AiCore.GetDeterministicHash(screenCand.Pointer, existingScreens + 7) & 1) == 0) ? 1f : -1f;
+                float angleDeg = Mathf.Lerp(42.0f, 68.0f, force.SprawlFactor01);
+                float screenDist = Mathf.Lerp(72.0f, 114.0f, force.SprawlFactor01);
+                Vector3 screenDir = (fwd * Mathf.Cos(angleDeg * Mathf.Deg2Rad) + right * (sideSign * Mathf.Sin(angleDeg * Mathf.Deg2Rad))).normalized;
+                Vector3 rawScreen = objPos + screenDir * screenDist;
+
+                if (!AiCore.TrySnapWalkableGroundProbe(objPos, rawScreen, 18.0f, 36.0f, 0.55f, 3.0f, hasWater, waterY, out Vector3 screenPos))
+                    continue;
+
+                if (Time.frameCount == _lastMacroImmediateOrderFrame ||
+                    (syncOnline && !AiCore.TryConsumeBotRpcBudget(0.45f)))
+                {
+                    return;
+                }
+
+                _lastMacroImmediateOrderFrame = Time.frameCount;
+                _squadBlackboards.TryGetValue(screenCand.Pointer, out SquadBlackboard scBoard);
+                scBoard.IsOuterScreenSquad = true;
+                scBoard.OuterScreenAnchor = screenPos;
+                scBoard.OuterScreenUntil = now + 48.0f;
+                _squadBlackboards[screenCand.Pointer] = scBoard;
+
+                try
+                {
+                    screenCand.formationDirection = fwd;
+                    screenCand.HoldArea(screenPos, 20.0f, false);
+                    MacroGarrisonsAssignedCount++;
+                    if (VisionConfig.DebugLogging.Value)
+                    {
+                        AiCore.LogDebug(
+                            "TeamNetSprawl",
+                            $"{faction} deployed surplus defense screen squad '{screenCand.squadName}' {screenDist:F0}m out on flank of '{GetObjectiveDebugLabel(heldObj)}'.",
+                            3.5f);
+                    }
+                }
+                catch { }
+                return;
+            }
         }
 
         private static Squad PickBestReserveDefenderSquad(
@@ -2275,8 +2656,20 @@ namespace EasyRed2HumanAI
                 if (dSq > 65f * 65f && !IsSquadConnectedToRadioNet(cand))
                     continue;
 
-                // Strongly prefer pulling a squad from an objective that already has 2+ squads (or an unassigned squad)
-                // so we don't strip the last defender from another objective unless necessary.
+                // Strongly prefer pulling a close inner squad (or a squad from a stacked flag), while penalizing
+                // yanking outer-screen / distant squads so outer flank fights stay anchored unless inner troops are gone.
+                if (dSq <= 105f * 105f)
+                    dSq *= 0.65f;
+                else if (dSq > 125f * 125f)
+                    dSq *= 2.25f;
+
+                if (_squadBlackboards.TryGetValue(cand.Pointer, out SquadBlackboard candB) &&
+                    candB.IsOuterScreenSquad &&
+                    now < candB.OuterScreenUntil)
+                {
+                    dSq *= 2.25f;
+                }
+
                 if (cand.currentTask != null && sameTaskCount <= 1)
                 {
                     dSq *= 4.0f;

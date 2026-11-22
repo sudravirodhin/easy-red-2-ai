@@ -1345,8 +1345,10 @@ namespace EasyRed2HumanAI
                             ScheduleDelayedPickedWeaponRefill(soldier, 1, now);
                             _nextGlobalBotWeaponPickupTime = now + 2.20f;
                             if (boxH != null)
+                            {
                                 boxH.Goap.NextWeaponUpgradeAllowedTime = now + 20.0f;
-                            plan.NextReplanTime = Mathf.Max(plan.NextReplanTime, now + 2.50f);
+                                boxH.Emergent.NextPlanTime = Mathf.Max(boxH.Emergent.NextPlanTime, now + 2.50f);
+                            }
                             needAtWeapon = false;
                             canSwitchWeaponNow = false;
                             anyRefilled = true;

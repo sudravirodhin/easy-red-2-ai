@@ -37,7 +37,6 @@ namespace EasyRed2HumanAI
         public static int TankRockUnsticksCount;
         public static int SmartAmmoSwitchesCount;
 
-        private static readonly HashSet<IntPtr> _hotStartedPlayerPlanes = new HashSet<IntPtr>();
         internal static readonly Dictionary<IntPtr, TurretAI> _turretAiByTurretPtr = new Dictionary<IntPtr, TurretAI>(64);
         internal static readonly Dictionary<IntPtr, string> _lastKnownVehicleFaction = new Dictionary<IntPtr, string>(64);
         internal static readonly HashSet<IntPtr> _creditedDestroyedVehicles = new HashSet<IntPtr>();
@@ -127,7 +126,6 @@ namespace EasyRed2HumanAI
             _lastKnownVehicleCrewSquad.Clear();
             ResetSpawnerReservations();
             _nextGroundedCrewRetreatCheckTime = 0f;
-            _hotStartedPlayerPlanes.Clear();
             _turretAiByTurretPtr.Clear();
             _lastKnownVehicleFaction.Clear();
             _creditedDestroyedVehicles.Clear();
@@ -236,7 +234,7 @@ namespace EasyRed2HumanAI
             return false;
         }
 
-        private static string GetVehicleCrewFaction(Vehicle veh, Turret turret = null)
+        internal static string GetVehicleCrewFaction(Vehicle veh, Turret turret = null)
         {
             if (ReferenceEquals(veh, null) || veh == null)
                 return null;
@@ -282,6 +280,11 @@ namespace EasyRed2HumanAI
                 string vf = AiCore.InternFaction(veh.GetVehicleFaction());
                 if (!string.IsNullOrEmpty(vf) && vf != "Civilian")
                     resolved = vf;
+            }
+
+            if (resolved == null && veh.Pointer != IntPtr.Zero && _lastKnownVehicleFaction.TryGetValue(veh.Pointer, out string cachedFac) && !string.IsNullOrEmpty(cachedFac))
+            {
+                resolved = cachedFac;
             }
 
             if (resolved != null && veh.Pointer != IntPtr.Zero)
@@ -717,7 +720,7 @@ namespace EasyRed2HumanAI
             if (turretAi == null || turretAi.turret == null || veh == null || veh.Pointer == IntPtr.Zero)
                 return;
 
-            if (!veh.CanFight() || veh.IsAirVehicle() || veh.PlayerIsInside())
+            if (!veh.CanFight())
                 return;
 
             Turret turret = turretAi.turret;
@@ -729,21 +732,76 @@ namespace EasyRed2HumanAI
             if (gunner != null && gunner.IsPlayer())
                 return;
 
+            bool playerInVeh = veh.PlayerIsInside();
+            if (playerInVeh && gunner == null)
+                return;
+
             string myFaction = GetVehicleCrewFaction(veh, turret);
             if (string.IsNullOrEmpty(myFaction))
                 return;
+
+            AiCore.VehicleFastHandles vh = traits.VehHandles ?? AiCore.GetOrCreateVehicleHandles(veh);
+            float now = Time.time;
+            Vector3 firePos = turret.GetFirePos();
+            Spottable curTarget = turretAi.CurrentVisibleTarget;
+
+            // Air Vehicle Defensive Gunners (Tail/Waist/Dorsal): return fire on attacking planes or AA shooters
+            if (veh.IsAirVehicle())
+            {
+                if (vh != null &&
+                    now < vh.UnderFireUntil &&
+                    AiCore.IsValidAliveSpottable(vh.UnderFireAttacker))
+                {
+                    Spottable ufAirAtk = vh.UnderFireAttacker;
+                    bool shouldSwitch = curTarget == null ||
+                                        !AiCore.IsValidAliveSpottable(curTarget) ||
+                                        (!curTarget.IsAirVehicle() && ufAirAtk.IsAirVehicle());
+                    if (shouldSwitch)
+                    {
+                        Vector3 ufPos = ufAirAtk.GetCenterOfUnit();
+                        Vector3 toUf = ufPos - firePos;
+                        float ufDist = toUf.magnitude;
+                        if (ufDist >= 8.0f &&
+                            ufDist <= 1150.0f &&
+                            turret.CanShootInDirection(toUf / ufDist, 1.0f))
+                        {
+                            float ufAirAngleAdj = Corvostudio.Weapons.BulletInstance.CalculateTrajectory(
+                                ufDist, turret.GetBulletSpeed(), turret.GetBulletGravity(), out bool ufAirReach);
+                            if (ufAirReach)
+                            {
+                                bool airCanSee;
+                                VisionPatches.AllowCommanderIntercomFovBypass = true;
+                                try
+                                {
+                                    airCanSee = turretAi.CanSee(ufAirAtk);
+                                }
+                                finally
+                                {
+                                    VisionPatches.AllowCommanderIntercomFovBypass = false;
+                                }
+
+                                if (airCanSee)
+                                {
+                                    turretAi.CurrentVisibleTarget = ufAirAtk;
+                                    turretAi.supportedSquad = null;
+                                    turretAi.targetAngleAdjust = ufAirAngleAdj;
+                                    turretAi.targetInWeaponRange = true;
+                                    turret.SelectBestAmmo(ufAirAtk);
+                                }
+                            }
+                        }
+                    }
+                }
+                return;
+            }
 
             bool checkFF = VisionConfig.FriendlyFireConeDegrees.Value > 0.1f;
             bool isIndirectOrArty = turret.IsUpIndirectFire() || turret.IsArtillery();
             IntPtr gunnerPtr = gunner != null ? gunner.Pointer : IntPtr.Zero;
             IntPtr turretPtr = turret.Pointer;
-            float now = Time.time;
-
-            Vector3 firePos = turret.GetFirePos();
-            Spottable curTarget = turretAi.CurrentVisibleTarget;
 
             // 1. Sanitize danger-close indirect/artillery targets & radio support requests before vanilla fires into friendlies!
-            if (checkFF && isIndirectOrArty)
+            if (!playerInVeh && checkFF && isIndirectOrArty)
             {
                 if (curTarget != null && AiCore.IsValidAliveSpottable(curTarget) && !curTarget.IsAirVehicle())
                 {
@@ -765,6 +823,10 @@ namespace EasyRed2HumanAI
                     FriendlyFirePrevented++;
                 }
             }
+
+            bool hasActiveUnderFire = vh != null &&
+                                      now < vh.UnderFireUntil &&
+                                      AiCore.IsValidAliveSpottable(vh.UnderFireAttacker);
 
             if (curTarget != null)
             {
@@ -799,7 +861,9 @@ namespace EasyRed2HumanAI
                 }
             }
 
-            AiCore.VehicleFastHandles vh = traits.VehHandles ?? AiCore.GetOrCreateVehicleHandles(veh);
+            if (playerInVeh && !hasActiveUnderFire)
+                return;
+
             bool isEnclosedArmorGun = vh != null &&
                                       vh.IsWheeledOrTank &&
                                       !traits.IsExposedCrewSeat &&
@@ -808,18 +872,20 @@ namespace EasyRed2HumanAI
 
             bool hasInternalSpotter = true;
             bool hasInfantryEscort = false;
-            if (isEnclosedArmorGun)
+            if (!playerInVeh && isEnclosedArmorGun)
             {
                 AiCore.GetCachedVehicleSpotterStatus(vh, myFaction, now, out hasInternalSpotter, out hasInfantryEscort);
                 if (!hasInternalSpotter && !hasInfantryEscort)
                 {
                     // Lone buttoned-up tank with dead/missing commander and no nearby friendly infantry escort:
-                    // cancel any pending intercom handoff; the gunner can only see inside their narrow gun-sight arc!
+                    // cancel any pending intercom handoff; the gunner can only see inside their narrow gun-sight arc
+                    // (except when actively under incoming fire via Step -1 below!).
                     _pendingTurretIntercom.Remove(turretPtr);
                 }
                 else if (_pendingTurretIntercom.TryGetValue(turretPtr, out PendingTurretIntercomHandoff pending))
                 {
-                    if (!AiCore.IsValidAliveSpottable(pending.Target))
+                    if (!AiCore.IsValidAliveSpottable(pending.Target) ||
+                        (hasActiveUnderFire && vh.UnderFireAttackerPtr != pending.Target.Pointer))
                     {
                         _pendingTurretIntercom.Remove(turretPtr);
                     }
@@ -871,15 +937,16 @@ namespace EasyRed2HumanAI
                 }
             }
 
-            bool hasCommanderCupolaSpot = vh != null &&
+            bool hasCommanderCupolaSpot = !playerInVeh &&
+                                          vh != null &&
                                           vh.CommanderSpottedTarget != null &&
                                           (now - vh.CommanderSpotTime) <= 4.2f &&
                                           AiCore.IsValidAliveSpottable(vh.CommanderSpottedTarget);
 
-            if (!VisionConfig.EnableCombinedArmsPrioritySupport.Value && !hasCommanderCupolaSpot)
+            if (!VisionConfig.EnableCombinedArmsPrioritySupport.Value && !hasCommanderCupolaSpot && !hasActiveUnderFire)
                 return;
 
-            if (VisionConfig.EnableCombinedArmsPrioritySupport.Value)
+            if (!playerInVeh && VisionConfig.EnableCombinedArmsPrioritySupport.Value)
                 RefreshCombinedArmsIntelIfNeeded();
 
             turret.CheckBullets(out bool hasHe, out bool hasAp, out bool hasFire, out _);
@@ -900,6 +967,78 @@ namespace EasyRed2HumanAI
             Spottable bestCandidate = null;
             float bestScore = curScore + 18.0f;
             float bestAngleAdj = 0f;
+            IntPtr activeUfCandPtr = IntPtr.Zero;
+
+            // -1. Active Under-Fire Counter-Fire (works even for lone buttoned-up armor: crew feels which side was hit!)
+            if (hasActiveUnderFire)
+            {
+                Spottable ufCand = vh.UnderFireAttacker;
+                bool ufIsAir = ufCand.IsAirVehicle();
+                bool ufIsVeh = !ufIsAir && ufCand.IsWheeledVehicleOrTank();
+                Vehicle ufVeh = ufIsVeh ? ufCand.TryCast<Vehicle>() : null;
+                if ((!ufIsAir || traits.IsAA) && (!ufIsVeh || canDamageLightVehicles))
+                {
+                    Vector3 ufPos = ufCand.GetCenterOfUnit();
+                    Vector3 toUf = ufPos - firePos;
+                    float ufDist = toUf.magnitude;
+                    float ufMaxDist = ufIsAir ? 900.0f : (ufIsVeh ? 600.0f : (isIndirectOrArty ? 650.0f : 360.0f));
+                    bool canDamageUfVeh = ufVeh == null || CanTurretEffectivelyDamageArmoredVehicle(turret, ufVeh, ufDist);
+                    if (canDamageUfVeh && ufDist >= 4.0f && ufDist <= ufMaxDist && turret.CanShootInDirection(toUf / ufDist, 1.0f))
+                    {
+                        bool ufSafe = true;
+                        if (checkFF && (isIndirectOrArty || (hasHe && caliber >= 50.0f)))
+                        {
+                            float safeR = isIndirectOrArty ? 30.0f : 20.0f;
+                            float playerSafeR = isIndirectOrArty ? 36.0f : 26.0f;
+                            if (AiCore.IsIndirectFireImpactDangerClose(myFaction, ufPos, gunnerPtr, safeR, playerSafeR))
+                                ufSafe = false;
+                        }
+
+                        if (ufSafe)
+                        {
+                            float ufAngleAdj = Corvostudio.Weapons.BulletInstance.CalculateTrajectory(ufDist, bulletSpeed, bulletGrav, out bool ufReach);
+                            if (ufReach)
+                            {
+                                bool ufCanSee;
+                                VisionPatches.AllowCommanderIntercomFovBypass = true;
+                                try
+                                {
+                                    ufCanSee = turretAi.CanSee(ufCand);
+                                }
+                                finally
+                                {
+                                    VisionPatches.AllowCommanderIntercomFovBypass = false;
+                                }
+
+                                if (ufCanSee || CanTankShellIndoorTargetFacade(turret, veh, ufCand))
+                                {
+                                    float ufScore = (vh.UnderFireIsHeavy ? 135.0f : 96.0f) + (ufIsVeh && hasHeavyGun ? 40.0f : 0f) - (ufDist * 0.08f);
+                                    if (ufScore > bestScore)
+                                    {
+                                        bestScore = ufScore;
+                                        bestCandidate = ufCand;
+                                        bestAngleAdj = ufAngleAdj;
+                                        activeUfCandPtr = ufCand.Pointer;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            if (playerInVeh)
+            {
+                if (bestCandidate != null && (curTarget == null || bestCandidate.Pointer != curTarget.Pointer))
+                {
+                    turretAi.CurrentVisibleTarget = bestCandidate;
+                    turretAi.supportedSquad = null;
+                    turretAi.targetAngleAdjust = bestAngleAdj;
+                    turretAi.targetInWeaponRange = true;
+                    turret.SelectBestAmmo(bestCandidate);
+                }
+                return;
+            }
 
             // 0. Intra-vehicle Tank Commander Cupola / Periscope direct spot (highest priority intra-crew handoff)
             if (hasCommanderCupolaSpot && (!loneButtonedUpArmor))
@@ -1090,7 +1229,8 @@ namespace EasyRed2HumanAI
                 if (curTarget == null || bestCandidate.Pointer != curTarget.Pointer)
                 {
                     float offBoreDeg = Vector3.Angle(curFireDir, bestCandidate.GetCenterOfUnit() - firePos);
-                    if (canBypassGunSlitViaSpotter &&
+                    if (bestCandidate.Pointer != activeUfCandPtr &&
+                        canBypassGunSlitViaSpotter &&
                         offBoreDeg > 26.0f &&
                         VisionConfig.EnableDynamicHumanReactionTime.Value)
                     {
@@ -1602,15 +1742,15 @@ namespace EasyRed2HumanAI
 
                             if (outsideOrderArea || staleCoverAngle)
                             {
-                                GoapActionId curAct = now < coverHandles.Goap.Plan.PlanExpireTime
-                                    ? (coverHandles.Goap.Plan.StepIndex == 0 ? coverHandles.Goap.Plan.Step0 : coverHandles.Goap.Plan.Step1)
-                                    : GoapActionId.None;
+                                var curAct = coverHandles.Emergent.HasDecision
+                                    ? coverHandles.Emergent.CurrentDecision.Step0
+                                    : EmergentEngine.EmergentActionId.None;
                                 bool keepSpecialTask =
                                     coverHandles.MoveOverride.Kind == AiCore.BotMoveOverrideKind.CasualtyDrag ||
                                     coverHandles.Goap.Plan.IsEvacuatingBailedCrew ||
-                                    curAct == GoapActionId.ScavengeSupplyFromCorpse ||
-                                    curAct == GoapActionId.MaintainRadioLinkWithLeader ||
-                                    curAct == GoapActionId.RescueSurrenderedComrade;
+                                    curAct == EmergentEngine.EmergentActionId.ResupplyAmmo ||
+                                    curAct == EmergentEngine.EmergentActionId.MaintainRadioLink ||
+                                    curAct == EmergentEngine.EmergentActionId.LiberatePrisoner;
                                 if (!keepSpecialTask)
                                 {
                                     coverHandles.Stance.LocalCoverProtectedUntil = 0f;
@@ -1619,6 +1759,14 @@ namespace EasyRed2HumanAI
                                 }
                             }
                         }
+                    }
+
+                    if (coverHandles != null &&
+                        (coverHandles.MoveOverride.Kind == AiCore.BotMoveOverrideKind.GrenadeReflex ||
+                         coverHandles.MoveOverride.Kind == AiCore.BotMoveOverrideKind.VehicleEvade) &&
+                        now < coverHandles.MoveOverride.ExpireTime)
+                    {
+                        return;
                     }
 
                     if (coverHandles != null &&
@@ -1662,8 +1810,7 @@ namespace EasyRed2HumanAI
                         IntPtr sqPtr = __instance.Pointer;
                         bool holdTimedOrder =
                             __instance.timed_order_end > now ||
-                            IsSquadActivelyRetreating(sqPtr, now) ||
-                            (_aiFollowColumnUntil.TryGetValue(sqPtr, out float folT) && now < folT) ||
+                            IsSquadVehicleSeekingRepairStation(__instance) ||
                             (_garrisonAssignedObjectiveBySquad.TryGetValue(sqPtr, out IntPtr garPtr) &&
                              __instance.currentTask != null &&
                              __instance.currentTask.Pointer == garPtr &&

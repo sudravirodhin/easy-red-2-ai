@@ -86,7 +86,7 @@ namespace EasyRed2HumanAI
             switch (ActiveSpectatorHudMode)
             {
                 case SpectatorTacticalHudMode.FullTactical:
-                    return "[Battle Hardened] Spectator View (F): FULL TACTICAL (Objectives + Bot GOAP Inspector)";
+                    return "[Battle Hardened] Spectator View (F): FULL TACTICAL (Objectives + Bot H.A.R.M./GOAP Inspector)";
                 case SpectatorTacticalHudMode.ObjectivesOnly:
                     return "[Battle Hardened] Spectator View (F): OBJECTIVES ONLY (Objective Bar + 3D Markers)";
                 case SpectatorTacticalHudMode.CommandNetOverview:
@@ -399,6 +399,8 @@ namespace EasyRed2HumanAI
             }
         }
 
+        private static IntPtr _lastNormalizedFreeCamLockonPtr;
+
         [HarmonyPatch(typeof(CinematicCameraGUI), nameof(CinematicCameraGUI.EnableCinematicCamera))]
         public static class CinematicCameraGUI_EnableCinematicCamera_Patch
         {
@@ -406,7 +408,137 @@ namespace EasyRed2HumanAI
             {
                 try
                 {
+                    _lastNormalizedFreeCamLockonPtr = IntPtr.Zero;
                     MaintainSpectatorHudVisibility();
+                    if (!VisionConfig.EnableMod.Value)
+                        return;
+
+                    Camera cam = ResourcesManager.mainCamera;
+                    if (cam == null || cam.transform == null)
+                        return;
+
+                    if (cam.transform.parent != null)
+                        cam.transform.SetParent(null, true);
+
+                    Vector3 eul = cam.transform.eulerAngles;
+                    if (Mathf.Abs(Mathf.DeltaAngle(0f, eul.z)) > 0.5f)
+                    {
+                        eul.z = 0f;
+                        cam.transform.eulerAngles = eul;
+                    }
+
+                    CinematicCameraController ctrl = cam.GetComponent<CinematicCameraController>();
+                    if (ctrl != null)
+                    {
+                        ctrl.targetPosition = cam.transform.position;
+                        Vector3 tr = cam.transform.eulerAngles;
+                        if (tr.x > 180f) tr.x -= 360f;
+                        tr.z = 0f;
+                        ctrl.targetRotation = tr;
+                    }
+                }
+                catch { }
+            }
+        }
+
+        [HarmonyPatch(typeof(CinematicCameraGUI), nameof(CinematicCameraGUI.Close))]
+        public static class CinematicCameraGUI_Close_Patch
+        {
+            public static void Postfix()
+            {
+                try
+                {
+                    _lastNormalizedFreeCamLockonPtr = IntPtr.Zero;
+                    if (!VisionConfig.EnableMod.Value)
+                        return;
+
+                    PlayerController pc = PlayerController.currentController;
+                    if (pc != null && pc.ControlledCharacter != null && pc.ControlledCharacter.IsAlive)
+                    {
+                        PlayerController.UpdateCameraParent();
+                    }
+                }
+                catch { }
+            }
+        }
+
+        [HarmonyPatch(typeof(PlayerController), nameof(PlayerController.LateUpdate))]
+        public static class PlayerController_LateUpdate_Patch
+        {
+            public static bool Prefix()
+            {
+                return !VisionConfig.EnableMod.Value || !CinematicCameraGUI.cinematicCameraEnabled;
+            }
+        }
+
+        [HarmonyPatch(typeof(PlayerController), nameof(PlayerController.ShakeCameraRoutine))]
+        public static class PlayerController_ShakeCameraRoutine_Patch
+        {
+            public static bool Prefix()
+            {
+                return !VisionConfig.EnableMod.Value || !CinematicCameraGUI.cinematicCameraEnabled;
+            }
+        }
+
+        [HarmonyPatch(typeof(CinematicCameraController), nameof(CinematicCameraController.TrackingRigidbody))]
+        public static class CinematicCameraController_TrackingRigidbody_Patch
+        {
+            public static bool Prefix(ref bool __result)
+            {
+                if (!VisionConfig.EnableMod.Value)
+                    return true;
+
+                __result = false;
+                return false;
+            }
+        }
+
+        [HarmonyPatch(typeof(CinematicCameraController), nameof(CinematicCameraController.MoveAndRotateCamera))]
+        public static class CinematicCameraController_MoveAndRotateCamera_Patch
+        {
+            public static void Prefix(CinematicCameraController __instance)
+            {
+                try
+                {
+                    if (!VisionConfig.EnableMod.Value)
+                        return;
+
+                    Transform curLock = CinematicCameraController.lockonTarget;
+                    if (curLock == null || curLock.Pointer == IntPtr.Zero)
+                    {
+                        _lastNormalizedFreeCamLockonPtr = IntPtr.Zero;
+                        return;
+                    }
+
+                    if (curLock.Pointer != _lastNormalizedFreeCamLockonPtr)
+                    {
+                        Vehicle veh = curLock.GetComponentInParent<Vehicle>();
+                        if (veh != null && veh.transform != null && veh.transform.Pointer != curLock.Pointer)
+                        {
+                            Vector3 worldLockPt = curLock.TransformPoint(CinematicCameraController.lockonLocalPosition);
+                            CinematicCameraController.lockonTarget = veh.transform;
+                            CinematicCameraController.lockonLocalPosition = veh.transform.InverseTransformPoint(worldLockPt);
+                            curLock = veh.transform;
+                        }
+                        _lastNormalizedFreeCamLockonPtr = curLock.Pointer;
+                    }
+                }
+                catch { }
+            }
+
+            public static void Postfix(CinematicCameraController __instance)
+            {
+                try
+                {
+                    if (!VisionConfig.EnableMod.Value || __instance == null || CinematicCameraController.lockonTarget == null)
+                        return;
+
+                    Vector3 tr = __instance.targetRotation;
+                    if (Mathf.Abs(tr.z) > 0.01f)
+                    {
+                        tr.z = 0f;
+                        __instance.targetRotation = tr;
+                    }
                 }
                 catch { }
             }
@@ -421,6 +553,7 @@ namespace EasyRed2HumanAI
         {
             public static void Postfix(MissionStatusGUI __instance)
             {
+                long profStart = HitchProfiler.BeginModScope();
                 try
                 {
                     bool modEnabled = VisionConfig.EnableMod.Value;
@@ -502,6 +635,10 @@ namespace EasyRed2HumanAI
                     }
                 }
                 catch { }
+                finally
+                {
+                    HitchProfiler.EndModScope(HitchBucket.UiMarkers, profStart);
+                }
             }
         }
 
@@ -513,6 +650,7 @@ namespace EasyRed2HumanAI
         {
             public static void Postfix(ObjectiveGUI __instance)
             {
+                long profStart = HitchProfiler.BeginModScope();
                 try
                 {
                     if (__instance == null || __instance.guiPanel == null)
@@ -566,6 +704,10 @@ namespace EasyRed2HumanAI
                     __instance.UpdateSmoothing();
                 }
                 catch { }
+                finally
+                {
+                    HitchProfiler.EndModScope(HitchBucket.UiMarkers, profStart);
+                }
             }
         }
 

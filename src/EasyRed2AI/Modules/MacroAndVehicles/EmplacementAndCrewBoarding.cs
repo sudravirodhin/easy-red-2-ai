@@ -22,6 +22,8 @@ namespace EasyRed2HumanAI
             if (sqCount == 0)
                 return;
 
+            RefreshCombinedArmsIntelIfNeeded();
+
             var squads = AiCore.WorldSquads;
             var soldiers = AiCore.WorldSoldiers;
 
@@ -127,6 +129,10 @@ namespace EasyRed2HumanAI
                             {
                                 _squadOrderedToVehicle[bestRearSq.Pointer] = vehPtr;
                                 bestRearSq.SendUnitsToVehicle(veh);
+                                AiCore.VehicleFastHandles rqVehH = AiCore.GetOrCreateVehicleHandles(veh);
+                                float nowTime = UnityEngine.Time.time;
+                                if (rqVehH != null && rqVehH.BoardingWaitUntil < nowTime + 10.0f)
+                                    rqVehH.BoardingWaitUntil = nowTime + 10.0f;
                                 StaticGunsStaffedCount++;
                                 TrySayTacticalVoice(bestRearSq.Leader, bestRearSq, VoiceManager.VoiceClip.illTakeHisSeat, 0.15f);
                             }
@@ -433,8 +439,9 @@ namespace EasyRed2HumanAI
                     continue;
 
                 staticEvaluations++;
+                bool isAntiTankGun = IsStaticAntiTankGun(veh, mainTurret);
                 Soldier bestCandidate = null;
-                float bestScoreDistSq = 65.0f * 65.0f;
+                float bestScoreDistSq = isAntiTankGun ? (85.0f * 85.0f) : (65.0f * 65.0f);
                 float bestRealDistSq = 0f;
                 bool canShoot360 = mainTurret.CanShoot360;
                 Vector3 vehFwd = veh.transform.forward;
@@ -499,22 +506,28 @@ namespace EasyRed2HumanAI
 
                     bool isDefendingSquad = _garrisonAssignedObjectiveBySquad.ContainsKey(sqSnap.Ptr) ||
                                             (_squadBlackboards.TryGetValue(sqSnap.Ptr, out SquadBlackboard defBb) && defBb.IsDefendingObjective);
+                    bool emergencyAtGunCall = isAntiTankGun &&
+                                              !isPlayerJoiningEmplacement &&
+                                              TryGetKnownEnemyArmorInEmplacementArc(vehPos, mainTurret, canShoot360, sqSnap.Faction, 360.0f, out _);
                     float empMult = GetFactionCommandProfile(sqSnap.Faction).EmplacementSearchMult;
                     float baseSquadReach = isPlayerJoiningEmplacement
                         ? 36.0f
-                        : (isBailedCrew ? 75.0f : (isDefendingSquad ? 55.0f : 42.0f));
+                        : (isBailedCrew ? 75.0f : (emergencyAtGunCall ? 85.0f : (isDefendingSquad ? 55.0f : 42.0f)));
                     float maxSquadDist = isPlayerJoiningEmplacement ? 36.0f : (baseSquadReach * empMult);
                     if ((sqSnap.RefPos - vehPos).sqrMagnitude > maxSquadDist * maxSquadDist)
                         continue;
 
                     // Keep regular infantry squads tethered near their active squad order area so advancing squads
                     // never peel riflemen 50m+ backwards off an assault axis to chase distant rear bunkers,
-                    // while allowing defenders up to 50m reach across their strongpoint's AT/AA/coastal/MG pits!
+                    // while allowing defenders up to 50m reach across their strongpoint's AT/AA/coastal/MG pits
+                    // and emergency AT-gun crewing up to 85m when enemy armor enters the gun's arc!
                     if (!isPlayerJoiningEmplacement && !isBailedCrew && sq.order != Order.follow && sq.moveOrderPosition.sqrMagnitude > 0.1f)
                     {
-                        float maxOrderOffset = isDefendingSquad
-                            ? Mathf.Max(sq.moveOrderRadius + 36.0f, 52.0f)
-                            : Mathf.Max(sq.moveOrderRadius + 22.0f, 34.0f);
+                        float maxOrderOffset = emergencyAtGunCall
+                            ? Mathf.Max(sq.moveOrderRadius + 55.0f, 85.0f)
+                            : (isDefendingSquad
+                                ? Mathf.Max(sq.moveOrderRadius + 36.0f, 52.0f)
+                                : Mathf.Max(sq.moveOrderRadius + 22.0f, 34.0f));
                         if ((vehPos - sq.moveOrderPosition).sqrMagnitude > maxOrderOffset * maxOrderOffset)
                             continue;
                     }
@@ -528,7 +541,8 @@ namespace EasyRed2HumanAI
                         continue;
 
                     // Verify the turret can aim toward the squad's threat sector or enemy approach axis (fast blackboard lookup first!)
-                    if (!canShoot360 && !isPlayerJoiningEmplacement)
+                    // Emergency AT-gun calls already verified enemy armor lies inside the gun's firing arc.
+                    if (!canShoot360 && !isPlayerJoiningEmplacement && !emergencyAtGunCall)
                     {
                         Vector3 threatDir = (_squadBlackboards.TryGetValue(sqSnap.Ptr, out SquadBlackboard bb) &&
                                              bb.HasActiveThreat &&
@@ -541,9 +555,11 @@ namespace EasyRed2HumanAI
                     }
 
                     int uEnd = sqSnap.UnitStartIndex + sqSnap.UnitCount;
-                    float maxSoldierDistSq = (isPlayerJoiningEmplacement || !isDefendingSquad)
-                        ? (isBailedCrew ? (65.0f * 65.0f) : (32.0f * 32.0f))
-                        : (50.0f * 50.0f);
+                    float maxSoldierDistSq = emergencyAtGunCall
+                        ? (75.0f * 75.0f)
+                        : ((isPlayerJoiningEmplacement || !isDefendingSquad)
+                            ? (isBailedCrew ? (65.0f * 65.0f) : (32.0f * 32.0f))
+                            : (50.0f * 50.0f));
                     for (int uIdx = sqSnap.UnitStartIndex; uIdx < uEnd; uIdx++)
                     {
                         ref AiCore.SoldierSnapshot uSnap = ref soldiers[uIdx];
@@ -560,7 +576,9 @@ namespace EasyRed2HumanAI
 
                         float scoreDistSq = isPlayerJoiningEmplacement
                             ? rawDistSq * 0.25f
-                            : (isBailedCrew ? rawDistSq * 0.45f : rawDistSq);
+                            : (isBailedCrew
+                                ? rawDistSq * 0.45f
+                                : (emergencyAtGunCall ? rawDistSq * 0.65f : rawDistSq));
                         if (scoreDistSq >= bestScoreDistSq)
                             continue;
 
@@ -767,6 +785,96 @@ namespace EasyRed2HumanAI
             }
             _reusableExpiredEmplacementBots.Clear();
             return inboundCount;
+        }
+
+        private static bool IsStaticAntiTankGun(Vehicle veh, Turret mainTurret)
+        {
+            if (veh == null || mainTurret == null)
+                return false;
+
+            AiCore.TurretFastTraits traits = AiCore.GetCachedTurretTraits(mainTurret);
+            if (traits.IsIndirectOrArty)
+                return false;
+
+            TurretGun tg = mainTurret.TryCast<TurretGun>();
+            if (tg == null || tg.weapons == null)
+                return false;
+
+            InventoryManager inv = veh.GetInventory();
+            var weapons = tg.weapons;
+            for (int wIdx = 0; wIdx < weapons.Length; wIdx++)
+            {
+                TurretWeapon w = weapons[wIdx];
+                if (w == null || w.ammos == null)
+                    continue;
+
+                bool refreshedInv = false;
+                var ammos = w.ammos;
+                for (int aIdx = 0; aIdx < ammos.Length; aIdx++)
+                {
+                    if (!HasTurretWeaponAmmoInSlot(w, aIdx, inv, ref refreshedInv))
+                        continue;
+
+                    BulletData bd = w.GetBulletDataFor(aIdx) ?? w.BulletData;
+                    if (bd != null &&
+                        bd.caliber >= 25.0f &&
+                        (!traits.IsAA || bd.caliber >= 37.0f) &&
+                        !IsTrueHeOrAntiInfantryRound(bd))
+                    {
+                        return true;
+                    }
+                }
+            }
+
+            return false;
+        }
+
+        private static bool TryGetKnownEnemyArmorInEmplacementArc(
+            Vector3 gunPos,
+            Turret mainTurret,
+            bool canShoot360,
+            string friendlyFaction,
+            float maxRange,
+            out Vector3 armorDir)
+        {
+            armorDir = Vector3.zero;
+            if (string.IsNullOrEmpty(friendlyFaction) || mainTurret == null)
+                return false;
+
+            float maxRangeSq = maxRange * maxRange;
+            int count = _knownEnemyClusters.Count;
+            for (int c = 0; c < count; c++)
+            {
+                KnownEnemyCluster cluster = _knownEnemyClusters[c];
+                if (cluster.VehicleTarget == null || !AiCore.AreEnemyFactions(friendlyFaction, cluster.Faction))
+                    continue;
+
+                Vehicle enemyVeh = cluster.VehicleTarget.TryCast<Vehicle>();
+                if (enemyVeh == null ||
+                    enemyVeh.Pointer == IntPtr.Zero ||
+                    enemyVeh.transform == null ||
+                    enemyVeh.IsAirVehicle() ||
+                    !enemyVeh.IsWheeledVehicleOrTank() ||
+                    !enemyVeh.CanFight() ||
+                    GetVehicleMaxHullArmorMm(enemyVeh) < 12.0f)
+                {
+                    continue;
+                }
+
+                Vector3 toArmor = enemyVeh.transform.position - gunPos;
+                float dSq = toArmor.sqrMagnitude;
+                if (dSq < 16.0f || dSq > maxRangeSq)
+                    continue;
+
+                Vector3 dir = toArmor / Mathf.Sqrt(dSq);
+                if (!canShoot360 && !mainTurret.IsPositionInDirection(dir))
+                    continue;
+
+                armorDir = dir;
+                return true;
+            }
+
+            return false;
         }
 
         private static bool HasKnownEnemyClusterWithinRadius(Vector3 pos, string friendlyFaction, float radius)
@@ -1328,6 +1436,31 @@ namespace EasyRed2HumanAI
                                 SetBotPose(u.aiController, u, SoldierPose.Idle, true);
                         }
                     }
+
+                    Soldier sqLeader = __instance.Leader;
+                    int seatCap = __0.seats != null ? __0.seats.Length : 0;
+                    if (sqLeader != null &&
+                        sqLeader.IsAI() &&
+                        sqLeader.IsAlive &&
+                        !sqLeader.IsOnVehicle() &&
+                        AiCore.IsLocallyOwnedBot(sqLeader) &&
+                        __instance.units != null &&
+                        __instance.units.Count <= seatCap &&
+                        __0.HasSpace() &&
+                        (!sqLeader.HasDestinationAssigned || sqLeader.targetDestination == null || sqLeader.targetDestination.Pointer != vehPtr))
+                    {
+                        sqLeader.CoverPosition(__0.Cast<AiDestination>());
+                        _assignedEmplacementUntil[sqLeader.Pointer] = now + 22.0f;
+                        _assignedEmplacementVehicle[sqLeader.Pointer] = vehPtr;
+                        if (AiCore.TryGetSoldierHandles(sqLeader.Pointer, out var lh))
+                            lh.Stance.CombatCrouchLockUntil = 0f;
+                        if (sqLeader.aiController != null)
+                            SetBotPose(sqLeader.aiController, sqLeader, SoldierPose.Idle, true);
+                    }
+
+                    AiCore.VehicleFastHandles vehH = AiCore.GetOrCreateVehicleHandles(__0);
+                    if (vehH != null && vehH.BoardingWaitUntil < now + 10.0f)
+                        vehH.BoardingWaitUntil = now + 10.0f;
                 }
                 catch { }
             }
@@ -1373,10 +1506,7 @@ namespace EasyRed2HumanAI
                     }
 
                     float now = Time.time;
-                    IntPtr sqPtr = __instance.Pointer;
-                    if (__instance.timed_order_end > now ||
-                        IsSquadActivelyRetreating(sqPtr, now) ||
-                        (_aiFollowColumnUntil.TryGetValue(sqPtr, out float folUntil) && now < folUntil))
+                    if (__instance.timed_order_end > now)
                     {
                         return false;
                     }
@@ -2044,6 +2174,20 @@ namespace EasyRed2HumanAI
                         RegisterVehicleCrewSquad(__instance, __1);
                     }
 
+                    if (__0 == 0 && __instance != null && __instance.IsAirVehicle() && __1 != null && __1.IsAlive)
+                    {
+                        VehiclePlane vp = __instance.TryCast<VehiclePlane>();
+                        if (vp != null)
+                        {
+                            AiCore.VehicleFastHandles pvh = AiCore.GetOrCreateVehicleHandles(vp);
+                            ReleaseAirborneSpawnHold(vp, pvh);
+                            if (AiCore.IsLocallyOwnedSoldier(__1))
+                            {
+                                BeginPlaneHotStartWindow(vp, allowAiPilot: true, forceRecheck: __1.IsPlayer());
+                            }
+                        }
+                    }
+
                     if (__state.DisplacedBot == null || !__state.DisplacedBot.IsAlive || __instance == null)
                         return;
 
@@ -2088,6 +2232,15 @@ namespace EasyRed2HumanAI
                     if (Photon.Pun.PhotonNetwork.InRoom && AiCore.IsMasterClient())
                     {
                         _spawnerReserveUntil[__instance.Pointer] = Time.time + 3.5f;
+                    }
+
+                    if (__result.IsAirVehicle())
+                    {
+                        VehiclePlane vp = __result.TryCast<VehiclePlane>();
+                        if (vp != null)
+                        {
+                            TryStartAirborneSpawnHold(vp);
+                        }
                     }
                 }
                 catch { }

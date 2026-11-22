@@ -171,7 +171,10 @@ namespace EasyRed2HumanAI
                         music.volume = _mpAnthemOrigVolume * t;
                     }
                 }
-                catch { }
+                catch (Exception ex)
+                {
+                    AiCore.ReportPatchException("EndBattle.Anthem", ex);
+                }
                 return true;
             }
         }
@@ -1111,9 +1114,19 @@ namespace EasyRed2HumanAI
                     StepResolveCampaignBattlesAtIndex(
                         _selectedCampaignIdx,
                         _battlePage * MapPickerRowsPerPage,
-                        maxPerFrame: 4,
-                        budgetTicks: System.Diagnostics.Stopwatch.Frequency / 500, // 2.0ms budget
+                        maxPerFrame: 3,
+                        budgetTicks: System.Diagnostics.Stopwatch.Frequency / 666, // 1.5ms budget
                         updateSelection: true);
+                }
+                else
+                {
+                    if (Time.timeSinceLevelLoad < 12.0f ||
+                        (Time.frameCount % 6) != 0 ||
+                        AiCore.IsHeavyWorkFrame() ||
+                        Time.unscaledDeltaTime > 0.0175f)
+                    {
+                        return;
+                    }
                 }
 
                 if (_allCampaignsPreloaded)
@@ -1121,7 +1134,7 @@ namespace EasyRed2HumanAI
 
                 int checkedCamps = 0;
                 int totalCamps = _mapPickerCampaigns.Count;
-                long bgBudget = System.Diagnostics.Stopwatch.Frequency / 800; // 1.25ms background cap
+                long bgBudget = System.Diagnostics.Stopwatch.Frequency / 2000; // 0.5ms background cap
                 while (checkedCamps < totalCamps)
                 {
                     int idx = _bgPreloadCampaignIdx % totalCamps;
@@ -1138,7 +1151,7 @@ namespace EasyRed2HumanAI
                     StepResolveCampaignBattlesAtIndex(
                         idx,
                         startBattleOffset: 0,
-                        maxPerFrame: 2,
+                        maxPerFrame: 1,
                         budgetTicks: bgBudget,
                         updateSelection: false);
                     return;
@@ -1384,8 +1397,9 @@ namespace EasyRed2HumanAI
                 float bias = Mathf.Clamp(_mapPickerAlliesBias, -0.40f, 0.40f);
                 float alliesMult = clampedScale * (1.0f + bias);
                 float axisMult = clampedScale * (1.0f - bias);
-                scaledAllies = (short)Mathf.Clamp(Mathf.RoundToInt(Mathf.Max(1, baseAllies) * alliesMult), 1, 500);
-                scaledAxis = (short)Mathf.Clamp(Mathf.RoundToInt(Mathf.Max(1, baseAxis) * axisMult), 1, 500);
+                int maxPerSide = VeteranAndTacticsPatches.GetOnlineMaxUnitsPerFaction();
+                scaledAllies = (short)Mathf.Clamp(Mathf.RoundToInt(Mathf.Max(1, baseAllies) * alliesMult), 1, maxPerSide);
+                scaledAxis = (short)Mathf.Clamp(Mathf.RoundToInt(Mathf.Max(1, baseAxis) * axisMult), 1, maxPerSide);
             }
 
             private static MatchBattle CreateConfiguredMatchBattle(
@@ -1941,9 +1955,12 @@ namespace EasyRed2HumanAI
                     out short pAllies,
                     out short pAxis);
 
+                string mpCapNote = (Photon.Pun.PhotonNetwork.InRoom && !Photon.Pun.PhotonNetwork.OfflineMode)
+                    ? $"  [MP PC Cap: {VeteranAndTacticsPatches.GetOnlineMaxUnitsPerFaction()}/side]"
+                    : "";
                 GUI.color = new Color(0.80f, 0.90f, 0.98f, 0.96f);
                 GUI.Label(new Rect(panelX + 20f, panelY + 532f, panelW - 40f, 20f),
-                    $"Current Match Caps: {curAllies} Allies / {curAxis} Axis (Tickets {(curMb != null ? curMb.ticketsMultiplier : 1f):F2}x)  ->  Next Preview: {pAllies} Allies / {pAxis} Axis (Tickets {_mapPickerTicketsMult:F2}x)");
+                    $"Current Match Caps: {curAllies} Allies / {curAxis} Axis (Tickets {(curMb != null ? curMb.ticketsMultiplier : 1f):F2}x)  ->  Next Preview: {pAllies} Allies / {pAxis} Axis (Tickets {_mapPickerTicketsMult:F2}x){mpCapNote}");
 
                 GUI.color = canControlMatch
                     ? (_matchSettingsDraftDirty || _mapPickerBotScaleDirty ? new Color(0.45f, 0.95f, 0.52f, 1.0f) : new Color(0.52f, 0.86f, 0.96f, 1.0f))
@@ -2398,6 +2415,10 @@ namespace EasyRed2HumanAI
                         unitPreviewText += $"   |   Next Map Queue: currently {nextMb.maxAllies}/{nextMb.maxAxis} (preview {nScaledA}/{nScaledX})";
                     }
                 }
+                if (Photon.Pun.PhotonNetwork.InRoom && !Photon.Pun.PhotonNetwork.OfflineMode)
+                {
+                    unitPreviewText += $"  [MP PC Cap: {VeteranAndTacticsPatches.GetOnlineMaxUnitsPerFaction()}/side]";
+                }
                 GUI.color = new Color(0.76f, 0.88f, 0.96f, 0.95f);
                 GUI.Label(new Rect(panelX + 20f, previewY, panelW - 40f, 20f), unitPreviewText);
 
@@ -2605,6 +2626,7 @@ namespace EasyRed2HumanAI
 
                     if (Photon.Pun.PhotonNetwork.InRoom)
                     {
+                        VeteranAndTacticsPatches.ClampMatchBattlesToOnlineEnvelope(md);
                         BattleLoader bl = BattleLoader.instance;
                         if (bl != null)
                         {

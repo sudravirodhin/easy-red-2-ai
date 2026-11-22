@@ -50,7 +50,10 @@ namespace EasyRed2HumanAI
         VanSoldierPath = 37,
         VanVehiclePath = 38,
         VehFixedUpdate = 39,
-        Count = 40
+        UiMarkers = 40,
+        DeathHitAttr = 41,
+        SpecCmdNet = 42,
+        Count = 43
     }
 
     /// <summary>
@@ -106,7 +109,10 @@ namespace EasyRed2HumanAI
             "VanMedicRtn",
             "VanSoldierPath",
             "VanVehiclePath",
-            "VehFixedUpdate"
+            "VehFixedUpdate",
+            "UiMarkers",
+            "DeathHitAttr",
+            "SpecCmdNet"
         };
 
         private static readonly double _ticksToMs = 1000.0 / Stopwatch.Frequency;
@@ -117,6 +123,34 @@ namespace EasyRed2HumanAI
         private static readonly long[] _maxTicks = new long[BucketCount];
         private static readonly int[] _sortIndices = new int[BucketCount];
         private static readonly StringBuilder _sb = new StringBuilder(1280);
+        private static readonly StringBuilder _hudSb = new StringBuilder(192);
+        private static readonly int[] _topPickedBuckets = new int[4];
+
+        // Leaf/subsystem pure-mod buckets ranked for "Top:" breakdowns in [HitchSummary 15s] and Perf Pill
+        private static readonly int[] _modSubsystemRankBuckets =
+        {
+            (int)HitchBucket.ModExtraSeqTicks,
+            (int)HitchBucket.GoapSoldier,
+            (int)HitchBucket.GoapSquadBoard,
+            (int)HitchBucket.GoapFlankCovers,
+            (int)HitchBucket.GoapScavenge,
+            (int)HitchBucket.GoapFloorSnap,
+            (int)HitchBucket.WorldSnapshot,
+            (int)HitchBucket.MacroDirector,
+            (int)HitchBucket.Emplacements,
+            (int)HitchBucket.TeamNetGoap,
+            (int)HitchBucket.CombinedArmsIntel,
+            (int)HitchBucket.ConquestQM,
+            (int)HitchBucket.DictCleanup,
+            (int)HitchBucket.CanSeeMod,
+            (int)HitchBucket.UpdateMoveDir,
+            (int)HitchBucket.CoverAvail,
+            (int)HitchBucket.BallisticsExpl,
+            (int)HitchBucket.OnGUI,
+            (int)HitchBucket.UiMarkers,
+            (int)HitchBucket.DeathHitAttr,
+            (int)HitchBucket.SpecCmdNet
+        };
 
         // Active Frame N state
         private static int _activeFrame = -1;
@@ -125,6 +159,8 @@ namespace EasyRed2HumanAI
         private static long _bmStartStamp;
         private static long _bmEndStamp;
         private static long _lastHookEndStamp;
+        private static int _modScopeDepth;
+        private static long _frameModCpuTicks;
         private static float _bmFixedTime = -1f;
         private static float _prevBmFixedTime = -1f;
         private static float _bmScaledTime;
@@ -165,6 +201,7 @@ namespace EasyRed2HumanAI
         private static int _suppressedBurstHitches;
         private static float _autopsyBurstWindowStart;
         private static int _autopsyLogsInCurrentSecond;
+        private static float _ignoreBenchUntilUnscaledTime;
 
         // 15-second [HitchSummary] rolling telemetry
         private static float _nextSummaryUnscaledTime;
@@ -172,45 +209,123 @@ namespace EasyRed2HumanAI
         private static int _winHitches;
         private static float _winMaxDtMs;
         private static double _winSumDtMs;
+        private static readonly float[] _winDtSamples = new float[4096];
+        private static int _winDtCount;
+        private static long _winModCpuTicks;
+        private static readonly long[] _winBucketTicks = new long[BucketCount];
         private static long _winIl2CppPosAllocBytes;
         private static long _winPeakIl2CppFrameAllocBytes;
         private static int _winIl2CppGcCount;
         private static long _winNetPosAllocBytes;
         private static int _winNetGcCount;
 
+        // 0.5-second Live Performance Overlay telemetry
+        private static float _nextHudRefreshUnscaledTime;
+        private static int _hudFrames;
+        private static double _hudSumDtMs;
+        private static float _hudMaxDtMs;
+        private static int _hudHitches;
+        private static long _hudModCpuTicks;
+        private static readonly long[] _hudBucketTicks = new long[BucketCount];
+        private static string _hudLine1;
+        private static string _hudLine2;
+        private static bool _hudModEnabled = true;
+        private static double _hudAvgModMs;
+
+        private static bool _flightRecorderActive;
+        private static bool _perfOverlayActive;
+        internal static bool FlightRecorderActive => _flightRecorderActive;
+        internal static bool PerfOverlayActive => _perfOverlayActive;
         internal static bool Enabled;
         private static Harmony _probeHarmony;
         private static bool _probesPatched;
 
-        public static void RefreshConfigState()
+        private static void ResetSummaryWindowState(float nextSummaryTime)
         {
-            bool wantEnabled = VisionConfig.EnableHitchFlightRecorder != null && VisionConfig.EnableHitchFlightRecorder.Value;
-            if (wantEnabled == Enabled && wantEnabled == _probesPatched)
-                return;
-
-            Enabled = wantEnabled;
-            _activeFrame = -1;
-            _lastFrameCheckStamp = 0L;
-            _firstHookStamp = 0L;
-            _bmStartStamp = 0L;
-            _bmEndStamp = 0L;
-            _lastHookEndStamp = 0L;
-            _prevBmFixedTime = -1f;
-            _bmFixedTime = -1f;
-            _nextSummaryUnscaledTime = 0f;
+            _nextSummaryUnscaledTime = nextSummaryTime;
             _winFrames = 0;
             _winHitches = 0;
             _winMaxDtMs = 0f;
             _winSumDtMs = 0.0;
+            _winDtCount = 0;
+            _winModCpuTicks = 0L;
+            Array.Clear(_winBucketTicks, 0, BucketCount);
             _winIl2CppPosAllocBytes = 0;
             _winPeakIl2CppFrameAllocBytes = 0;
             _winIl2CppGcCount = 0;
             _winNetPosAllocBytes = 0;
             _winNetGcCount = 0;
+        }
+
+        private static void ResetHudOverlayWindowState(string statusLine1, string statusLine2 = null, float nextRefreshTime = 0f)
+        {
+            _nextHudRefreshUnscaledTime = nextRefreshTime;
+            _hudFrames = 0;
+            _hudSumDtMs = 0.0;
+            _hudMaxDtMs = 0f;
+            _hudHitches = 0;
+            _hudModCpuTicks = 0L;
+            Array.Clear(_hudBucketTicks, 0, BucketCount);
+            _hudLine1 = statusLine1;
+            _hudLine2 = statusLine2;
+        }
+
+        public static void RefreshConfigState()
+        {
+            bool wantFlight = VisionConfig.EnableHitchFlightRecorder != null && VisionConfig.EnableHitchFlightRecorder.Value;
+            bool wantOverlay = VisionConfig.EnablePerformanceOverlay != null && VisionConfig.EnablePerformanceOverlay.Value;
+            bool wantAny = wantFlight || wantOverlay;
+            if (wantFlight == _flightRecorderActive && wantOverlay == _perfOverlayActive && wantFlight == _probesPatched)
+                return;
+
+            bool enabledChanged = wantAny != Enabled;
+            bool flightChanged = wantFlight != _flightRecorderActive;
+            bool overlayChanged = wantOverlay != _perfOverlayActive;
+
+            _flightRecorderActive = wantFlight;
+            _perfOverlayActive = wantOverlay;
+            Enabled = wantAny;
+
+            if (enabledChanged)
+            {
+                _activeFrame = -1;
+                _lastFrameCheckStamp = 0L;
+                _firstHookStamp = 0L;
+                _bmStartStamp = 0L;
+                _bmEndStamp = 0L;
+                _lastHookEndStamp = 0L;
+                _prevBmFixedTime = -1f;
+                _bmFixedTime = -1f;
+                _modScopeDepth = 0;
+                _frameModCpuTicks = 0L;
+            }
+
+            if (flightChanged)
+            {
+                ResetSummaryWindowState(0f);
+            }
+
+            if (overlayChanged)
+            {
+                if (wantOverlay)
+                {
+                    bool curOn = VisionConfig.EnableMod != null && VisionConfig.EnableMod.Value;
+                    _hudModEnabled = curOn;
+                    _hudAvgModMs = 0.0;
+                    ResetHudOverlayWindowState(
+                        curOn ? $"[BATTLE HARDENED v{Plugin.PluginVersion}]  Sampling performance..." : "[VANILLA AI — F8 OFF]  Sampling performance...",
+                        "Waiting for active gameplay frame...",
+                        0f);
+                }
+                else
+                {
+                    ResetHudOverlayWindowState(null, null, 0f);
+                }
+            }
 
             try
             {
-                if (wantEnabled && !_probesPatched)
+                if (wantFlight && !_probesPatched)
                 {
                     if (_probeHarmony == null)
                         _probeHarmony = new Harmony(Plugin.PluginGuid + ".hitchprobes");
@@ -221,7 +336,7 @@ namespace EasyRed2HumanAI
                     PatchProbe(typeof(BattleManager), nameof(BattleManager.RecalculateObjectivesForAll), nameof(ProbeBeginPrefix), nameof(RecalcObjsPostfix));
                     _probesPatched = true;
                 }
-                else if (!wantEnabled && _probesPatched && _probeHarmony != null)
+                else if (!wantFlight && _probesPatched && _probeHarmony != null)
                 {
                     _probeHarmony.UnpatchSelf();
                     _probesPatched = false;
@@ -259,6 +374,17 @@ namespace EasyRed2HumanAI
         }
 
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        public static long BeginModScope(bool topLevel = false)
+        {
+            if (!Enabled)
+                return 0L;
+
+            long ts = topLevel ? BeginTopLevel() : Begin();
+            _modScopeDepth++;
+            return ts;
+        }
+
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
         public static void End(HitchBucket bucket, long startStamp)
         {
             if (!Enabled || startStamp <= 0)
@@ -277,10 +403,35 @@ namespace EasyRed2HumanAI
                 _maxTicks[idx] = elapsed;
         }
 
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        public static void EndModScope(HitchBucket bucket, long startStamp)
+        {
+            if (!Enabled || startStamp <= 0)
+                return;
+
+            long endStamp = Stopwatch.GetTimestamp();
+            _lastHookEndStamp = endStamp;
+            if (_modScopeDepth > 0)
+                _modScopeDepth--;
+
+            long elapsed = endStamp - startStamp;
+            if (elapsed < 0)
+                return;
+
+            int idx = (int)bucket;
+            _ticks[idx] += elapsed;
+            _calls[idx]++;
+            if (elapsed > _maxTicks[idx])
+                _maxTicks[idx] = elapsed;
+            if (_modScopeDepth == 0)
+                _frameModCpuTicks += elapsed;
+        }
+
         public static long OnBattleManagerUpdatePrefix()
         {
-            bool cfgEnabled = VisionConfig.EnableHitchFlightRecorder != null && VisionConfig.EnableHitchFlightRecorder.Value;
-            if (cfgEnabled != Enabled)
+            bool wantFlight = VisionConfig.EnableHitchFlightRecorder != null && VisionConfig.EnableHitchFlightRecorder.Value;
+            bool wantOverlay = VisionConfig.EnablePerformanceOverlay != null && VisionConfig.EnablePerformanceOverlay.Value;
+            if (wantFlight != _flightRecorderActive || wantOverlay != _perfOverlayActive)
                 RefreshConfigState();
             if (!Enabled)
                 return 0L;
@@ -304,7 +455,7 @@ namespace EasyRed2HumanAI
                 return 0L;
 
             End(HitchBucket.VanBMUpdate, vanStartStamp);
-            return Stopwatch.GetTimestamp();
+            return BeginModScope();
         }
 
         public static void OnBattleManagerUpdatePostfixEnd(long modStartStamp)
@@ -312,7 +463,7 @@ namespace EasyRed2HumanAI
             if (!Enabled)
                 return;
 
-            End(HitchBucket.ModBMUpdate, modStartStamp);
+            EndModScope(HitchBucket.ModBMUpdate, modStartStamp);
             _bmEndStamp = _lastHookEndStamp;
         }
 
@@ -382,12 +533,133 @@ namespace EasyRed2HumanAI
                 _netPropFlushesThisFrame++;
         }
 
+        public static void NotifyModToggled()
+        {
+            float now = 0f;
+            try { now = Time.unscaledTime; } catch { }
+            _ignoreBenchUntilUnscaledTime = now + 1.0f;
+            ResetSummaryWindowState(now + 16.0f);
+            bool curOn = VisionConfig.EnableMod != null && VisionConfig.EnableMod.Value;
+            _hudModEnabled = curOn;
+            _hudAvgModMs = 0.0;
+            if (_perfOverlayActive)
+            {
+                ResetHudOverlayWindowState(
+                    curOn ? $"[BATTLE HARDENED v{Plugin.PluginVersion}]  Switching mode..." : "[VANILLA AI — F8 OFF]  Switching mode...",
+                    "Measuring live frame time & Mod CPU...",
+                    now + 0.5f);
+            }
+            else
+            {
+                ResetHudOverlayWindowState(null, null, 0f);
+            }
+        }
+
+        internal static bool TryGetPerfOverlaySnapshot(out string line1, out string line2, out bool modEnabled, out double avgModMs)
+        {
+            if (!_perfOverlayActive || string.IsNullOrEmpty(_hudLine1))
+            {
+                line1 = null;
+                line2 = null;
+                modEnabled = true;
+                avgModMs = 0.0;
+                return false;
+            }
+            line1 = _hudLine1;
+            line2 = _hudLine2 ?? "";
+            modEnabled = _hudModEnabled;
+            avgModMs = _hudAvgModMs;
+            return true;
+        }
+
+        private static void AppendTopModSubsystems(StringBuilder sb, long[] bucketTicks, int frameCount, int maxItems)
+        {
+            if (frameCount <= 0)
+            {
+                sb.Append("none");
+                return;
+            }
+
+            int picked = 0;
+            int limit = Math.Min(maxItems, _topPickedBuckets.Length);
+            for (int p = 0; p < limit; p++)
+            {
+                int bestBucket = -1;
+                long bestTicks = 0L;
+                for (int i = 0; i < _modSubsystemRankBuckets.Length; i++)
+                {
+                    int b = _modSubsystemRankBuckets[i];
+                    long t = bucketTicks[b];
+                    if (t <= bestTicks)
+                        continue;
+
+                    bool alreadyPicked = false;
+                    for (int k = 0; k < picked; k++)
+                    {
+                        if (_topPickedBuckets[k] == b)
+                        {
+                            alreadyPicked = true;
+                            break;
+                        }
+                    }
+                    if (!alreadyPicked)
+                    {
+                        bestBucket = b;
+                        bestTicks = t;
+                    }
+                }
+
+                if (bestBucket < 0 || ((bestTicks * _ticksToMs) / frameCount) < 0.005)
+                    break;
+
+                _topPickedBuckets[picked++] = bestBucket;
+            }
+
+            if (picked == 0)
+            {
+                long seqTicks = bucketTicks[(int)HitchBucket.ModSeqUpdate];
+                long bmTicks = bucketTicks[(int)HitchBucket.ModBMUpdate];
+                int fb = seqTicks >= bmTicks ? (int)HitchBucket.ModSeqUpdate : (int)HitchBucket.ModBMUpdate;
+                double fbAvgMs = (bucketTicks[fb] * _ticksToMs) / frameCount;
+                if (fbAvgMs >= 0.005)
+                    sb.Append(_bucketNames[fb]).Append('=').Append(fbAvgMs.ToString("F2")).Append("ms");
+                else
+                    sb.Append("none");
+                return;
+            }
+
+            for (int i = 0; i < picked; i++)
+            {
+                if (i > 0)
+                    sb.Append(", ");
+                int b = _topPickedBuckets[i];
+                double avgMs = (bucketTicks[b] * _ticksToMs) / frameCount;
+                sb.Append(_bucketNames[b]).Append('=').Append(avgMs.ToString("F2")).Append("ms");
+            }
+        }
+
         public static void ResetOnSceneChange()
         {
             _prevBmFixedTime = -1f;
             _bmFixedTime = -1f;
             _suppressedBurstHitches = 0;
+            _ignoreBenchUntilUnscaledTime = 0f;
             _bmWasFocused = AiCore.IsGameWindowFocused;
+            ResetSummaryWindowState(0f);
+            if (_perfOverlayActive)
+            {
+                bool curOn = VisionConfig.EnableMod != null && VisionConfig.EnableMod.Value;
+                _hudModEnabled = curOn;
+                _hudAvgModMs = 0.0;
+                ResetHudOverlayWindowState(
+                    curOn ? $"[BATTLE HARDENED v{Plugin.PluginVersion}]  Loading scene..." : "[VANILLA AI — F8 OFF]  Loading scene...",
+                    "Waiting for active gameplay frame...",
+                    0f);
+            }
+            else
+            {
+                ResetHudOverlayWindowState(null, null, 0f);
+            }
         }
 
         [MethodImpl(MethodImplOptions.NoInlining)]
@@ -482,6 +754,8 @@ namespace EasyRed2HumanAI
             _bmStartStamp = 0;
             _bmEndStamp = 0;
             _lastHookEndStamp = startStamp;
+            _modScopeDepth = 0;
+            _frameModCpuTicks = 0L;
             _bmFixedTime = -1f;
             _bmWasFocused = AiCore.IsGameWindowFocused;
 
@@ -498,15 +772,18 @@ namespace EasyRed2HumanAI
             _lastSpawnedSquadId = null;
             _netPropFlushesThisFrame = 0;
 
-            SampleMemoryCounters(
-                out _frameStartIl2CppGc0,
-                out _frameStartIl2CppUsed,
-                out _frameStartMonoHeap,
-                out _frameStartNativeAlloc,
-                out _frameStartNetGc0,
-                out _frameStartNetGc1,
-                out _frameStartNetGc2,
-                out _frameStartNetMem);
+            if (_flightRecorderActive)
+            {
+                SampleMemoryCounters(
+                    out _frameStartIl2CppGc0,
+                    out _frameStartIl2CppUsed,
+                    out _frameStartMonoHeap,
+                    out _frameStartNativeAlloc,
+                    out _frameStartNetGc0,
+                    out _frameStartNetGc1,
+                    out _frameStartNetGc2,
+                    out _frameStartNetMem);
+            }
         }
 
         private static void FlushFinishedFrame(long nextFrameFirstStamp)
@@ -516,26 +793,49 @@ namespace EasyRed2HumanAI
                 : (Time.unscaledDeltaTime * 1000f);
             float unscaledNow = Time.unscaledTime;
 
-            SampleMemoryCounters(
-                out int curIl2CppGc0,
-                out long curIl2CppUsed,
-                out long curMonoHeap,
-                out long curNativeAlloc,
-                out int curNetGc0,
-                out int curNetGc1,
-                out int curNetGc2,
-                out long curNetMem);
+            int curIl2CppGc0 = 0;
+            long curIl2CppUsed = 0;
+            long curMonoHeap = 0;
+            long curNativeAlloc = 0;
+            int curNetGc0 = 0;
+            int curNetGc1 = 0;
+            int curNetGc2 = 0;
+            long curNetMem = 0;
 
-            int il2cppGcDelta = curIl2CppGc0 - _frameStartIl2CppGc0;
-            long il2cppUsedDelta = curIl2CppUsed - _frameStartIl2CppUsed;
-            long nativeDelta = curNativeAlloc - _frameStartNativeAlloc;
-            bool il2cppGcRan = il2cppGcDelta > 0 || il2cppUsedDelta < -4096L;
+            int il2cppGcDelta = 0;
+            long il2cppUsedDelta = 0;
+            long nativeDelta = 0;
+            bool il2cppGcRan = false;
 
-            int netG0Delta = curNetGc0 - _frameStartNetGc0;
-            int netG1Delta = curNetGc1 - _frameStartNetGc1;
-            int netG2Delta = curNetGc2 - _frameStartNetGc2;
-            long netMemDelta = curNetMem - _frameStartNetMem;
-            bool netGcRan = netG0Delta > 0 || netG1Delta > 0 || netG2Delta > 0 || netMemDelta < -4096L;
+            int netG0Delta = 0;
+            int netG1Delta = 0;
+            int netG2Delta = 0;
+            long netMemDelta = 0;
+            bool netGcRan = false;
+
+            if (_flightRecorderActive)
+            {
+                SampleMemoryCounters(
+                    out curIl2CppGc0,
+                    out curIl2CppUsed,
+                    out curMonoHeap,
+                    out curNativeAlloc,
+                    out curNetGc0,
+                    out curNetGc1,
+                    out curNetGc2,
+                    out curNetMem);
+
+                il2cppGcDelta = curIl2CppGc0 - _frameStartIl2CppGc0;
+                il2cppUsedDelta = curIl2CppUsed - _frameStartIl2CppUsed;
+                nativeDelta = curNativeAlloc - _frameStartNativeAlloc;
+                il2cppGcRan = il2cppGcDelta > 0 || il2cppUsedDelta < -4096L;
+
+                netG0Delta = curNetGc0 - _frameStartNetGc0;
+                netG1Delta = curNetGc1 - _frameStartNetGc1;
+                netG2Delta = curNetGc2 - _frameStartNetGc2;
+                netMemDelta = curNetMem - _frameStartNetMem;
+                netGcRan = netG0Delta > 0 || netG1Delta > 0 || netG2Delta > 0 || netMemDelta < -4096L;
+            }
 
             bool inGameplay = _bmStartStamp > 0L &&
                               !_bmBattleEnded &&
@@ -543,7 +843,70 @@ namespace EasyRed2HumanAI
                               _bmTimeScale > 0.01f &&
                               dtMs > 0.05f &&
                               dtMs < 500.0f;
-            if (inGameplay)
+            bool pastToggleSettle = unscaledNow >= _ignoreBenchUntilUnscaledTime;
+
+            if (_perfOverlayActive && inGameplay && _bmWasFocused && pastToggleSettle)
+            {
+                _hudFrames++;
+                _hudSumDtMs += dtMs;
+                if (dtMs > _hudMaxDtMs)
+                    _hudMaxDtMs = dtMs;
+                _hudModCpuTicks += _frameModCpuTicks;
+                if (dtMs > HitchThresholdMs)
+                    _hudHitches++;
+                for (int i = 0; i < BucketCount; i++)
+                    _hudBucketTicks[i] += _ticks[i];
+
+                if (unscaledNow >= _nextHudRefreshUnscaledTime && _hudFrames > 0)
+                {
+                    double avgDt = _hudSumDtMs / _hudFrames;
+                    double fps = avgDt > 0.01 ? (1000.0 / avgDt) : 0.0;
+                    double avgModMs = (_hudModCpuTicks * _ticksToMs) / _hudFrames;
+                    double pct60 = (avgModMs / 16.6667) * 100.0;
+
+                    _hudSb.Clear();
+                    if (_bmModEnabled)
+                        _hudSb.Append("[BATTLE HARDENED v").Append(Plugin.PluginVersion).Append("]  ");
+                    else
+                        _hudSb.Append("[VANILLA AI — F8 OFF]  ");
+
+                    _hudSb.Append(fps.ToString("F0")).Append(" FPS (")
+                          .Append(avgDt.ToString("F1")).Append("ms | Max ")
+                          .Append(_hudMaxDtMs.ToString("F1")).Append("ms)  |  Hitches:")
+                          .Append(_hudHitches).Append("  Errs:").Append(AiCore.TotalCaughtPatchExceptions);
+                    _hudLine1 = _hudSb.ToString();
+
+                    _hudSb.Clear();
+                    if (_bmModEnabled)
+                    {
+                        _hudSb.Append("Mod CPU: ").Append(avgModMs.ToString("F2"))
+                              .Append("ms/f (").Append(pct60.ToString("F1")).Append("% of 60fps)  |  Top: ");
+                        AppendTopModSubsystems(_hudSb, _hudBucketTicks, _hudFrames, 2);
+                        _hudSb.Append("  |  Bots:").Append(AiCore.WorldSoldierCount);
+                    }
+                    else
+                    {
+                        _hudSb.Append("Mod CPU: ").Append(avgModMs.ToString("F2"))
+                              .Append("ms/f (Bypassed — Press F8 to A/B Compare)  |  Bots:").Append(AiCore.WorldSoldierCount);
+                    }
+                    _hudLine2 = _hudSb.ToString();
+                    _hudModEnabled = _bmModEnabled;
+                    _hudAvgModMs = avgModMs;
+
+                    _hudFrames = 0;
+                    _hudSumDtMs = 0.0;
+                    _hudMaxDtMs = 0f;
+                    _hudHitches = 0;
+                    _hudModCpuTicks = 0L;
+                    Array.Clear(_hudBucketTicks, 0, BucketCount);
+                    _nextHudRefreshUnscaledTime = unscaledNow + 0.5f;
+                }
+            }
+
+            if (!_flightRecorderActive)
+                return;
+
+            if (inGameplay && pastToggleSettle)
             {
                 if (_bmWasFocused)
                 {
@@ -551,6 +914,11 @@ namespace EasyRed2HumanAI
                     _winSumDtMs += dtMs;
                     if (dtMs > _winMaxDtMs)
                         _winMaxDtMs = dtMs;
+                    _winModCpuTicks += _frameModCpuTicks;
+                    for (int i = 0; i < BucketCount; i++)
+                        _winBucketTicks[i] += _ticks[i];
+                    if (_winDtCount < _winDtSamples.Length)
+                        _winDtSamples[_winDtCount++] = dtMs;
                 }
 
                 if (il2cppUsedDelta > 0)
@@ -569,7 +937,7 @@ namespace EasyRed2HumanAI
             }
 
             float effectiveThresholdMs = _bmWasFocused ? HitchThresholdMs : 80.0f;
-            if (inGameplay && dtMs > effectiveThresholdMs)
+            if (inGameplay && pastToggleSettle && dtMs > effectiveThresholdMs)
             {
                 _totalAutopsyHitches++;
                 _winHitches++;
@@ -611,16 +979,7 @@ namespace EasyRed2HumanAI
                 {
                     EmitRollingSummaryLog(curIl2CppUsed, curMonoHeap, curNetMem);
                 }
-                _nextSummaryUnscaledTime = unscaledNow + 15.0f;
-                _winFrames = 0;
-                _winHitches = 0;
-                _winMaxDtMs = 0f;
-                _winSumDtMs = 0.0;
-                _winIl2CppPosAllocBytes = 0;
-                _winPeakIl2CppFrameAllocBytes = 0;
-                _winIl2CppGcCount = 0;
-                _winNetPosAllocBytes = 0;
-                _winNetGcCount = 0;
+                ResetSummaryWindowState(unscaledNow + 15.0f);
             }
         }
 
@@ -869,6 +1228,17 @@ namespace EasyRed2HumanAI
             {
                 double avgDtMs = _winSumDtMs / _winFrames;
                 double avgFps = avgDtMs > 0.01 ? (1000.0 / avgDtMs) : 0.0;
+                double p99Ms = _winMaxDtMs;
+                double p99Fps = p99Ms > 0.01 ? (1000.0 / p99Ms) : 0.0;
+                if (_winDtCount > 0)
+                {
+                    Array.Sort(_winDtSamples, 0, _winDtCount);
+                    int p99Idx = Math.Min(_winDtCount - 1, (int)((_winDtCount - 1) * 0.99));
+                    p99Ms = _winDtSamples[p99Idx];
+                    p99Fps = p99Ms > 0.01 ? (1000.0 / p99Ms) : 0.0;
+                }
+                double avgModMs = (_winModCpuTicks * _ticksToMs) / _winFrames;
+                double pct60 = (avgModMs / 16.6667) * 100.0;
                 double avgIl2CppKb = (_winIl2CppPosAllocBytes / 1024.0) / _winFrames;
                 double peakIl2CppKb = _winPeakIl2CppFrameAllocBytes / 1024.0;
                 double avgNetKb = (_winNetPosAllocBytes / 1024.0) / _winFrames;
@@ -877,7 +1247,13 @@ namespace EasyRed2HumanAI
                 _sb.Append("[HitchSummary 15s] Mod:").Append(_bmModEnabled ? "ON" : "OFF")
                    .Append(" | Frames:").Append(_winFrames)
                    .Append(" AvgFPS:").Append(avgFps.ToString("F0"))
-                   .Append(" (").Append(avgDtMs.ToString("F2")).Append("ms, Max:").Append(_winMaxDtMs.ToString("F1")).Append("ms)")
+                   .Append(" (").Append(avgDtMs.ToString("F2")).Append("ms, P99:")
+                   .Append(p99Ms.ToString("F1")).Append("ms/").Append(p99Fps.ToString("F0")).Append("fps, Max:")
+                   .Append(_winMaxDtMs.ToString("F1")).Append("ms)")
+                   .Append(" | ModCPU:").Append(avgModMs.ToString("F2")).Append("ms/f (")
+                   .Append(pct60.ToString("F1")).Append("% of 60fps, Top:");
+                AppendTopModSubsystems(_sb, _winBucketTicks, _winFrames, 3);
+                _sb.Append(')')
                    .Append(" | Hitches15s:").Append(_winHitches).Append(" (Total:").Append(_totalAutopsyHitches).Append(')')
                    .Append(" | IL2CPP[AvgAlloc:").Append(avgIl2CppKb.ToString("F1"))
                    .Append("KB/f, PeakFrame:").Append(peakIl2CppKb.ToString("F1"))
@@ -892,7 +1268,14 @@ namespace EasyRed2HumanAI
                    .Append("] | NetSync[Flush:").Append(VeteranAndTacticsPatches.ScoreboardCoalescedFlushesCount)
                    .Append(",Sup:").Append(VeteranAndTacticsPatches.ScoreboardVanillaPacketsSuppressedCount)
                    .Append(",BotRPC:").Append(AiCore.BotRpcBudgetGrantedCount)
-                   .Append('/').Append(AiCore.BotRpcBudgetThrottledCount).Append(']');
+                   .Append('/').Append(AiCore.BotRpcBudgetThrottledCount);
+                if (AiCore.GetConnectedPlayerCount() > 1)
+                {
+                    _sb.Append(",RTT:").Append(AiCore.CachedEffectiveMaxRttMs)
+                       .Append("ms(").Append(AiCore.CachedCoopRpcCongestionScale.ToString("F1")).Append("x)");
+                }
+                _sb.Append(']')
+                   .Append(" | PatchErrs:").Append(AiCore.TotalCaughtPatchExceptions);
 
                 AiCore.EnqueueAsyncLog(false, _sb.ToString());
             }

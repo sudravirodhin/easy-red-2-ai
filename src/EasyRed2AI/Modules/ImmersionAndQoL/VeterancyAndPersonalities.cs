@@ -64,6 +64,8 @@ namespace EasyRed2HumanAI
             public SoldierPersonality Personality;
             public byte RoleCategory;
             public bool NameInitialized;
+            public bool LeaderPromotionEvaluated;
+            public bool RoseToTheOccasion;
         }
 
         internal static readonly Dictionary<IntPtr, (SoldierPersonality Pers, float ExpireTime)> _cachedVehiclePersonalities =
@@ -72,6 +74,7 @@ namespace EasyRed2HumanAI
         // Telemetry counters for debug / toast feedback
         public static int ActiveVeteransCount;
         public static int FieldPromotionsCount;
+        public static int RisenLeadersCount;
         public static int SelfPreservationDrops;
         public static int BipodsDeployed;
         public static int WallsBlocked;
@@ -97,6 +100,8 @@ namespace EasyRed2HumanAI
         public static int TankStandoffHoldsCount;
         public static int FriendlyRoadkillsPreventedCount;
         public static int BridgeCrossingsAssistedCount;
+        public static int GrenadesKickedCount;
+        public static int GrenadesEvadedCount;
         public static int ShellShockSurrendersCount;
 
         private static byte DetermineVehicleRoleCategory(Vehicle veh)
@@ -240,6 +245,10 @@ namespace EasyRed2HumanAI
                     rawName = rawName.Substring(0, bracketIdx);
 
                 byte roleCat = DetermineRoleCategory(s);
+                SoldierPersonality rolledPers = RollPersonalityForRole(s, roleCat);
+                bool spawnedAsLeader = roleCat == 1 ||
+                                       s.IsSquadLeader() ||
+                                       (s.joinedSquad != null && s.joinedSquad.Leader != null && s.joinedSquad.Leader.Pointer == s.Pointer);
                 float jitter = (AiCore.GetDeterministicHash(h.Ptr, 43) & 63) * 0.04f;
                 rec = new SoldierRecord
                 {
@@ -251,35 +260,202 @@ namespace EasyRed2HumanAI
                     BaseRank = s.rank,
                     BaseName = rawName,
                     RoleCategory = roleCat,
-                    Personality = RollPersonalityForRole(s, roleCat)
+                    Personality = rolledPers,
+                    LeaderPromotionEvaluated = spawnedAsLeader || IsLeaderPersonality(rolledPers),
+                    RoseToTheOccasion = false
                 };
             }
-            else if (now >= rec.NextRoleCheckTime)
-            {
-                rec.NextRoleCheckTime = now + 4.0f;
-                bool preserveCrewRole = false;
-                if (rec.RoleCategory >= 8 && !s.IsOnVehicle())
-                {
-                    Squad sq = s.joinedSquad;
-                    bool joinedOpenInfantry = sq != null &&
-                                              sq.isOpenForJoiners &&
-                                              !AiCore.IsTrueVehicleCrewSquad(sq) &&
-                                              !AiCore.IsConfirmedPlaneCrewSquad(sq);
-                    preserveCrewRole = !joinedOpenInfantry;
-                }
+            return rec;
+        }
 
-                if (!preserveCrewRole)
+        internal static bool IsLeaderPersonality(SoldierPersonality p)
+        {
+            return p == SoldierPersonality.Leader_Spearhead ||
+                   p == SoldierPersonality.Leader_Tactician ||
+                   p == SoldierPersonality.Leader_OldGuard;
+        }
+
+        internal static bool HasSoldierRisenToOccasion(Soldier s)
+        {
+            return !ReferenceEquals(s, null) &&
+                   s != null &&
+                   s.Pointer != IntPtr.Zero &&
+                   AiCore.TryGetSoldierHandles(s.Pointer, out AiCore.SoldierFastHandles h) &&
+                   h.Veterancy.Record.Initialized &&
+                   h.Veterancy.Record.RoseToTheOccasion;
+        }
+
+        private static SoldierPersonality ResolveRiseToOccasionPersonality(Soldier s, SoldierPersonality originalPers)
+        {
+            switch (originalPers)
+            {
+                case SoldierPersonality.Assaulter_Shock:
+                case SoldierPersonality.Assaulter_Breacher:
+                case SoldierPersonality.Assaulter_Skirmisher:
+                case SoldierPersonality.Gunner_AssaultMG:
+                case SoldierPersonality.AT_TankHunter:
+                case SoldierPersonality.AT_Demolitionist:
+                case SoldierPersonality.Medic_Heroic:
+                case SoldierPersonality.TankCrew_Brawler:
+                case SoldierPersonality.LightCrew_Outrider:
+                case SoldierPersonality.Pilot_Daredevil:
+                    return SoldierPersonality.Leader_Spearhead;
+
+                case SoldierPersonality.Rifleman_Regular:
+                case SoldierPersonality.Rifleman_Grenadier:
+                case SoldierPersonality.Gunner_Overwatch:
+                case SoldierPersonality.Marksman_Spotter:
+                case SoldierPersonality.Medic_Combat:
+                case SoldierPersonality.TankCrew_Support:
+                case SoldierPersonality.LightCrew_Escort:
+                case SoldierPersonality.Pilot_Ace:
+                    return SoldierPersonality.Leader_Tactician;
+
+                default:
                 {
-                    byte currentRoleCat = DetermineRoleCategory(s);
-                    if (currentRoleCat != rec.RoleCategory)
-                    {
-                        rec.RoleCategory = currentRoleCat;
-                        rec.Personality = RollPersonalityForRole(s, currentRoleCat);
-                        rec.NameInitialized = false;
-                    }
+                    int surgeRoll = s != null ? (AiCore.GetDeterministicHash(s.Pointer, 947) % 100) : 50;
+                    return surgeRoll < 20 ? SoldierPersonality.Leader_Spearhead : SoldierPersonality.Leader_OldGuard;
                 }
             }
-            return rec;
+        }
+
+        internal static float ComputeLeaderBraveryAura(Soldier leader)
+        {
+            if (ReferenceEquals(leader, null) ||
+                leader == null ||
+                leader.Pointer == IntPtr.Zero ||
+                !leader.IsAlive ||
+                leader.IsInjured ||
+                leader.HasSurrended() ||
+                !VisionConfig.EnableMod.Value ||
+                !VisionConfig.EnableRolePersonalities.Value ||
+                !VisionConfig.EnableInfantryPersonalities.Value)
+            {
+                return 0f;
+            }
+
+            float vet01 = GetVeterancy01(leader);
+            SoldierPersonality pers = GetPersonality(leader);
+            switch (pers)
+            {
+                case SoldierPersonality.Leader_Spearhead:
+                    return 0.09f + 0.07f * vet01;
+                case SoldierPersonality.Leader_Tactician:
+                    return 0.05f + 0.05f * vet01;
+                case SoldierPersonality.Leader_OldGuard:
+                    return 0.04f + 0.05f * vet01;
+                case SoldierPersonality.Assaulter_Shock:
+                case SoldierPersonality.Assaulter_Breacher:
+                case SoldierPersonality.Assaulter_Skirmisher:
+                case SoldierPersonality.Gunner_AssaultMG:
+                case SoldierPersonality.AT_TankHunter:
+                case SoldierPersonality.AT_Demolitionist:
+                case SoldierPersonality.Medic_Heroic:
+                case SoldierPersonality.TankCrew_Brawler:
+                case SoldierPersonality.LightCrew_Outrider:
+                case SoldierPersonality.Pilot_Daredevil:
+                    return 0.04f + 0.04f * vet01;
+                case SoldierPersonality.Rifleman_Regular:
+                case SoldierPersonality.Rifleman_Grenadier:
+                case SoldierPersonality.Gunner_Overwatch:
+                case SoldierPersonality.Marksman_Spotter:
+                case SoldierPersonality.Medic_Combat:
+                case SoldierPersonality.TankCrew_Support:
+                case SoldierPersonality.LightCrew_Escort:
+                case SoldierPersonality.Pilot_Ace:
+                    return 0.01f + 0.03f * vet01;
+                case SoldierPersonality.None:
+                    return 0f;
+                default:
+                    return -0.03f + 0.04f * vet01;
+            }
+        }
+
+        internal static bool TryEvaluateRiseToTheOccasion(Soldier s, Squad sq, ref SquadBlackboard board, float now, bool hasBoard)
+        {
+            if (ReferenceEquals(s, null) ||
+                s == null ||
+                s.Pointer == IntPtr.Zero ||
+                !s.IsAlive ||
+                s.IsInjured ||
+                s.HasSurrended() ||
+                ReferenceEquals(sq, null) ||
+                sq == null ||
+                sq.Pointer == IntPtr.Zero ||
+                sq.CountMembers < 2)
+            {
+                return false;
+            }
+
+            Soldier sqLdr = sq.Leader;
+            if (sqLdr == null || sqLdr.Pointer != s.Pointer)
+                return false;
+
+            GetOrCreateRecord(s);
+            AiCore.SoldierFastHandles h = AiCore.GetOrCreateSoldierHandles(s);
+            if (h == null)
+                return false;
+
+            ref SoldierRecord rec = ref h.Veterancy.Record;
+            if (!rec.Initialized || rec.LeaderPromotionEvaluated)
+                return false;
+
+            rec.LeaderPromotionEvaluated = true;
+
+            if (IsLeaderPersonality(rec.Personality) ||
+                !VisionConfig.EnableMod.Value ||
+                !VisionConfig.EnableRolePersonalities.Value ||
+                !VisionConfig.EnableInfantryPersonalities.Value)
+            {
+                return false;
+            }
+
+            int tier = VisionConfig.EnableVeteranSystem.Value ? GetVeteranTier(s) : 0;
+            int chancePct = tier >= 3 ? 60 : (tier == 2 ? 45 : (tier == 1 ? 30 : 20));
+            int roll100 = AiCore.GetDeterministicHash(s.Pointer, s._randomSeed_k__BackingField ^ 0x5A3C) % 100;
+            if (roll100 >= chancePct)
+                return false;
+
+            SoldierPersonality promoted = ResolveRiseToOccasionPersonality(s, rec.Personality);
+            rec.Personality = promoted;
+            rec.RoseToTheOccasion = true;
+            rec.NameInitialized = false;
+            h.Emergent.WeightsInitialized = false;
+            RisenLeadersCount++;
+
+            RefreshSoldierBracketNameAndRoster(s, ref rec);
+            RefreshSquadSoldierLabelIfShown(s);
+
+            if (hasBoard && board.LeaderShockUntil > now)
+            {
+                board.LeaderShockUntil = now + (board.LeaderShockUntil - now) * 0.50f;
+                board.LeaderShockPeak *= 0.60f;
+            }
+
+            string archLabel = GetPersonalityTag(promoted);
+            Soldier localPlayer = Soldier.CurrentControlledSoldierOrNull();
+            if (localPlayer != null && localPlayer.Pointer == s.Pointer)
+            {
+                string msg = $"Rise to the Occasion! Command forged you into a {archLabel} leader.";
+                try { PlayerController.HintToPlayer(msg, false); } catch { }
+                VisionPatches.ShowToast($"[Battle Hardened] {msg}", 5.0f);
+            }
+            else if (sq.IsPlayerInSquad())
+            {
+                string cleanName = string.IsNullOrEmpty(rec.BaseName) ? "Your new Squad Leader" : rec.BaseName;
+                AiCore.TryShowLocalPlayerRadioHint(
+                    sq,
+                    $"Chain of Command: {cleanName} rose to the occasion ({archLabel})!",
+                    requireLeader: false,
+                    minInterval: 4.0f);
+            }
+
+            if (!s.IsPlayer())
+            {
+                TrySayTacticalVoice(s, sq, VoiceManager.VoiceClip.followMe, 0.0f);
+            }
+
+            return true;
         }
 
         public static SoldierPersonality GetPersonality(Soldier s)
@@ -453,20 +629,39 @@ namespace EasyRed2HumanAI
                     break;
             }
 
-            // Squad Leader Spearhead Aura (+12 suppression grit when leader is alive within 22m)
+            // Squad Leader Leadership Suppression Grit (+12 Spearhead / +8 Old Guard / +4 Tactician within 22m)
+            // minus decaying SL-death shock penalty when officer leadership falls
             if (!ReferenceEquals(s, null) && s != null && s.joinedSquad != null)
             {
-                Soldier leader = s.joinedSquad.Leader;
-                if (leader != null && leader.IsAlive && leader.Pointer != s.Pointer &&
-                    GetPersonality(leader) == SoldierPersonality.Leader_Spearhead)
+                Squad sq = s.joinedSquad;
+                Soldier leader = sq.Leader;
+                if (leader != null && leader.IsAlive && !leader.IsInjured && !leader.HasSurrended() && leader.Pointer != s.Pointer)
                 {
-                    AiCore.SoldierFastHandles sh = AiCore.GetOrCreateSoldierHandles(s);
-                    AiCore.SoldierFastHandles lh = AiCore.GetOrCreateSoldierHandles(leader);
-                    if (sh != null && lh != null && sh.Tr != null && lh.Tr != null &&
-                        (lh.Tr.position - sh.Tr.position).sqrMagnitude <= 22f * 22f)
+                    SoldierPersonality leaderPers = GetPersonality(leader);
+                    float auraBonus = leaderPers == SoldierPersonality.Leader_Spearhead
+                        ? 12f
+                        : (leaderPers == SoldierPersonality.Leader_OldGuard
+                            ? 8f
+                            : (leaderPers == SoldierPersonality.Leader_Tactician ? 4f : 0f));
+                    if (auraBonus > 0f)
                     {
-                        threshold += 12f;
+                        AiCore.SoldierFastHandles sh = AiCore.GetOrCreateSoldierHandles(s);
+                        AiCore.SoldierFastHandles lh = AiCore.GetOrCreateSoldierHandles(leader);
+                        if (sh != null && lh != null && sh.Tr != null && lh.Tr != null &&
+                            (lh.Tr.position - sh.Tr.position).sqrMagnitude <= 22f * 22f)
+                        {
+                            threshold += auraBonus;
+                        }
                     }
+                }
+
+                if (sq.Pointer != IntPtr.Zero &&
+                    _squadBlackboards.TryGetValue(sq.Pointer, out SquadBlackboard b) &&
+                    Time.time < b.LeaderShockUntil &&
+                    b.LeaderShockPeak > 0.001f)
+                {
+                    float shockFrac = Mathf.Clamp01((b.LeaderShockUntil - Time.time) / 20.0f);
+                    threshold = Mathf.Max(12f, threshold - 8f * shockFrac * Mathf.Lerp(1.0f, 0.55f, vet01));
                 }
             }
 
@@ -553,6 +748,36 @@ namespace EasyRed2HumanAI
             }
         }
 
+        private static void RefreshSoldierBracketNameAndRoster(Soldier s, ref SoldierRecord rec)
+        {
+            if (ReferenceEquals(s, null) || s == null || s.Pointer == IntPtr.Zero)
+                return;
+
+            rec.NameInitialized = true;
+
+            bool showVetTag = VisionConfig.EnableVeteranSystem.Value && (VisionConfig.ShowVeteranSquadRosterTags.Value || VisionConfig.ShowVeteran3DIcons.Value);
+            bool showPersTag = VisionConfig.EnableRolePersonalities.Value && VisionConfig.ShowPersonalityInSquadRoster.Value;
+            string baseName = string.IsNullOrEmpty(rec.BaseName) ? (s.name_surname ?? "") : rec.BaseName;
+            int bracketIdx = baseName.IndexOf(" [", StringComparison.Ordinal);
+            if (bracketIdx >= 0)
+                baseName = baseName.Substring(0, bracketIdx);
+
+            string desiredName = baseName + BuildSoldierBracketTag(s, showVetTag, showPersTag, false);
+            if (s.name_surname != desiredName)
+            {
+                s.name_surname = desiredName;
+            }
+
+            Soldier controlled = Soldier.CurrentControlledSoldierOrNull();
+            if (controlled != null &&
+                controlled.joinedSquad != null &&
+                s.joinedSquad != null &&
+                controlled.joinedSquad.Pointer == s.joinedSquad.Pointer)
+            {
+                RefreshBottomLeftSquadRosterVisuals();
+            }
+        }
+
         private static void CheckAndApplyFieldPromotion(Soldier s)
         {
             AiCore.SoldierFastHandles h = AiCore.GetOrCreateSoldierHandles(s);
@@ -600,29 +825,7 @@ namespace EasyRed2HumanAI
 
             if (tierPromoted || !rec.NameInitialized)
             {
-                rec.NameInitialized = true;
-
-                bool showVetTag = VisionConfig.EnableVeteranSystem.Value && (VisionConfig.ShowVeteranSquadRosterTags.Value || VisionConfig.ShowVeteran3DIcons.Value);
-                bool showPersTag = VisionConfig.EnableRolePersonalities.Value && VisionConfig.ShowPersonalityInSquadRoster.Value;
-                string baseName = string.IsNullOrEmpty(rec.BaseName) ? (s.name_surname ?? "") : rec.BaseName;
-                int bracketIdx = baseName.IndexOf(" [", StringComparison.Ordinal);
-                if (bracketIdx >= 0)
-                    baseName = baseName.Substring(0, bracketIdx);
-
-                string desiredName = baseName + BuildSoldierBracketTag(s, showVetTag, showPersTag, false);
-                if (s.name_surname != desiredName)
-                {
-                    s.name_surname = desiredName;
-                }
-
-                Soldier controlled = Soldier.CurrentControlledSoldierOrNull();
-                if (controlled != null &&
-                    controlled.joinedSquad != null &&
-                    s.joinedSquad != null &&
-                    controlled.joinedSquad.Pointer == s.joinedSquad.Pointer)
-                {
-                    RefreshBottomLeftSquadRosterVisuals();
-                }
+                RefreshSoldierBracketNameAndRoster(s, ref rec);
             }
         }
 
@@ -756,18 +959,27 @@ namespace EasyRed2HumanAI
                             return;
                     }
 
-                    // Active 360-Degree Tank Commander Periscope / Cupola Horizon Scan:
+                    // Active 360-Degree Tank Commander Periscope / Cupola Horizon Scan & Under-Fire Slewing:
                     // Native TurretAI.AutoPilot (0x180830802) returns immediately when CurrentVisibleTarget == null without
-                    // ever calling TurretCommander.RotateToward, leaving the Commander's periscope frozen dead ahead!
-                    // When unengaged, orient toward recent enemy gunfire or continuously pan 360 degrees around the tank.
+                    // ever calling TurretCommander.RotateToward or slewing main/coax/AA turrets toward incoming fire!
+                    // Priority #0: slew toward active incoming attacker bearing when idle; otherwise commander scans gunfire / 360.
                     if (owned && traits.IsCommanderTurret && (curTarget == null || curTarget.Pointer == IntPtr.Zero))
                     {
                         string cmdFac = (__0 != null && !string.IsNullOrEmpty(__0.faction))
                             ? __0.faction
                             : GetVehicleCrewFaction(veh, turret);
                         Vector3 scanDir;
-                        if (!string.IsNullOrEmpty(cmdFac) &&
-                            VisionPatches.TryGetDominantEnemyGunfireDirection(turret.GetFirePos(), cmdFac, 185f, 3.5f, out Vector3 gunDir, out _, out _))
+                        if (traits.VehHandles != null &&
+                            now < traits.VehHandles.UnderFireUntil)
+                        {
+                            Vector3 ufTargetPos = AiCore.TryGetSpottableCenter(traits.VehHandles.UnderFireAttacker, out Vector3 liveUfPos)
+                                ? liveUfPos
+                                : traits.VehHandles.UnderFireFromPos;
+                            Vector3 toUf = ufTargetPos - turret.GetFirePos();
+                            scanDir = toUf.sqrMagnitude > 0.25f ? toUf.normalized : Vector3.forward;
+                        }
+                        else if (!string.IsNullOrEmpty(cmdFac) &&
+                                 VisionPatches.TryGetDominantEnemyGunfireDirection(turret.GetFirePos(), cmdFac, 185f, 3.5f, out Vector3 gunDir, out _, out _))
                         {
                             scanDir = gunDir;
                         }
@@ -777,6 +989,29 @@ namespace EasyRed2HumanAI
                             scanDir = new Vector3(Mathf.Sin(phaseRad), 0f, Mathf.Cos(phaseRad));
                         }
                         turret.RotateToward(scanDir, 0f);
+                    }
+                    else if (owned &&
+                             !traits.IsCommanderTurret &&
+                             (__0 == null || !__0.IsPlayer()) &&
+                             (curTarget == null || curTarget.Pointer == IntPtr.Zero) &&
+                             !__instance.HasRadioSupportRequest &&
+                             traits.VehHandles != null &&
+                             now < traits.VehHandles.UnderFireUntil)
+                    {
+                        Vector3 firePos = turret.GetFirePos();
+                        Vector3 threatPos = AiCore.TryGetSpottableCenter(traits.VehHandles.UnderFireAttacker, out Vector3 livePos)
+                            ? livePos
+                            : traits.VehHandles.UnderFireFromPos;
+                        Vector3 toThreat = threatPos - firePos;
+                        float d = toThreat.magnitude;
+                        if (d >= 4.0f)
+                        {
+                            Vector3 threatDir = toThreat / d;
+                            if (turret.CanShootInDirection(threatDir, 1.0f))
+                            {
+                                turret.RotateToward(threatDir, 0f);
+                            }
+                        }
                     }
 
                     // Dynamic Human Turret / Emplacement Sight-Lay & Trail-Shift Reaction Time:

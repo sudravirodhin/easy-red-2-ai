@@ -235,6 +235,126 @@ namespace EasyRed2HumanAI
             }
         }
 
+        [HarmonyPatch(typeof(Soldier), nameof(Soldier.SayClip))]
+        public static class Soldier_SayClip_Patch
+        {
+            private static float ComputeDeterministicVoiceBasePitch(Soldier s, AiCore.SoldierFastHandles h)
+            {
+                string rawName = h != null && !string.IsNullOrEmpty(h.CachedFullName)
+                    ? h.CachedFullName
+                    : (s.name_surname ?? string.Empty);
+
+                int baseLen = rawName.IndexOf(" [", StringComparison.Ordinal);
+                if (baseLen < 0)
+                    baseLen = rawName.Length;
+
+                uint hash = 2166136261u;
+                for (int i = 0; i < baseLen; i++)
+                {
+                    hash ^= rawName[i];
+                    hash *= 16777619u;
+                }
+
+                int bornYear = s.bornYear;
+                int seedVal = s._randomSeed_k__BackingField;
+                hash ^= unchecked((uint)bornYear);
+                hash *= 16777619u;
+                hash ^= unchecked((uint)seedVal);
+                hash *= 16777619u;
+
+                // Only mix native pointer if neither name nor network seed identifies the soldier
+                if (baseLen == 0 && seedVal == 0)
+                {
+                    hash ^= unchecked((uint)AiCore.GetDeterministicHash(s.Pointer, 757));
+                    hash *= 16777619u;
+                }
+
+                // Murmur3 fmix32 finalizer for uniform bit distribution
+                hash ^= hash >> 16;
+                hash *= 0x85ebca6bu;
+                hash ^= hash >> 13;
+                hash *= 0xc2b2ae35u;
+                hash ^= hash >> 16;
+
+                float hashSpread = (((hash & 0xFFFFu) / 65535.0f) * 2.0f - 1.0f) * 0.058f;
+                float ageBias = (bornYear >= 1895 && bornYear <= 1928)
+                    ? Mathf.Clamp((bornYear - 1915) / 12.0f, -1.0f, 1.0f) * 0.014f
+                    : 0.0f;
+
+                return Mathf.Clamp(1.0f + hashSpread + ageBias, 0.93f, 1.07f);
+            }
+
+            public static void Prefix(Soldier __instance, AudioClip __0, bool __1, out float __state)
+            {
+                __state = 0f;
+                try
+                {
+                    if (ReferenceEquals(__instance, null) || __instance == null || __instance.Pointer == IntPtr.Zero || __0 == null)
+                        return;
+
+                    AudioSource src = __instance.voiceSoundEmitter;
+                    if (src == null)
+                        return;
+
+                    if (!VisionConfig.EnableMod.Value || !VisionConfig.EnableDynamicSoldierVoicePitch.Value)
+                    {
+                        if (Mathf.Abs(src.pitch - 1.0f) > 0.001f)
+                            src.pitch = 1.0f;
+                        return;
+                    }
+
+                    AiCore.SoldierFastHandles h = AiCore.GetOrCreateSoldierHandles(__instance);
+                    if (h != null && h.CachedVoiceBasePitch <= 0.01f)
+                        h.CachedVoiceBasePitch = ComputeDeterministicVoiceBasePitch(__instance, h);
+
+                    float basePitch = h != null
+                        ? h.CachedVoiceBasePitch
+                        : ComputeDeterministicVoiceBasePitch(__instance, null);
+
+                    uint lineSeq = h != null ? ++h.VoiceLineCounter : 1u;
+                    int infHash = AiCore.GetDeterministicHash(__instance.Pointer, unchecked((int)(lineSeq * 131u)));
+                    float inflection = (((infHash & 0xFF) / 255.0f) * 2.0f - 1.0f) * 0.010f;
+                    float stressLift = (__instance.IsInjured || __instance.suppressionValue >= 60) ? 0.012f : 0.0f;
+
+                    float finalPitch = Mathf.Clamp(basePitch + inflection + stressLift, 0.92f, 1.08f);
+                    src.pitch = finalPitch;
+                    __state = finalPitch;
+                }
+                catch { }
+            }
+
+            public static void Postfix(Soldier __instance, AudioClip __0, bool __1, float __state)
+            {
+                try
+                {
+                    if (__state <= 0.01f ||
+                        ReferenceEquals(__instance, null) ||
+                        __instance == null ||
+                        __instance.Pointer == IntPtr.Zero ||
+                        __0 == null)
+                    {
+                        return;
+                    }
+
+                    float clipLen = __0.length;
+                    if (clipLen <= 0.01f)
+                        return;
+
+                    // Only scale talk/lock timers if native SayClip actually started playing this clip
+                    if (Mathf.Abs(__instance.talkEndTime - (Time.unscaledTime + clipLen)) < 0.06f)
+                    {
+                        float scaledLen = clipLen / __state;
+                        __instance.talkEndTime = Time.unscaledTime + scaledLen;
+                        if (__1 && scaledLen > clipLen)
+                        {
+                            __instance.voiceLockedUntil = Mathf.Max(__instance.voiceLockedUntil, Time.time + scaledLen + 0.1f);
+                        }
+                    }
+                }
+                catch { }
+            }
+        }
+
         [HarmonyPatch(typeof(BulletInstance), nameof(BulletInstance.OnHit))]
         public static class BulletInstance_OnHit_Patch
         {
@@ -272,6 +392,8 @@ namespace EasyRed2HumanAI
 
                     if (!VisionConfig.EnableMod.Value)
                         return true;
+
+                    VeteranAndTacticsPatches.NotifyProjectileImpactReaction(__instance, hitDirection, bulletData, hit);
 
                     // Prevent diving aircraft AP cannons/HMGs from falsely ricocheting off simplified
                     // tank hull/turret box colliders before VehicleDamagablePart.TryPenetrateArmor runs,
@@ -356,7 +478,7 @@ namespace EasyRed2HumanAI
                 RaycastHit hit,
                 bool __state)
             {
-                long profStart = HitchProfiler.Begin();
+                long profStart = HitchProfiler.BeginModScope();
                 try
                 {
                     if (__state && __instance != null)
@@ -483,7 +605,7 @@ namespace EasyRed2HumanAI
                 catch { }
                 finally
                 {
-                    HitchProfiler.End(HitchBucket.BallisticsExpl, profStart);
+                    HitchProfiler.EndModScope(HitchBucket.BallisticsExpl, profStart);
                 }
             }
 
@@ -867,19 +989,27 @@ namespace EasyRed2HumanAI
         {
             public static bool Prefix(Soldier __instance, ref float __0, out bool __state)
             {
-                __state = !ReferenceEquals(__instance, null) &&
-                          __instance != null &&
-                          __instance.Pointer != IntPtr.Zero &&
-                          __instance.IsAlive;
+                long profStart = HitchProfiler.BeginModScope();
+                try
+                {
+                    __state = !ReferenceEquals(__instance, null) &&
+                              __instance != null &&
+                              __instance.Pointer != IntPtr.Zero &&
+                              __instance.IsAlive;
 
-                if (!ActiveCrewSpallContext)
-                    return true;
+                    if (!ActiveCrewSpallContext)
+                        return true;
 
-                if (ActiveCrewSpallMultiplier <= 0.001f)
-                    return false;
+                    if (ActiveCrewSpallMultiplier <= 0.001f)
+                        return false;
 
-                __0 = Mathf.Min(__0 * ActiveCrewSpallMultiplier, ActiveCrewSpallMaxDamage);
-                return __0 > 0.05f;
+                    __0 = Mathf.Min(__0 * ActiveCrewSpallMultiplier, ActiveCrewSpallMaxDamage);
+                    return __0 > 0.05f;
+                }
+                finally
+                {
+                    HitchProfiler.EndModScope(HitchBucket.DeathHitAttr, profStart);
+                }
             }
 
             public static void Postfix(Soldier __instance, bool __state)
@@ -1065,13 +1195,12 @@ namespace EasyRed2HumanAI
         [HarmonyPatch(typeof(BodyPart), nameof(BodyPart.TryDamageWithExplosion))]
         public static class BodyPart_TryDamageWithExplosion_Patch
         {
-            public static bool Prefix(BodyPart __instance, float __0)
+            public static bool Prefix(BodyPart __instance, float __0, Vector3 __2, Soldier __3)
             {
-                long profStart = HitchProfiler.Begin();
+                long profStart = HitchProfiler.BeginModScope();
                 try
                 {
                     if (!VisionConfig.EnableMod.Value ||
-                        !VisionConfig.EnableRealisticVehicleArmorAndTopAttack.Value ||
                         __instance == null ||
                         __instance.unit == null)
                     {
@@ -1079,6 +1208,25 @@ namespace EasyRed2HumanAI
                     }
 
                     Soldier victim = __instance.unit.TryCast<Soldier>();
+                    if (victim != null && victim.Pointer != IntPtr.Zero && victim.IsAlive)
+                    {
+                        if (victim.IsOnVehicle())
+                        {
+                            Vehicle expVeh = victim.GetCurrentVehicle();
+                            if (expVeh != null && expVeh.Pointer != IntPtr.Zero)
+                                VeteranAndTacticsPatches.NotifyExplosionReactionOnVehicle(expVeh, __2, __3);
+                        }
+                        else
+                        {
+                            VeteranAndTacticsPatches.NotifyExplosionReactionOnSoldier(victim, __2, __3);
+                        }
+                    }
+
+                    if (!VisionConfig.EnableRealisticVehicleArmorAndTopAttack.Value)
+                    {
+                        return true;
+                    }
+
                     if (victim == null || victim.Pointer == IntPtr.Zero || !victim.IsOnVehicle() || !victim.IsAlive)
                         return true;
 
@@ -1107,7 +1255,7 @@ namespace EasyRed2HumanAI
                 catch { }
                 finally
                 {
-                    HitchProfiler.End(HitchBucket.BallisticsExpl, profStart);
+                    HitchProfiler.EndModScope(HitchBucket.BallisticsExpl, profStart);
                 }
                 return true;
             }
@@ -1268,9 +1416,21 @@ namespace EasyRed2HumanAI
                 try
                 {
                     if (!VisionConfig.EnableMod.Value ||
-                        !VisionConfig.EnableRealisticVehicleArmorAndTopAttack.Value ||
                         __instance == null ||
                         __instance.Pointer == IntPtr.Zero)
+                    {
+                        return true;
+                    }
+
+                    Vehicle expRootVeh = __instance.rootVeh;
+                    if (expRootVeh == null || expRootVeh.Pointer == IntPtr.Zero)
+                        expRootVeh = __instance.GetRootVehicle();
+                    if (expRootVeh != null && expRootVeh.Pointer != IntPtr.Zero)
+                    {
+                        VeteranAndTacticsPatches.NotifyExplosionReactionOnVehicle(expRootVeh, __2, __3);
+                    }
+
+                    if (!VisionConfig.EnableRealisticVehicleArmorAndTopAttack.Value)
                     {
                         return true;
                     }

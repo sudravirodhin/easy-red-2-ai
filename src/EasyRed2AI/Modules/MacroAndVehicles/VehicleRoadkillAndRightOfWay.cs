@@ -71,7 +71,7 @@ namespace EasyRed2HumanAI
         /// with non-turret low-hull solid colliders so truck hoods, bumpers, and cargo beds
         /// (plus off-center vehicle pivots) are accurately covered without including elevated gun barrels.
         /// </summary>
-        private static Vector4 GetCachedVehicleLocalHullObb(Vehicle veh)
+        internal static Vector4 GetCachedVehicleLocalHullObb(Vehicle veh)
         {
             Vector4 fallback = new Vector4(1.65f, 3.10f, 0f, 0f);
             if (veh == null || veh.Pointer == IntPtr.Zero)
@@ -320,73 +320,126 @@ namespace EasyRed2HumanAI
             }
         }
 
-        private static void TryNudgeFriendlySoldierAside(
+        internal static bool TryEvadeFriendlyVehicleCorridor(
             Soldier s,
+            SoldierAI sAi,
+            AiCore.SoldierFastHandles sHandles,
             Vehicle veh,
-            Vector3 vehPos,
+            Vector3 hullCenter,
             Vector3 travelDir,
             Vector3 vehRight,
             float halfWidth,
             float now,
             bool ignoreHullCollision)
         {
-            AiCore.SoldierFastHandles sHandles = AiCore.GetOrCreateSoldierHandles(s);
-            if (sHandles == null || sHandles.Tr == null || !s.IsAI() || !AiCore.IsLocallyOwnedBot(s))
-                return;
+            if (sHandles == null || sHandles.Tr == null || s == null || !s.IsAI() || !AiCore.IsLocallyOwnedBot(sHandles) || AiCore.IsSoldierInVehicleOrTransition(s))
+                return false;
 
+            s.DisableHitByVehicleFor(2.0f);
             if (ignoreHullCollision && veh != null)
             {
                 TemporarilyIgnoreFriendlyVehicleCollision(s, veh, now + 1.85f);
             }
 
-            if (now < sHandles.Combat.NextFriendlyStepAsideTime)
-                return;
-
-            Vector3 sPos = sHandles.Tr.position;
-            Vector3 delta = sPos - vehPos;
-            float sideSign = Vector3.Dot(delta, vehRight) >= 0f ? 1f : -1f;
-            float stepDist = halfWidth + 2.35f;
-            int solidMask = AiCore.GetSolidEnvironmentMask();
-            Transform sRoot = sHandles.RootTr;
-
-            Vector3 sideDir = vehRight * sideSign;
-            Vector3 candidatePos = sPos + sideDir * stepDist + travelDir * 0.70f;
-            bool primaryValid = !AiCore.IsDirectionBlockedByEnvironment(sPos + Vector3.up * 0.75f, sideDir, 2.6f, sRoot) &&
-                                Physics.Raycast(candidatePos + Vector3.up * 0.85f, Vector3.down, 2.65f, solidMask, QueryTriggerInteraction.Ignore);
-
-            if (!primaryValid)
+            if ((sHandles.MoveOverride.Kind == AiCore.BotMoveOverrideKind.GrenadeReflex && now < sHandles.MoveOverride.ExpireTime) ||
+                s.isInBodyAnimation ||
+                (s.Params != null && !s.Params.canMove))
             {
-                sideSign = -sideSign;
-                sideDir = vehRight * sideSign;
-                candidatePos = sPos + sideDir * stepDist + travelDir * 0.70f;
-                primaryValid = !AiCore.IsDirectionBlockedByEnvironment(sPos + Vector3.up * 0.75f, sideDir, 2.6f, sRoot) &&
-                               Physics.Raycast(candidatePos + Vector3.up * 0.85f, Vector3.down, 2.65f, solidMask, QueryTriggerInteraction.Ignore);
+                return false;
             }
 
-            sHandles.Combat.NextFriendlyStepAsideTime = now + 1.15f;
+            if (s.UsingBipod())
+                s.UndeployBipodNow();
 
-            if (!primaryValid || s.UsingBipod() || s.isInBodyAnimation || (s.Params != null && !s.Params.canMove))
-                return;
+            sHandles.Stance.NoProneUntil = Mathf.Max(sHandles.Stance.NoProneUntil, now + 2.5f);
+            if (s.IsOnCover() || sHandles.Stance.LocalCoverProtectedUntil > now || sHandles.Stance.CoverSettledUntil > now)
+            {
+                sHandles.Stance.LocalCoverProtectedUntil = 0f;
+                sHandles.Stance.CoverSettledUntil = 0f;
+                sHandles.Goap.Plan.LockUnitCoverChange = false;
+                if (s.IsOnCover())
+                    s.CoverPosition(null);
+            }
 
-            SoldierAI sAi = sHandles.Ai;
             if (s.m_pose == SoldierPose.Prone)
             {
                 if (!ReferenceEquals(sAi, null) && sAi != null)
-                {
                     SetBotPose(sAi, s, SoldierPose.Idle, true);
-                }
                 else
-                {
                     s.SetPose(SoldierPose.Idle, false);
+            }
+
+            if (sHandles.MoveOverride.Kind == AiCore.BotMoveOverrideKind.VehicleEvade &&
+                now < sHandles.MoveOverride.ExpireTime &&
+                now < sHandles.Combat.NextFriendlyStepAsideTime)
+            {
+                if (!ReferenceEquals(sAi, null) && sAi != null &&
+                    !AiCore.IsDirectSegmentBlockedByWall(sHandles.Tr.position, sHandles.MoveOverride.Dest, out _))
+                {
+                    sAi.MoveDirectlyToward(sHandles.MoveOverride.Dest, 1.55f);
+                }
+                return true;
+            }
+
+            if (now < sHandles.Combat.NextFriendlyStepAsideTime)
+                return false;
+
+            Vector3 sPos = sHandles.Tr.position;
+            Vector3 delta = sPos - hullCenter;
+            float latSigned = Vector3.Dot(delta, vehRight);
+            float sideSign = latSigned >= 0f ? 1f : -1f;
+            float neededLat = Mathf.Max(2.2f, (halfWidth + 2.65f) - Mathf.Abs(latSigned));
+            int solidMask = AiCore.GetSolidEnvironmentMask();
+            Transform sRoot = sHandles.RootTr;
+            bool onBridge = VisionConfig.EnableBridgeCrossingDiscipline.Value && AiCore.IsOnBridgeOrNarrowCrossing(sPos);
+
+            Vector3 candidatePos = Vector3.zero;
+            bool primaryValid = false;
+            for (int attempt = 0; attempt < 3; attempt++)
+            {
+                Vector3 sideDir = vehRight * (attempt == 1 ? -sideSign : sideSign);
+                Vector3 cand = attempt == 2
+                    ? (sPos + (sideDir * 0.85f + travelDir * 0.52f) * neededLat)
+                    : (sPos + sideDir * neededLat + travelDir * 0.70f);
+                Vector3 rayDir = cand - sPos;
+                rayDir.y = 0f;
+                float rayDist = Mathf.Max(1.0f, rayDir.magnitude);
+                if (rayDist > 0.001f)
+                    rayDir /= rayDist;
+
+                if (!AiCore.IsDirectionBlockedByEnvironment(sPos + Vector3.up * 0.75f, rayDir, Mathf.Min(rayDist, 3.2f), sRoot) &&
+                    Physics.Raycast(cand + Vector3.up * 0.85f, Vector3.down, out RaycastHit groundHit, 2.65f, solidMask, QueryTriggerInteraction.Ignore))
+                {
+                    cand.y = groundHit.point.y;
+                    if (!onBridge || AiCore.IsSafeBridgeDeckStep(sPos, cand, out cand))
+                    {
+                        candidatePos = cand;
+                        primaryValid = true;
+                        break;
+                    }
                 }
             }
 
-            if (!ReferenceEquals(sAi, null) && sAi != null &&
-                s.transform != null &&
-                !AiCore.IsDirectSegmentBlockedByWall(s.transform.position, candidatePos, out _))
+            sHandles.Combat.NextFriendlyStepAsideTime = now + 0.85f;
+            if (!primaryValid)
+                return false;
+
+            if (ReferenceEquals(sAi, null) || sAi == null)
+                sAi = sHandles.Ai ?? s.aiController;
+            if (ReferenceEquals(sAi, null) || sAi == null)
+                return false;
+
+            AiCore.SetBotMoveOverride(sHandles, AiCore.BotMoveOverrideKind.VehicleEvade, candidatePos, now + 1.85f);
+            if ((candidatePos - sPos).sqrMagnitude <= 4.4f * 4.4f &&
+                !AiCore.IsDirectSegmentBlockedByWall(sPos, candidatePos, out _))
             {
-                sAi.MoveDirectlyToward(candidatePos, 1.45f);
+                sAi.MoveDirectlyToward(candidatePos, 1.55f);
             }
+            else
+            {
+                AiCore.SetBotMoveDestinationAndRefreshPath(sAi, candidatePos, 0.25f);
+            }
+            return true;
         }
 
         private static void EvaluateFriendlySoldierInVehicleCorridor(
@@ -397,7 +450,8 @@ namespace EasyRed2HumanAI
             Vector3 travelDir,
             Vector3 vehRight,
             float halfWidth,
-            float minFwd,
+            float minStepAsideFwd,
+            float minBrakeFwd,
             float maxStepAsideFwd,
             float maxBrakeFwd,
             float stepAsideHalfWidth,
@@ -420,7 +474,7 @@ namespace EasyRed2HumanAI
                 return;
 
             float fwdDist = Vector3.Dot(delta, travelDir);
-            if (fwdDist < minFwd || fwdDist > maxStepAsideFwd)
+            if (fwdDist < minStepAsideFwd || fwdDist > maxStepAsideFwd)
                 return;
 
             float latAbs = Mathf.Abs(Vector3.Dot(delta, vehRight));
@@ -428,15 +482,15 @@ namespace EasyRed2HumanAI
                 return;
 
             // Protect friendly soldier from accidental low-speed contact while clearing the corridor
-            s.DisableHitByVehicleFor(1.6f);
+            s.DisableHitByVehicleFor(2.0f);
 
             if (s.IsAI())
             {
-                bool closeHull = fwdDist <= (minFwd + 3.6f) && latAbs <= (halfWidth + 0.75f);
-                TryNudgeFriendlySoldierAside(s, veh, vehPos, travelDir, vehRight, halfWidth, now, closeHull);
+                bool closeHull = fwdDist <= (minBrakeFwd + 3.6f) && latAbs <= (halfWidth + 0.90f);
+                TryEvadeFriendlyVehicleCorridor(s, sHandles.Ai, sHandles, veh, vehPos, travelDir, vehRight, halfWidth, now, closeHull);
             }
 
-            if (fwdDist <= maxBrakeFwd && latAbs <= brakeHalfWidth)
+            if (fwdDist >= minBrakeFwd && fwdDist <= maxBrakeFwd && latAbs <= brakeHalfWidth)
             {
                 if (s.IsPlayer())
                     playerInBrakeCorridor = true;
@@ -487,20 +541,22 @@ namespace EasyRed2HumanAI
             vehRight.y = 0f;
             vehRight = vehRight.sqrMagnitude > 0.001f ? vehRight.normalized : Vector3.right;
 
-            Vector2 extents = GetCachedVehicleHalfExtents(veh);
-            float halfWidth = extents.x;
-            float halfLength = extents.y;
+            Vector4 obb = GetCachedVehicleLocalHullObb(veh);
+            float halfWidth = obb.x;
+            float halfLength = obb.y;
+            Vector3 hullCenter = vehPos + tr.right.normalized * obb.z + tr.forward.normalized * obb.w;
 
             float speedMs = 0f;
             MovableVehicle mv = veh.TryCast<MovableVehicle>();
             if (mv != null)
                 speedMs = Mathf.Abs(mv.GetCurrentSpeed());
 
-            float minFwd = Mathf.Max(0.85f, halfLength * 0.45f);
-            float maxStepAsideFwd = Mathf.Clamp(halfLength + 5.2f + speedMs * 0.65f, 5.5f, 11.0f);
-            float maxBrakeFwd = Mathf.Clamp(halfLength + 3.8f + speedMs * 0.55f, 4.5f, 9.0f);
-            float stepAsideHalfWidth = halfWidth + 1.45f;
-            float brakeHalfWidth = halfWidth + 0.70f;
+            float minStepAsideFwd = -halfLength * 0.35f;
+            float minBrakeFwd = Mathf.Max(0.25f, halfLength * 0.20f);
+            float maxStepAsideFwd = Mathf.Clamp(halfLength + 5.8f + speedMs * 0.85f, 6.0f, 17.5f);
+            float maxBrakeFwd = Mathf.Clamp(halfLength + 4.2f + speedMs * 0.75f, 4.8f, 14.0f);
+            float stepAsideHalfWidth = halfWidth + 1.85f;
+            float brakeHalfWidth = halfWidth + 0.85f;
 
             bool playerInBrakeCorridor = false;
             bool aiInBrakeCorridor = false;
@@ -509,8 +565,8 @@ namespace EasyRed2HumanAI
             if (player != null)
             {
                 EvaluateFriendlySoldierInVehicleCorridor(
-                    player, veh, vehFaction, vehPos, travelDir, vehRight,
-                    halfWidth, minFwd, maxStepAsideFwd, maxBrakeFwd, stepAsideHalfWidth, brakeHalfWidth,
+                    player, veh, vehFaction, hullCenter, travelDir, vehRight,
+                    halfWidth, minStepAsideFwd, minBrakeFwd, maxStepAsideFwd, maxBrakeFwd, stepAsideHalfWidth, brakeHalfWidth,
                     now, ref playerInBrakeCorridor, ref aiInBrakeCorridor);
             }
 
@@ -522,8 +578,8 @@ namespace EasyRed2HumanAI
                 for (int i = 0; i < crewCount; i++)
                 {
                     EvaluateFriendlySoldierInVehicleCorridor(
-                        crewUnits[i], veh, vehFaction, vehPos, travelDir, vehRight,
-                        halfWidth, minFwd, maxStepAsideFwd, maxBrakeFwd, stepAsideHalfWidth, brakeHalfWidth,
+                        crewUnits[i], veh, vehFaction, hullCenter, travelDir, vehRight,
+                        halfWidth, minStepAsideFwd, minBrakeFwd, maxStepAsideFwd, maxBrakeFwd, stepAsideHalfWidth, brakeHalfWidth,
                         now, ref playerInBrakeCorridor, ref aiInBrakeCorridor);
                 }
             }
@@ -545,7 +601,7 @@ namespace EasyRed2HumanAI
                     if (!AiCore.AreSameSideFactions(vehFaction, sqSnap.Faction))
                         continue;
 
-                    if ((sqSnap.RefPos - vehPos).sqrMagnitude > 48f * 48f)
+                    if ((sqSnap.RefPos - hullCenter).sqrMagnitude > 48f * 48f)
                         continue;
 
                     int uEnd = sqSnap.UnitStartIndex + sqSnap.UnitCount;
@@ -555,8 +611,8 @@ namespace EasyRed2HumanAI
                         if (f != null)
                         {
                             EvaluateFriendlySoldierInVehicleCorridor(
-                                f, veh, vehFaction, vehPos, travelDir, vehRight,
-                                halfWidth, minFwd, maxStepAsideFwd, maxBrakeFwd, stepAsideHalfWidth, brakeHalfWidth,
+                                f, veh, vehFaction, hullCenter, travelDir, vehRight,
+                                halfWidth, minStepAsideFwd, minBrakeFwd, maxStepAsideFwd, maxBrakeFwd, stepAsideHalfWidth, brakeHalfWidth,
                                 now, ref playerInBrakeCorridor, ref aiInBrakeCorridor);
                         }
                     }
@@ -571,8 +627,8 @@ namespace EasyRed2HumanAI
                     _vehicleContinuousYieldStart[vehPtr] = yieldStart;
                 }
 
-                // Always yield for the human player; yield up to 2.0s for AI infantry while they step aside
-                if (playerInBrakeCorridor || (now - yieldStart) <= 2.0f)
+                // Always yield for the human player; yield up to 3.5s for AI infantry while they step aside
+                if (playerInBrakeCorridor || (now - yieldStart) <= 3.5f)
                 {
                     _vehicleYieldUntilTime[vehPtr] = now + 0.24f;
                     if (TryRecordFriendlyYieldOrSave(vehPtr, now))
@@ -633,6 +689,40 @@ namespace EasyRed2HumanAI
                                 __instance.resumeDriveTime = pauseUntil;
                             return;
                         }
+                    }
+
+                    AiCore.VehicleFastHandles bvh = AiCore.GetOrCreateVehicleHandles(veh);
+                    if (bvh != null && Time.time < bvh.BoardingWaitUntil)
+                    {
+                        bool waitForBoarders = false;
+                        if (!__instance.hasEnemy && veh.HasSpace())
+                        {
+                            Squad sq = veh.GetSquadInside();
+                            if (sq != null && sq.units != null)
+                            {
+                                int uc = sq.units.Count;
+                                for (int ui = 0; ui < uc; ui++)
+                                {
+                                    Soldier u = sq.units[ui];
+                                    if (u != null && u.IsAlive && !u.IsOnVehicle() &&
+                                        u.HasDestinationAssigned && u.targetDestination != null &&
+                                        u.targetDestination.Pointer == veh.Pointer)
+                                    {
+                                        waitForBoarders = true;
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+
+                        if (waitForBoarders)
+                        {
+                            float pauseUntil = Time.time + 0.35f;
+                            if (__instance.resumeDriveTime < pauseUntil)
+                                __instance.resumeDriveTime = pauseUntil;
+                            return;
+                        }
+                        bvh.BoardingWaitUntil = 0f;
                     }
 
                     bool isReversing = __instance.going_in_retro;
@@ -719,7 +809,7 @@ namespace EasyRed2HumanAI
                     if (go == null)
                         return true;
 
-                    Soldier soldier = go.GetComponent<Soldier>();
+                    Soldier soldier = go.GetComponent<Soldier>() ?? go.GetComponentInParent<Soldier>();
                     if (soldier == null || soldier.Pointer == IntPtr.Zero || !soldier.IsAlive)
                         return true;
 
@@ -732,7 +822,7 @@ namespace EasyRed2HumanAI
                     if (isSameFaction)
                     {
                         // Friendly soldier: grant hit immunity and smoothly step AI bots clear of the hull/tracks!
-                        soldier.DisableHitByVehicleFor(1.65f);
+                        soldier.DisableHitByVehicleFor(2.0f);
 
                         float now = Time.time;
                         if (soldier.IsAI() && __instance.transform != null)
@@ -746,7 +836,8 @@ namespace EasyRed2HumanAI
                             vehRight = vehRight.sqrMagnitude > 0.001f ? vehRight.normalized : Vector3.right;
                             Vector3 hullCenter = __instance.transform.position + vehRight * obb.z + vehFwd * obb.w;
 
-                            TryNudgeFriendlySoldierAside(soldier, __instance, hullCenter, vehFwd, vehRight, obb.x, now, true);
+                            AiCore.SoldierFastHandles sHandles = AiCore.GetOrCreateSoldierHandles(soldier);
+                            TryEvadeFriendlyVehicleCorridor(soldier, sHandles != null ? sHandles.Ai : null, sHandles, __instance, hullCenter, vehFwd, vehRight, obb.x, now, true);
                         }
 
                         if ((soldier.IsPlayer() || __instance.PlayerIsInside()) && TryRecordFriendlyYieldOrSave(__instance.Pointer, now))

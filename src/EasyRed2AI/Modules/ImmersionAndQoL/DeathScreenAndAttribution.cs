@@ -570,9 +570,18 @@ namespace EasyRed2HumanAI
             {
                 try
                 {
-                    if (__0 == null ||
-                        __0.Code != DeathAttributionPhotonEventCode ||
-                        !VisionConfig.EnableMod.Value ||
+                    if (__0 == null || !VisionConfig.EnableMod.Value)
+                    {
+                        return;
+                    }
+
+                    if (__0.Code == GrenadeKickPhotonEventCode)
+                    {
+                        HandleRemoteGrenadeKickPhotonEvent(__0);
+                        return;
+                    }
+
+                    if (__0.Code != DeathAttributionPhotonEventCode ||
                         !VisionConfig.EnableDeathScreenAttribution.Value)
                     {
                         return;
@@ -615,7 +624,10 @@ namespace EasyRed2HumanAI
                         }
                     }
                 }
-                catch { }
+                catch (Exception ex)
+                {
+                    AiCore.ReportPatchException("Death.PhotonEv", ex);
+                }
             }
         }
 
@@ -696,6 +708,12 @@ namespace EasyRed2HumanAI
                     {
                         string shellFac = (__4 != null && __4.Pointer != IntPtr.Zero) ? AiCore.GetCachedFaction(__4) : srcVehFac;
                         RecordHeavyArtilleryShellingImpact(__0, __3, shellFac);
+                    }
+
+                    if (VisionConfig.EnableEmergentDecisionEngine != null && VisionConfig.EnableEmergentDecisionEngine.Value)
+                    {
+                        string expFac = (__4 != null && __4.Pointer != IntPtr.Zero) ? AiCore.GetCachedFaction(__4) : srcVehFac;
+                        EmergentRuntimeBridge.NotifyExplosion(__0, __3, expFac, __3 >= 4.5f || __1 >= 45f);
                     }
 
                     if (!VisionConfig.EnableDeathScreenAttribution.Value)
@@ -1093,6 +1111,16 @@ namespace EasyRed2HumanAI
                     {
                         bool hasOrigin = __4 != null && __4.Pointer != IntPtr.Zero && __4.transform != null;
                         Vector3 origin = hasOrigin ? __4.transform.position : __2;
+                        byte hitKind = 1;
+                        if (__4 != null && __4.Pointer != IntPtr.Zero && __4.IsOnVehicle())
+                            hitKind = 2;
+                        else if (!string.IsNullOrEmpty(_activeExplosionWeaponName) ||
+                                 (__1 != null && (__1.IsHe() || __1.IsFlak() || __1.IsFire() || __1.caliber >= 20f)))
+                            hitKind = 3;
+                        float hitDist = (hasOrigin && victim.transform != null)
+                            ? Vector3.Distance(victim.transform.position, origin)
+                            : -1f;
+                        EmergentRuntimeBridge.RecordLastHitContext(victim, hitKind, hitDist, Time.time);
                         NotifyFriendlyHitOrCasualty(victim, origin, hasOrigin, isFatalOrDown: false);
                     }
 
@@ -1218,6 +1246,7 @@ namespace EasyRed2HumanAI
         {
             public static void Prefix(BodyPart __instance, float __0, float __1, Vector3 __2, string __3, HitType __4)
             {
+                long profStart = HitchProfiler.BeginModScope();
                 try
                 {
                     if (!VisionConfig.EnableMod.Value ||
@@ -1288,7 +1317,14 @@ namespace EasyRed2HumanAI
                         },
                         onlyIfNoRecentDetailed);
                 }
-                catch { }
+                catch (Exception ex)
+                {
+                    AiCore.ReportPatchException("Death.HitPart", ex);
+                }
+                finally
+                {
+                    HitchProfiler.EndModScope(HitchBucket.DeathHitAttr, profStart);
+                }
             }
         }
 
@@ -1340,7 +1376,10 @@ namespace EasyRed2HumanAI
                         },
                         onlyIfNoRecentDetailed: true);
                 }
-                catch { }
+                catch (Exception ex)
+                {
+                    AiCore.ReportPatchException("Death.DmgAnim", ex);
+                }
             }
         }
 
@@ -1452,7 +1491,8 @@ namespace EasyRed2HumanAI
                     {
                         isFriendlyFire = attr.IsFriendlyFire;
                         isSelfInflicted = attr.IsSelfInflicted;
-                        bool bledOut = __0.isBleeding || ((Time.time - attr.Timestamp) > 3.0f && attr.CausedBleeding);
+                        float hitAge = Mathf.Max(0f, Time.time - attr.Timestamp);
+                        bool delayedBleedOut = hitAge > 3.0f && (__0.isBleeding || attr.CausedBleeding);
 
                         string prefixTag = "";
                         if (isSelfInflicted)
@@ -1467,9 +1507,13 @@ namespace EasyRed2HumanAI
                         }
 
                         List<string> detailParts = new List<string>(4);
-                        if (bledOut)
+                        if (delayedBleedOut)
                         {
                             detailParts.Add("Bled out");
+                        }
+                        else if (__0.isBleeding)
+                        {
+                            detailParts.Add("Bleeding");
                         }
 
                         string cleanWep = CleanDisplayLabel(attr.WeaponOrSource);

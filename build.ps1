@@ -288,13 +288,19 @@ if (Test-Path (Join-Path $workspace "tools\bepinex\extracted")) {
 Write-Host "  -> Built $buildDir\EasyRed2HumanAI.dll" -ForegroundColor Green
 
 if ($Test) {
-    Write-Host "[Test 1/2] Running GOAP Planner, Acoustic & Ground Probe Suite..." -ForegroundColor Cyan
-    & (Join-Path $workspace "tools\verify_patches\VerifyGoapPlanner.ps1")
+    Write-Host "[Test 1/3] Running Emergent 3-Tier Decision Engine Suite..." -ForegroundColor Cyan
+    & (Join-Path $workspace "tools\verify_patches\VerifyEmergentEngine.ps1")
     if ($LASTEXITCODE -ne 0) {
-        throw "VerifyGoapPlanner.ps1 failed!"
+        throw "VerifyEmergentEngine.ps1 failed!"
     }
 
-    Write-Host "[Test 2/2] Running Deterministic Battle Loss & Emergence Model..." -ForegroundColor Cyan
+    Write-Host "[Test 2/3] Running Acoustic Ring, Ground Probe & CQB Physics Suite..." -ForegroundColor Cyan
+    & (Join-Path $workspace "tools\verify_patches\VerifyPhysicsAndAcoustics.ps1")
+    if ($LASTEXITCODE -ne 0) {
+        throw "VerifyPhysicsAndAcoustics.ps1 failed!"
+    }
+
+    Write-Host "[Test 3/3] Running Deterministic Battle Loss & Emergence Model..." -ForegroundColor Cyan
     & (Join-Path $workspace "tools\verify_patches\Run-BattleLossModel.ps1") -GameDir $resolvedGameDir
     if ($LASTEXITCODE -ne 0) {
         throw "Run-BattleLossModel.ps1 failed!"

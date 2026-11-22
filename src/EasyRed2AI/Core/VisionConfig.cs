@@ -8,6 +8,7 @@ namespace EasyRed2HumanAI
         public static ConfigEntry<bool> EnableMod;
         public static ConfigEntry<bool> DebugLogging;
         public static ConfigEntry<bool> EnableHitchFlightRecorder;
+        public static ConfigEntry<bool> EnablePerformanceOverlay;
         public static ConfigEntry<bool> EnableBotActionTrace;
         public static ConfigEntry<bool> EnableDeathScreenAttribution;
         public static ConfigEntry<bool> EnableDogTagArchive;
@@ -59,10 +60,8 @@ namespace EasyRed2HumanAI
         public static ConfigEntry<bool> ShowVeteranSquadRosterTags;
 
         // 6. Phase 2: 5-Tier Survival Priority, Stance Redirection, Bipods, Muzzle Discipline & Vaulting
-        public static ConfigEntry<bool> EnableSelfPreservationStance;
         public static ConfigEntry<bool> EnforceStandingWhenOutOfCombat;
         public static ConfigEntry<bool> NeverShootStandingInOpen;
-        public static ConfigEntry<bool> BandageOnlyAfterFindingCover;
         public static ConfigEntry<bool> EnableGunnerBipodWallMounting;
         public static ConfigEntry<bool> EnableWallShootingPrevention;
         public static ConfigEntry<float> MuzzleObstructionCheckDist;
@@ -92,13 +91,15 @@ namespace EasyRed2HumanAI
         public static ConfigEntry<bool> EnableStrategicDoorDiscipline;
         public static ConfigEntry<bool> EnableCombinedArmsPrioritySupport;
         public static ConfigEntry<bool> EnableBridgeCrossingDiscipline;
+        public static ConfigEntry<bool> EnableLiveGrenadeReflexes;
         public static ConfigEntry<bool> EnableShellShockSurrender;
-        public static ConfigEntry<bool> EnableTacticalGoapPlanner;
         public static ConfigEntry<bool> EnableRadiomanIntelNet;
         public static ConfigEntry<bool> EnableTacticalVoiceCallouts;
         public static ConfigEntry<bool> EnableFactionNetDoctrines;
         public static ConfigEntry<bool> EnableCoopAirborneSpawnFix;
         public static ConfigEntry<bool> EnableTankRockUnstickAssist;
+        public static ConfigEntry<bool> EnableUrgentVehicleCruiseSpeed;
+        public static ConfigEntry<bool> EnableVehicleRoadAndClearPathing;
         public static ConfigEntry<bool> EnableSmartVehicleAmmoSelection;
         public static ConfigEntry<bool> EnableAntiDogpileMedicTriage;
         public static ConfigEntry<bool> EnableBuddyResupply;
@@ -106,6 +107,8 @@ namespace EasyRed2HumanAI
         public static ConfigEntry<bool> EnableBuddyCasualtyDragging;
         public static ConfigEntry<bool> EnableTacticalRetreatsAndRegroup;
         public static ConfigEntry<bool> EnableSpecialMunitionsAndSappers;
+        public static ConfigEntry<bool> EnableEmergentDecisionEngine;
+        public static ConfigEntry<bool> EnableEmergentDebugTelemetry;
 
         // 7. Phase 3: Role-Based AI Personalities (3 Archetypes per Infantry & Vehicle Role)
         public static ConfigEntry<bool> EnableRolePersonalities;
@@ -116,6 +119,7 @@ namespace EasyRed2HumanAI
 
         // 8. Phase 4: Ballistics, Plane Audio De-Throbber & Battlefield Immersion
         public static ConfigEntry<bool> EnablePlaneAudioSmoothing;
+        public static ConfigEntry<bool> EnableDynamicSoldierVoicePitch;
         public static ConfigEntry<bool> EnableThinCoverBulletPenetration;
         public static ConfigEntry<bool> EnableRealisticVehicleArmorAndTopAttack;
         public static ConfigEntry<bool> EnableParachuteWindDrift;
@@ -147,6 +151,12 @@ namespace EasyRed2HumanAI
                 "EnableHitchFlightRecorder",
                 false,
                 "Diagnostics: Enable the zero-allocation [HitchAutopsy] (>28ms frame-spike profiler) and 15s [HitchSummary] GC/subsystem flight recorder in BepInEx/LogOutput.log (default false).");
+
+            EnablePerformanceOverlay = config.Bind(
+                "0. General",
+                "EnablePerformanceOverlay",
+                false,
+                "Performance Proof (Default OFF): Display a compact top-right live Performance & Mod CPU Cost pill (FPS, Frame ms, Max ms, exact Battle Hardened CPU ms + top subsystems, Hitches, PatchErrs) so you can verify mod overhead live while toggling F8.");
 
             EnableBotActionTrace = config.Bind(
                 "0. General",
@@ -388,12 +398,6 @@ namespace EasyRed2HumanAI
                 "Display [Vet I], [Vet II], and [Vet III ★] tags and rank colors in the bottom-left squad member UI.");
 
             // 6. Phase 2: 5-Tier Survival Priority, Stance Redirection, Bipods, Muzzle Discipline & Vaulting
-            EnableSelfPreservationStance = config.Bind(
-                "6. Tactical Self-Preservation & Muzzle Discipline",
-                "EnableSelfPreservationStance",
-                true,
-                "Priority 1 (Don't Die): Bots caught in the open drop to Crouch/Prone or duck into cover BEFORE opening fire.");
-
             EnforceStandingWhenOutOfCombat = config.Bind(
                 "6. Tactical Self-Preservation & Muzzle Discipline",
                 "EnforceStandingWhenOutOfCombat",
@@ -405,12 +409,6 @@ namespace EasyRed2HumanAI
                 "NeverShootStandingInOpen",
                 true,
                 "Firing from standing is ineffective: bots always at least Crouch when shooting (and Machine Gunners drop Prone or mount on cover) unless peeking over high cover or high-wall bipod mounted.");
-
-            BandageOnlyAfterFindingCover = config.Bind(
-                "6. Tactical Self-Preservation & Muzzle Discipline",
-                "BandageOnlyAfterFindingCover",
-                true,
-                "Bleeding soldiers actively seek and sprint to nearby cover FIRST before stopping to bandage (unless no cover exists nearby or emergency bleed-out timeout is reached).");
 
             EnableGunnerBipodWallMounting = config.Bind(
                 "6. Tactical Self-Preservation & Muzzle Discipline",
@@ -586,17 +584,17 @@ namespace EasyRed2HumanAI
                 true,
                 "Bridge Crossing, Parapet Cover & Bipod Propping: prevents vanilla's 5m-35m sideways squad-spacing scatter from flinging waypoints off bridges into rivers/ravines, while letting suppressed bridge troops hug deck-safe parapet walls/pillars, prop gunner bipods on bridge balustrades, and bound safely along the span.");
 
+            EnableLiveGrenadeReflexes = config.Bind(
+                "6. Tactical Self-Preservation & Muzzle Discipline",
+                "EnableLiveGrenadeReflexes",
+                true,
+                "Live Grenade Kick-Back & Evasion Reflexes: brave/close bots can safely kick back reachable live enemy time-fuse grenades clear of friendlies and walls (synced in Co-op), while other threatened soldiers shout a grenade warning and sprint out of the blast radius or dive prone.");
+
             EnableShellShockSurrender = config.Bind(
                 "6. Tactical Self-Preservation & Muzzle Discipline",
                 "EnableShellShockSurrender",
                 true,
                 "Shell-Shocked & Skittish Dynamic Surrender: isolated, heavily suppressed/shell-shocked Skittish ([Cautious] / [Triage]) or green rookie soldiers who are overrun at close range (<= 18m) with no inspiring Squad Leader nearby can dynamically surrender (SurrenderSynched), and can later be liberated by friendly counterattacks.");
-
-            EnableTacticalGoapPlanner = config.Bind(
-                "6. Tactical Self-Preservation & Muzzle Discipline",
-                "EnableTacticalGoapPlanner",
-                true,
-                "F.E.A.R.-Style 3-Tier Bitmask GOAP Planner & Squad Blackboard: coordinates Individual -> Squad -> Team fire-and-maneuver (Suppressors pin enemy positions on the Squad Blackboard to unlock lateral Flanker bounds, Smoke-Screen advances, and Grenade breaches).");
 
             EnableRadiomanIntelNet = config.Bind(
                 "6. Tactical Self-Preservation & Muzzle Discipline",
@@ -627,6 +625,18 @@ namespace EasyRed2HumanAI
                 "EnableTankRockUnstickAssist",
                 true,
                 "Vanilla Physics Fix: applies a smooth sprocket/track crawl impulse when a tank's discrete WheelCollider rays get high-centered on a rock, stump, or trench lip while throttle is held.");
+
+            EnableUrgentVehicleCruiseSpeed = config.Bind(
+                "6. Tactical Self-Preservation & Muzzle Discipline",
+                "EnableUrgentVehicleCruiseSpeed",
+                true,
+                "Vanilla AI Fix: lifts vanilla AIVehicle's hardcoded 16-17 km/h speed governor on clear straightaways (scaled to each vehicle's maxKmhSpeed: up to ~44-46 km/h for transports, ~40 km/h for armored cars, ~34 km/h for fast tanks) while keeping vanilla cornering, waypoint lookahead braking, and friendly right-of-way intact.");
+
+            EnableVehicleRoadAndClearPathing = config.Bind(
+                "6. Tactical Self-Preservation & Muzzle Discipline",
+                "EnableVehicleRoadAndClearPathing",
+                true,
+                "Vehicle & Tank Pathing Differentiation: biases A.F.vehicleGrid (wheeled vehicles and tanks; never infantry) toward mapped roads (excluding rivers), wide unobstructed corridors, and gentler grades, and prevents any-angle path smoothing from corner-cutting off curving roads into trees, rubble, or tight gaps.");
 
             EnableSmartVehicleAmmoSelection = config.Bind(
                 "6. Tactical Self-Preservation & Muzzle Discipline",
@@ -670,6 +680,18 @@ namespace EasyRed2HumanAI
                 true,
                 "Special Munitions & Sapper AI: teaches bots to deploy AT/AP pressure mines along safe defensive/bridge choke points (with friendly proximity & objective-edge safety checks and friendly vehicle mine avoidance), use heavy satchels against enemy bunkers/emplacements, and deploy heavy tripod/weapon recipes.");
 
+            EnableEmergentDecisionEngine = config.Bind(
+                "6. Tactical Self-Preservation & Muzzle Discipline",
+                "EnableEmergentDecisionEngine",
+                true,
+                "H.A.R.M. 3-Tier Emergent Decision Engine (Heuristic Action & Risk Model — Survive/Win + Lethality Lever, Asymmetric Danger Stamps, Two-Speed Reflexes, and 2-3 Ply Prerequisites).");
+
+            EnableEmergentDebugTelemetry = config.Bind(
+                "6. Tactical Self-Preservation & Muzzle Discipline",
+                "EnableEmergentDebugTelemetry",
+                true,
+                "Experimental Branch: emits 30s + match-end emergent signal telemetry summaries to BepInEx/LogOutput.log, utility scores into BotActionTrace.jsonl, and live signal readouts on the Spectator Bot Inspector.");
+
             // 7. AI Role Personalities (3 Archetypes per Infantry & Vehicle Role)
             EnableRolePersonalities = config.Bind(
                 "7. AI Role Personalities",
@@ -707,6 +729,12 @@ namespace EasyRed2HumanAI
                 "EnablePlaneAudioSmoothing",
                 true,
                 "Client-side Plane Engine Loop De-Throbber: desynchronizes aircraft loop start times across near/far audio clips, clamps Doppler pitch spikes (<= 0.22), and low-pass smooths engine pitch transitions to eliminate repetitive flyby throbbing.");
+
+            EnableDynamicSoldierVoicePitch = config.Bind(
+                "8. Ballistics & Immersion",
+                "EnableDynamicSoldierVoicePitch",
+                true,
+                "Individualistic deterministic soldier voices: assigns each soldier a consistent subtle vocal pitch offset (0.93x-1.07x) derived from their identity and age, with minor per-callout inflection and combat-stress lift.");
 
             EnableThinCoverBulletPenetration = config.Bind(
                 "8. Ballistics & Immersion",

@@ -96,26 +96,33 @@ namespace EasyRed2HumanAI
             if (AiCore.HorizontalAngleToDirection(shooter, targetPos - shooter.transform.position) > 35f)
                 return false;
 
-            if (shooter.IsTowardWall())
+            float leanAngle = shooter.LeanAngle;
+            bool activelyLeaning = Mathf.Abs(leanAngle) >= 0.45f;
+            if (!activelyLeaning && shooter.IsTowardWall())
                 return true;
 
             Transform myRoot = shooter.transform.root;
             Vector3 soldierPos = shooter.transform.position;
             float barrelH = AiCore.GetBarrelHeightForPose(shooter.m_pose);
 
+            float midLowWallDist = distToTarget > 3.5f ? Mathf.Min(12.0f, distToTarget * 0.45f) : (distToTarget - 0.35f);
             Vector3 spineAtBarrel = soldierPos + Vector3.up * barrelH;
+            if (Mathf.Abs(leanAngle) > 0.15f && shooter.transform != null)
+            {
+                spineAtBarrel += shooter.transform.right * (leanAngle * 0.40f);
+            }
             Vector3 toTargetFromSpine = targetPos - spineAtBarrel;
             if (toTargetFromSpine.sqrMagnitude > 0.04f)
             {
                 Vector3 spineAimDir = toTargetFromSpine.normalized;
-                float spineMaxCheck = Mathf.Min(VisionConfig.MuzzleObstructionCheckDist.Value + 0.65f, distToTarget - 0.35f);
+                float spineMaxCheck = Mathf.Min(Mathf.Max(VisionConfig.MuzzleObstructionCheckDist.Value + 0.65f, midLowWallDist), distToTarget - 0.35f);
                 if (spineMaxCheck > 0.25f)
                 {
                     Vector3 spineStart = spineAtBarrel - spineAimDir * 0.10f;
                     if (AiCore.RaycastEnvironment(spineStart, spineAimDir, spineMaxCheck, myRoot, out _))
                         return true;
 
-                    if (AiCore.RaycastEnvironment(spineStart - Vector3.up * 0.06f, spineAimDir, Mathf.Min(spineMaxCheck, 2.0f), myRoot, out _))
+                    if (AiCore.RaycastEnvironment(spineStart - Vector3.up * 0.08f, spineAimDir, Mathf.Min(spineMaxCheck, 6.0f), myRoot, out _))
                         return true;
                 }
             }
@@ -126,14 +133,15 @@ namespace EasyRed2HumanAI
                 GenericGun heldGun = shooter.GetHeldGun();
                 Vector3 receiverPos = (heldGun != null && heldGun.transform != null) ? heldGun.transform.position : gunPos;
 
-                float minLiveY = soldierPos.y + barrelH - 0.12f;
-                if (receiverPos.y < minLiveY) receiverPos.y = minLiveY;
-                if (gunPos.y < minLiveY) gunPos.y = minLiveY;
+                // Only clamp against sub-ground-plane bone anomalies; never lift rays up over low walls.
+                float floorSafeY = soldierPos.y + 0.15f;
+                if (receiverPos.y < floorSafeY) receiverPos.y = floorSafeY;
+                if (gunPos.y < floorSafeY) gunPos.y = floorSafeY;
 
                 Vector3 toTarget = targetPos - receiverPos;
                 Vector3 aimDir = toTarget.sqrMagnitude > 0.01f ? toTarget.normalized : shooter.GetFireDir();
 
-                float maxCheck = Mathf.Min(VisionConfig.MuzzleObstructionCheckDist.Value + 0.35f, distToTarget - 0.35f);
+                float maxCheck = Mathf.Min(Mathf.Max(VisionConfig.MuzzleObstructionCheckDist.Value + 0.35f, midLowWallDist), distToTarget - 0.35f);
                 if (maxCheck > 0.25f)
                 {
                     if (AiCore.RaycastEnvironment(receiverPos - aimDir * 0.10f, aimDir, maxCheck, myRoot, out _))
@@ -142,7 +150,7 @@ namespace EasyRed2HumanAI
                     if (AiCore.RaycastEnvironment(gunPos - aimDir * 0.15f, aimDir, maxCheck, myRoot, out _))
                         return true;
 
-                    if (AiCore.RaycastEnvironment(gunPos - Vector3.up * 0.06f - aimDir * 0.10f, aimDir, Mathf.Min(maxCheck, 1.85f), myRoot, out _))
+                    if (AiCore.RaycastEnvironment(gunPos - Vector3.up * 0.06f - aimDir * 0.10f, aimDir, Mathf.Min(maxCheck, 4.5f), myRoot, out _))
                         return true;
                 }
             }

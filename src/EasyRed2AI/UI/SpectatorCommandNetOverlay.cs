@@ -48,6 +48,7 @@ namespace EasyRed2HumanAI
         private static Material _cmdNetMatYellowLeader;
         private static Material _cmdNetMatRedLeader;
         private static Material _cmdNetMatCyan;
+        private static Material _cmdNetMatHoverMember;
         private static bool _cmdNetAssetsInitialized;
 
         private static readonly List<MissionObjective> _cmdNetObjBuf = new List<MissionObjective>(16);
@@ -60,6 +61,7 @@ namespace EasyRed2HumanAI
         private static readonly Color CmdNetColorRed = new Color(1.00f, 0.23f, 0.19f, 0.96f);
         private static readonly Color CmdNetColorRedSl = new Color(1.00f, 0.48f, 0.34f, 1.00f);
         private static readonly Color CmdNetColorCyan = new Color(0.17f, 0.91f, 1.00f, 0.96f);
+        private static readonly Color CmdNetColorHoverMember = new Color(0.26f, 1.00f, 0.62f, 0.98f);
         private static readonly Color CmdNetColorAmber = new Color(1.00f, 0.60f, 0.15f, 0.85f);
 
         private static void EnsureCommandNetRenderAssets()
@@ -68,7 +70,8 @@ namespace EasyRed2HumanAI
                 _cmdNetBeaconMesh != null &&
                 _cmdNetVehicleMesh != null &&
                 _cmdNetMatYellow != null &&
-                _cmdNetMatRed != null)
+                _cmdNetMatRed != null &&
+                _cmdNetMatHoverMember != null)
             {
                 return;
             }
@@ -102,6 +105,8 @@ namespace EasyRed2HumanAI
                         _cmdNetMatRedLeader = CreateCommandNetMaterial(sh, CmdNetColorRedSl);
                     if (_cmdNetMatCyan == null)
                         _cmdNetMatCyan = CreateCommandNetMaterial(sh, CmdNetColorCyan);
+                    if (_cmdNetMatHoverMember == null)
+                        _cmdNetMatHoverMember = CreateCommandNetMaterial(sh, CmdNetColorHoverMember);
                 }
             }
             catch { }
@@ -247,205 +252,214 @@ namespace EasyRed2HumanAI
 
         internal static void UpdateAndRenderSpectatorCommandNet3D(bool isFreeCamera, bool canShowOverlays)
         {
-            if (ActiveSpectatorHudMode != SpectatorTacticalHudMode.CommandNetOverview ||
-                !canShowOverlays ||
-                !IsCommandNetOverviewAllowed())
+            try
             {
-                _specCommandNetActive = false;
-                _cmdNetHasHoveredSquad = false;
-                return;
-            }
-
-            Camera cam = ResourcesManager.mainCamera;
-            if (cam == null)
-                cam = Camera.main;
-            if (cam == null || cam.transform == null)
-            {
-                _specCommandNetActive = false;
-                _cmdNetHasHoveredSquad = false;
-                return;
-            }
-
-            // Build/refresh the read-only world snapshot even if AI Mod is toggled OFF via F8!
-            AiCore.EnsureWorldSnapshot(0.22f);
-
-            _specCommandNetActive = true;
-            _specCommandNetIsFreeCam = isFreeCamera;
-
-            BattleData bd = null;
-            try { bd = BattleManager.GetCurrentBattleData(); } catch { }
-            string yellowRefFac = ResolveYellowSideFaction(bd, out string redRefFac);
-
-            Vector3 camPos = cam.transform.position;
-            float unscaledNow = Time.unscaledTime;
-
-            // 1. Sky-friendly Squad / SL Hover Detection
-            int sqCount = AiCore.WorldSquadCount;
-            var squads = AiCore.WorldSquads;
-            IntPtr bestSqPtr = IntPtr.Zero;
-            int bestSqSnapIdx = -1;
-
-            if (isFreeCamera && sqCount > 0)
-            {
-                Vector2 screenCenter = new Vector2(Screen.width * 0.5f, Screen.height * 0.5f);
-                float maxHoverPx = Mathf.Max(42f, Screen.height * 0.14f);
-                float stickyHoverPx = maxHoverPx * 1.35f;
-                float bestScorePx = float.MaxValue;
-
-                for (int i = 0; i < sqCount; i++)
+                if (ActiveSpectatorHudMode != SpectatorTacticalHudMode.CommandNetOverview ||
+                    !canShowOverlays ||
+                    !IsCommandNetOverviewAllowed())
                 {
-                    ref AiCore.SquadSnapshot sqSnap = ref squads[i];
-                    if (sqSnap.Ptr == IntPtr.Zero || sqSnap.UnitCount <= 0 || sqSnap.Ref == null)
-                        continue;
-
-                    if ((sqSnap.RefPos - camPos).sqrMagnitude > 480f * 480f)
-                        continue;
-
-                    Vector3 sp = cam.WorldToScreenPoint(sqSnap.RefPos + new Vector3(0f, 1.6f, 0f));
-                    if (sp.z <= 0.5f || sp.z > 480f)
-                        continue;
-
-                    float dPx = Vector2.Distance(new Vector2(sp.x, sp.y), screenCenter);
-                    bool isCur = _cmdNetHoveredSquadPtr != IntPtr.Zero && sqSnap.Ptr == _cmdNetHoveredSquadPtr;
-                    if (dPx > (isCur ? stickyHoverPx : maxHoverPx))
-                        continue;
-
-                    float score = (isCur ? dPx * 0.72f : dPx) + sp.z * 0.08f;
-                    if (score < bestScorePx)
-                    {
-                        bestScorePx = score;
-                        bestSqPtr = sqSnap.Ptr;
-                        bestSqSnapIdx = i;
-                    }
+                    _specCommandNetActive = false;
+                    _cmdNetHasHoveredSquad = false;
+                    return;
                 }
-            }
 
-            if (bestSqPtr != IntPtr.Zero)
-            {
-                _cmdNetHoveredSquadPtr = bestSqPtr;
-                _cmdNetHoverHoldUntil = unscaledNow + 0.65f;
-                _cmdNetHasHoveredSquad = true;
-            }
-            else if (_cmdNetHoveredSquadPtr != IntPtr.Zero && unscaledNow < _cmdNetHoverHoldUntil)
-            {
-                bestSqSnapIdx = -1;
-                for (int i = 0; i < sqCount; i++)
+                Camera cam = ResourcesManager.mainCamera;
+                if (cam == null)
+                    cam = Camera.main;
+                if (cam == null || cam.transform == null)
                 {
-                    if (squads[i].Ptr == _cmdNetHoveredSquadPtr && squads[i].UnitCount > 0)
-                    {
-                        bestSqSnapIdx = i;
-                        bestSqPtr = _cmdNetHoveredSquadPtr;
-                        break;
-                    }
+                    _specCommandNetActive = false;
+                    _cmdNetHasHoveredSquad = false;
+                    return;
                 }
-                _cmdNetHasHoveredSquad = bestSqSnapIdx >= 0;
-                if (!_cmdNetHasHoveredSquad)
-                    _cmdNetHoveredSquadPtr = IntPtr.Zero;
-            }
-            else
-            {
-                _cmdNetHasHoveredSquad = false;
-                _cmdNetHoveredSquadPtr = IntPtr.Zero;
-            }
 
-            // 2. Render Bright Yellow / Red Unlit 3D Meshes over Soldiers and Vehicles
-            EnsureCommandNetRenderAssets();
-            float hoverPulse = 1.0f + 0.14f * Mathf.Sin(unscaledNow * 6.5f);
+                // Build/refresh the read-only world snapshot even if AI Mod is toggled OFF via F8!
+                AiCore.EnsureWorldSnapshot(0.22f);
 
-            if (_cmdNetBeaconMesh != null && _cmdNetMatYellow != null && _cmdNetMatRed != null)
-            {
-                int wCount = AiCore.WorldSoldierCount;
-                var soldiers = AiCore.WorldSoldiers;
-                for (int i = 0; i < wCount; i++)
+                _specCommandNetActive = true;
+                _specCommandNetIsFreeCam = isFreeCamera;
+
+                BattleData bd = null;
+                try { bd = BattleManager.GetCurrentBattleData(); } catch { }
+                string yellowRefFac = ResolveYellowSideFaction(bd, out string redRefFac);
+
+                Vector3 camPos = cam.transform.position;
+                float unscaledNow = Time.unscaledTime;
+
+                // 1. Sky-friendly Squad / SL Hover Detection
+                int sqCount = AiCore.WorldSquadCount;
+                var squads = AiCore.WorldSquads;
+                IntPtr bestSqPtr = IntPtr.Zero;
+                int bestSqSnapIdx = -1;
+
+                if (isFreeCamera && sqCount > 0)
                 {
-                    ref AiCore.SoldierSnapshot sSnap = ref soldiers[i];
-                    if (sSnap.Ptr == IntPtr.Zero || sSnap.IsOnVehicle || sSnap.HasSurrendered || sSnap.IsInjured)
-                        continue;
+                    Vector2 screenCenter = new Vector2(Screen.width * 0.5f, Screen.height * 0.5f);
+                    float maxHoverPx = Mathf.Max(42f, Screen.height * 0.14f);
+                    float stickyHoverPx = maxHoverPx * 1.35f;
+                    float bestScorePx = float.MaxValue;
 
-                    float dist = Vector3.Distance(camPos, sSnap.Pos);
-                    if (dist > 650f)
-                        continue;
-
-                    float s = Mathf.Clamp(dist * 0.0115f, 0.75f, 3.6f);
-                    bool isYellow = !string.IsNullOrEmpty(yellowRefFac) && AiCore.AreSameSideFactions(sSnap.Faction, yellowRefFac);
-                    bool isHovered = _cmdNetHasHoveredSquad && sSnap.SquadPtr == _cmdNetHoveredSquadPtr;
-
-                    Material mat;
-                    if (isHovered && sSnap.IsSquadLeader && _cmdNetMatCyan != null)
-                        mat = _cmdNetMatCyan;
-                    else if (isYellow)
-                        mat = (sSnap.IsSquadLeader && _cmdNetMatYellowLeader != null) ? _cmdNetMatYellowLeader : _cmdNetMatYellow;
-                    else
-                        mat = (sSnap.IsSquadLeader && _cmdNetMatRedLeader != null) ? _cmdNetMatRedLeader : _cmdNetMatRed;
-
-                    float pulse = isHovered ? hoverPulse : 1.0f;
-                    Vector3 scale = sSnap.IsSquadLeader
-                        ? new Vector3(s * 0.95f * pulse, s * 2.25f * pulse, s * 0.95f * pulse)
-                        : new Vector3(s * 0.65f * pulse, s * 1.45f * pulse, s * 0.65f * pulse);
-                    Vector3 drawPos = sSnap.Pos + new Vector3(0f, sSnap.IsSquadLeader ? (1.35f + s * 0.55f) : (0.95f + s * 0.25f), 0f);
-
-                    Graphics.DrawMesh(_cmdNetBeaconMesh, Matrix4x4.TRS(drawPos, Quaternion.identity, scale), mat, 0, cam, 0, null, false, false);
-                }
-            }
-
-            if (_cmdNetVehicleMesh != null && _cmdNetMatYellow != null && _cmdNetMatRed != null)
-            {
-                try
-                {
-                    var allVeh = Vehicle.allVehicles;
-                    if (allVeh != null)
+                    for (int i = 0; i < sqCount; i++)
                     {
-                        int vLen = allVeh.Count;
-                        for (int i = 0; i < vLen; i++)
+                        ref AiCore.SquadSnapshot sqSnap = ref squads[i];
+                        if (sqSnap.Ptr == IntPtr.Zero || sqSnap.UnitCount <= 0 || sqSnap.Ref == null)
+                            continue;
+
+                        if ((sqSnap.RefPos - camPos).sqrMagnitude > 480f * 480f)
+                            continue;
+
+                        Vector3 sp = cam.WorldToScreenPoint(sqSnap.RefPos + new Vector3(0f, 1.6f, 0f));
+                        if (sp.z <= 0.5f || sp.z > 480f)
+                            continue;
+
+                        float dPx = Vector2.Distance(new Vector2(sp.x, sp.y), screenCenter);
+                        bool isCur = _cmdNetHoveredSquadPtr != IntPtr.Zero && sqSnap.Ptr == _cmdNetHoveredSquadPtr;
+                        if (dPx > (isCur ? stickyHoverPx : maxHoverPx))
+                            continue;
+
+                        float score = (isCur ? dPx * 0.72f : dPx) + sp.z * 0.08f;
+                        if (score < bestScorePx)
                         {
-                            Vehicle v = allVeh[i];
-                            if (v == null || v.Pointer == IntPtr.Zero || v.IsDisabled() || v.transform == null)
-                                continue;
-
-                            string vFac = v.GetVehicleFaction();
-                            if (string.IsNullOrEmpty(vFac) || vFac == "Civilian")
-                                continue;
-
-                            Vector3 vPos = v.transform.position;
-                            float dist = Vector3.Distance(camPos, vPos);
-                            if (dist > 850f)
-                                continue;
-
-                            bool isYellow = !string.IsNullOrEmpty(yellowRefFac) && AiCore.AreSameSideFactions(vFac, yellowRefFac);
-                            Material vMat = isYellow ? (_cmdNetMatYellowLeader ?? _cmdNetMatYellow) : (_cmdNetMatRedLeader ?? _cmdNetMatRed);
-                            float vs = Mathf.Clamp(dist * 0.016f, 1.5f, 5.5f);
-                            Vector3 drawPos = vPos + new Vector3(0f, 2.0f + vs * 0.35f, 0f);
-
-                            Graphics.DrawMesh(_cmdNetVehicleMesh, Matrix4x4.TRS(drawPos, v.transform.rotation, new Vector3(vs, vs, vs)), vMat, 0, cam, 0, null, false, false);
+                            bestScorePx = score;
+                            bestSqPtr = sqSnap.Ptr;
+                            bestSqSnapIdx = i;
                         }
                     }
                 }
-                catch { }
-            }
 
-            // 3. Throttled Card Readout Formatting (0.18s cadence)
-            bool modEnabled = VisionConfig.EnableMod.Value;
-            if (unscaledNow < _nextCmdNetFormatTime &&
-                _lastFormattedHoveredSqPtr == _cmdNetHoveredSquadPtr &&
-                _lastFormattedModEnabled == modEnabled &&
-                _nextCmdNetFormatTime - unscaledNow <= 2.0f)
-            {
-                return;
-            }
+                if (bestSqPtr != IntPtr.Zero)
+                {
+                    _cmdNetHoveredSquadPtr = bestSqPtr;
+                    _cmdNetHoverHoldUntil = unscaledNow + 0.65f;
+                    _cmdNetHasHoveredSquad = true;
+                }
+                else if (_cmdNetHoveredSquadPtr != IntPtr.Zero && unscaledNow < _cmdNetHoverHoldUntil)
+                {
+                    bestSqSnapIdx = -1;
+                    for (int i = 0; i < sqCount; i++)
+                    {
+                        if (squads[i].Ptr == _cmdNetHoveredSquadPtr && squads[i].UnitCount > 0)
+                        {
+                            bestSqSnapIdx = i;
+                            bestSqPtr = _cmdNetHoveredSquadPtr;
+                            break;
+                        }
+                    }
+                    _cmdNetHasHoveredSquad = bestSqSnapIdx >= 0;
+                    if (!_cmdNetHasHoveredSquad)
+                        _cmdNetHoveredSquadPtr = IntPtr.Zero;
+                }
+                else
+                {
+                    _cmdNetHasHoveredSquad = false;
+                    _cmdNetHoveredSquadPtr = IntPtr.Zero;
+                }
 
-            _nextCmdNetFormatTime = unscaledNow + 0.18f;
-            _lastFormattedHoveredSqPtr = _cmdNetHoveredSquadPtr;
-            _lastFormattedModEnabled = modEnabled;
+                // 2. Render Bright Yellow / Red Unlit 3D Meshes over Soldiers and Vehicles
+                EnsureCommandNetRenderAssets();
+                float hoverPulse = 1.0f + 0.14f * Mathf.Sin(unscaledNow * 6.5f);
 
-            if (bestSqSnapIdx >= 0 && bestSqSnapIdx < sqCount)
-            {
-                ref AiCore.SquadSnapshot hoveredSnap = ref squads[bestSqSnapIdx];
-                _cmdNetHoverIsYellow = !string.IsNullOrEmpty(yellowRefFac) && AiCore.AreSameSideFactions(hoveredSnap.Faction, yellowRefFac);
-                FormatCommandNetSquadLeaderCard(ref hoveredSnap, _cmdNetHoverIsYellow, modEnabled, camPos);
+                if (_cmdNetBeaconMesh != null && _cmdNetMatYellow != null && _cmdNetMatRed != null)
+                {
+                    int wCount = AiCore.WorldSoldierCount;
+                    var soldiers = AiCore.WorldSoldiers;
+                    for (int i = 0; i < wCount; i++)
+                    {
+                        ref AiCore.SoldierSnapshot sSnap = ref soldiers[i];
+                        if (sSnap.Ptr == IntPtr.Zero || sSnap.IsOnVehicle || sSnap.HasSurrendered || sSnap.IsInjured)
+                            continue;
+
+                        float dist = Vector3.Distance(camPos, sSnap.Pos);
+                        if (dist > 650f)
+                            continue;
+
+                        float s = Mathf.Clamp(dist * 0.0115f, 0.75f, 3.6f);
+                        bool isYellow = !string.IsNullOrEmpty(yellowRefFac) && AiCore.AreSameSideFactions(sSnap.Faction, yellowRefFac);
+                        bool isHovered = _cmdNetHasHoveredSquad && sSnap.SquadPtr == _cmdNetHoveredSquadPtr;
+
+                        Material mat;
+                        if (isHovered && sSnap.IsSquadLeader && _cmdNetMatCyan != null)
+                            mat = _cmdNetMatCyan;
+                        else if (isHovered && _cmdNetMatHoverMember != null)
+                            mat = _cmdNetMatHoverMember;
+                        else if (isYellow)
+                            mat = (sSnap.IsSquadLeader && _cmdNetMatYellowLeader != null) ? _cmdNetMatYellowLeader : _cmdNetMatYellow;
+                        else
+                            mat = (sSnap.IsSquadLeader && _cmdNetMatRedLeader != null) ? _cmdNetMatRedLeader : _cmdNetMatRed;
+
+                        float pulse = isHovered ? hoverPulse : 1.0f;
+                        Vector3 scale = sSnap.IsSquadLeader
+                            ? new Vector3(s * 0.95f * pulse, s * 2.25f * pulse, s * 0.95f * pulse)
+                            : new Vector3(s * 0.65f * pulse, s * 1.45f * pulse, s * 0.65f * pulse);
+                        Vector3 drawPos = sSnap.Pos + new Vector3(0f, sSnap.IsSquadLeader ? (1.35f + s * 0.55f) : (0.95f + s * 0.25f), 0f);
+
+                        Graphics.DrawMesh(_cmdNetBeaconMesh, Matrix4x4.TRS(drawPos, Quaternion.identity, scale), mat, 0, cam, 0, null, false, false);
+                    }
+                }
+
+                if (_cmdNetVehicleMesh != null && _cmdNetMatYellow != null && _cmdNetMatRed != null)
+                {
+                    try
+                    {
+                        var allVeh = Vehicle.allVehicles;
+                        if (allVeh != null)
+                        {
+                            int vLen = allVeh.Count;
+                            for (int i = 0; i < vLen; i++)
+                            {
+                                Vehicle v = allVeh[i];
+                                if (v == null || v.Pointer == IntPtr.Zero || v.IsDisabled() || v.transform == null)
+                                    continue;
+
+                                string vFac = v.GetVehicleFaction();
+                                if (string.IsNullOrEmpty(vFac) || vFac == "Civilian")
+                                    continue;
+
+                                Vector3 vPos = v.transform.position;
+                                float dist = Vector3.Distance(camPos, vPos);
+                                if (dist > 850f)
+                                    continue;
+
+                                bool isYellow = !string.IsNullOrEmpty(yellowRefFac) && AiCore.AreSameSideFactions(vFac, yellowRefFac);
+                                Material vMat = isYellow ? (_cmdNetMatYellowLeader ?? _cmdNetMatYellow) : (_cmdNetMatRedLeader ?? _cmdNetMatRed);
+                                float vs = Mathf.Clamp(dist * 0.016f, 1.5f, 5.5f);
+                                Vector3 drawPos = vPos + new Vector3(0f, 2.0f + vs * 0.35f, 0f);
+
+                                Graphics.DrawMesh(_cmdNetVehicleMesh, Matrix4x4.TRS(drawPos, v.transform.rotation, new Vector3(vs, vs, vs)), vMat, 0, cam, 0, null, false, false);
+                            }
+                        }
+                    }
+                    catch { }
+                }
+
+                // 3. Throttled Card Readout Formatting (0.18s cadence)
+                bool modEnabled = VisionConfig.EnableMod.Value;
+                if (unscaledNow < _nextCmdNetFormatTime &&
+                    _lastFormattedHoveredSqPtr == _cmdNetHoveredSquadPtr &&
+                    _lastFormattedModEnabled == modEnabled &&
+                    _nextCmdNetFormatTime - unscaledNow <= 2.0f)
+                {
+                    return;
+                }
+
+                _nextCmdNetFormatTime = unscaledNow + 0.18f;
+                _lastFormattedHoveredSqPtr = _cmdNetHoveredSquadPtr;
+                _lastFormattedModEnabled = modEnabled;
+
+                if (bestSqSnapIdx >= 0 && bestSqSnapIdx < sqCount)
+                {
+                    ref AiCore.SquadSnapshot hoveredSnap = ref squads[bestSqSnapIdx];
+                    _cmdNetHoverIsYellow = !string.IsNullOrEmpty(yellowRefFac) && AiCore.AreSameSideFactions(hoveredSnap.Faction, yellowRefFac);
+                    FormatCommandNetSquadLeaderCard(ref hoveredSnap, _cmdNetHoverIsYellow, modEnabled, camPos);
+                }
+                else
+                {
+                    FormatCommandNetMacroSummaryCard(yellowRefFac, redRefFac, modEnabled);
+                }
             }
-            else
+            catch (Exception ex)
             {
-                FormatCommandNetMacroSummaryCard(yellowRefFac, redRefFac, modEnabled);
+                AiCore.ReportPatchException("SpecCmdNet.Update", ex);
             }
         }
 
@@ -477,19 +491,10 @@ namespace EasyRed2HumanAI
 
             if (_garrisonAssignedObjectiveBySquad.ContainsKey(sqPtr))
                 return "GARRISON";
-            if (_aiSquadRetreatUntil.TryGetValue(sqPtr, out float retUntil) && now < retUntil)
-                return "WITHDRAW";
 
             if (_squadBlackboards.TryGetValue(sqPtr, out SquadBlackboard b))
             {
                 smokeUp = now < b.SmokeActiveUntil;
-                underBarrageHold = b.WasHoldingForFriendlyBarrage;
-                postBarrageSurge = !underBarrageHold && now < b.BarrageSurgeUntil;
-
-                if (underBarrageHold)
-                    return "BARRAGE HOLD";
-                if (postBarrageSurge)
-                    return "BARRAGE SURGE";
 
                 switch (b.NetDirective)
                 {
@@ -524,16 +529,19 @@ namespace EasyRed2HumanAI
                 ? "HQ-NET"
                 : (sqSnap.HasRadioOrRelay ? "RELAY" : "CUT OFF");
 
+            string slClass = sqSnap.Leader != null
+                ? AiCore.GetSoldierClassLabel(sqSnap.Leader)
+                : "Squad Leader";
             string slPers = (modEnabled && sqSnap.Leader != null)
                 ? GetPersonalityShortLabel(GetPersonality(sqSnap.Leader))
-                : "Vanilla SL";
+                : "Vanilla";
             int camDist = Mathf.RoundToInt(Vector3.Distance(camPos, sqSnap.RefPos));
 
             // Line 1
             _cmdNetSb.Length = 0;
             _cmdNetSb.Append('[').Append(modeTag).Append("]  \u2022  [").Append(sideTag).Append("] '")
                      .Append(sqName).Append("' (").Append(sqSnap.UnitCount).Append(" alive)  |  SL: ")
-                     .Append(slPers).Append("  |  Radio: ").Append(radioStr)
+                     .Append(slClass).Append(" (").Append(slPers).Append(")  |  Radio: ").Append(radioStr)
                      .Append("  |  ").Append(camDist).Append('m');
             _cmdNetCardLine0 = _cmdNetSb.ToString();
 
@@ -558,6 +566,15 @@ namespace EasyRed2HumanAI
                 _cmdNetSb.Append(" (").Append(objDist).Append("m)");
             if (smokeUp)
                 _cmdNetSb.Append("  [SMOKE]");
+            if (modEnabled && _squadBlackboards.TryGetValue(sqPtr, out SquadBlackboard cardB))
+            {
+                if (cardB.LeaderRoseToOccasion)
+                    _cmdNetSb.Append("  [RALLIED]");
+                if (now < cardB.LeaderShockUntil)
+                    _cmdNetSb.Append("  [SL SHOCK]");
+                else if (cardB.LeaderBraveryAura >= 0.06f)
+                    _cmdNetSb.Append("  [BRAVERY +").Append(Mathf.RoundToInt(cardB.LeaderBraveryAura * 100f)).Append("%]");
+            }
             _cmdNetCardLine1 = _cmdNetSb.ToString();
 
             // Line 3: Aggregate squad suppression + live A* paths + threat/casualties
@@ -861,224 +878,247 @@ namespace EasyRed2HumanAI
 
         internal static void DrawSpectatorCommandNetWorldOverlay()
         {
-            if (!_specCommandNetActive || Event.current == null || Event.current.type != EventType.Repaint)
-                return;
-
-            if (ActiveSpectatorHudMode != SpectatorTacticalHudMode.CommandNetOverview || !IsCommandNetOverviewAllowed())
-                return;
-
-            Camera cam = ResourcesManager.mainCamera;
-            if (cam == null)
-                cam = Camera.main;
-            if (cam == null || cam.transform == null)
-                return;
-
-            Vector3 camPos = cam.transform.position;
-            Vector3 camFwd = cam.transform.forward;
-            float now = Time.time;
-            float unscaledNow = Time.unscaledTime;
-            bool modEnabled = VisionConfig.EnableMod.Value;
-
-            BattleData bd = null;
-            try { bd = BattleManager.GetCurrentBattleData(); } catch { }
-            string yellowRefFac = ResolveYellowSideFaction(bd, out _);
-
-            // 1. Artillery Barrage Zones (pulsing Amber/Orange rings)
-            if (modEnabled)
+            long profStart = HitchProfiler.Begin();
+            try
             {
-                float pulseAlpha = 0.55f + 0.28f * Mathf.Sin(unscaledNow * 4.5f);
-                Color artyCol = new Color(CmdNetColorAmber.r, CmdNetColorAmber.g, CmdNetColorAmber.b, pulseAlpha);
-                int fCount = FriendlyArtilleryZoneCount;
-                for (int i = 0; i < fCount; i++)
+                if (!_specCommandNetActive || Event.current == null || Event.current.type != EventType.Repaint)
+                    return;
+
+                if (ActiveSpectatorHudMode != SpectatorTacticalHudMode.CommandNetOverview || !IsCommandNetOverviewAllowed())
+                    return;
+
+                Camera cam = ResourcesManager.mainCamera;
+                if (cam == null)
+                    cam = Camera.main;
+                if (cam == null || cam.transform == null)
+                    return;
+
+                Vector3 camPos = cam.transform.position;
+                Vector3 camFwd = cam.transform.forward;
+                float now = Time.time;
+                float unscaledNow = Time.unscaledTime;
+                bool modEnabled = VisionConfig.EnableMod.Value;
+
+                BattleData bd = null;
+                try { bd = BattleManager.GetCurrentBattleData(); } catch { }
+                string yellowRefFac = ResolveYellowSideFaction(bd, out _);
+
+                // 1. Artillery Barrage Zones (pulsing Amber/Orange rings)
+                if (modEnabled)
                 {
-                    ref ActiveBarragePocket z = ref FriendlyArtilleryZones[i];
-                    if (now < z.ExpireTime)
-                        DrawProjectedGroundCircle(cam, camPos, camFwd, z.Position, z.Radius, 2.0f, artyCol);
+                    float pulseAlpha = 0.55f + 0.28f * Mathf.Sin(unscaledNow * 4.5f);
+                    Color artyCol = new Color(CmdNetColorAmber.r, CmdNetColorAmber.g, CmdNetColorAmber.b, pulseAlpha);
+                    int fCount = FriendlyArtilleryZoneCount;
+                    for (int i = 0; i < fCount; i++)
+                    {
+                        ref ActiveBarragePocket z = ref FriendlyArtilleryZones[i];
+                        if (now < z.ExpireTime)
+                            DrawProjectedGroundCircle(cam, camPos, camFwd, z.Position, z.Radius, 2.0f, artyCol);
+                    }
+
+                    Color shellCol = new Color(1.0f, 0.36f, 0.14f, pulseAlpha * 0.85f);
+                    var pockets = ActiveShellingPockets;
+                    for (int i = 0; i < pockets.Length; i++)
+                    {
+                        ref ActiveBarragePocket p = ref pockets[i];
+                        if (now < p.ExpireTime)
+                            DrawProjectedGroundCircle(cam, camPos, camFwd, p.Position, p.Radius, 1.8f, shellCol);
+                    }
                 }
 
-                Color shellCol = new Color(1.0f, 0.36f, 0.14f, pulseAlpha * 0.85f);
-                var pockets = ActiveShellingPockets;
-                for (int i = 0; i < pockets.Length; i++)
+                // 2. Macro Squad Cyan Routes
+                int sqCount = AiCore.WorldSquadCount;
+                var squads = AiCore.WorldSquads;
+                IntPtr hoveredLeaderPtr = IntPtr.Zero;
+                Vector3 hoveredLeaderPos = Vector3.zero;
+
+                for (int s = 0; s < sqCount; s++)
                 {
-                    ref ActiveBarragePocket p = ref pockets[i];
-                    if (now < p.ExpireTime)
-                        DrawProjectedGroundCircle(cam, camPos, camFwd, p.Position, p.Radius, 1.8f, shellCol);
-                }
-            }
-
-            // 2. Macro Squad Cyan Routes
-            int sqCount = AiCore.WorldSquadCount;
-            var squads = AiCore.WorldSquads;
-            IntPtr hoveredLeaderPtr = IntPtr.Zero;
-            Vector3 hoveredLeaderPos = Vector3.zero;
-
-            for (int s = 0; s < sqCount; s++)
-            {
-                ref AiCore.SquadSnapshot sqSnap = ref squads[s];
-                if (sqSnap.UnitCount <= 0 || sqSnap.Ref == null || sqSnap.RefOnPlane)
-                    continue;
-
-                if (_cmdNetHasHoveredSquad && sqSnap.Ptr == _cmdNetHoveredSquadPtr)
-                {
-                    hoveredLeaderPtr = sqSnap.Leader != null ? sqSnap.Leader.Pointer : IntPtr.Zero;
-                    hoveredLeaderPos = sqSnap.RefPos + new Vector3(0f, 1.4f, 0f);
-                }
-
-                if (sqSnap.LeaderOnVehicle && sqSnap.Leader != null)
-                {
-                    Vehicle lv = sqSnap.Leader.GetCurrentVehicle();
-                    AiCore.VehicleFastHandles vh = lv != null ? AiCore.GetOrCreateVehicleHandles(lv) : null;
-                    if (vh != null && (vh.IsStaticEmplacement || vh.IsParachute))
+                    ref AiCore.SquadSnapshot sqSnap = ref squads[s];
+                    if (sqSnap.UnitCount <= 0 || sqSnap.Ref == null || sqSnap.RefOnPlane)
                         continue;
+
+                    if (_cmdNetHasHoveredSquad && sqSnap.Ptr == _cmdNetHoveredSquadPtr)
+                    {
+                        hoveredLeaderPtr = sqSnap.Leader != null ? sqSnap.Leader.Pointer : IntPtr.Zero;
+                        hoveredLeaderPos = sqSnap.RefPos + new Vector3(0f, 1.4f, 0f);
+                    }
+
+                    if (sqSnap.LeaderOnVehicle && sqSnap.Leader != null)
+                    {
+                        Vehicle lv = sqSnap.Leader.GetCurrentVehicle();
+                        AiCore.VehicleFastHandles vh = lv != null ? AiCore.GetOrCreateVehicleHandles(lv) : null;
+                        if (vh != null && (vh.IsStaticEmplacement || vh.IsParachute))
+                            continue;
+                    }
+
+                    Vector3 startPos = sqSnap.RefPos + new Vector3(0f, 1.4f, 0f);
+                    Vector3 destPos = Vector3.zero;
+                    bool hasDest = false;
+                    float lineWidth = 1.4f;
+                    Color routeCol = new Color(0.17f, 0.82f, 1.0f, 0.44f);
+
+                    if (modEnabled &&
+                        _squadBlackboards.TryGetValue(sqSnap.Ptr, out SquadBlackboard b) &&
+                        b.NetDirective == SquadNetDirective.Hammer_WideFlankEnvelopment &&
+                        now < b.NetDirectiveExpireTime &&
+                        b.NetDirectiveTargetPos.sqrMagnitude > 1f)
+                    {
+                        destPos = b.NetDirectiveTargetPos + new Vector3(0f, 1.4f, 0f);
+                        hasDest = true;
+                        lineWidth = 2.4f;
+                        routeCol = new Color(0.20f, 0.96f, 1.0f, 0.90f);
+                    }
+                    else if (sqSnap.Ref.moveOrderPosition.sqrMagnitude > 1f &&
+                             (sqSnap.Ref.moveOrderPosition - sqSnap.RefPos).sqrMagnitude > 36f)
+                    {
+                        destPos = sqSnap.Ref.moveOrderPosition + new Vector3(0f, 1.4f, 0f);
+                        hasDest = true;
+                        lineWidth = 1.8f;
+                        routeCol = new Color(0.17f, 0.88f, 1.0f, 0.72f);
+                    }
+                    else if (sqSnap.Ref.currentTask != null && sqSnap.Ref.currentTask.Pointer != IntPtr.Zero)
+                    {
+                        destPos = sqSnap.Ref.currentTask.GetTaskDestination() + new Vector3(0f, 1.4f, 0f);
+                        hasDest = (destPos - startPos).sqrMagnitude > 25f;
+                    }
+
+                    if (hasDest &&
+                        sqSnap.LeaderOnVehicle &&
+                        !sqSnap.LeaderOnGroundVehicle &&
+                        (destPos - startPos).sqrMagnitude > 260f * 260f)
+                    {
+                        hasDest = false;
+                    }
+
+                    if (hasDest && TryProjectSegmentToGui(cam, camPos, camFwd, startPos, destPos, out Vector2 guiA, out Vector2 guiB))
+                    {
+                        DrawScreenArrow(guiA, guiB, lineWidth, routeCol);
+                    }
                 }
 
-                Vector3 startPos = sqSnap.RefPos + new Vector3(0f, 1.4f, 0f);
-                Vector3 destPos = Vector3.zero;
-                bool hasDest = false;
-                float lineWidth = 1.4f;
-                Color routeCol = new Color(0.17f, 0.82f, 1.0f, 0.44f);
+                // 3. Hovered Squad Live A* Polyline Paths (Bright Cyan) + Cohesion Tethers
+                var soldiers = AiCore.WorldSoldiers;
+                int wCount = AiCore.WorldSoldierCount;
 
-                if (modEnabled &&
-                    _squadBlackboards.TryGetValue(sqSnap.Ptr, out SquadBlackboard b) &&
-                    b.NetDirective == SquadNetDirective.Hammer_WideFlankEnvelopment &&
-                    now < b.NetDirectiveExpireTime &&
-                    b.NetDirectiveTargetPos.sqrMagnitude > 1f)
+                if (_cmdNetHasHoveredSquad && _cmdNetHoveredSquadPtr != IntPtr.Zero)
                 {
-                    destPos = b.NetDirectiveTargetPos + new Vector3(0f, 1.4f, 0f);
-                    hasDest = true;
-                    lineWidth = 2.4f;
-                    routeCol = new Color(0.20f, 0.96f, 1.0f, 0.90f);
-                }
-                else if (sqSnap.Ref.moveOrderPosition.sqrMagnitude > 1f &&
-                         (sqSnap.Ref.moveOrderPosition - sqSnap.RefPos).sqrMagnitude > 36f)
-                {
-                    destPos = sqSnap.Ref.moveOrderPosition + new Vector3(0f, 1.4f, 0f);
-                    hasDest = true;
-                    lineWidth = 1.8f;
-                    routeCol = new Color(0.17f, 0.88f, 1.0f, 0.72f);
-                }
-                else if (sqSnap.Ref.currentTask != null && sqSnap.Ref.currentTask.Pointer != IntPtr.Zero)
-                {
-                    destPos = sqSnap.Ref.currentTask.GetTaskDestination() + new Vector3(0f, 1.4f, 0f);
-                    hasDest = (destPos - startPos).sqrMagnitude > 25f;
+                    Color tetherCol = new Color(0.32f, 1.00f, 0.68f, 0.68f);
+                    Color pathCol = new Color(0.35f, 0.98f, 1.00f, 0.96f);
+
+                    for (int i = 0; i < wCount; i++)
+                    {
+                        ref AiCore.SoldierSnapshot ss = ref soldiers[i];
+                        if (ss.SquadPtr != _cmdNetHoveredSquadPtr || ss.IsOnVehicle || ss.HasSurrendered || ss.IsInjured)
+                            continue;
+
+                        Vector3 myWPos = ss.Pos + new Vector3(0f, 1.1f, 0f);
+                        if (hoveredLeaderPtr != IntPtr.Zero &&
+                            ss.Ptr != hoveredLeaderPtr &&
+                            TryProjectSegmentToGui(cam, camPos, camFwd, myWPos, hoveredLeaderPos, out Vector2 gSol, out Vector2 gLdr))
+                        {
+                            DrawScreenLine(gSol, gLdr, 1.2f, tetherCol);
+                        }
+
+                        SoldierAI ai = ss.Handles != null ? ss.Handles.Ai : (ss.Ref != null ? ss.Ref.aiController : null);
+                        if (ReferenceEquals(ai, null) || ai == null)
+                            continue;
+
+                        bool drewPoly = false;
+                        try
+                        {
+                            A.d path = ss.Handles != null ? AiCore.GetCachedAiPath(ss.Handles, ai) : ai.path;
+                            if (!ReferenceEquals(path, null) && path.Pointer != IntPtr.Zero && path.IsOk && path.NodesCount > 0)
+                            {
+                                var nodes = path.B();
+                                if (nodes != null && nodes.Length > 0)
+                                {
+                                    Vector3 prevW = myWPos;
+                                    int maxNodes = Mathf.Min(nodes.Length, 14);
+                                    for (int k = 0; k < maxNodes; k++)
+                                    {
+                                        Vector3 nextW = nodes[k].point + new Vector3(0f, 0.8f, 0f);
+                                        if (TryProjectSegmentToGui(cam, camPos, camFwd, prevW, nextW, out Vector2 g0, out Vector2 g1))
+                                            DrawScreenLine(g0, g1, 2.3f, pathCol);
+                                        prevW = nextW;
+                                    }
+                                    Vector3 endW = path.Destination + new Vector3(0f, 0.8f, 0f);
+                                    if (TryProjectSegmentToGui(cam, camPos, camFwd, prevW, endW, out Vector2 gl0, out Vector2 gl1))
+                                        DrawScreenArrow(gl0, gl1, 2.3f, pathCol);
+                                    drewPoly = true;
+                                }
+                            }
+                        }
+                        catch { }
+
+                        if (!drewPoly && ai.MoveDestination.sqrMagnitude > 1f)
+                        {
+                            Vector3 mdW = ai.MoveDestination + new Vector3(0f, 0.8f, 0f);
+                            if ((mdW - myWPos).sqrMagnitude > 4.0f &&
+                                TryProjectSegmentToGui(cam, camPos, camFwd, myWPos, mdW, out Vector2 gm0, out Vector2 gm1))
+                            {
+                                DrawScreenArrow(gm0, gm1, 1.8f, new Color(0.28f, 0.90f, 1.00f, 0.72f));
+                            }
+                        }
+                    }
                 }
 
-                if (hasDest &&
-                    sqSnap.LeaderOnVehicle &&
-                    !sqSnap.LeaderOnGroundVehicle &&
-                    (destPos - startPos).sqrMagnitude > 260f * 260f)
-                {
-                    hasDest = false;
-                }
-
-                if (hasDest && TryProjectSegmentToGui(cam, camPos, camFwd, startPos, destPos, out Vector2 guiA, out Vector2 guiB))
-                {
-                    DrawScreenArrow(guiA, guiB, lineWidth, routeCol);
-                }
-            }
-
-            // 3. Hovered Squad Live A* Polyline Paths (Bright Cyan) + Cohesion Tethers
-            var soldiers = AiCore.WorldSoldiers;
-            int wCount = AiCore.WorldSoldierCount;
-
-            if (_cmdNetHasHoveredSquad && _cmdNetHoveredSquadPtr != IntPtr.Zero)
-            {
-                Color tetherCol = _cmdNetHoverIsYellow
-                    ? new Color(1.00f, 0.90f, 0.25f, 0.45f)
-                    : new Color(1.00f, 0.30f, 0.22f, 0.45f);
-                Color pathCol = new Color(0.35f, 0.98f, 1.00f, 0.96f);
+                // 4. Crisp Overhead Screen Pips (Through-Canopy Visibility)
+                Color borderCol = new Color(0.02f, 0.02f, 0.03f, 0.90f);
+                float sh = Screen.height;
+                float sw = Screen.width;
 
                 for (int i = 0; i < wCount; i++)
                 {
                     ref AiCore.SoldierSnapshot ss = ref soldiers[i];
-                    if (ss.SquadPtr != _cmdNetHoveredSquadPtr || ss.IsOnVehicle || ss.HasSurrendered || ss.IsInjured)
+                    if (ss.IsOnVehicle || ss.IsInjured)
                         continue;
 
-                    Vector3 myWPos = ss.Pos + new Vector3(0f, 1.1f, 0f);
-                    if (hoveredLeaderPtr != IntPtr.Zero &&
-                        ss.Ptr != hoveredLeaderPtr &&
-                        TryProjectSegmentToGui(cam, camPos, camFwd, myWPos, hoveredLeaderPos, out Vector2 gSol, out Vector2 gLdr))
-                    {
-                        DrawScreenLine(gSol, gLdr, 1.2f, tetherCol);
-                    }
-
-                    SoldierAI ai = ss.Handles != null ? ss.Handles.Ai : (ss.Ref != null ? ss.Ref.aiController : null);
-                    if (ReferenceEquals(ai, null) || ai == null)
+                    Vector3 worldPip = ss.Pos + new Vector3(0f, 1.6f, 0f);
+                    if (Vector3.Dot(worldPip - camPos, camFwd) <= 0.75f)
                         continue;
 
-                    bool drewPoly = false;
-                    try
-                    {
-                        A.d path = ss.Handles != null ? AiCore.GetCachedAiPath(ss.Handles, ai) : ai.path;
-                        if (!ReferenceEquals(path, null) && path.Pointer != IntPtr.Zero && path.IsOk && path.NodesCount > 0)
-                        {
-                            var nodes = path.B();
-                            if (nodes != null && nodes.Length > 0)
-                            {
-                                Vector3 prevW = myWPos;
-                                int maxNodes = Mathf.Min(nodes.Length, 14);
-                                for (int k = 0; k < maxNodes; k++)
-                                {
-                                    Vector3 nextW = nodes[k].point + new Vector3(0f, 0.8f, 0f);
-                                    if (TryProjectSegmentToGui(cam, camPos, camFwd, prevW, nextW, out Vector2 g0, out Vector2 g1))
-                                        DrawScreenLine(g0, g1, 2.3f, pathCol);
-                                    prevW = nextW;
-                                }
-                                Vector3 endW = path.Destination + new Vector3(0f, 0.8f, 0f);
-                                if (TryProjectSegmentToGui(cam, camPos, camFwd, prevW, endW, out Vector2 gl0, out Vector2 gl1))
-                                    DrawScreenArrow(gl0, gl1, 2.3f, pathCol);
-                                drewPoly = true;
-                            }
-                        }
-                    }
-                    catch { }
+                    Vector3 sp = cam.WorldToScreenPoint(worldPip);
+                    float gx = sp.x;
+                    float gy = sh - sp.y;
+                    if (gx < -12f || gx > sw + 12f || gy < -12f || gy > sh + 12f)
+                        continue;
 
-                    if (!drewPoly && ai.MoveDestination.sqrMagnitude > 1f)
+                    if (ss.HasSurrendered)
                     {
-                        Vector3 mdW = ai.MoveDestination + new Vector3(0f, 0.8f, 0f);
-                        if ((mdW - myWPos).sqrMagnitude > 4.0f &&
-                            TryProjectSegmentToGui(cam, camPos, camFwd, myWPos, mdW, out Vector2 gm0, out Vector2 gm1))
-                        {
-                            DrawScreenArrow(gm0, gm1, 1.8f, new Color(0.28f, 0.90f, 1.00f, 0.72f));
-                        }
+                        float psz = 4f;
+                        float phalf = psz * 0.5f;
+                        GUI.color = borderCol;
+                        GUI.DrawTexture(new Rect(gx - phalf - 1f, gy - phalf - 1f, psz + 2f, psz + 2f), Texture2D.whiteTexture);
+                        GUI.color = Color.white;
+                        GUI.DrawTexture(new Rect(gx - phalf, gy - phalf, psz, psz), Texture2D.whiteTexture);
+                        continue;
                     }
+
+                    bool isY = !string.IsNullOrEmpty(yellowRefFac) && AiCore.AreSameSideFactions(ss.Faction, yellowRefFac);
+                    bool isHovSq = _cmdNetHasHoveredSquad && ss.SquadPtr == _cmdNetHoveredSquadPtr;
+                    bool isHovSl = isHovSq && ss.IsSquadLeader;
+                    bool isHovMember = isHovSq && !ss.IsSquadLeader;
+                    float sz = isHovSl ? 9f : (isHovMember ? 6f : (ss.IsSquadLeader ? 7f : 4f));
+                    float half = sz * 0.5f;
+
+                    GUI.color = (isHovSl || isHovMember) ? Color.white : borderCol;
+                    GUI.DrawTexture(new Rect(gx - half - 1f, gy - half - 1f, sz + 2f, sz + 2f), Texture2D.whiteTexture);
+
+                    GUI.color = isHovSl ? CmdNetColorCyan : (isHovMember ? CmdNetColorHoverMember : (isY ? CmdNetColorYellow : CmdNetColorRed));
+                    GUI.DrawTexture(new Rect(gx - half, gy - half, sz, sz), Texture2D.whiteTexture);
                 }
+
+                GUI.color = Color.white;
             }
-
-            // 4. Crisp Overhead Screen Pips (Through-Canopy Visibility)
-            Color borderCol = new Color(0.02f, 0.02f, 0.03f, 0.90f);
-            float sh = Screen.height;
-            float sw = Screen.width;
-
-            for (int i = 0; i < wCount; i++)
+            catch (Exception ex)
             {
-                ref AiCore.SoldierSnapshot ss = ref soldiers[i];
-                if (ss.IsOnVehicle || ss.HasSurrendered || ss.IsInjured)
-                    continue;
-
-                Vector3 worldPip = ss.Pos + new Vector3(0f, 1.6f, 0f);
-                if (Vector3.Dot(worldPip - camPos, camFwd) <= 0.75f)
-                    continue;
-
-                Vector3 sp = cam.WorldToScreenPoint(worldPip);
-                float gx = sp.x;
-                float gy = sh - sp.y;
-                if (gx < -12f || gx > sw + 12f || gy < -12f || gy > sh + 12f)
-                    continue;
-
-                bool isY = !string.IsNullOrEmpty(yellowRefFac) && AiCore.AreSameSideFactions(ss.Faction, yellowRefFac);
-                bool isHovSl = _cmdNetHasHoveredSquad && ss.SquadPtr == _cmdNetHoveredSquadPtr && ss.IsSquadLeader;
-                float sz = isHovSl ? 9f : (ss.IsSquadLeader ? 7f : 4f);
-                float half = sz * 0.5f;
-
-                GUI.color = isHovSl ? Color.white : borderCol;
-                GUI.DrawTexture(new Rect(gx - half - 1f, gy - half - 1f, sz + 2f, sz + 2f), Texture2D.whiteTexture);
-
-                GUI.color = isHovSl ? CmdNetColorCyan : (isY ? CmdNetColorYellow : CmdNetColorRed);
-                GUI.DrawTexture(new Rect(gx - half, gy - half, sz, sz), Texture2D.whiteTexture);
+                AiCore.ReportPatchException("SpecCmdNet.World", ex);
             }
-
-            GUI.color = Color.white;
+            finally
+            {
+                HitchProfiler.End(HitchBucket.SpecCmdNet, profStart);
+            }
         }
 
         internal static void DrawSpectatorCenterReticle(float cx, float cy, Color tint, bool hovered)
@@ -1102,86 +1142,98 @@ namespace EasyRed2HumanAI
 
         internal static void DrawSpectatorCommandNetHudCard(float virtualW, float virtualH, float toastBottomY)
         {
-            if (!_specCommandNetActive)
-                return;
-
-            // Minimal crisp center reticle in Free Camera
-            if (_specCommandNetIsFreeCam)
+            long profStart = HitchProfiler.Begin();
+            try
             {
-                DrawSpectatorCenterReticle(
-                    virtualW * 0.5f,
-                    virtualH * 0.5f,
-                    _cmdNetHasHoveredSquad
-                        ? CmdNetColorCyan
-                        : new Color(0.92f, 0.96f, 1.0f, 0.48f),
-                    _cmdNetHasHoveredSquad);
-            }
+                if (!_specCommandNetActive)
+                    return;
 
-            if (string.IsNullOrEmpty(_cmdNetCardLine0))
-            {
+                // Minimal crisp center reticle in Free Camera
+                if (_specCommandNetIsFreeCam)
+                {
+                    DrawSpectatorCenterReticle(
+                        virtualW * 0.5f,
+                        virtualH * 0.5f,
+                        _cmdNetHasHoveredSquad
+                            ? CmdNetColorCyan
+                            : new Color(0.92f, 0.96f, 1.0f, 0.48f),
+                        _cmdNetHasHoveredSquad);
+                }
+
+                if (string.IsNullOrEmpty(_cmdNetCardLine0))
+                {
+                    GUI.color = Color.white;
+                    return;
+                }
+
+                float cardW = Mathf.Min(virtualW - 44f, 980f);
+                float cardH = 82f;
+                float cardX = (virtualW - cardW) * 0.5f;
+                float cardY = toastBottomY > 0f ? Mathf.Max(68f, toastBottomY + 8f) : 68f;
+
+                GUI.color = new Color(0.03f, 0.04f, 0.06f, 0.92f);
+                GUI.Box(new Rect(cardX, cardY, cardW, cardH), "");
+                GUI.Box(new Rect(cardX + 2f, cardY + 2f, cardW - 4f, cardH - 4f), "");
+
+                bool modEnabled = VisionConfig.EnableMod.Value;
+                GUI.color = !modEnabled
+                    ? CmdNetColorAmber
+                    : (_cmdNetHasHoveredSquad ? CmdNetColorCyan : CmdNetColorYellow);
+                GUI.DrawTexture(new Rect(cardX + 2f, cardY + 2f, cardW - 4f, 3f), Texture2D.whiteTexture);
+
+                GUIStyle lbl = GUI.skin != null ? GUI.skin.label : null;
+                int oldSize = 0;
+                FontStyle oldStyle = FontStyle.Normal;
+                TextAnchor oldAlign = TextAnchor.UpperLeft;
+                bool oldWrap = false;
+                if (lbl != null)
+                {
+                    oldSize = lbl.fontSize;
+                    oldStyle = lbl.fontStyle;
+                    oldAlign = lbl.alignment;
+                    oldWrap = lbl.wordWrap;
+                    lbl.alignment = TextAnchor.MiddleLeft;
+                    lbl.wordWrap = false;
+                }
+
+                if (lbl != null)
+                {
+                    lbl.fontSize = 14;
+                    lbl.fontStyle = FontStyle.Bold;
+                }
+                GUI.color = !modEnabled
+                    ? new Color(1.0f, 0.74f, 0.30f, 1.0f)
+                    : (_cmdNetHasHoveredSquad ? (_cmdNetHoverIsYellow ? CmdNetColorYellowSl : CmdNetColorRedSl) : CmdNetColorYellow);
+                GUI.Label(new Rect(cardX + 14f, cardY + 7f, cardW - 28f, 22f), _cmdNetCardLine0);
+
+                if (lbl != null)
+                {
+                    lbl.fontSize = 13;
+                    lbl.fontStyle = FontStyle.Normal;
+                }
+                GUI.color = new Color(0.45f, 0.94f, 1.0f, 1.0f);
+                GUI.Label(new Rect(cardX + 14f, cardY + 31f, cardW - 28f, 21f), _cmdNetCardLine1);
+
+                GUI.color = new Color(0.90f, 0.93f, 0.97f, 0.98f);
+                GUI.Label(new Rect(cardX + 14f, cardY + 54f, cardW - 28f, 21f), _cmdNetCardLine2);
+
+                if (lbl != null)
+                {
+                    lbl.fontSize = oldSize;
+                    lbl.fontStyle = oldStyle;
+                    lbl.alignment = oldAlign;
+                    lbl.wordWrap = oldWrap;
+                }
                 GUI.color = Color.white;
-                return;
             }
-
-            float cardW = Mathf.Min(virtualW - 44f, 980f);
-            float cardH = 82f;
-            float cardX = (virtualW - cardW) * 0.5f;
-            float cardY = toastBottomY > 0f ? Mathf.Max(68f, toastBottomY + 8f) : 68f;
-
-            GUI.color = new Color(0.03f, 0.04f, 0.06f, 0.92f);
-            GUI.Box(new Rect(cardX, cardY, cardW, cardH), "");
-            GUI.Box(new Rect(cardX + 2f, cardY + 2f, cardW - 4f, cardH - 4f), "");
-
-            bool modEnabled = VisionConfig.EnableMod.Value;
-            GUI.color = !modEnabled
-                ? CmdNetColorAmber
-                : (_cmdNetHasHoveredSquad ? CmdNetColorCyan : CmdNetColorYellow);
-            GUI.DrawTexture(new Rect(cardX + 2f, cardY + 2f, cardW - 4f, 3f), Texture2D.whiteTexture);
-
-            GUIStyle lbl = GUI.skin != null ? GUI.skin.label : null;
-            int oldSize = 0;
-            FontStyle oldStyle = FontStyle.Normal;
-            TextAnchor oldAlign = TextAnchor.UpperLeft;
-            bool oldWrap = false;
-            if (lbl != null)
+            catch (Exception ex)
             {
-                oldSize = lbl.fontSize;
-                oldStyle = lbl.fontStyle;
-                oldAlign = lbl.alignment;
-                oldWrap = lbl.wordWrap;
-                lbl.alignment = TextAnchor.MiddleLeft;
-                lbl.wordWrap = false;
+                AiCore.ReportPatchException("SpecCmdNet.Hud", ex);
             }
-
-            if (lbl != null)
+            finally
             {
-                lbl.fontSize = 14;
-                lbl.fontStyle = FontStyle.Bold;
+                HitchProfiler.End(HitchBucket.SpecCmdNet, profStart);
             }
-            GUI.color = !modEnabled
-                ? new Color(1.0f, 0.74f, 0.30f, 1.0f)
-                : (_cmdNetHasHoveredSquad ? (_cmdNetHoverIsYellow ? CmdNetColorYellowSl : CmdNetColorRedSl) : CmdNetColorYellow);
-            GUI.Label(new Rect(cardX + 14f, cardY + 7f, cardW - 28f, 22f), _cmdNetCardLine0);
-
-            if (lbl != null)
-            {
-                lbl.fontSize = 13;
-                lbl.fontStyle = FontStyle.Normal;
-            }
-            GUI.color = new Color(0.45f, 0.94f, 1.0f, 1.0f);
-            GUI.Label(new Rect(cardX + 14f, cardY + 31f, cardW - 28f, 21f), _cmdNetCardLine1);
-
-            GUI.color = new Color(0.90f, 0.93f, 0.97f, 0.98f);
-            GUI.Label(new Rect(cardX + 14f, cardY + 54f, cardW - 28f, 21f), _cmdNetCardLine2);
-
-            if (lbl != null)
-            {
-                lbl.fontSize = oldSize;
-                lbl.fontStyle = oldStyle;
-                lbl.alignment = oldAlign;
-                lbl.wordWrap = oldWrap;
-            }
-            GUI.color = Color.white;
         }
     }
 }

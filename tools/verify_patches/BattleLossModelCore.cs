@@ -204,8 +204,6 @@ namespace EasyRed2HumanAI
 
     public static partial class VeteranAndTacticsPatches
     {
-        public static int IndividualSelfPreservationBalksCount;
-
         public enum SoldierPersonality : byte
         {
             None = 0,
@@ -219,26 +217,6 @@ namespace EasyRed2HumanAI
             TankCrew_Brawler = 22, TankCrew_Sniper = 23, TankCrew_Support = 24,
             LightCrew_Outrider = 25, LightCrew_Escort = 26, LightCrew_FlakWatch = 27,
             Pilot_Ace = 28, Pilot_Daredevil = 29, Pilot_Disciplined = 30
-        }
-
-        private static bool IsMovementGoapAction(GoapActionId id)
-        {
-            switch (id)
-            {
-                case GoapActionId.SeekEmergencyCover:
-                case GoapActionId.RepositionBehindWall:
-                case GoapActionId.MaintainRadioLinkWithLeader:
-                case GoapActionId.MoveToFlankCover:
-                case GoapActionId.BoundWithOverwatch:
-                case GoapActionId.PointBlankBayonetBreach:
-                case GoapActionId.RescueSurrenderedComrade:
-                case GoapActionId.LoneWolfLinkUpOrAmbush:
-                case GoapActionId.ScavengeSupplyFromCorpse:
-                case GoapActionId.TacticalFallbackRetreat:
-                    return true;
-                default:
-                    return false;
-            }
         }
     }
 
@@ -369,7 +347,6 @@ namespace EasyRed2HumanAI
             public UnityEngine.Vector3 DestPos;
             public VeteranAndTacticsPatches.BotGoapPlan Plan;
             public float LastPlanTime = -99f;
-            public VeteranAndTacticsPatches.GoapActionId LastPlannedStep0;
             public int RapidFlipCount;
             public float FlipWindowStart;
             public int ConsecutiveAborts;
@@ -387,6 +364,10 @@ namespace EasyRed2HumanAI
             public bool PlacedPressureMine;
             public bool PickedDudMine;
             public bool OnEmptyEmplacement;
+            public EmergentEngine.SoldierEmergentState Emergent;
+            public int AmmoShotsRemaining = 60;
+            public bool EmergentRunningBandage;
+            public float NextMedicHealTime;
         }
 
         private sealed class SimSquad
@@ -405,6 +386,10 @@ namespace EasyRed2HumanAI
             public float AttritionWaitUntil;
             public VeteranAndTacticsPatches.SquadNetDirectivePrevSnapshot NetPrev;
             public VeteranAndTacticsPatches.SquadBlackboard Board;
+            public float LastHeartbeatTime;
+            public bool HadRadioLink;
+            public bool MiaStamped;
+            public EmergentEngine.Tier2SquadDirective EmergentDirective;
             public List<SimSoldier> Members = new List<SimSoldier>(8);
         }
 
@@ -474,6 +459,15 @@ namespace EasyRed2HumanAI
             public int DistinctActionsUsedMask;
             public float AvgSquadActionDiversity;
             public double[] ActionShares = new double[17];
+            public bool UsedEmergentEngine;
+            public int[] EmergentActionCounts = new int[24];
+            public int[] EmergentReflexCounts = new int[8];
+            public int EmergentPrereqChains;
+            public int EmergentUnsafePrereqRejects;
+            public int EmergentDangerStamps;
+            public int EmergentEnemyReliefStamps;
+            public int EmergentMiaTimeouts;
+            public int EmergentTier3Levers;
             public List<BattleIssueSample> Issues = new List<BattleIssueSample>(4);
         }
 
@@ -769,11 +763,15 @@ namespace EasyRed2HumanAI
             return list;
         }
 
-        public static BattleSimResult SimulateBattle(MissionScenario sc, int seedIdx, int missionIndex, float maxDuration = 900f)
+        public static BattleSimResult SimulateBattle(MissionScenario sc, int seedIdx, int missionIndex, float maxDuration = 900f, bool useEmergent = true)
         {
             var rng = new SimRng(sc.UniqueKey, seedIdx);
             float now = 10f;
             const float dt = 0.50f;
+            var rings = useEmergent ? new[] { new EmergentEngine.DangerStampRing(), new EmergentEngine.DangerStampRing() } : null;
+            var intents = useEmergent ? new[] { new EmergentEngine.IntentBoard(), new EmergentEngine.IntentBoard() } : null;
+            float[] sideDesperation = new float[2];
+            var lastSideLever = new EmergentEngine.Tier3NetLever[2];
 
             AiCore.t_nightDarkness01 = sc.IsNight ? 0.78f : 0.0f;
             AiCore.t_hasWater = sc.IsAmphibiousBeach;
@@ -801,7 +799,8 @@ namespace EasyRed2HumanAI
                 MissionKey = sc.UniqueKey,
                 Campaign = sc.Campaign,
                 Mode = sc.Mode,
-                Seed = seedIdx
+                Seed = seedIdx,
+                UsedEmergentEngine = useEmergent
             };
 
             // Initialize objectives for current phase
@@ -838,6 +837,8 @@ namespace EasyRed2HumanAI
                     Faction = fac,
                     IsVehicleSquad = isVehSq,
                     ObjectiveIndex = rng.RangeInt(0, objectives.Count),
+                    LastHeartbeatTime = now,
+                    HadRadioLink = !isVehSq,
                     Board = new VeteranAndTacticsPatches.SquadBlackboard
                     {
                         AliveMemberCount = isVehSq ? 4 : 6,
@@ -884,6 +885,7 @@ namespace EasyRed2HumanAI
                         HasBlindSuppressWeapon = m == 0 || m == 3 || m == 5,
                         IsManualBoltOnly = m == 2 || m == 4,
                         InCover = startInCover,
+                        AmmoShotsRemaining = (!isVehSq && m == 3) ? 120 : 60,
                         InShallowSurf = yStart <= 0.1f,
                         CurrentWeightKg = rng.Range(14f, 22f),
                         MaxWeightKg = 24f,
@@ -963,6 +965,11 @@ namespace EasyRed2HumanAI
                             s.IsBleeding = true;
                             s.Suppression = 48f;
                             s.StuckTimer = 6.5f;
+                            if (useEmergent)
+                            {
+                                rings[0].StampExplosionHazard(s.Pos, s.SquadIndex + 1L, true, true, 16f, 0.85f, now);
+                                res.EmergentDangerStamps++;
+                            }
                             break;
                         }
                     }
@@ -976,6 +983,13 @@ namespace EasyRed2HumanAI
                         {
                             s.Alive = false;
                             invTickets--;
+                            if (useEmergent)
+                            {
+                                rings[s.Side].StampFriendlyHarm(s.Pos, s.Pos, s.SquadIndex + 1L, false, EmergentEngine.DangerWeaponClass.SmallArms, 0.78f, 12f, 20f, now);
+                                rings[1 - s.Side].StampEnemyHarmRelief(s.Pos, 0L, true, 0.55f, now);
+                                res.EmergentDangerStamps++;
+                                res.EmergentEnemyReliefStamps++;
+                            }
                             var mySq = squads[s.SquadIndex];
                             foreach (var mate in mySq.Members)
                             {
@@ -1177,10 +1191,36 @@ namespace EasyRed2HumanAI
                 // =================================================================
                 if (tick % 2 == 0)
                 {
+                    int[] t3Active = useEmergent ? new int[2] : null;
+                    int[] t3Balk = useEmergent ? new int[2] : null;
+                    int[] t3Mia = useEmergent ? new int[2] : null;
+                    float[] t3Heat = useEmergent ? new float[2] : null;
+                    float[] t3Rel = useEmergent ? new float[2] : null;
+                    float[] t3MinTickets = useEmergent ? new[] { 1f, 1f } : null;
+                    float[] t3MaxDefCap = useEmergent ? new float[2] : null;
+                    bool[] t3ArmorBlock = useEmergent ? new bool[2] : null;
+                    bool[] t3Collapsing = useEmergent ? new bool[2] : null;
+                    string[] t3Fac = useEmergent ? new[] { sc.InvaderFaction, sc.DefenderFaction } : null;
+
                     foreach (var sq in squads)
                     {
                         int aliveCnt = sq.Members.Count(m => m.Alive);
-                        if (aliveCnt == 0) continue;
+                        if (aliveCnt == 0)
+                        {
+                            if (useEmergent && sq.HadRadioLink && !sq.MiaStamped && sq.LastHeartbeatTime > 0f && (now - sq.LastHeartbeatTime) >= 18f)
+                            {
+                                sq.MiaStamped = true;
+                                rings[sq.Side].StampMiaCommsTimeout(sq.Board.SquadCenter, sq.Index + 1L, 0.78f, now);
+                                res.EmergentMiaTimeouts++;
+                                res.EmergentDangerStamps++;
+                                t3Mia[sq.Side]++;
+                            }
+                            continue;
+                        }
+
+                        sq.LastHeartbeatTime = now;
+                        sq.MiaStamped = false;
+                        if (sq.Board.IsConnectedToRadioNet) sq.HadRadioLink = true;
 
                         SimSoldier ldr = sq.Members.FirstOrDefault(m => m.Alive && m.IsLeader) ?? sq.Members.FirstOrDefault(m => m.Alive);
                         if (ldr == null) continue;
@@ -1230,47 +1270,120 @@ namespace EasyRed2HumanAI
                         var dummySq = new Squad { Pointer = new IntPtr(sq.Index + 1), isChargeSquad = false };
                         bool isTrueGyokusai = VeteranAndTacticsPatches.IsTrueGyokusaiOrBanzaiCondition(in prof, dummySq, in sq.Board);
 
-                        // Team Net Anvil / Hammer Pairing across Radio-Connected squads
-                        if (sq.Board.IsConnectedToRadioNet && !sq.IsGarrison && sq.Board.HasActiveThreat && now >= sq.Board.NetDirectiveExpireTime)
+                        if (useEmergent)
                         {
-                            float dThreat = UnityEngine.Vector3.Distance(ldr.Pos, sq.Board.ThreatPosition);
-                            bool onBeachSurf = sc.IsAmphibiousBeach && sq.Side == 0 && ldr.Pos.y <= AiCore.t_waterLevel + 4.2f;
-                            bool hasPinnedOrAlly = sq.Board.IsThreatBeingPinned(now) || squads.Any(a => a.Side == sq.Side && a.Index != sq.Index && a.Board.IsConnectedToRadioNet && UnityEngine.Vector3.Distance(a.Board.SquadCenter, sq.Board.ThreatPosition) < 115f);
+                            long sqId = sq.Index + 1L;
+                            float laneHarm = rings[sq.Side].EvaluateSpotProjectedHarm(
+                                sq.Board.SquadCenter, sq.Board.SquadCenter, sqId,
+                                sq.Board.IsConnectedToRadioNet, sq.IsVehicleSquad, false,
+                                EmergentEngine.EmergentTier.SquadCrew, now, out _, out float sqRelief, out _);
 
-                            if (!onBeachSurf && dThreat >= 18f && dThreat <= 160f && hasPinnedOrAlly)
+                            t3Active[sq.Side]++;
+                            t3Heat[sq.Side] += laneHarm;
+                            t3Rel[sq.Side] += sqRelief;
+                            if (sq.Board.TicketRatio01 < t3MinTickets[sq.Side]) t3MinTickets[sq.Side] = sq.Board.TicketRatio01;
+                            if (sq.Board.IsDefendingObjective && sq.Board.HasActiveObjectiveTask)
                             {
-                                bool isHammer = rng.Next01() < 0.45f;
-                                if (isHammer)
+                                if (sq.Board.ObjectiveCaptureProgress > t3MaxDefCap[sq.Side]) t3MaxDefCap[sq.Side] = sq.Board.ObjectiveCaptureProgress;
+                                if (sq.Board.ObjectiveCaptureProgress >= 0.60f) t3Collapsing[sq.Side] = true;
+                            }
+
+                            if (!sq.IsGarrison)
+                            {
+                                float dThreat = sq.Board.HasActiveThreat ? UnityEngine.Vector3.Distance(ldr.Pos, sq.Board.ThreatPosition) : 999f;
+                                bool onBeachSurf = sc.IsAmphibiousBeach && sq.Side == 0 && ldr.Pos.y <= AiCore.t_waterLevel + 4.2f;
+                                var t2Inp = new EmergentEngine.Tier2SquadInput
                                 {
-                                    // NCO evaluation matching TeamNetAndSquadCommand.cs
-                                    bool hasImminent = dThreat <= 165f || ldr.Suppression >= 12f;
-                                    float balkDeathThresh = ldrPers == VeteranAndTacticsPatches.SoldierPersonality.Leader_Spearhead ? 2.60f : 1.85f;
-                                    bool ncoBalks = !isTrueGyokusai && hasImminent && (aliveCnt <= 2 || sq.Board.DecayedRecentDeaths >= balkDeathThresh || ldr.Suppression >= 44f);
-                                    if (aliveCnt <= 2 && !hasImminent)
+                                    Now = now,
+                                    AliveMembers = aliveCnt,
+                                    AvgSquadHarm = laneHarm,
+                                    ProjectedLaneHarm = laneHarm,
+                                    DecayedRecentDeaths = sq.Board.DecayedRecentDeaths,
+                                    EnemyRelief = sqRelief,
+                                    ObjectiveDist = UnityEngine.Vector3.Distance(ldr.Pos, sq.Board.ObjectivePosition),
+                                    ObjectiveUrgency = Mathf.Clamp01(0.45f + sq.Board.ObjectiveCaptureProgress * 0.55f),
+                                    HasActiveThreat = sq.Board.HasActiveThreat && !onBeachSurf,
+                                    ThreatDist = dThreat,
+                                    ThreatIsArmor = sq.Board.ThreatIsArmor,
+                                    SquadHasAT = sq.Board.SquadHasAntiTank,
+                                    SquadHasSmoke = sq.Members.Any(m => m.Alive && m.HasSmokeGrenade),
+                                    SquadOutOfAmmo = sq.Members.All(m => !m.Alive || m.AmmoShotsRemaining <= 0),
+                                    AllySquadPinning = sq.Board.IsThreatBeingPinned(now) || squads.Any(a => a.Side == sq.Side && a.Index != sq.Index && a.Board.IsConnectedToRadioNet && UnityEngine.Vector3.Distance(a.Board.SquadCenter, sq.Board.ThreatPosition) < 115f),
+                                    FlankCoverAvailable = !onBeachSurf && ((sq.Board.FlankLeftCover != null && !sq.Board.FlankLeftCover.Unreachable) || sq.Board.FlankRightCover != null),
+                                    HasIntactRadio = sq.Board.IsConnectedToRadioNet,
+                                    IsVehicleCrew = sq.IsVehicleSquad,
+                                    LeaderIsSpearhead = ldrPers == VeteranAndTacticsPatches.SoldierPersonality.Leader_Spearhead,
+                                    IsGyokusaiOrFinalStand = isTrueGyokusai,
+                                    SectorDesperationBias = sideDesperation[sq.Side]
+                                };
+                                var t2Dec = EmergentEngine.EvaluateTier2Squad(in t2Inp, in prof);
+                                sq.EmergentDirective = t2Dec.Directive;
+                                if (t2Dec.Directive == EmergentEngine.Tier2SquadDirective.BalkNeedSupport)
+                                {
+                                    if (now >= sq.Board.NetDirectiveExpireTime)
                                     {
-                                        sq.Board.NetDirective = VeteranAndTacticsPatches.SquadNetDirective.Connected_StandardObjective;
-                                    }
-                                    else if (ncoBalks)
-                                    {
-                                        sq.Board.NetDirective = VeteranAndTacticsPatches.SquadNetDirective.Anvil_PinAndCallSupport;
                                         res.NcoBalkCount++;
+                                        sq.Board.NetDirectiveExpireTime = now + 10.0f;
+                                    }
+                                    t3Balk[sq.Side]++;
+                                    if (t2Dec.BalkReason == EmergentEngine.Tier2BalkReason.BlockedByArmor) t3ArmorBlock[sq.Side] = true;
+                                }
+                                if (t2Dec.Directive == EmergentEngine.Tier2SquadDirective.HammerFlank)
+                                    sq.Board.NetDirective = VeteranAndTacticsPatches.SquadNetDirective.Hammer_WideFlankEnvelopment;
+                                else if (t2Dec.Directive == EmergentEngine.Tier2SquadDirective.AnvilPin)
+                                    sq.Board.NetDirective = VeteranAndTacticsPatches.SquadNetDirective.Anvil_PinAndCallSupport;
+                                else if (t2Dec.Directive == EmergentEngine.Tier2SquadDirective.LocalFallback)
+                                    sq.Board.NetDirective = VeteranAndTacticsPatches.SquadNetDirective.Regroup_SectorWithdrawal;
+                                else
+                                    sq.Board.NetDirective = sq.Board.IsConnectedToRadioNet
+                                        ? VeteranAndTacticsPatches.SquadNetDirective.Connected_StandardObjective
+                                        : VeteranAndTacticsPatches.SquadNetDirective.Disconnected_Autonomous;
+                            }
+                        }
+                        else
+                        {
+                            // Team Net Anvil / Hammer Pairing across Radio-Connected squads
+                            if (sq.Board.IsConnectedToRadioNet && !sq.IsGarrison && sq.Board.HasActiveThreat && now >= sq.Board.NetDirectiveExpireTime)
+                            {
+                                float dThreat = UnityEngine.Vector3.Distance(ldr.Pos, sq.Board.ThreatPosition);
+                                bool onBeachSurf = sc.IsAmphibiousBeach && sq.Side == 0 && ldr.Pos.y <= AiCore.t_waterLevel + 4.2f;
+                                bool hasPinnedOrAlly = sq.Board.IsThreatBeingPinned(now) || squads.Any(a => a.Side == sq.Side && a.Index != sq.Index && a.Board.IsConnectedToRadioNet && UnityEngine.Vector3.Distance(a.Board.SquadCenter, sq.Board.ThreatPosition) < 115f);
+
+                                if (!onBeachSurf && dThreat >= 18f && dThreat <= 160f && hasPinnedOrAlly)
+                                {
+                                    bool isHammer = rng.Next01() < 0.45f;
+                                    if (isHammer)
+                                    {
+                                        // NCO evaluation matching TeamNetAndSquadCommand.cs
+                                        bool hasImminent = dThreat <= 165f || ldr.Suppression >= 12f;
+                                        float balkDeathThresh = ldrPers == VeteranAndTacticsPatches.SoldierPersonality.Leader_Spearhead ? 2.60f : 1.85f;
+                                        bool ncoBalks = !isTrueGyokusai && hasImminent && (aliveCnt <= 2 || sq.Board.DecayedRecentDeaths >= balkDeathThresh || ldr.Suppression >= 44f);
+                                        if (aliveCnt <= 2 && !hasImminent)
+                                        {
+                                            sq.Board.NetDirective = VeteranAndTacticsPatches.SquadNetDirective.Connected_StandardObjective;
+                                        }
+                                        else if (ncoBalks)
+                                        {
+                                            sq.Board.NetDirective = VeteranAndTacticsPatches.SquadNetDirective.Anvil_PinAndCallSupport;
+                                            res.NcoBalkCount++;
+                                        }
+                                        else
+                                        {
+                                            sq.Board.NetDirective = VeteranAndTacticsPatches.SquadNetDirective.Hammer_WideFlankEnvelopment;
+                                        }
+                                        sq.Board.NetDirectiveExpireTime = now + 14f;
                                     }
                                     else
                                     {
-                                        sq.Board.NetDirective = VeteranAndTacticsPatches.SquadNetDirective.Hammer_WideFlankEnvelopment;
+                                        sq.Board.NetDirective = VeteranAndTacticsPatches.SquadNetDirective.Anvil_PinAndCallSupport;
+                                        sq.Board.NetDirectiveExpireTime = now + 14f;
                                     }
-                                    sq.Board.NetDirectiveExpireTime = now + 14f;
-                                }
-                                else
-                                {
-                                    sq.Board.NetDirective = VeteranAndTacticsPatches.SquadNetDirective.Anvil_PinAndCallSupport;
-                                    sq.Board.NetDirectiveExpireTime = now + 14f;
                                 }
                             }
-                        }
-                        else if (!sq.Board.IsConnectedToRadioNet)
-                        {
-                            sq.Board.NetDirective = VeteranAndTacticsPatches.SquadNetDirective.Disconnected_Autonomous;
+                            else if (!sq.Board.IsConnectedToRadioNet)
+                            {
+                                sq.Board.NetDirective = VeteranAndTacticsPatches.SquadNetDirective.Disconnected_Autonomous;
+                            }
                         }
 
                         // Follow column march check: release immediately on contact or <= 78m
@@ -1282,6 +1395,43 @@ namespace EasyRed2HumanAI
                         else if (sq.FollowingColumn && (sq.Board.HasActiveThreat || dToObj <= 78f))
                         {
                             sq.FollowingColumn = false;
+                        }
+                    }
+
+                    if (useEmergent)
+                    {
+                        for (int sIdx = 0; sIdx < 2; sIdx++)
+                        {
+                            if (t3Active[sIdx] <= 0) continue;
+                            var profS = VeteranAndTacticsPatches.GetFactionCommandProfile(t3Fac[sIdx]);
+                            var t3Inp = new EmergentEngine.Tier3NetInput
+                            {
+                                Now = now,
+                                ActiveSquads = t3Active[sIdx],
+                                BalkingSquads = t3Balk[sIdx],
+                                MiaSilentTimeouts = t3Mia[sIdx],
+                                LaneHarmHeat = Mathf.Clamp01(t3Heat[sIdx] / t3Active[sIdx]),
+                                EnemyRelief = Mathf.Clamp01(t3Rel[sIdx] / t3Active[sIdx]),
+                                TicketRatio01 = t3MinTickets[sIdx],
+                                CriticalObjectiveThreat01 = Mathf.Max(t3MaxDefCap[sIdx], t3Balk[sIdx] > 0 ? 0.55f : 0.25f),
+                                SmokeAvailable = t3Balk[sIdx] > 0,
+                                ArtilleryAvailable = true,
+                                TanksAvailable = sc.HasArmor && t3ArmorBlock[sIdx],
+                                CasAvailable = sc.HasAircraft,
+                                AtAssetsAvailable = true,
+                                InfantryBlockedByArmor = t3ArmorBlock[sIdx],
+                                AlternativeFlankOpen = true,
+                                FreshSpawnNeedsStaging = (t3Heat[sIdx] / t3Active[sIdx]) >= 0.45f,
+                                HasCollapsingFriendlyCap = t3Collapsing[sIdx],
+                                HasShreddedEncircledSquad = t3Balk[sIdx] >= 2
+                            };
+                            var t3Dec = EmergentEngine.EvaluateTier3Net(in t3Inp, in profS);
+                            sideDesperation[sIdx] = t3Dec.SectorDesperationBias;
+                            if (t3Dec.PrimaryLever != lastSideLever[sIdx])
+                            {
+                                lastSideLever[sIdx] = t3Dec.PrimaryLever;
+                                res.EmergentTier3Levers++;
+                            }
                         }
                     }
                 }
@@ -1352,6 +1502,13 @@ namespace EasyRed2HumanAI
                         sq.Board.DecayedRecentDeaths += 1f;
                         sq.Board.LastCasualtyPos = sol.Pos;
                         sq.Board.LastCasualtyTime = now;
+                        if (useEmergent)
+                        {
+                            rings[sol.Side].StampFriendlyHarm(sol.Pos, visTarget != null ? visTarget.Pos : sol.Pos, sq.Index + 1L, sq.Board.IsConnectedToRadioNet, EmergentEngine.DangerWeaponClass.SmallArms, 0.78f, 12f, 20f, now);
+                            rings[1 - sol.Side].StampEnemyHarmRelief(sol.Pos, 0L, true, 0.55f, now);
+                            res.EmergentDangerStamps++;
+                            res.EmergentEnemyReliefStamps++;
+                        }
                         continue;
                     }
 
@@ -1384,177 +1541,200 @@ namespace EasyRed2HumanAI
                         res.Issues.Add(new BattleIssueSample { Category = "WeightLockBug", MissionKey = sc.UniqueKey, Seed = seedIdx, TimeSec = now, Detail = $"Bot weight {sol.CurrentWeightKg:F1} > {sol.MaxWeightKg:F1}" });
                     }
 
-                    // Build exact 64-bit WorldState matching BuildSoldierWorldState()
-                    VeteranAndTacticsPatches.GoapStateBits ws = VeteranAndTacticsPatches.GoapStateBits.None;
-                    if (sol.IsBleeding)
                     {
-                        ws |= VeteranAndTacticsPatches.GoapStateBits.IsBleeding;
-                        if (sol.HasTarget && sol.TargetDist <= 28f && sol.Suppression >= 28f)
-                            ws |= VeteranAndTacticsPatches.GoapStateBits.BandageUnsafeUnderFire;
-                    }
-                    if ((ws & VeteranAndTacticsPatches.GoapStateBits.BandageUnsafeUnderFire) == 0 && sol.InCover)
-                        ws |= VeteranAndTacticsPatches.GoapStateBits.InCover;
-                    if (sol.HasBandage) ws |= VeteranAndTacticsPatches.GoapStateBits.HasBandage;
-                    if (sol.Suppression >= 18f) ws |= VeteranAndTacticsPatches.GoapStateBits.IsSuppressed;
-                    if (sol.Suppression >= 45f) ws |= VeteranAndTacticsPatches.GoapStateBits.IsHeavilySuppressed;
-                    if (sol.HasTarget) ws |= VeteranAndTacticsPatches.GoapStateBits.HasVisibleEnemy;
-                    if (sol.HasClearLof) ws |= VeteranAndTacticsPatches.GoapStateBits.CanFireAtVisibleEnemy;
-                    if (sol.IsMg) ws |= VeteranAndTacticsPatches.GoapStateBits.IsMachineGunner;
-                    if (sol.IsRadioman) ws |= VeteranAndTacticsPatches.GoapStateBits.IsRadioman;
-                    if (sol.HasTarget && sol.TargetDist <= 6.5f) ws |= VeteranAndTacticsPatches.GoapStateBits.InPointBlankRange;
-                    if (sq.Board.HasActiveThreat) ws |= VeteranAndTacticsPatches.GoapStateBits.SquadHasActiveThreat;
-                    if (sq.Board.IsThreatBeingPinned(now) && sq.Board.Suppressor0Ptr != sol.Ptr)
-                        ws |= VeteranAndTacticsPatches.GoapStateBits.AllyPinningThreat;
-                    if (sol.HasTarget && sol.TargetDist >= 16f && sol.TargetDist <= 140f && sol.HasClearLof && sol.Suppression < 42f)
-                        ws |= VeteranAndTacticsPatches.GoapStateBits.CanProvideOverwatch;
-                    else if (sq.Board.HasActiveThreat && (ws & VeteranAndTacticsPatches.GoapStateBits.CanProvideOverwatch) == 0 &&
-                             sol.HasBlindSuppressWeapon && !sol.IsManualBoltOnly && !sol.TowardExposedWall)
-                        ws |= VeteranAndTacticsPatches.GoapStateBits.CanBlindSuppressThreat;
-
-                    if (sol.HasFragGrenade) ws |= VeteranAndTacticsPatches.GoapStateBits.HasFragGrenade;
-                    if (sol.HasSmokeGrenade && now >= (sol.Plan.NextReplanTime - 1f)) ws |= VeteranAndTacticsPatches.GoapStateBits.HasSmokeGrenade;
-                    if (sq.Board.HasActiveThreat && UnityEngine.Vector3.Distance(sol.Pos, sq.Board.ThreatPosition) is >= 10f and <= 29f)
-                        ws |= VeteranAndTacticsPatches.GoapStateBits.InGrenadeRange;
-                    if (sq.Board.HasActiveThreat && !sol.HasClearLof)
-                        ws |= VeteranAndTacticsPatches.GoapStateBits.TargetLostBehindCover;
-
-                    bool multiSl = sol.IsLeader && sq.Board.AliveMemberCount >= 2;
-                    if (!multiSl && ((sq.Board.FlankLeftCover != null && !sq.Board.FlankLeftCover.Unreachable) || sq.Board.FlankRightCover != null))
-                        ws |= VeteranAndTacticsPatches.GoapStateBits.FlankCoverAvailable;
-
-                    if ((ws & VeteranAndTacticsPatches.ScavengeForbiddenMask) == 0 &&
-                        sol.Suppression < 5f &&
-                        (sol.NearDroppedRadio || (!sol.HasBandage && sol.IsBleeding) || sol.NearAmmoBox || (sol.NearAtMinePickup && sc.HasArmor)))
-                    {
-                        ws |= VeteranAndTacticsPatches.GoapStateBits.NeedAmmoOrMedScavenge;
-                    }
-
-                    if (sq.Board.AliveMemberCount <= 1 && !sol.HasClearLof)
-                        ws |= VeteranAndTacticsPatches.GoapStateBits.IsEntirelyAlone;
-
-                    if (sq.Board.ThreatIsArmor && UnityEngine.Vector3.Distance(sol.Pos, sq.Board.ThreatPosition) <= 32f && !sol.HasAtWeapon)
-                        ws |= VeteranAndTacticsPatches.GoapStateBits.OverwhelmedNeedFallback | VeteranAndTacticsPatches.GoapStateBits.ArmorThreatClose;
-
-                    if (now >= sol.Plan.PlanExpireTime || now >= sol.Plan.NextReplanTime)
-                    {
-                        var prevAct = sol.Plan.StepIndex == 0 ? sol.Plan.Step0 : sol.Plan.Step1;
-                        var nextPlan = VeteranAndTacticsPatches.PlanBestGoapActionChainCore(
-                            ws, sol.Ptr, sol.Faction, !sol.IsInVehicle, sol.IsMedic, false, ref sq.Board, sol.Personality,
-                            MathF.Min(1f, sol.VetBonusSec / 900f), now, prevAct);
-
-                        res.TotalPlans++;
-                        actHist[(int)nextPlan.Step0]++;
-                        res.DistinctActionsUsedMask |= (1 << (int)nextPlan.Step0);
-
-                        // AUDIT 1: SurviveCrisis fallthrough check (skip Expected fallback when !canMove turret/vehicle crew uses suppress/direct fire)
-                        if (nextPlan.LastGoalBit == VeteranAndTacticsPatches.GoapStateBits.SurvivedCrisis &&
-                            nextPlan.Step0 == VeteranAndTacticsPatches.GoapActionId.SuppressThreatPosition &&
-                            !sol.IsInVehicle)
+                        bool multiSl = sol.IsLeader && sq.Board.AliveMemberCount >= 2;
+                        long sqId = sq.Index + 1L;
+                        long eId = sol.Ptr.ToInt64();
+                        var prof = VeteranAndTacticsPatches.GetFactionCommandProfile(sol.Faction);
+                        float vet01 = MathF.Min(1f, sol.VetBonusSec / 900f);
+                        float desp = sideDesperation[sol.Side];
+                        if (!sol.Emergent.WeightsInitialized || MathF.Abs(sol.Emergent.CachedDesperation - desp) > 0.04f)
                         {
-                            res.CrisisFallthroughs++;
-                            res.Issues.Add(new BattleIssueSample { Category = "CrisisFallthrough", MissionKey = sc.UniqueKey, Seed = seedIdx, TimeSec = now, Detail = $"{sol.Personality} inVeh={sol.IsInVehicle} ws={ws} -> {nextPlan.Step0}" });
+                            uint eHash = (uint)AiCore.GetDeterministicHash(sol.Ptr, 73);
+                            sol.Emergent.Weights = EmergentEngine.ComputeWeights(in prof, sol.Personality, vet01, eHash, desp, multiSl);
+                            sol.Emergent.WeightsInitialized = true;
+                            sol.Emergent.CachedDesperation = desp;
                         }
 
-                        // AUDIT 2: Invalid 2-step chain check
-                        if ((nextPlan.Step0 == VeteranAndTacticsPatches.GoapActionId.SuppressThreatPosition ||
-                             nextPlan.Step0 == VeteranAndTacticsPatches.GoapActionId.HoldOverwatchFire) &&
-                            (nextPlan.Step1 == VeteranAndTacticsPatches.GoapActionId.BoundWithOverwatch ||
-                             nextPlan.Step1 == VeteranAndTacticsPatches.GoapActionId.MoveToFlankCover))
-                        {
-                            res.InvalidTwoStepChains++;
-                            res.Issues.Add(new BattleIssueSample { Category = "Invalid2Step", MissionKey = sc.UniqueKey, Seed = seedIdx, TimeSec = now, Detail = $"{sol.Personality} {nextPlan.Step0}->{nextPlan.Step1}" });
-                        }
+                        float rawHarm = Mathf.Clamp01(sol.Suppression / 55.0f);
+                        if (sol.IsBleeding) rawHarm = MathF.Max(rawHarm, 0.32f);
+                        sol.Emergent.SmoothedHarmNow = EmergentEngine.SmoothHarmEnvelope(sol.Emergent.SmoothedHarmNow, rawHarm, dt);
+                        float projHarm = rings[sol.Side].EvaluateSpotProjectedHarm(
+                            sol.Pos, sol.Pos, sqId, sq.Board.IsConnectedToRadioNet,
+                            sol.IsInVehicle && sol.IsButtonedArmorCrew, false,
+                            EmergentEngine.EmergentTier.Individual, now,
+                            out int activeStamps, out float enemyRelief, out bool doorwayCas);
 
-                        // AUDIT 3: Rapid flip / Thrash check
-                        if (nextPlan.Step0 != sol.LastPlannedStep0)
+                        bool needSupply = sol.AmmoShotsRemaining <= 0 || sol.NearAmmoBox || sol.NearDroppedRadio || sol.NearAtMinePickup || (!sol.HasBandage && sol.IsBleeding);
+                        bool hasInjuredAlly = false;
+                        bool injuredInOpen = false;
+                        if (sol.IsMedic && now >= sol.NextMedicHealTime)
                         {
-                            if (now - sol.FlipWindowStart > 3.5f)
+                            for (int mi = 0; mi < sq.Members.Count; mi++)
                             {
-                                sol.FlipWindowStart = now;
-                                sol.RapidFlipCount = 1;
-                            }
-                            else
-                            {
-                                sol.RapidFlipCount++;
-                                if (sol.RapidFlipCount >= 4)
+                                var mate = sq.Members[mi];
+                                if (mate == sol || !mate.Alive || (!mate.IsBleeding && mate.Health >= 45f)) continue;
+                                if ((mate.Pos - sol.Pos).sqrMagnitude <= 14f * 14f)
                                 {
-                                    res.ThrashEvents++;
-                                    res.Issues.Add(new BattleIssueSample { Category = "RapidFlipThrash", MissionKey = sc.UniqueKey, Seed = seedIdx, TimeSec = now, Detail = $"{sol.Personality} flipped {sol.LastPlannedStep0}<->{nextPlan.Step0}" });
-                                    sol.RapidFlipCount = 0;
+                                    hasInjuredAlly = true;
+                                    injuredInOpen = !mate.InCover && projHarm >= 0.35f;
+                                    break;
                                 }
                             }
                         }
+                        float threatDist = sq.Board.HasActiveThreat ? UnityEngine.Vector3.Distance(sol.Pos, sq.Board.ThreatPosition) : 999f;
+                        float objDist = UnityEngine.Vector3.Distance(sol.Pos, sq.Board.ObjectivePosition);
+                        float canHarm = (visTarget != null && visTarget.IsButtonedArmorCrew && !sol.IsAtRole)
+                            ? 0f
+                            : (sol.HasTarget ? (sol.HasClearLof ? 0.90f : 0.45f) : (sq.Board.HasActiveThreat ? 0.50f : 0f));
 
-                        // AUDIT 4: Squad Leader guardrail check
-                        if (multiSl && (nextPlan.Step0 == VeteranAndTacticsPatches.GoapActionId.MoveToFlankCover ||
-                                        nextPlan.Step0 == VeteranAndTacticsPatches.GoapActionId.RescueSurrenderedComrade))
+                        var eInp = new EmergentEngine.EmergentInput
                         {
-                            res.SquadLeaderBugs++;
-                            res.Issues.Add(new BattleIssueSample { Category = "SquadLeaderBug", MissionKey = sc.UniqueKey, Seed = seedIdx, TimeSec = now, Detail = $"Multi-man SL {sol.Personality} picked {nextPlan.Step0}" });
-                        }
+                            Now = now,
+                            MyPos = sol.Pos,
+                            SquadId = sqId,
+                            IsLeader = multiSl,
+                            IsVehicle = sol.IsInVehicle,
+                            IsHeavyArmor = sol.IsInVehicle && sol.IsButtonedArmorCrew,
+                            IsLightArmor = sol.IsInVehicle && !sol.IsButtonedArmorCrew,
+                            HasRadioLink = sq.Board.IsConnectedToRadioNet,
+                            IsRadioman = sol.IsRadioman,
+                            IsMedic = sol.IsMedic,
+                            IsMachineGunnerOrBipod = sol.IsMg,
+                            IsAtCapable = sol.IsAtRole || sol.HasAtWeapon,
+                            RawHarmNow = rawHarm,
+                            SmoothedHarmNow = sol.Emergent.SmoothedHarmNow,
+                            ProjectedHarm = projHarm,
+                            EnemyRelief = enemyRelief,
+                            ActiveDangerStamps = activeStamps,
+                            DoorwayFreshCasualtyAhead = doorwayCas,
+                            InCover = sol.InCover,
+                            ExposedSideOfWall = sol.TowardExposedWall,
+                            IsBleeding = sol.IsBleeding,
+                            HasBandage = sol.HasBandage,
+                            HasSmokeGrenade = sol.HasSmokeGrenade,
+                            HasFragGrenade = sol.HasFragGrenade,
+                            AmmoEmpty = sol.AmmoShotsRemaining <= 0,
+                            HasVisibleEnemy = sol.HasTarget,
+                            PointBlankThreat = sol.HasTarget && sol.TargetDist <= 6.5f,
+                            VisibleEnemyDist = sol.TargetDist,
+                            CanHarmTarget = canHarm,
+                            CoverAvailable = true,
+                            FlankCoverAvailable = !multiSl && ((sq.Board.FlankLeftCover != null && !sq.Board.FlankLeftCover.Unreachable) || sq.Board.FlankRightCover != null),
+                            AllyPinningThreat = sq.Board.IsThreatBeingPinned(now) && sq.Board.Suppressor0Ptr != sol.Ptr,
+                            SmokeActive = now < sq.Board.SmokeActiveUntil,
+                            HasLastKnownThreat = sq.Board.HasActiveThreat,
+                            LastKnownThreatDist = threatDist,
+                            TargetBehindCover = sq.Board.HasActiveThreat && !sol.HasClearLof,
+                            Overwhelmed = sq.Board.AliveMemberCount <= 1 && !sol.HasClearLof && rawHarm >= 0.65f,
+                            UncounterableArmorClose = sq.Board.ThreatIsArmor && threatDist <= 32f && !sol.HasAtWeapon,
+                            HasObjectiveTask = sq.Board.HasActiveObjectiveTask,
+                            InsideObjectiveZone = objDist <= 18f,
+                            ObjectiveDist = objDist,
+                            ObjectiveUrgency = Mathf.Clamp01(0.45f + sq.Board.ObjectiveCaptureProgress * 0.55f),
+                            NearbyAmmoSource = needSupply && (sol.NearAmmoBox || sol.NearDroppedRadio || sol.NearAtMinePickup || sc.HasSupplyCrates || sq.Board.DecayedRecentDeaths >= 0.25f || sq.Board.AliveMemberCount >= 2),
+                            HasInjuredAlly = hasInjuredAlly,
+                            InjuredAllyHarm = projHarm,
+                            InjuredAllyInOpen = injuredInOpen,
+                            HasAidOverwatchNeed = intents[sol.Side].HasOpenCanAid(EmergentEngine.IntentKind.CanAidOverwatchMedic, sol.Pos, 42f, eId, now),
+                            PrereqBlockedUntil = sol.Emergent.PrereqBlockedUntil,
+                            PrereqBlockedAction = (byte)sol.Emergent.PrereqBlockedAction,
+                            SquadDirective = sq.EmergentDirective,
+                            SectorDesperationBias = desp,
+                            CurrentStep0 = sol.Emergent.HasDecision ? sol.Emergent.CurrentDecision.Step0 : EmergentEngine.EmergentActionId.None,
+                            LastReflexKind = sol.Emergent.LastReflexKind,
+                            LastReflexTime = sol.Emergent.LastReflexTime
+                        };
 
-                        // AUDIT 5: Non-intrusive Comrade Liberation & Bailed-Crew Evacuation checks (no SimRng/trajectory mutation)
-                        if (!sol.IsInVehicle &&
-                            !multiSl &&
-                            (ws & (VeteranAndTacticsPatches.LiberateForbiddenMask | VeteranAndTacticsPatches.GoapStateBits.RadioLinkDrifting)) == 0 &&
-                            ((tick + (int)sol.Ptr.ToInt64()) % 13 == 0))
+                        bool ranReflex = EmergentEngine.EvaluateFastReflex(in eInp, in sol.Emergent.Weights, now, out EmergentEngine.EmergentDecision dec);
+                        bool decidedThisTick = ranReflex;
+                        if (ranReflex)
                         {
-                            res.LiberationAndBailoutAudits++;
-                            var libWs = ws | VeteranAndTacticsPatches.GoapStateBits.ComradeNeedsLiberation;
-                            var libPlan = VeteranAndTacticsPatches.PlanBestGoapActionChainCore(
-                                libWs, sol.Ptr, sol.Faction, true, sol.IsMedic, false, ref sq.Board, sol.Personality,
-                                MathF.Min(1f, sol.VetBonusSec / 900f), now, VeteranAndTacticsPatches.GoapActionId.None);
-                            if (libPlan.Step0 != VeteranAndTacticsPatches.GoapActionId.RescueSurrenderedComrade)
-                            {
-                                res.PrisonerOrCrewZombieBugs++;
-                                res.Issues.Add(new BattleIssueSample { Category = "PrisonerIgnoredBug", MissionKey = sc.UniqueKey, Seed = seedIdx, TimeSec = now, Detail = $"{sol.Personality} failed liberation audit: picked {libPlan.Step0} (goal={libPlan.LastGoalBit}) on ws={libWs}" });
-                            }
-
-                            var crewEvacWs = (ws & ~VeteranAndTacticsPatches.GoapStateBits.ComradeNeedsLiberation) | VeteranAndTacticsPatches.GoapStateBits.IsEntirelyAlone;
-                            var crewBoard = sq.Board;
-                            if (crewBoard.AliveMemberCount > 4) crewBoard.AliveMemberCount = 2;
-                            var crewPlan = VeteranAndTacticsPatches.PlanBestGoapActionChainCore(
-                                crewEvacWs, sol.Ptr, sol.Faction, true, false, true, ref crewBoard, sol.Personality,
-                                MathF.Min(1f, sol.VetBonusSec / 900f), now, VeteranAndTacticsPatches.GoapActionId.None);
-                            if (crewPlan.Step0 != VeteranAndTacticsPatches.GoapActionId.LoneWolfLinkUpOrAmbush)
-                            {
-                                res.PrisonerOrCrewZombieBugs++;
-                                res.Issues.Add(new BattleIssueSample { Category = "BailedCrewZombieBug", MissionKey = sc.UniqueKey, Seed = seedIdx, TimeSec = now, Detail = $"{sol.Personality} failed bailed-crew evac audit: picked {crewPlan.Step0} (goal={crewPlan.LastGoalBit}) on ws={crewEvacWs}" });
-                            }
-                        }
-
-                        sol.LastPlannedStep0 = nextPlan.Step0;
-                        sol.Plan = nextPlan;
-                        sol.LastPlanTime = now;
-
-                        hash ^= (ulong)(int)nextPlan.Step0 * 2654435761UL ^ (ulong)(tick * 131);
-                        hash *= 1099511628211UL;
-                    }
-
-                    // CLOSED-LOOP EXECUTOR FEEDBACK CHECK
-                    bool isPlanningTick = MathF.Abs(now - sol.LastPlanTime) < 0.01f;
-                    bool execAccepted = ExecuteSimGoapStep(sol, sq, covers, ref sq.Board, sol.Plan.Step0, ws, now, sc, res, ref rng);
-                    if (!execAccepted)
-                    {
-                        if (isPlanningTick)
-                        {
-                            sol.ConsecutiveAborts++;
-                            sol.Plan.PlanExpireTime = 0f;
-                            if (sol.ConsecutiveAborts >= 2)
-                            {
-                                res.ThrashEvents++;
-                                res.Issues.Add(new BattleIssueSample { Category = "PlannerExecutorAbortLoop", MissionKey = sc.UniqueKey, Seed = seedIdx, TimeSec = now, Detail = $"{sol.Personality} aborted {sol.Plan.Step0} {sol.ConsecutiveAborts}x (ws={ws})" });
-                                sol.ConsecutiveAborts = 0;
-                            }
+                            sol.Emergent.LastReflexKind = dec.Reflex;
+                            sol.Emergent.LastReflexTime = now;
                         }
                         else
                         {
-                            sol.Plan.PlanExpireTime = MathF.Min(sol.Plan.PlanExpireTime, now + 0.85f);
+                            if (!sol.Emergent.HasDecision || now >= sol.Emergent.NextPlanTime)
+                            {
+                                dec = EmergentEngine.EvaluateDeliberative(in eInp, in sol.Emergent.Weights, in sol.Emergent.CurrentDecision, now);
+                                sol.Emergent.NextPlanTime = MathF.Max(now + 1.0f, dec.CommitUntil);
+                                decidedThisTick = true;
+                            }
+                            else
+                            {
+                                dec = sol.Emergent.CurrentDecision;
+                            }
                         }
-                    }
-                    else if (isPlanningTick)
-                    {
-                        sol.ConsecutiveAborts = 0;
+
+                        if (decidedThisTick)
+                        {
+                            res.TotalPlans++;
+                            int actIdx = (int)dec.Step0;
+                            if (actIdx >= 0 && actIdx < res.EmergentActionCounts.Length) res.EmergentActionCounts[actIdx]++;
+                            res.DistinctActionsUsedMask |= (1 << Math.Min(30, actIdx));
+                            if (ranReflex && (int)dec.Reflex < res.EmergentReflexCounts.Length) res.EmergentReflexCounts[(int)dec.Reflex]++;
+                            if (dec.Step1 != EmergentEngine.EmergentActionId.None) res.EmergentPrereqChains++;
+                            if (dec.UnsafePrereqRejected)
+                            {
+                                res.EmergentUnsafePrereqRejects++;
+                                sol.Emergent.PrereqBlockedAction = dec.RejectedPrereqAction;
+                                sol.Emergent.PrereqBlockedUntil = now + 4.5f;
+                            }
+
+                            if (!ranReflex && dec.Step0 != sol.Emergent.LastActionForFlip)
+                            {
+                                if (now - sol.FlipWindowStart > 3.5f)
+                                {
+                                    sol.FlipWindowStart = now;
+                                    sol.RapidFlipCount = 1;
+                                }
+                                else
+                                {
+                                    sol.RapidFlipCount++;
+                                    if (sol.RapidFlipCount >= 4)
+                                    {
+                                        res.ThrashEvents++;
+                                        res.Issues.Add(new BattleIssueSample { Category = "EmergentFlipThrash", MissionKey = sc.UniqueKey, Seed = seedIdx, TimeSec = now, Detail = $"{sol.Personality} flipped {sol.Emergent.LastActionForFlip}<->{dec.Step0}" });
+                                        sol.RapidFlipCount = 0;
+                                    }
+                                }
+                                sol.Emergent.LastActionForFlip = dec.Step0;
+                            }
+
+                            if (multiSl && (dec.Step0 == EmergentEngine.EmergentActionId.FlankManeuver || dec.Step0 == EmergentEngine.EmergentActionId.LiberatePrisoner))
+                            {
+                                res.SquadLeaderBugs++;
+                                res.Issues.Add(new BattleIssueSample { Category = "EmergentSLBug", MissionKey = sc.UniqueKey, Seed = seedIdx, TimeSec = now, Detail = $"Multi-man SL {sol.Personality} picked {dec.Step0}" });
+                            }
+
+                            if (!sol.IsInVehicle && !multiSl && !sol.IsBleeding && !sol.HasTarget && sol.Suppression < 5f && ((tick + (int)sol.Ptr.ToInt64()) % 13 == 0))
+                            {
+                                res.LiberationAndBailoutAudits++;
+                                var libInp = new EmergentEngine.EmergentInput
+                                {
+                                    Now = now,
+                                    MyPos = sol.Pos,
+                                    InCover = true,
+                                    HasSurrenderedPrisoner = true,
+                                    CoverAvailable = false
+                                };
+                                var libDec = EmergentEngine.EvaluateDeliberative(in libInp, in sol.Emergent.Weights, default, now);
+                                if (libDec.Step0 != EmergentEngine.EmergentActionId.LiberatePrisoner)
+                                {
+                                    res.PrisonerOrCrewZombieBugs++;
+                                    res.Issues.Add(new BattleIssueSample { Category = "EmergentPrisonerBug", MissionKey = sc.UniqueKey, Seed = seedIdx, TimeSec = now, Detail = $"{sol.Personality} picked {libDec.Step0}" });
+                                }
+                            }
+
+                            hash ^= (ulong)actIdx * 2654435761UL ^ (ulong)(tick * 131);
+                            hash *= 1099511628211UL;
+                        }
+
+                        sol.Emergent.HasDecision = true;
+                        sol.Emergent.CurrentDecision = dec;
+                        sol.EmergentRunningBandage = dec.Step0 == EmergentEngine.EmergentActionId.SelfBandage;
+                        ExecuteSimEmergentStep(sol, sq, covers, ref sq.Board, intents[sol.Side], in dec, decidedThisTick, now, sc, res);
                     }
 
                     // Chronic Foot-Stuck Recovery Check (Surf + Unreachable Flank Cover Eviction)
@@ -1603,7 +1783,8 @@ namespace EasyRed2HumanAI
                     }
 
                     // Advance position smoothly toward destination when moving (keep cover earned inside objective radius)
-                    if (!sol.IsInVehicle && now >= sol.SapperStepBackUntil && sol.Plan.Step0 != VeteranAndTacticsPatches.GoapActionId.BandageInCover)
+                    bool holdBandage = sol.EmergentRunningBandage;
+                    if (!sol.IsInVehicle && now >= sol.SapperStepBackUntil && !holdBandage)
                     {
                         var objDest = objectives[sq.ObjectiveIndex % objectives.Count].Pos;
                         sol.DestPos = objDest;
@@ -1612,11 +1793,11 @@ namespace EasyRed2HumanAI
                         float d = delta.magnitude;
                         bool fightingInsideObjective = d <= 14.0f && sol.HasTarget;
                         bool holdingDefendedCap = sq.Board.IsDefendingObjective && d <= 16.0f && !sq.Board.HasActiveThreat;
+                        bool holdFireStep = sol.Emergent.CurrentDecision.Step0 == EmergentEngine.EmergentActionId.HoldAndFight ||
+                                            sol.Emergent.CurrentDecision.Step0 == EmergentEngine.EmergentActionId.SuppressPin;
                         bool holdingFireCover = holdingDefendedCap ||
                                                 (sol.InCover && (fightingInsideObjective ||
-                                                 (sol.HasTarget && sol.TargetDist <= 55f &&
-                                                  (sol.Plan.Step0 == VeteranAndTacticsPatches.GoapActionId.HoldOverwatchFire ||
-                                                   sol.Plan.Step0 == VeteranAndTacticsPatches.GoapActionId.DirectFireEngagement))));
+                                                 (sol.HasTarget && sol.TargetDist <= 55f && holdFireStep)));
                         sol.IsMoving = !holdingFireCover;
                         if (sol.IsMoving && d > 2.0f && !sol.AssignedCoverUnreachable && !sol.InShallowSurf)
                         {
@@ -1632,19 +1813,27 @@ namespace EasyRed2HumanAI
 
                     // Combat Fire Exchange
                     sol.FireCooldown -= dt;
-                    if (visTarget != null && sol.HasClearLof && sol.FireCooldown <= 0f)
+                    if (visTarget != null && sol.HasClearLof && sol.FireCooldown <= 0f && (!useEmergent || sol.AmmoShotsRemaining > 0))
                     {
+                        if (useEmergent && sol.AmmoShotsRemaining > 0) sol.AmmoShotsRemaining--;
                         sol.FireCooldown = sol.IsMg ? 0.5f : 1.5f;
                         sol.LastMuzzleFlashTime = now;
                         float hitChance = Mathf.Clamp(0.28f / MathF.Max(15f, sol.TargetDist) * 35f, 0.03f, 0.42f);
                         if (sol.OnEmptyEmplacement) hitChance *= 1.18f;
                         if (visTarget.InCover)
                             hitChance *= (sc.IsDenseUrban || sc.IsSteepHillside || (sc.IsAmphibiousBeach && visTarget.Side == 1 && currentPhase == 0)) ? 0.40f : 0.46f;
+                        if (useEmergent && now < squads[visTarget.SquadIndex].Board.SmokeActiveUntil)
+                            hitChance *= 0.55f;
                         if (rng.Next01() < hitChance)
                         {
                             visTarget.Health -= rng.Range(18f, 45f);
                             visTarget.Suppression = MathF.Min(100f, visTarget.Suppression + 28f);
                             if (rng.Next01() < 0.35f) visTarget.IsBleeding = true;
+                            if (useEmergent)
+                            {
+                                rings[visTarget.Side].StampIncomingFireLane(visTarget.Pos, sol.Pos, visTarget.SquadIndex + 1L, true, sol.IsAtRole ? EmergentEngine.DangerWeaponClass.AntiTank : EmergentEngine.DangerWeaponClass.SmallArms, 0.42f, now);
+                                res.EmergentDangerStamps++;
+                            }
                         }
                         else
                         {
@@ -1663,8 +1852,9 @@ namespace EasyRed2HumanAI
                             int mask = 0;
                             foreach (var m in sq.Members)
                             {
-                                if (m.Alive && m.Plan.Step0 != VeteranAndTacticsPatches.GoapActionId.None)
-                                    mask |= (1 << (int)m.Plan.Step0);
+                                int aBit = (int)m.Emergent.CurrentDecision.Step0;
+                                if (m.Alive && aBit > 0)
+                                    mask |= (1 << Math.Min(30, aBit));
                             }
                             int bits = System.Numerics.BitOperations.PopCount((uint)mask);
                             diversitySum += bits;
@@ -1700,6 +1890,11 @@ namespace EasyRed2HumanAI
                             {
                                 sapper.SapperStepBackUntil = now + 5.0f;
                                 sapper.Pos += (new UnityEngine.Vector3(0f, 0f, -1f)) * 9.5f; // mandatory 9m SapperStepBack!
+                            }
+                            if (useEmergent)
+                            {
+                                rings[1].StampExplosionHazard(obj.Pos, 0L, true, false, 18f, 0.72f, now);
+                                res.EmergentDangerStamps++;
                             }
                         }
                         else if (obj.DemolitionPlanted)
@@ -1760,6 +1955,10 @@ namespace EasyRed2HumanAI
                                 m.IsBleeding = false;
                                 m.Suppression = 0f;
                                 m.InCover = false;
+                                m.AmmoShotsRemaining = m.IsMg ? 120 : 60;
+                                m.Emergent = default;
+                                m.EmergentRunningBandage = false;
+                                m.NextMedicHealTime = 0f;
                                 m.Pos = new UnityEngine.Vector3(rng.Range(-90f, 90f), 2f, rZ + rng.Range(-12f, 12f));
                                 m.AnchorPos = m.Pos;
                             }
@@ -1854,117 +2053,102 @@ namespace EasyRed2HumanAI
 
         private static bool ModeIsConquest(this SimSquad sq, SimGameMode mode) => mode == SimGameMode.DynamicConquest;
 
-        private static bool ExecuteSimGoapStep(
-            SimSoldier sol, SimSquad sq, List<CombatCover> covers, ref VeteranAndTacticsPatches.SquadBlackboard board,
-            VeteranAndTacticsPatches.GoapActionId action, VeteranAndTacticsPatches.GoapStateBits ws, float now, MissionScenario sc, BattleSimResult res, ref SimRng rng)
+        private static void ExecuteSimEmergentStep(
+            SimSoldier sol,
+            SimSquad sq,
+            List<CombatCover> covers,
+            ref VeteranAndTacticsPatches.SquadBlackboard board,
+            EmergentEngine.IntentBoard intents,
+            in EmergentEngine.EmergentDecision dec,
+            bool decidedThisTick,
+            float now,
+            MissionScenario sc,
+            BattleSimResult res)
         {
-            switch (action)
+            switch (dec.Step0)
             {
-                case VeteranAndTacticsPatches.GoapActionId.SuppressThreatPosition:
-                    if (!board.HasActiveThreat || !sol.HasBlindSuppressWeapon || sol.IsManualBoltOnly || sol.TowardExposedWall)
-                        return false;
-                    board.Suppressor0Ptr = sol.Ptr;
-                    board.SuppressHoldUntil = MathF.Max(board.SuppressHoldUntil, now + 3.0f);
-                    return true;
-
-                case VeteranAndTacticsPatches.GoapActionId.HoldOverwatchFire:
-                    if (!sol.HasClearLof || !sol.HasTarget)
-                        return false;
-                    board.Suppressor0Ptr = sol.Ptr;
-                    board.SuppressHoldUntil = MathF.Max(board.SuppressHoldUntil, now + 3.0f);
-                    return true;
-
-                case VeteranAndTacticsPatches.GoapActionId.SeekEmergencyCover:
+                case EmergentEngine.EmergentActionId.SeekCover:
+                case EmergentEngine.EmergentActionId.RepositionWallSide:
+                case EmergentEngine.EmergentActionId.EvadeGrenade:
                     sol.InCover = true;
-                    return true;
+                    sol.TowardExposedWall = false;
+                    break;
 
-                case VeteranAndTacticsPatches.GoapActionId.BandageInCover:
-                    if (!sol.IsBleeding || !sol.HasBandage) return false;
-                    sol.IsBleeding = false;
-                    sol.HasBandage = false;
-                    sol.Health = MathF.Min(100f, sol.Health + 25f);
-                    return true;
-
-                case VeteranAndTacticsPatches.GoapActionId.MoveToFlankCover:
-                    bool okFlank = (board.FlankLeftCover != null && !board.FlankLeftCover.Unreachable) ||
-                                   (board.FlankRightCover != null && !board.FlankRightCover.Unreachable);
-                    if (okFlank && MathF.Abs(now - sol.LastPlanTime) < 0.01f)
+                case EmergentEngine.EmergentActionId.SelfBandage:
+                    if (sol.IsBleeding && sol.HasBandage)
                     {
-                        sol.Plan.NextReplanTime = MathF.Max(sol.Plan.NextReplanTime, now + 4.5f);
-                        sol.Plan.PlanExpireTime = now + 6.5f;
+                        sol.IsBleeding = false;
+                        sol.HasBandage = false;
+                        sol.Health = MathF.Min(100f, sol.Health + 25f);
                     }
-                    return okFlank;
+                    break;
 
-                case VeteranAndTacticsPatches.GoapActionId.BoundWithOverwatch:
-                    bool okBound = ((ws & VeteranAndTacticsPatches.GoapStateBits.ObjectiveCapContestUrgent) != 0 && board.HasActiveObjectiveTask) ||
-                                   (board.HasActiveThreat &&
-                                    (board.IsThreatBeingPinned(now) ||
-                                     now < board.SmokeActiveUntil ||
-                                     (ws & (VeteranAndTacticsPatches.GoapStateBits.IsSuppressed | VeteranAndTacticsPatches.GoapStateBits.IsHeavilySuppressed | VeteranAndTacticsPatches.GoapStateBits.NearFreshCasualty)) == 0) &&
-                                    !sol.HasClearLof &&
-                                    (sol.Pos - board.ThreatPosition).sqrMagnitude > 16f * 16f);
-                    if (okBound && MathF.Abs(now - sol.LastPlanTime) < 0.01f)
+                case EmergentEngine.EmergentActionId.PopSmoke:
+                    if (sol.HasSmokeGrenade)
                     {
-                        sol.Plan.NextReplanTime = MathF.Max(sol.Plan.NextReplanTime, now + 3.6f);
-                        sol.Plan.PlanExpireTime = now + 5.5f;
+                        sol.HasSmokeGrenade = false;
+                        board.SmokeActiveUntil = now + 10f;
                     }
-                    return okBound;
+                    break;
 
-                case VeteranAndTacticsPatches.GoapActionId.None:
-                    return true;
+                case EmergentEngine.EmergentActionId.FragFlush:
+                    sol.HasFragGrenade = false;
+                    break;
 
-                case VeteranAndTacticsPatches.GoapActionId.ScavengeSupplyFromCorpse:
-                    if (sol.NearDroppedRadio) { sol.NearDroppedRadio = false; sol.IsRadioman = true; return true; }
-                    if (sol.NearAtMinePickup && sc.HasArmor)
+                case EmergentEngine.EmergentActionId.SuppressPin:
+                    if (board.HasActiveThreat)
                     {
-                        sol.NearAtMinePickup = false;
-                        // VehiclePressionFuse ONLY — never InfantryPressionFuse dud, never 6.5m SapperStepBack!
-                        sol.PlacedPressureMine = true;
-                        res.SapperMineCount++;
-                        return true;
+                        board.Suppressor0Ptr = sol.Ptr;
+                        board.SuppressHoldUntil = MathF.Max(board.SuppressHoldUntil, now + 3.0f);
                     }
-                    if (sol.NearAmmoBox || !sol.HasBandage || sol.NearDroppedAt)
+                    intents.TryJoinCanAid(EmergentEngine.IntentKind.CanAidOverwatchMedic, sol.Pos, 42f, sol.Ptr.ToInt64(), now, out _, out _);
+                    break;
+
+                case EmergentEngine.EmergentActionId.HoldAndFight:
+                    if (sol.HasClearLof && sol.HasTarget)
                     {
+                        board.Suppressor0Ptr = sol.Ptr;
+                        board.SuppressHoldUntil = MathF.Max(board.SuppressHoldUntil, now + 2.5f);
+                    }
+                    intents.TryJoinCanAid(EmergentEngine.IntentKind.CanAidOverwatchMedic, sol.Pos, 42f, sol.Ptr.ToInt64(), now, out _, out _);
+                    break;
+
+                case EmergentEngine.EmergentActionId.FlankManeuver:
+                    if ((board.FlankLeftCover != null && !board.FlankLeftCover.Unreachable) || board.FlankRightCover != null)
+                        sol.Emergent.NextPlanTime = MathF.Max(sol.Emergent.NextPlanTime, now + 3.5f);
+                    break;
+
+                case EmergentEngine.EmergentActionId.MedicHeal:
+                    intents.PostCanAid(EmergentEngine.IntentKind.CanAidOverwatchMedic, sol.Ptr.ToInt64(), sol.Ptr.ToInt64(), sol.Pos, 2, 5.0f, now);
+                    sol.FireCooldown = MathF.Max(sol.FireCooldown, 2.5f);
+                    if (decidedThisTick && now >= sol.NextMedicHealTime)
+                    {
+                        for (int mi = 0; mi < sq.Members.Count; mi++)
+                        {
+                            var mate = sq.Members[mi];
+                            if (mate != sol && mate.Alive && (mate.IsBleeding || mate.Health < 45f) && (mate.Pos - sol.Pos).sqrMagnitude <= 14f * 14f)
+                            {
+                                mate.IsBleeding = false;
+                                mate.Health = MathF.Min(100f, mate.Health + 18f);
+                                sol.NextMedicHealTime = now + 10.0f;
+                                break;
+                            }
+                        }
+                    }
+                    break;
+
+                case EmergentEngine.EmergentActionId.ResupplyAmmo:
+                    if (decidedThisTick)
+                    {
+                        if (sol.NearDroppedRadio) { sol.NearDroppedRadio = false; sol.IsRadioman = true; }
+                        if (sol.NearAtMinePickup && sc.HasArmor) { sol.NearAtMinePickup = false; sol.PlacedPressureMine = true; res.SapperMineCount++; }
                         sol.NearAmmoBox = false;
                         sol.HasBandage = true;
-                        if (sol.IsBleeding && sol.InCover && sol.Plan.Step1 == VeteranAndTacticsPatches.GoapActionId.BandageInCover)
-                        {
-                            sol.IsBleeding = false;
-                            sol.HasBandage = false;
-                            sol.Health = MathF.Min(100f, sol.Health + 25f);
-                        }
                         sol.HasAtWeapon = sol.HasAtWeapon || sol.NearDroppedAt;
                         sol.NearDroppedAt = false;
-                        return true;
+                        sol.AmmoShotsRemaining = sol.IsMg ? 120 : 60;
                     }
-                    return false;
-
-                case VeteranAndTacticsPatches.GoapActionId.ThrowSmokeScreen:
-                    if (!sol.HasSmokeGrenade) return false;
-                    sol.HasSmokeGrenade = false;
-                    board.SmokeActiveUntil = now + 10f;
-                    return true;
-
-                case VeteranAndTacticsPatches.GoapActionId.FlushThreatWithFrag:
-                    if (!sol.HasFragGrenade) return false;
-                    sol.HasFragGrenade = false;
-                    return true;
-
-                case VeteranAndTacticsPatches.GoapActionId.DirectFireEngagement:
-                    return sol.HasClearLof && sol.HasTarget;
-
-                case VeteranAndTacticsPatches.GoapActionId.PointBlankBayonetBreach:
-                    return sol.HasTarget && sol.TargetDist <= 7.0f;
-
-                case VeteranAndTacticsPatches.GoapActionId.TacticalFallbackRetreat:
-                case VeteranAndTacticsPatches.GoapActionId.LoneWolfLinkUpOrAmbush:
-                case VeteranAndTacticsPatches.GoapActionId.MaintainRadioLinkWithLeader:
-                case VeteranAndTacticsPatches.GoapActionId.RescueSurrenderedComrade:
-                case VeteranAndTacticsPatches.GoapActionId.RepositionBehindWall:
-                    return true;
-
-                default:
-                    return false;
+                    break;
             }
         }
 
@@ -2032,6 +2216,7 @@ namespace EasyRed2HumanAI
             int opTicketsOverride = 0;
             float maxDurationOverride = 900f;
             bool noGate = false;
+            bool useEmergent = true;
 
             for (int i = 0; i < args.Length; i++)
             {
@@ -2042,6 +2227,7 @@ namespace EasyRed2HumanAI
                 else if (args[i] == "--json" && i + 1 < args.Length) jsonOut = args[++i];
                 else if (args[i] == "--op-tickets" && i + 1 < args.Length) int.TryParse(args[++i], out opTicketsOverride);
                 else if (args[i] == "--max-duration" && i + 1 < args.Length) float.TryParse(args[++i], System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out maxDurationOverride);
+                else if (args[i] == "--engine" && i + 1 < args.Length) useEmergent = !string.Equals(args[++i], "legacy", StringComparison.OrdinalIgnoreCase);
                 else if (args[i] == "--no-gate") noGate = true;
             }
 
@@ -2066,7 +2252,7 @@ namespace EasyRed2HumanAI
             Parallel.For(0, jobs.Count, idx =>
             {
                 var j = jobs[idx];
-                results[idx] = SimulateBattle(j.sc, j.seed, j.mIdx, maxDurationOverride);
+                results[idx] = SimulateBattle(j.sc, j.seed, j.mIdx, maxDurationOverride, useEmergent);
             });
 
             // Determinism check: Re-run up to 8 diverse missions with Seed 1 on main thread and compare TrajectoryHash
@@ -2074,7 +2260,7 @@ namespace EasyRed2HumanAI
             for (int m = 0; m < catalog.Count && detChecked < 8; m += Math.Max(1, catalog.Count / 8))
             {
                 var orig = results[m * seeds];
-                var rerun = SimulateBattle(catalog[m], 1, m, maxDurationOverride);
+                var rerun = SimulateBattle(catalog[m], 1, m, maxDurationOverride, useEmergent);
                 detChecked++;
                 if (orig.TrajectoryHash == rerun.TrajectoryHash && orig.TotalPlans == rerun.TotalPlans)
                     detMatched++;
@@ -2087,6 +2273,9 @@ namespace EasyRed2HumanAI
             int invWins = 0, defWins = 0, stalemates = 0;
             int emplaces = 0, pivots = 0, balks = 0, merges = 0, mines = 0, refills = 0;
             int legPlaneSnaps = 0, newPlaneSnaps = 0, legTankHits = 0, newTankHits = 0, vultureLocks = 0;
+            long[] emActions = new long[24];
+            long[] emReflex = new long[8];
+            long emPrereqChains = 0, emUnsafeRejects = 0, emDangerStamps = 0, emReliefStamps = 0, emMiaTimeouts = 0, emT3Levers = 0;
             double minConqBuf = 1.0, sumDiv = 0;
             var allIssues = new List<BattleIssueSample>();
             var byMode = new Dictionary<SimGameMode, (int count, int inv, int def, int st)>();
@@ -2113,6 +2302,14 @@ namespace EasyRed2HumanAI
                 legTankHits += r.LegacyTankOffRoadDetourHits;
                 newTankHits += r.NewTankOffRoadDetourHits;
                 vultureLocks += r.CarrierMapVultureLockouts;
+                for (int ai = 0; ai < emActions.Length; ai++) emActions[ai] += r.EmergentActionCounts[ai];
+                for (int ri = 0; ri < emReflex.Length; ri++) emReflex[ri] += r.EmergentReflexCounts[ri];
+                emPrereqChains += r.EmergentPrereqChains;
+                emUnsafeRejects += r.EmergentUnsafePrereqRejects;
+                emDangerStamps += r.EmergentDangerStamps;
+                emReliefStamps += r.EmergentEnemyReliefStamps;
+                emMiaTimeouts += r.EmergentMiaTimeouts;
+                emT3Levers += r.EmergentTier3Levers;
                 if (r.Mode == SimGameMode.DynamicConquest && r.ConquestMinPlayerBufferRatio < minConqBuf)
                     minConqBuf = r.ConquestMinPlayerBufferRatio;
                 sumDiv += r.AvgSquadActionDiversity;
@@ -2159,8 +2356,8 @@ namespace EasyRed2HumanAI
             double avgDiv = results.Length > 0 ? (sumDiv / results.Length) : 0.0;
 
             Console.WriteLine("===================================================================================");
-            Console.WriteLine($" BATTLE HARDENED LOSS & EMERGENCE MODEL REPORT ({results.Length} battles, {catalog.Count} scenarios x {seeds} seeds)");
-            Console.WriteLine($" Runtime: {sw.Elapsed.TotalSeconds:F2}s | Real StreamingAssets Missions: {realCount} | Doctrines: {docVerified}/21 | Total GOAP Plans: {totalPlans:N0}");
+            Console.WriteLine($" BATTLE HARDENED LOSS & EMERGENCE MODEL REPORT ({results.Length} battles, {catalog.Count} scenarios x {seeds} seeds) [Engine: {(useEmergent ? "Emergent 3-Tier" : "Legacy GOAP")}]");
+            Console.WriteLine($" Runtime: {sw.Elapsed.TotalSeconds:F2}s | Real StreamingAssets Missions: {realCount} | Doctrines: {docVerified}/21 | Total Plans: {totalPlans:N0}");
             Console.WriteLine("===================================================================================");
             Console.WriteLine(" [ZERO-TOLERANCE LOSS COUNTERS]");
             Console.WriteLine($"   1. Planner<->Executor Thrash Events : {thrash}");
@@ -2174,10 +2371,19 @@ namespace EasyRed2HumanAI
             Console.WriteLine(" [EMERGENCE, OUTCOMES & COMBINED ARMS]");
             Console.WriteLine($"   * Determinism Match                 : {detMatched}/{detChecked} re-runs 100% identical");
             Console.WriteLine($"   * Cross-Seed Emergence              : {emergentTrios}/{catalog.Count} missions diverged across seeds (Railroaded: {railroadedTrios})");
-            Console.WriteLine($"   * Intra-Squad Role Entropy          : {avgDiv:F2} concurrent distinct GOAP actions / engaged squad");
+            Console.WriteLine($"   * Intra-Squad Role Entropy          : {avgDiv:F2} concurrent distinct {(useEmergent ? "Emergent" : "GOAP")} actions / engaged squad");
             Console.WriteLine($"   * Outcomes                          : InvaderWins={invWins} | DefenderWins={defWins} | ContestedStalemates={stalemates} ({stalematePct:F1}%)");
             Console.WriteLine($"   * Emergent Mechanics Exercised      : Pivots={pivots} | NcoBalks={balks} | Emplacements={emplaces} | LoneMerges={merges} | AT_Mines={mines} | PlaneRefills={refills}");
             Console.WriteLine($"   * Vehicle/Air 'Less is More' A/B    : Co-op Plane Snaps {legPlaneSnaps} -> {newPlaneSnaps} | Tank Off-Road Obstacle Hits {legTankHits} -> {newTankHits} | Makin Vulture Lockouts={vultureLocks}");
+            if (useEmergent)
+            {
+                long vehTotal = emActions[(int)EmergentEngine.EmergentActionId.VehicleFaceAndFight] + emActions[(int)EmergentEngine.EmergentActionId.VehicleCrewSwap] + emActions[(int)EmergentEngine.EmergentActionId.VehicleFieldRepair] + emActions[(int)EmergentEngine.EmergentActionId.VehicleBailout];
+                Console.WriteLine(" [EMERGENT ENGINE TELEMETRY]");
+                Console.WriteLine($"   * T1 Actions    : SeekCover={emActions[(int)EmergentEngine.EmergentActionId.SeekCover]:N0} | Engage={emActions[(int)EmergentEngine.EmergentActionId.HoldAndFight]:N0} | Advance={emActions[(int)EmergentEngine.EmergentActionId.AdvanceObjective]:N0} | Flank={emActions[(int)EmergentEngine.EmergentActionId.FlankManeuver]:N0} | Suppress={emActions[(int)EmergentEngine.EmergentActionId.SuppressPin]:N0} | Smoke={emActions[(int)EmergentEngine.EmergentActionId.PopSmoke]:N0}");
+                Console.WriteLine($"   * T1 Support/CQB: Bandage={emActions[(int)EmergentEngine.EmergentActionId.SelfBandage]:N0} | Frag={emActions[(int)EmergentEngine.EmergentActionId.FragFlush]:N0} | Resupply={emActions[(int)EmergentEngine.EmergentActionId.ResupplyAmmo]:N0} | Fallback={emActions[(int)EmergentEngine.EmergentActionId.FallbackRegroup]:N0} | CQB={emActions[(int)EmergentEngine.EmergentActionId.CloseBreach]:N0} | Medic={emActions[(int)EmergentEngine.EmergentActionId.MedicHeal]:N0} | Vehicle={vehTotal:N0}");
+                Console.WriteLine($"   * Fast Reflexes : DoorCas={emReflex[(int)EmergentEngine.EmergentReflexKind.DoorwayFreshCasualty]:N0} | HeavyFire={emReflex[(int)EmergentEngine.EmergentReflexKind.SuddenPenetratingFire]:N0} | CQB={emReflex[(int)EmergentEngine.EmergentReflexKind.PointBlankAmbush]:N0} | BleedCov={emReflex[(int)EmergentEngine.EmergentReflexKind.LethalBleedExposed]:N0} | Prereqs={emPrereqChains:N0} (UnsafeRej:{emUnsafeRejects:N0})");
+                Console.WriteLine($"   * Shared Net    : DangerStamps={emDangerStamps:N0} | EnemyRelief={emReliefStamps:N0} | MIA_Timeouts={emMiaTimeouts:N0} | T3_LeverSwitches={emT3Levers:N0}");
+            }
             foreach (var kv in byMode.OrderBy(k => k.Key))
                 Console.WriteLine($"   * Mode {kv.Key,-20} : {kv.Value.count,3} battles (Inv:{kv.Value.inv}, Def:{kv.Value.def}, Stalemate:{kv.Value.st})");
 

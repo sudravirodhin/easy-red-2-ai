@@ -229,6 +229,9 @@ namespace EasyRed2HumanAI
             if (crewSq == null || crewSq.Pointer == IntPtr.Zero || crewSq.CountMembers <= 0)
                 return false;
 
+            if (AiCore.IsSquadOwnedOrOccupiedByRemoteHuman(crewSq))
+                return false;
+
             MissionTaskRetreat existingRet = crewSq.currentTask != null
                 ? crewSq.currentTask.TryCast<MissionTaskRetreat>()
                 : null;
@@ -802,6 +805,9 @@ namespace EasyRed2HumanAI
                     if (sq == null || sq.Pointer == IntPtr.Zero || sq.Pointer == localPlayerSqPtr)
                         continue;
 
+                    if (AiCore.IsSquadOwnedOrOccupiedByRemoteHuman(sq))
+                        continue;
+
                     if (AiCore.IsConfirmedPlaneCrewSquad(sq))
                     {
                         EvaluateGroundedAircrewSquad(sq);
@@ -1075,6 +1081,14 @@ namespace EasyRed2HumanAI
 
                 try
                 {
+                    if (VisionConfig.EnableEmergentDecisionEngine != null &&
+                        VisionConfig.EnableEmergentDecisionEngine.Value &&
+                        EmergentRuntimeBridge.TryEvaluateEmergentVehicleCrew(veh, out bool allowEmergentBail, out _) &&
+                        !allowEmergentBail)
+                    {
+                        return false;
+                    }
+
                     // Replace vanilla AIVehicle.RetreatCrew (0x18057B980), which crashes/fails on V2 & water spawns.
                     // Short-circuit once all crew have already exited an empty burning hulk so destroyed tanks stop thrashing!
                     bool alreadyRetreated = !_vehiclesCrewRetreatedFrom.Add(veh.Pointer);
@@ -1165,7 +1179,7 @@ namespace EasyRed2HumanAI
                         AiCore.MarkConfirmedVehicleCrewSquad(crewSq);
                     }
 
-                    if (crewSq != null && AiCore.IsTrueVehicleCrewSquad(crewSq))
+                    if (crewSq != null && AiCore.IsTrueVehicleCrewSquad(crewSq) && !AiCore.IsSquadOwnedOrOccupiedByRemoteHuman(crewSq))
                     {
                         string fac = sampleCrew != null ? sampleCrew.faction : null;
                         if (string.IsNullOrEmpty(fac))
@@ -1330,6 +1344,11 @@ namespace EasyRed2HumanAI
 
                     float effPen = Mathf.Max(bd.CalculateMmPenetrationWithFallof(checkDist), bd.explosion_penetration);
                     if (effPen >= penNeed)
+                        return true;
+
+                    // Dedicated anti-tank / tank cannons (>= 30mm AP/HEAT) can still track, flank-penetrate, or disable heavy tanks
+                    // even when front glacis thickness exceeds straight-on penetration; never blind them against enemy armor!
+                    if (bd.caliber >= 30.0f && !IsTrueHeOrAntiInfantryRound(bd) && (effPen >= 24.0f || effPen >= armorMm * 0.40f))
                         return true;
 
                     // Heavy >= 50mm HE shells can still track/de-crew armor when AP rounds run dry.

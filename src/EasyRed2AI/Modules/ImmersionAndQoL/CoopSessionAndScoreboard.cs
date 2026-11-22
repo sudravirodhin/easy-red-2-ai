@@ -87,15 +87,87 @@ namespace EasyRed2HumanAI
             }
         }
 
+        public static int GetOnlineMaxUnitsPerFaction()
+        {
+            if (!Photon.Pun.PhotonNetwork.InRoom || Photon.Pun.PhotonNetwork.OfflineMode)
+                return 500;
+
+            int onlineCap = 70;
+            try
+            {
+                int nativeCap = ServerListMenu.MaxFactionUnitsOnCurrentSystemOnline;
+                if (nativeCap > 0)
+                    onlineCap = nativeCap;
+            }
+            catch { }
+
+            return Mathf.Clamp(onlineCap, 1, 500);
+        }
+
+        public static bool ClampMatchBattlesToOnlineEnvelope(MatchData md)
+        {
+            if (!Photon.Pun.PhotonNetwork.InRoom || Photon.Pun.PhotonNetwork.OfflineMode || md == null || md.battles == null)
+                return false;
+
+            short maxPerSide = (short)GetOnlineMaxUnitsPerFaction();
+            bool clamped = false;
+            for (int i = 0; i < md.battles.Count; i++)
+            {
+                MatchBattle mb = md.battles[i];
+                if (mb == null)
+                    continue;
+
+                if (mb.maxAllies > maxPerSide)
+                {
+                    mb.maxAllies = maxPerSide;
+                    clamped = true;
+                }
+                if (mb.maxAxis > maxPerSide)
+                {
+                    mb.maxAxis = maxPerSide;
+                    clamped = true;
+                }
+            }
+            return clamped;
+        }
+
         [HarmonyPatch(typeof(MatchData), nameof(MatchData.SetMultiplayerRoomSettings))]
         public static class MatchData_SetMultiplayerRoomSettings_Patch
         {
-            public static void Prefix()
+            public static void Prefix(MatchData __instance)
             {
-                if (VisionConfig.EnableMod.Value && VisionConfig.EnableExtendedRoomNames.Value)
+                if (!VisionConfig.EnableMod.Value)
+                    return;
+
+                if (VisionConfig.EnableExtendedRoomNames.Value)
                 {
                     ServerListMenu.maxServerNameLength = 64;
                 }
+
+                try
+                {
+                    ClampMatchBattlesToOnlineEnvelope(__instance);
+                }
+                catch { }
+            }
+        }
+
+        [HarmonyPatch(typeof(MatchData), nameof(MatchData.UpdateNetworkMatchInfo))]
+        public static class MatchData_UpdateNetworkMatchInfo_Patch
+        {
+            public static void Prefix(MatchData __instance)
+            {
+                try
+                {
+                    if (!VisionConfig.EnableMod.Value ||
+                        !Photon.Pun.PhotonNetwork.InRoom ||
+                        Photon.Pun.PhotonNetwork.OfflineMode ||
+                        !Photon.Pun.PhotonNetwork.IsMasterClient)
+                        return;
+
+                    ClampMatchBattlesToOnlineEnvelope(__instance);
+                }
+                catch { }
             }
         }
 
@@ -524,18 +596,22 @@ namespace EasyRed2HumanAI
             {
                 try
                 {
-                    if (!VisionConfig.EnableMod.Value ||
-                        !VisionConfig.EnableMultiplayerBattleStatSyncFix.Value ||
-                        __instance == null)
-                    {
+                    if (!VisionConfig.EnableMod.Value)
                         return;
-                    }
+
+                    AiCore.EmitMatchEndHealthSummary();
+
+                    if (!VisionConfig.EnableMultiplayerBattleStatSyncFix.Value || __instance == null)
+                        return;
 
                     FlushDirtyMasterBattleStats(sendImmediate: true);
                     FlushDirtyLocalPlayerScoreboardStats(sendImmediate: true);
                     RefreshEndBattleGuiLabels(__instance, forceUpdate: true);
                 }
-                catch { }
+                catch (Exception ex)
+                {
+                    AiCore.ReportPatchException("EndBattle", ex);
+                }
             }
         }
 
@@ -1530,6 +1606,19 @@ namespace EasyRed2HumanAI
         private static readonly List<PendingJoinMotdEntry> _pendingJoinMotdQueue = new List<PendingJoinMotdEntry>(8);
         private static readonly HashSet<string> _welcomedMotdPlayerKeys = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
+        private static bool IsValidPlayableFactionString(string s)
+        {
+            if (string.IsNullOrWhiteSpace(s))
+                return false;
+
+            string t = s.Trim();
+            return !t.Equals("Unknown", StringComparison.OrdinalIgnoreCase) &&
+                   !t.Equals("Civilian", StringComparison.OrdinalIgnoreCase) &&
+                   !t.Equals("None", StringComparison.OrdinalIgnoreCase) &&
+                   !t.Equals("Spectator", StringComparison.OrdinalIgnoreCase) &&
+                   !t.Equals("Neutral", StringComparison.OrdinalIgnoreCase);
+        }
+
         private static bool TryGetPhotonPlayerFaction(Photon.Realtime.Player p, out string faction)
         {
             faction = null;
@@ -1543,7 +1632,7 @@ namespace EasyRed2HumanAI
                 {
                     Il2CppSystem.Object raw = props[_propKeyFactionObj];
                     string s = raw != null ? raw.ToString() : null;
-                    if (!string.IsNullOrWhiteSpace(s))
+                    if (IsValidPlayableFactionString(s))
                     {
                         faction = s.Trim();
                         return true;
@@ -1561,7 +1650,7 @@ namespace EasyRed2HumanAI
                 for (int i = 0; i < count; i++)
                 {
                     ref AiCore.SoldierSnapshot ss = ref soldiers[i];
-                    if (!ss.IsPlayer || ss.Ref == null || string.IsNullOrEmpty(ss.Faction))
+                    if (!ss.IsPlayer || ss.Ref == null || !IsValidPlayableFactionString(ss.Faction))
                         continue;
 
                     SyncSoldier syn = ss.Ref.soldierSyncher;
@@ -1776,7 +1865,7 @@ namespace EasyRed2HumanAI
                         _pendingJoinMotdQueue[i] = entry;
                         continue;
                     }
-                    if (now - entry.EnqueuedAtUnscaledTime < 45.0f)
+                    if (now - entry.EnqueuedAtUnscaledTime < 75.0f)
                         continue;
                     entry.ReadyAtUnscaledTime = now;
                 }
@@ -1811,11 +1900,11 @@ namespace EasyRed2HumanAI
 
                 if (anySent)
                 {
+                    string joinerNick = !string.IsNullOrEmpty(target.NickName) ? target.NickName : $"Player#{entry.ActorNumber}";
                     try
                     {
                         if (PlayerGUI.instance != null)
                         {
-                            string joinerNick = !string.IsNullOrEmpty(target.NickName) ? target.NickName : $"Player#{entry.ActorNumber}";
                             for (int lineIdx = 0; lineIdx < motdLines.Length; lineIdx++)
                             {
                                 string prefix = lineIdx == 0 ? $"<color=#9AA7B0>[MOTD -> {joinerNick}]</color> " : "<color=#9AA7B0>[MOTD]</color> ";
@@ -1824,6 +1913,11 @@ namespace EasyRed2HumanAI
                         }
                     }
                     catch { }
+
+                    if (VisionConfig.DebugLogging.Value)
+                    {
+                        AiCore.LogDebug("MOTD", $"Sent welcome MOTD to '{joinerNick}' (faction={joinerFaction ?? "none"}, modded={isModdedJoiner}): {greetingLine}", 0f);
+                    }
 
                     if (!string.IsNullOrEmpty(entry.DedupKey))
                     {
@@ -1866,6 +1960,140 @@ namespace EasyRed2HumanAI
                     {
                         if (MiniMapGUI.ShowingPlayerList())
                             _pendingOpenPlayerListRefresh = true;
+                    }
+                }
+                catch { }
+            }
+        }
+
+        [HarmonyPatch(typeof(BattleLoader), nameof(BattleLoader.RequestOwnershipAndSpawnOn))]
+        public static class BattleLoader_RequestOwnershipAndSpawnOn_Patch
+        {
+            public static void Prefix(Photon.Realtime.Player __0, int __1, int __2, int __3)
+            {
+                try
+                {
+                    if (!VisionConfig.EnableMod.Value || !AiCore.IsInMultiplayerRoom())
+                        return;
+
+                    Photon.Pun.PhotonView pv = Photon.Pun.PhotonView.Find(__1);
+                    Soldier s = pv != null ? pv.GetComponent<Soldier>() : null;
+                    if (s == null || s.Pointer == IntPtr.Zero)
+                    {
+                        if (VisionConfig.DebugLogging.Value)
+                            AiCore.LogDebug("CoopSpawn", $"RequestOwnershipAndSpawnOn from '{__0?.NickName ?? "?"}' rejected: viewID={__1} not found.");
+                        return;
+                    }
+
+                    SyncSoldier syn = s.soldierSyncher;
+                    if (syn != null && syn.OwnSyncher && s.IsAlive && !s.IsInjured && !s.HasSurrended() && !s.IsPlayer() && syn.controlled_by_player)
+                    {
+                        syn.UnsetAsControlledByPlayer();
+                        if (VisionConfig.DebugLogging.Value)
+                            AiCore.LogDebug("CoopSpawn", $"Auto-cleared stale controlled_by_player on '{s.name_surname}' (viewID={__1}) for '{__0?.NickName ?? "?"}'.");
+                    }
+                    else if (syn != null && syn.OwnSyncher && s.HasSurrended())
+                    {
+                        AiCore.SoldierFastHandles sh = AiCore.GetOrCreateSoldierHandles(s);
+                        float now = Time.time;
+                        if (sh == null || now >= sh.LastCoopSpawnHealTime + 2.5f)
+                        {
+                            if (sh != null)
+                                sh.LastCoopSpawnHealTime = now;
+
+                            if (sh != null && sh.IsRetreatDespawning)
+                            {
+                                if (s.joinedSquad != null)
+                                    s.joinedSquad.Leave(s, false);
+                            }
+                            else if (s.IsAlive && !s.IsInjured && !s.IsDead)
+                            {
+                                s.SurrenderSynched();
+                            }
+                        }
+                    }
+
+                    if (VisionConfig.DebugLogging.Value)
+                    {
+                        bool seatOk = true;
+                        if (__2 > 0)
+                        {
+                            Photon.Pun.PhotonView vpv = Photon.Pun.PhotonView.Find(__2);
+                            Vehicle reqVeh = vpv != null ? vpv.GetComponent<Vehicle>() : null;
+                            Seats curSeat = s.GetCurrentVehicleSeat();
+                            seatOk = reqVeh != null &&
+                                     __3 >= 0 &&
+                                     reqVeh.seats != null &&
+                                     __3 < reqVeh.seats.Length &&
+                                     reqVeh.seats[__3] != null &&
+                                     reqVeh.seats[__3].unitSet != null &&
+                                     reqVeh.seats[__3].unitSet.Pointer == s.Pointer &&
+                                     curSeat != null &&
+                                     curSeat.Pointer == reqVeh.seats[__3].Pointer;
+                        }
+
+                        if (!seatOk ||
+                            !s.IsAlive ||
+                            s.IsInjured ||
+                            s.HasSurrended() ||
+                            syn == null ||
+                            !syn.OwnSyncher ||
+                            s.IsPlayer() ||
+                            syn.controlled_by_player)
+                        {
+                            AiCore.LogDebug(
+                                "CoopSpawn",
+                                $"RequestOwnershipAndSpawnOn from '{__0?.NickName ?? "?"}' will be rejected for '{s.name_surname}' (viewID={__1}): alive={s.IsAlive}, inj={s.IsInjured}, surr={s.HasSurrended()}, own={syn != null && syn.OwnSyncher}, isLocalPlayer={s.IsPlayer()}, ctrlByPlayer={syn != null && syn.controlled_by_player}, reqVeh={__2}, reqSeat={__3}, seatOk={seatOk}.");
+                        }
+                    }
+                }
+                catch { }
+            }
+        }
+
+        [HarmonyPatch(typeof(SquadSoldierLabel), nameof(SquadSoldierLabel.BeginSpawnOnUnit))]
+        public static class SquadSoldierLabel_BeginSpawnOnUnit_Patch
+        {
+            public static void Prefix(Soldier __0)
+            {
+                try
+                {
+                    if (!VisionConfig.EnableMod.Value || __0 == null || __0.Pointer == IntPtr.Zero || !__0.IsReloading)
+                        return;
+
+                    bool clearReload = __0.IsOnVehicle();
+                    if (!clearReload && !AiCore.IsLocallyOwnedSoldier(__0))
+                    {
+                        GenericGun held = __0.GetHeldGun();
+                        clearReload = held == null || !held.IsReloadingOrUsingBolt();
+                    }
+
+                    if (clearReload)
+                    {
+                        __0.IsReloading = false;
+                    }
+                }
+                catch { }
+            }
+        }
+
+        [HarmonyPatch(typeof(SyncSoldier), nameof(SyncSoldier.SetControlledByPlayer))]
+        public static class SyncSoldier_SetControlledByPlayer_Patch
+        {
+            public static void Postfix(SyncSoldier __instance)
+            {
+                try
+                {
+                    if (!VisionConfig.EnableMod.Value || __instance == null || __instance.Pointer == IntPtr.Zero)
+                        return;
+
+                    if (PlayerGUI.IsSelectingSquad() && PlayerGUI.instance != null && PlayerGUI.GUISquad != null)
+                    {
+                        Soldier s = __instance.soldier;
+                        if (s != null && s.joinedSquad != null && s.joinedSquad.Pointer == PlayerGUI.GUISquad.Pointer)
+                        {
+                            PlayerGUI.instance.respawnEntryNextRefresh = 0f;
+                        }
                     }
                 }
                 catch { }
@@ -2351,6 +2579,11 @@ namespace EasyRed2HumanAI
                     if (__instance != null && __instance.Pointer != IntPtr.Zero && __instance.IsCarryingBody())
                     {
                         __instance.CarryBody(null);
+                    }
+
+                    if (VisionConfig.EnableEmergentDecisionEngine != null && VisionConfig.EnableEmergentDecisionEngine.Value)
+                    {
+                        EmergentRuntimeBridge.NotifySoldierKilled(__instance, Vector3.zero, false);
                     }
 
                     if (!IsLocalKillTrackingActive() || __instance == null || __instance.Pointer == IntPtr.Zero)

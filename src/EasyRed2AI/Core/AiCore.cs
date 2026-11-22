@@ -26,7 +26,14 @@ namespace EasyRed2HumanAI
         private static int _cachedSmokeOcclusionMask;
         private static IntPtr _cachedWaterInstancePtr;
         private static Renderer _cachedWaterRenderer;
-        private static float _nextAllowedBotRpcTime;
+        private static float _botRpcNormalTokens = 2.5f;
+        private static float _botRpcNormalLastRefillTime;
+        private static float _nextAllowedLowPriorityBotRpcTime;
+        private static float _nextCoopNetHealthSampleTime;
+        private static float _coopBaselineRttMs = -1f;
+        private static int _lastSampledResentReliableCommands = -1;
+        private static float _coopRecentResendsPerSec;
+        private static Il2CppSystem.Object _propKeyPingObj;
         private static float _nextRoomCheckTime;
         private static int _cachedRoomPlayerCount = 1;
         private static IntPtr _lastPublishedRoomPtr;
@@ -122,6 +129,7 @@ namespace EasyRed2HumanAI
             public float EnemySyringeCaptureUntil;
             public bool IsRetreatDespawning;
             public float RetreatDespawnForceCleanupAt;
+            public float LastCoopSpawnHealTime;
             public float SurrenderedSinceTime;
             public float UnliberatedWithNearbyAllySince;
             public Vector3 WatchdogAnchorPos;
@@ -133,6 +141,8 @@ namespace EasyRed2HumanAI
             public float NextWitnessReactTime;
             public bool InSmokeCached;
             public float NextInSmokeCheckTime;
+            public float CachedVoiceBasePitch;
+            public uint VoiceLineCounter;
 
             internal BotMoveOverrideState MoveOverride;
             internal SoldierVeterancyState Veterancy;
@@ -140,6 +150,7 @@ namespace EasyRed2HumanAI
             internal SoldierStanceState Stance;
             internal SoldierCombatState Combat;
             internal SoldierGoapState Goap;
+            internal EmergentEngine.SoldierEmergentState Emergent;
         }
 
         internal enum BotMoveOverrideKind : byte
@@ -149,7 +160,9 @@ namespace EasyRed2HumanAI
             CasualtyDrag = 2,
             UnstickSidestep = 3,
             SapperStepBack = 4,
-            EmergencyFallback = 5
+            EmergencyFallback = 5,
+            VehicleEvade = 6,
+            GrenadeReflex = 7
         }
 
         internal struct BotMoveOverrideState
@@ -182,6 +195,12 @@ namespace EasyRed2HumanAI
             public VeteranAndTacticsPatches.CornerPieState CornerPie;
             public VeteranAndTacticsPatches.StationaryWatchState StationaryWatch;
             public VeteranAndTacticsPatches.CoverEyeBlockState CoverEyeBlock;
+            public Spottable UnderFireAttacker;
+            public IntPtr UnderFireAttackerPtr;
+            public Vector3 UnderFireFromPos;
+            public float UnderFireUntil;
+            public float NextNearMissAlertTime;
+            public float NextIncomingFireSuppressTime;
         }
 
         internal struct SoldierStanceState
@@ -201,20 +220,18 @@ namespace EasyRed2HumanAI
             public float NextBipodDeployCheckTime;
             public float NextWallSideCheckTime;
             public float NextWallSidestepTime;
-            public float BleedCoverDeadline;
             public float LocalCoverProtectedUntil;
             public float NextLocalCoverSeekTime;
             public IntPtr LastSettledCoverPtr;
             public float CoverSettledUntil;
             public float NextStandCrouchLofCheckTime;
             public float NextIndoorCeilingCountTime;
-            public int LastBandageEvalFrame;
-            public bool CachedHasBandage;
-            public bool CachedCanSafelyBandage;
-            public string CachedBandageBlockReason;
-            public float CachedBandageGunfireDist;
             public float BandageLowPoseUntil;
             public SoldierPose BandageTargetPose;
+            public float NextStandLiftAttemptTime;
+            public Soldier.LeanDirection DesiredLean;
+            public float LeanHoldUntil;
+            public float NextLeanProbeTime;
         }
 
         internal struct SoldierCombatState
@@ -248,6 +265,7 @@ namespace EasyRed2HumanAI
             public IntPtr LastMeleeSwingTargetPtr;
             public float LastMeleeSwingTime;
             public byte ConsecutiveMeleeSwingsOnTarget;
+            public byte ConsecutiveSlopeVaultRejects;
             public float MeleeWhiffFallbackUntil;
             public float NextAtCapCheckTime;
             public bool CachedHasUsableAt;
@@ -256,6 +274,11 @@ namespace EasyRed2HumanAI
             public VeteranAndTacticsPatches.InfantrySightReactionState SightReaction;
             public VeteranAndTacticsPatches.BarbedWireStuckState BarbedWireStuck;
             public VeteranAndTacticsPatches.VehicleAimCache VehicleAim;
+            public IntPtr LastEvadedGrenadePtr;
+            public float GrenadeReflexCooldownUntil;
+            public Vector3 PendingSmokeAimPoint;
+            public float PendingSmokeAimUntil;
+            public IntPtr PendingSmokePrefabPtr;
         }
 
         internal struct SoldierGoapState
@@ -273,6 +296,7 @@ namespace EasyRed2HumanAI
             public float NextFlankCoverAssignTime;
             public float NextSpecialMunitionTime;
             public float NextIndividualFallbackTime;
+            public float NextOpenScatterTime;
             public float MedicHealStartTime;
             public IntPtr MedicHealTargetPtr;
             public float ActiveSyringeHealUntil;
@@ -325,6 +349,8 @@ namespace EasyRed2HumanAI
                 case BotMoveOverrideKind.UnstickSidestep: return "Unstick";
                 case BotMoveOverrideKind.SapperStepBack: return "SapperBack";
                 case BotMoveOverrideKind.EmergencyFallback: return "Fallback";
+                case BotMoveOverrideKind.VehicleEvade: return "VehEvade";
+                case BotMoveOverrideKind.GrenadeReflex: return "Grenade";
                 default: return "None";
             }
         }
@@ -365,12 +391,16 @@ namespace EasyRed2HumanAI
             public float OffMapRearmReadyTime;
             public float NextStaticSelfPreservationCheckTime;
             public AIVehicle AiVeh;
+            public float BoardingWaitUntil;
             public bool AiVehChecked;
             public float LoneGunnerHoldUntil;
             public float NextLoneDriverEvalTime;
             public float EmplacementHazardCooldownUntil;
             public float LastCrewLossTime;
             public int LastObservedPeopleInside;
+            public float RepairStationRouteStartedAt;
+            public float RepairStationBestDist;
+            public float NextRepairStationAttemptTime;
 
             public int UnstickLastFrame = -1;
             public bool UnstickApplyForce;
@@ -379,6 +409,28 @@ namespace EasyRed2HumanAI
             public float NextUnstickCountTime;
             public Soldier LastHumanOccupant;
             public float LastHumanInsideTime;
+            public Vector3 WatchdogAnchorPos;
+            public float WatchdogStationarySince;
+            public float NextAnomalyAlertTime;
+            public Spottable UnderFireAttacker;
+            public IntPtr UnderFireAttackerPtr;
+            public Vector3 UnderFireFromPos;
+            public float UnderFireUntil;
+            public bool UnderFireIsHeavy;
+            public float NextUnderFireWakeTime;
+
+            public bool AirborneSpawnHoldActive;
+            public float AirborneSpawnHoldUntil;
+            public Vector3 AirborneSpawnHoldPos;
+            public Quaternion AirborneSpawnHoldRot;
+            public bool PlaneHotStarted;
+            public bool PlaneGroundSpawnChecked;
+            public float PlaneHotStartPendingUntil;
+            public float PlaneHotStartWindowUntil;
+            public bool PlaneHotStartAllowAi;
+            public bool WasOwnDriverOrVehicle;
+            public bool HasObservedOwnershipState;
+            internal EmergentEngine.VehicleEmergentState Emergent;
         }
 
         public struct TurretFastTraits
@@ -1688,6 +1740,7 @@ namespace EasyRed2HumanAI
                     IntPtr roomPtr = PhotonNetwork.CurrentRoom.Pointer;
                     if (roomPtr != IntPtr.Zero && roomPtr != _lastPublishedRoomPtr && PhotonNetwork.LocalPlayer != null)
                     {
+                        ResetCoopRpcNetworkState();
                         EnsureLocalModVersionPublished();
                     }
                 }
@@ -1699,6 +1752,7 @@ namespace EasyRed2HumanAI
                         _lastPublishedRoomPtr = IntPtr.Zero;
                         _playerModdedCache.Clear();
                         _nextTargetedPlayerChatTime.Clear();
+                        ResetCoopRpcNetworkState();
                     }
                 }
             }
@@ -1824,9 +1878,28 @@ namespace EasyRed2HumanAI
         }
 
         /// <summary>
+        /// Co-op-safe check for whether <paramref name="s"/> is currently controlled by ANY human player
+        /// (local <c>PlayerController</c> OR remote Photon client via <c>SyncSoldier.controlled_by_player</c>).
+        /// </summary>
+        public static bool IsAnyHumanPlayerSoldier(Soldier s)
+        {
+            if (ReferenceEquals(s, null) || s == null || s.Pointer == IntPtr.Zero)
+                return false;
+
+            if (s.IsPlayer())
+                return true;
+
+            if (!IsInMultiplayerRoom())
+                return false;
+
+            SyncSoldier syn = s.soldierSyncher;
+            return syn != null && syn.controlled_by_player;
+        }
+
+        /// <summary>
         /// Co-op-safe equivalent of vanilla <c>Squad.IsPlayerInSquad()</c>, which only checks the
         /// local client's <c>PlayerController</c>. Returns true on Host or Client whenever ANY alive
-        /// human player (<c>u.IsPlayer()</c>) belongs to <paramref name="sq"/>.
+        /// human player (<see cref="IsAnyHumanPlayerSoldier"/>) belongs to <paramref name="sq"/>.
         /// </summary>
         public static bool HasAnyHumanPlayerInSquad(Squad sq)
         {
@@ -1845,7 +1918,39 @@ namespace EasyRed2HumanAI
                     for (int i = 0; i < c; i++)
                     {
                         Soldier u = units[i];
-                        if (!ReferenceEquals(u, null) && u != null && u.IsAlive && u.IsPlayer())
+                        if (!ReferenceEquals(u, null) && u != null && u.IsAlive && IsAnyHumanPlayerSoldier(u))
+                            return true;
+                    }
+                }
+            }
+            catch { }
+            return false;
+        }
+
+        /// <summary>
+        /// Returns true in an online room when ANY non-dead member of <paramref name="sq"/> is owned by
+        /// a remote Photon client (<c>!syn.OwnSyncher</c>) or actively controlled by a remote human player.
+        /// Remains true even while a remote vehicle player is dead on the Squad Selection screen.
+        /// </summary>
+        public static bool IsSquadOwnedOrOccupiedByRemoteHuman(Squad sq)
+        {
+            if (!IsInMultiplayerRoom() || sq == null || sq.Pointer == IntPtr.Zero)
+                return false;
+
+            try
+            {
+                var units = sq.units;
+                if (units != null)
+                {
+                    int c = units.Count;
+                    for (int i = 0; i < c; i++)
+                    {
+                        Soldier u = units[i];
+                        if (ReferenceEquals(u, null) || u == null || u.Pointer == IntPtr.Zero || u.IsDead || (!u.IsAlive && !u.IsInjured))
+                            continue;
+
+                        SyncSoldier syn = u.soldierSyncher;
+                        if (syn != null && (!syn.OwnSyncher || (!u.IsPlayer() && syn.controlled_by_player)))
                             return true;
                     }
                 }
@@ -2045,7 +2150,7 @@ namespace EasyRed2HumanAI
                 if (bl == null || bl.photonView == null || PhotonNetwork.LocalPlayer == null)
                     return false;
 
-                if (!bypassRpcBudget && !TryConsumeBotRpcBudget(0.20f))
+                if (!bypassRpcBudget && !TryConsumeBotRpcBudget(0.20f, BotRpcPriority.Low))
                     return false;
 
                 if (_nextTargetedPlayerChatTime.Count > 32)
@@ -2175,6 +2280,54 @@ namespace EasyRed2HumanAI
                 return trimmed;
 
             return $"Squad {trimmed}";
+        }
+
+        public static string GetSoldierClassLabel(Soldier s)
+        {
+            if (s == null || s.Pointer == IntPtr.Zero)
+                return "Soldier";
+
+            try
+            {
+                if (s.IsAmmoBoxCarrier() &&
+                    !s.hasMg &&
+                    !s.IsSquadLeader() &&
+                    !s.IsRadioman() &&
+                    !s.hasSyringe &&
+                    !s.isAtUnit &&
+                    !s.isSapper &&
+                    !s.isMarksMan)
+                {
+                    return "Ammo Carrier";
+                }
+            }
+            catch { }
+
+            string raw = null;
+            try { raw = s.GetClassName(); } catch { }
+            if (!string.IsNullOrWhiteSpace(raw) &&
+                !raw.StartsWith("Missing", StringComparison.OrdinalIgnoreCase) &&
+                !raw.StartsWith("loadout_", StringComparison.OrdinalIgnoreCase))
+            {
+                string trimmed = raw.Trim();
+                return trimmed.Length > 24 ? trimmed.Substring(0, 24) : trimmed;
+            }
+
+            try
+            {
+                if (s.IsSquadLeader()) return "Squad Leader";
+                if (s.IsRadioman()) return "Radioman";
+                if (s.hasSyringe || s.IsMedic()) return "Medic";
+                if (s.isAtUnit) return "Anti-Tank";
+                if (s.hasGrenadeLauncher) return "Grenadier";
+                if (s.isSapper) return "Sapper";
+                if (s.isMarksMan) return "Marksman";
+                if (s.hasMg) return "Machine Gunner";
+                if (s.IsAmmoBoxCarrier()) return "Ammo Carrier";
+            }
+            catch { }
+
+            return "Rifleman";
         }
 
         public static string GetVehicleDisplayNameShort(Vehicle veh)
@@ -2578,6 +2731,7 @@ namespace EasyRed2HumanAI
                     s != null)
                 {
                     h.NextAnomalyAlertTime = now + 5.0f;
+                    AnomalyRetreatStallCount++;
                     BotActionTrace.RecordEvent(s, BotTraceEventKind.AnomalyAlert, "retreat_despawn_stalled", now - h.RetreatDespawnForceCleanupAt);
                 }
 
@@ -2735,13 +2889,270 @@ namespace EasyRed2HumanAI
             }
         }
 
+        public enum BotRpcPriority : byte
+        {
+            Normal = 0,
+            Low = 1
+        }
+
         public static int ActiveSoldierHandlesCount => _soldierHandlesByPtr.Count;
         public static int ActiveVehicleHandlesCount => _vehicleHandlesByPtr.Count;
         public static int MoveOverridePreemptionsCount { get; private set; }
         public static int BotRpcBudgetGrantedCount { get; private set; }
         public static int BotRpcBudgetThrottledCount { get; private set; }
+        public static int CachedMaxRemotePingMs { get; private set; } = -1;
+        public static int CachedEffectiveMaxRttMs { get; private set; }
+        public static float CachedCoopRpcCongestionScale { get; private set; } = 1.0f;
 
-        public static bool TryConsumeBotRpcBudget(float minInterval = 0.35f)
+        private static readonly Dictionary<string, int> _caughtExceptionCountsBySite = new Dictionary<string, int>(32, StringComparer.Ordinal);
+        public static int TotalCaughtPatchExceptions;
+        public static string FirstCaughtPatchExceptionSite = string.Empty;
+        public static int AnomalyZombieCount;
+        public static int AnomalyPrisonerCount;
+        public static int AnomalyMeleeCount;
+        public static int AnomalySurrenderCount;
+        public static int AnomalyRetreatStallCount;
+        public static int AnomalyVehicleStuckCount;
+        private static float _matchStartUnscaledTime = -1f;
+        private static bool _matchEndSummaryEmitted;
+
+        public static void ResetMatchTelemetryAndExceptions()
+        {
+            _caughtExceptionCountsBySite.Clear();
+            TotalCaughtPatchExceptions = 0;
+            FirstCaughtPatchExceptionSite = string.Empty;
+            AnomalyZombieCount = 0;
+            AnomalyPrisonerCount = 0;
+            AnomalyMeleeCount = 0;
+            AnomalySurrenderCount = 0;
+            AnomalyRetreatStallCount = 0;
+            AnomalyVehicleStuckCount = 0;
+            _matchStartUnscaledTime = Time.unscaledTime;
+            _matchEndSummaryEmitted = false;
+        }
+
+        [MethodImpl(MethodImplOptions.NoInlining)]
+        public static void ReportPatchException(string site, Exception ex)
+        {
+            TotalCaughtPatchExceptions++;
+            if (ex == null)
+                return;
+            if (string.IsNullOrEmpty(site))
+                site = "Unknown";
+
+            int count;
+            if (_caughtExceptionCountsBySite.TryGetValue(site, out int prev))
+            {
+                count = prev + 1;
+            }
+            else
+            {
+                if (_caughtExceptionCountsBySite.Count >= 64)
+                    return;
+                count = 1;
+            }
+            _caughtExceptionCountsBySite[site] = count;
+
+            if (count == 1)
+            {
+                if (string.IsNullOrEmpty(FirstCaughtPatchExceptionSite))
+                    FirstCaughtPatchExceptionSite = site;
+                EnqueueAsyncLog(true, $"[PatchErr:{site}] {ex.GetType().Name}: {ex.Message}");
+            }
+            else if (count == 10 || count == 100 || count == 1000)
+            {
+                EnqueueAsyncLog(true, $"[PatchErr:{site}] count={count} (last: {ex.GetType().Name}: {ex.Message})");
+            }
+        }
+
+        public static void EmitMatchEndHealthSummary()
+        {
+            if (_matchEndSummaryEmitted || !VisionConfig.EnableMod.Value)
+                return;
+
+            _matchEndSummaryEmitted = true;
+            float dur = _matchStartUnscaledTime >= 0f
+                ? Mathf.Max(0f, Time.unscaledTime - _matchStartUnscaledTime)
+                : Mathf.Max(0f, Time.time);
+
+            string errSuffix = string.Empty;
+            if (TotalCaughtPatchExceptions > 0 && _caughtExceptionCountsBySite.Count > 0)
+            {
+                string s1 = null, s2 = null, s3 = null;
+                int c1 = 0, c2 = 0, c3 = 0;
+                foreach (var kv in _caughtExceptionCountsBySite)
+                {
+                    int v = kv.Value;
+                    if (v > c1) { c3 = c2; s3 = s2; c2 = c1; s2 = s1; c1 = v; s1 = kv.Key; }
+                    else if (v > c2) { c3 = c2; s3 = s2; c2 = v; s2 = kv.Key; }
+                    else if (v > c3) { c3 = v; s3 = kv.Key; }
+                }
+                errSuffix = c3 > 0 ? $" ({s1}={c1},{s2}={c2},{s3}={c3})"
+                    : c2 > 0 ? $" ({s1}={c1},{s2}={c2})"
+                    : $" ({s1}={c1})";
+            }
+
+            EnqueueAsyncLog(
+                false,
+                $"[MatchSummary] Dur:{dur:F0}s | MaxFrame:{RollingMaxFrameMs:F1}ms Hitches:{TotalHitchesOver28ms} | PatchErrs:{TotalCaughtPatchExceptions}{errSuffix} | Stuck:{VeteranAndTacticsPatches.FootBotUnsticksCount}/{VeteranAndTacticsPatches.TankRockUnsticksCount} Vault:{VeteranAndTacticsPatches.WallsVaulted}(Rej:{VeteranAndTacticsPatches.SlopedVaultsRejectedCount}) | Anoms[Zombie:{AnomalyZombieCount} Pris:{AnomalyPrisonerCount} Melee:{AnomalyMeleeCount} Surr:{AnomalySurrenderCount} RetStall:{AnomalyRetreatStallCount} VehStuck:{AnomalyVehicleStuckCount}] | BotRPC:{BotRpcBudgetGrantedCount}/{BotRpcBudgetThrottledCount}{GetCoopRpcTelemetrySuffix()}");
+
+            EmergentRuntimeBridge.EmitTelemetrySummary("match_end");
+        }
+
+        public static string GetCoopRpcTelemetrySuffix()
+        {
+            return GetConnectedPlayerCount() > 1
+                ? $" (RTT:{CachedEffectiveMaxRttMs}ms/{CachedCoopRpcCongestionScale:F1}x)"
+                : string.Empty;
+        }
+
+        private static void ResetCoopRpcNetworkState()
+        {
+            _botRpcNormalTokens = 2.5f;
+            _botRpcNormalLastRefillTime = 0f;
+            _nextAllowedLowPriorityBotRpcTime = 0f;
+            _nextCoopNetHealthSampleTime = 0f;
+            _coopBaselineRttMs = -1f;
+            _lastSampledResentReliableCommands = -1;
+            _coopRecentResendsPerSec = 0f;
+            CachedMaxRemotePingMs = -1;
+            CachedEffectiveMaxRttMs = 0;
+            CachedCoopRpcCongestionScale = 1.0f;
+        }
+
+        private static bool TryReadPlayerPingMs(Photon.Realtime.Player player, out short pingMs)
+        {
+            pingMs = -1;
+            if (player == null)
+                return false;
+
+            try
+            {
+                var props = player.CustomProperties;
+                if (props == null)
+                    return false;
+
+                if (_propKeyPingObj == null)
+                    _propKeyPingObj = ((Il2CppSystem.String)"ping").Cast<Il2CppSystem.Object>();
+
+                if (!props.ContainsKey(_propKeyPingObj))
+                    return false;
+
+                Il2CppSystem.Object raw = props[_propKeyPingObj];
+                if (raw == null)
+                    return false;
+
+                try
+                {
+                    pingMs = raw.Unbox<short>();
+                    return true;
+                }
+                catch
+                {
+                    if (short.TryParse(raw.ToString(), out pingMs))
+                        return true;
+                }
+            }
+            catch { }
+
+            return false;
+        }
+
+        private static void RefreshCoopNetworkHealthIfDue()
+        {
+            float nowUnscaled = Time.unscaledTime;
+            if (nowUnscaled < _nextCoopNetHealthSampleTime && _nextCoopNetHealthSampleTime - nowUnscaled <= 5.0f)
+                return;
+
+            float elapsed = _nextCoopNetHealthSampleTime > 0f
+                ? Mathf.Clamp(nowUnscaled - (_nextCoopNetHealthSampleTime - 1.5f), 0.25f, 10.0f)
+                : 1.5f;
+            _nextCoopNetHealthSampleTime = nowUnscaled + 1.5f;
+
+            try
+            {
+                int localRelayPing = Mathf.Max(0, PhotonNetwork.GetPing());
+                int maxRemoteOneWayMs = -1;
+
+                var room = PhotonNetwork.CurrentRoom;
+                var playersMap = room != null ? room.Players : null;
+                if (playersMap != null)
+                {
+                    foreach (var kv in playersMap)
+                    {
+                        Photon.Realtime.Player p = kv.Value;
+                        if (p == null || p.IsLocal)
+                            continue;
+
+                        if (TryReadPlayerPingMs(p, out short pPing) && pPing >= 0 && pPing <= 5000 && pPing > maxRemoteOneWayMs)
+                            maxRemoteOneWayMs = pPing;
+                    }
+                }
+
+                CachedMaxRemotePingMs = maxRemoteOneWayMs;
+                int effectiveRtt = maxRemoteOneWayMs >= 0
+                    ? Mathf.Max(maxRemoteOneWayMs * 2, localRelayPing)
+                    : localRelayPing * 2;
+                CachedEffectiveMaxRttMs = effectiveRtt;
+
+                if (effectiveRtt > 0)
+                {
+                    if (_coopBaselineRttMs <= 0f)
+                        _coopBaselineRttMs = effectiveRtt;
+                    else if (effectiveRtt < _coopBaselineRttMs)
+                        _coopBaselineRttMs = Mathf.Lerp(_coopBaselineRttMs, effectiveRtt, 0.30f);
+                    else
+                        _coopBaselineRttMs = Mathf.Min(effectiveRtt, _coopBaselineRttMs + 4.0f);
+                }
+
+                int curResends = PhotonNetwork.ResentReliableCommands;
+                if (_lastSampledResentReliableCommands >= 0 && curResends >= _lastSampledResentReliableCommands)
+                {
+                    float instantResendRate = (curResends - _lastSampledResentReliableCommands) / elapsed;
+                    _coopRecentResendsPerSec = instantResendRate > _coopRecentResendsPerSec
+                        ? instantResendRate
+                        : (_coopRecentResendsPerSec * 0.55f);
+                }
+                else
+                {
+                    _coopRecentResendsPerSec *= 0.55f;
+                }
+                _lastSampledResentReliableCommands = curResends;
+
+                float rttInflation = _coopBaselineRttMs > 0f ? Mathf.Max(0f, effectiveRtt - _coopBaselineRttMs) : 0f;
+                float inflationScale = rttInflation <= 50f
+                    ? 1.0f
+                    : (1.0f + Mathf.Clamp01((rttInflation - 50f) / 150f) * 1.5f);
+
+                float absRttScale;
+                if (effectiveRtt <= 160)
+                    absRttScale = 1.0f;
+                else if (effectiveRtt <= 320)
+                    absRttScale = 1.0f + ((effectiveRtt - 160f) / 160f) * 0.8f;
+                else
+                    absRttScale = 1.8f + Mathf.Clamp01((effectiveRtt - 320f) / 180f) * 1.7f;
+
+                float resendScale = _coopRecentResendsPerSec <= 0.5f
+                    ? 1.0f
+                    : (1.0f + Mathf.Clamp01((_coopRecentResendsPerSec - 0.5f) / 3.5f) * 2.5f);
+
+                CachedCoopRpcCongestionScale = Mathf.Clamp(
+                    Mathf.Max(inflationScale, Mathf.Max(absRttScale, resendScale)),
+                    1.0f,
+                    4.0f);
+            }
+            catch
+            {
+                CachedCoopRpcCongestionScale = Mathf.Clamp(CachedCoopRpcCongestionScale, 1.0f, 4.0f);
+            }
+        }
+
+        /// <summary>
+        /// Two-lane Co-op RPC pacer scaled by room fan-out, remote RTT spikes, and Photon resends.
+        /// Normal priority grants combat/order actions up to ~8/s in clean 2-player Co-op via a token bucket;
+        /// Low priority isolates ambient doors/chat/voice and sheds immediately under congestion.
+        /// </summary>
+        public static bool TryConsumeBotRpcBudget(float minInterval = 0.35f, BotRpcPriority priority = BotRpcPriority.Normal)
         {
             int players = GetConnectedPlayerCount();
             if (players <= 1)
@@ -2756,21 +3167,61 @@ namespace EasyRed2HumanAI
                 return false;
             }
 
-            float now = Time.time;
-            if (_nextAllowedBotRpcTime > now + 2.5f)
+            RefreshCoopNetworkHealthIfDue();
+
+            int remotePlayers = Mathf.Max(1, players - 1);
+            float fanoutScale = 1.0f + Mathf.Min(remotePlayers - 1, 12) * 0.35f;
+            float congestion = Mathf.Clamp(CachedCoopRpcCongestionScale, 1.0f, 4.0f);
+            float now = Time.unscaledTime;
+
+            if (priority == BotRpcPriority.Low)
             {
-                _nextAllowedBotRpcTime = 0f;
+                if (congestion >= 1.60f)
+                {
+                    BotRpcBudgetThrottledCount++;
+                    return false;
+                }
+
+                if (_nextAllowedLowPriorityBotRpcTime > now + 5.0f)
+                    _nextAllowedLowPriorityBotRpcTime = 0f;
+
+                if (now < _nextAllowedLowPriorityBotRpcTime)
+                {
+                    BotRpcBudgetThrottledCount++;
+                    return false;
+                }
+
+                _nextAllowedLowPriorityBotRpcTime = now + Mathf.Clamp(minInterval * 1.15f * fanoutScale * congestion, 0.20f, 4.0f);
+                BotRpcBudgetGrantedCount++;
+                return true;
             }
 
-            if (now < _nextAllowedBotRpcTime)
+            float maxBurst = congestion <= 1.25f ? 2.5f : 1.0f;
+            float tokensPerSec = 1.0f / (0.125f * fanoutScale * congestion);
+
+            if (_botRpcNormalLastRefillTime <= 0f || now < _botRpcNormalLastRefillTime || (now - _botRpcNormalLastRefillTime) > 10.0f)
+            {
+                _botRpcNormalTokens = maxBurst;
+                _botRpcNormalLastRefillTime = now;
+            }
+            else
+            {
+                float dt = now - _botRpcNormalLastRefillTime;
+                if (dt > 0f)
+                {
+                    _botRpcNormalTokens = Mathf.Min(maxBurst, _botRpcNormalTokens + dt * tokensPerSec);
+                    _botRpcNormalLastRefillTime = now;
+                }
+            }
+
+            float cost = Mathf.Clamp(minInterval / 0.35f, 0.60f, 1.60f);
+            if (_botRpcNormalTokens < cost)
             {
                 BotRpcBudgetThrottledCount++;
                 return false;
             }
 
-            minInterval *= (1.0f + Mathf.Min(players - 1, 12) * 0.25f);
-
-            _nextAllowedBotRpcTime = now + Mathf.Clamp(minInterval, 0.05f, 3.0f);
+            _botRpcNormalTokens -= cost;
             BotRpcBudgetGrantedCount++;
             return true;
         }
@@ -3327,7 +3778,7 @@ namespace EasyRed2HumanAI
                 if (dt > 0.025f)
                     return;
 
-                long extraProfStart = HitchProfiler.Begin();
+                long extraProfStart = HitchProfiler.BeginModScope();
                 try
                 {
                     var list = Creature.allCreatures;
@@ -3446,7 +3897,7 @@ namespace EasyRed2HumanAI
                 finally
                 {
                     _isRunningExtraTicks = false;
-                    HitchProfiler.End(HitchBucket.ModExtraSeqTicks, extraProfStart);
+                    HitchProfiler.EndModScope(HitchBucket.ModExtraSeqTicks, extraProfStart);
                 }
             }
         }

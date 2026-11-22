@@ -6,14 +6,16 @@ param(
     [string]$JsonOut = "",
     [int]$OpTickets = 0,
     [double]$MaxDuration = 0,
+    [string]$Engine = "emergent",
     [switch]$NoGate
 )
 
 $ErrorActionPreference = "Stop"
-$workspace = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
-$goapFile  = Join-Path $workspace "src\EasyRed2AI\Modules\Goap\GoapDefinitionsAndPlanner.cs"
-$wqFile    = Join-Path $workspace "src\EasyRed2AI\Core\AiCore.WorldQuery.cs"
-$coreFile  = Join-Path $workspace "tools\verify_patches\BattleLossModelCore.cs"
+$workspace    = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
+$goapFile     = Join-Path $workspace "src\EasyRed2AI\Modules\Goap\GoapDefinitionsAndPlanner.cs"
+$wqFile       = Join-Path $workspace "src\EasyRed2AI\Core\AiCore.WorldQuery.cs"
+$emergentFile = Join-Path $workspace "src\EasyRed2AI\Modules\Emergent\EmergentDecisionCore.cs"
+$coreFile     = Join-Path $workspace "tools\verify_patches\BattleLossModelCore.cs"
 $buildDir  = Join-Path $workspace "build"
 New-Item -ItemType Directory -Force -Path $buildDir | Out-Null
 
@@ -48,9 +50,8 @@ function Slice-LinesBetween {
 }
 
 $goapLines = Get-Content $goapFile
-$partA = Slice-LinesBetween $goapLines '^\s*\[Flags\]' 'public Vector3 MoveOverrideDest;' 1
+$partA = Slice-LinesBetween $goapLines '^\s*internal enum SquadNetDirective' 'public Vector3 MoveOverrideDest;' 1
 $partB = Slice-LinesBetween $goapLines '^\s*internal struct BotMicroVariance' '_factionProfileCache\[faction\] = p;' 2
-$partC = Slice-LinesBetween $goapLines '^\s*internal static BotGoapPlan PlanBestGoapActionChainCore' 'Mathf\.Max\(0\.1f, cost - vet01 \* 0\.15f\);' 1
 
 # Make _factionProfileCache and _lastFactionProfileTheaterGen [ThreadStatic] in the slice so Parallel.For is lock-free!
 $partB = $partB -replace '(internal|private) static readonly Dictionary<string, FactionCommandProfile>\s+_factionProfileCache\s*=\s*new Dictionary<string, FactionCommandProfile>\(32\);',
@@ -83,7 +84,6 @@ $wqSnapProbe
     {
 $partA
 $partB
-$partC
     }
 }
 "@
@@ -123,10 +123,10 @@ try {
         "/r:$dotnetDir\System.Threading.Tasks.Parallel.dll" `
         "/r:$dotnetDir\netstandard.dll" `
         "/out:$tmpDll" `
-        $coreFile $tmpSlice
+        $coreFile $tmpSlice $emergentFile
     if ($LASTEXITCODE -ne 0) { throw "Failed to compile BattleLossModel.dll" }
 
-    $runArgs = @("exec", "--runtimeconfig", $cscRuntimeConfig, $tmpDll, "--seeds", $Seeds.ToString())
+    $runArgs = @("exec", "--runtimeconfig", $cscRuntimeConfig, $tmpDll, "--seeds", $Seeds.ToString(), "--engine", $Engine)
     if ($GameDir)  { $runArgs += @("--game-dir", $GameDir) }
     if ($Quick)    { $runArgs += "--quick" }
     if ($Campaign) { $runArgs += @("--campaign", $Campaign) }

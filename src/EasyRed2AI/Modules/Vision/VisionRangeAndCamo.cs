@@ -881,7 +881,7 @@ namespace EasyRed2HumanAI
         {
             public static bool Prefix(Creature __instance, Spottable __0, ref bool __result, out long __state)
             {
-                long pStart = HitchProfiler.Begin();
+                long pStart = HitchProfiler.BeginModScope();
                 __state = pStart;
                 bool runVanillaLinecast = true;
                 _currentObserverOpticMultiplier = 1.0f;
@@ -976,6 +976,9 @@ namespace EasyRed2HumanAI
                     bool isQuietFlanker = targetSoldier != null &&
                                           !targetSoldier.IsSpotted &&
                                           !HasFiredRecently(targetSoldier, 4.0f);
+                    bool isActiveUnderFireAttacker = now < obsH.Vision.UnderFireUntil &&
+                                                     obsH.Vision.UnderFireAttackerPtr != IntPtr.Zero &&
+                                                     __0.Pointer == obsH.Vision.UnderFireAttackerPtr;
 
                     if (VisionConfig.EnforceHumanFOVWhenAlerted.Value)
                     {
@@ -1009,10 +1012,16 @@ namespace EasyRed2HumanAI
 
                         // Only narrow peripheral awareness for stationary overwatch beyond 34m so close-quarters
                         // flankers (12m-34m) never hit an artificial 60-degree blind-spot wall!
-                        if (hasActiveThreatSector && isQuietFlanker && dist > 34.0f)
+                        if (!isActiveUnderFireAttacker && hasActiveThreatSector && isQuietFlanker && dist > 34.0f)
                         {
                             float focusCap = Mathf.Lerp(76.0f, 52.0f, Mathf.InverseLerp(34.0f, 95.0f, dist));
                             allowedHalfFOV = Mathf.Min(allowedHalfFOV, focusCap);
+                        }
+
+                        if (isActiveUnderFireAttacker)
+                        {
+                            // Human glance toward active incoming fire bearing while still obeying vanilla LOS raycasts.
+                            allowedHalfFOV = Mathf.Max(allowedHalfFOV, dist <= 85.0f ? 135.0f : 95.0f);
                         }
 
                         if (angle > allowedHalfFOV)
@@ -1079,14 +1088,15 @@ namespace EasyRed2HumanAI
 
                     return true;
                 }
-                catch
+                catch (Exception ex)
                 {
+                    AiCore.ReportPatchException("CanSee", ex);
                     _currentObserverOpticMultiplier = 1.0f;
                     return true;
                 }
                 finally
                 {
-                    HitchProfiler.End(HitchBucket.CanSeeMod, pStart);
+                    HitchProfiler.EndModScope(HitchBucket.CanSeeMod, pStart);
                     if (runVanillaLinecast && __instance != null && __0 != null)
                         HitchProfiler.RecordCanSeeLinecastPassThrough();
                 }
@@ -1181,10 +1191,15 @@ namespace EasyRed2HumanAI
                     bool isAlreadyTrackingThis = !ReferenceEquals(curTracked, null) &&
                                                  curTracked != null &&
                                                  curTracked.Pointer == __0.Pointer;
+                    bool isUnderFireAttacker = obsVehH != null &&
+                                               now < obsVehH.UnderFireUntil &&
+                                               obsVehH.UnderFireAttackerPtr != IntPtr.Zero &&
+                                               obsVehH.UnderFireAttackerPtr == __0.Pointer;
 
                     if (VisionConfig.EnforceHumanFOVWhenAlerted.Value &&
                         !isAlreadyTrackingThis &&
-                        !AllowCommanderIntercomFovBypass)
+                        !AllowCommanderIntercomFovBypass &&
+                        !isUnderFireAttacker)
                     {
                         if (AllowLoneDriverSeatSwitchFovBypass && turretVeh != null && turretVeh.transform != null)
                         {
@@ -1339,8 +1354,9 @@ namespace EasyRed2HumanAI
 
                     return true;
                 }
-                catch
+                catch (Exception ex)
                 {
+                    AiCore.ReportPatchException("TurretCanSee", ex);
                     _currentObserverOpticMultiplier = 1.0f;
                     return true;
                 }

@@ -32,7 +32,17 @@ namespace EasyRed2HumanAI
         VehicleBailout = 18,
         AnomalyAlert = 19,
         EmplacementBoard = 20,
-        EmplacementBail = 21
+        EmplacementBail = 21,
+        GrenadeKick = 22,
+        GrenadeEvade = 23,
+        EmergentPlan = 24,
+        EmergentReflex = 25,
+        Tier2Balk = 26,
+        Tier3Lever = 27,
+        TroopInteract = 28,
+        BotProfile = 29,
+        BotKilled = 30,
+        MatchPulse = 31
     }
 
     /// <summary>
@@ -68,22 +78,31 @@ namespace EasyRed2HumanAI
             public string Act0;
             public string Act1;
             public string Reason;
+            public byte IsEmergent;
+            public int Stamps;
+            public float HNow;
+            public float HProj;
+            public float Win;
+            public float CanH;
+            public float Score;
+            public float RunnerScore;
+            public string RunnerUp;
+            public uint Flags;
+            public float ExtraA;
+            public float ExtraB;
+            public float ExtraC;
+            public int ExtraIntA;
+            public int ExtraIntB;
         }
 
         private struct BotLastTraceState
         {
-            public ulong LastPlanSig;
-            public ulong LastActionSig;
-            public float LastPlanEmitTime;
             public BotTraceEventKind LastDiscreteKind;
             public string LastDiscreteReason;
             public float LastDiscreteTime;
             public float LastBandageBlockTime;
             public float LastVaultRejectTime;
             public float LastMeleeEnterTime;
-            public Vector3 AnchorPos;
-            public float AnchorTime;
-            public float NextStuckEmitTime;
         }
 
         private static volatile bool _enabled;
@@ -182,12 +201,16 @@ namespace EasyRed2HumanAI
             }
             catch { }
 
+            string verTag = (VisionConfig.EnableEmergentDecisionEngine != null && VisionConfig.EnableEmergentDecisionEngine.Value)
+                ? (Plugin.PluginVersion + "-harm")
+                : Plugin.PluginVersion;
+
             TraceRecord rec = new TraceRecord
             {
                 Time = now,
                 Kind = BotTraceEventKind.SessionStart,
                 Faction = mapId,
-                Role = Plugin.PluginVersion,
+                Role = verTag,
                 Reason = reason
             };
             PushRecord(ref rec);
@@ -303,14 +326,18 @@ namespace EasyRed2HumanAI
             Squad sq = AiCore.GetCachedSquad(h, now);
             int sqId = sq != null ? AiCore.GetSquadDiagId(sq.Pointer) : 0;
 
-            VeteranAndTacticsPatches.TryGetBotGoapSummary(
-                soldier,
-                out var netDir,
-                out var goalBit,
-                out var step0,
-                out var step1,
-                out _,
-                out _);
+            VeteranAndTacticsPatches.SquadNetDirective netDir = VeteranAndTacticsPatches.SquadNetDirective.Disconnected_Autonomous;
+            if (sq != null && sq.Pointer != IntPtr.Zero &&
+                VeteranAndTacticsPatches._squadBlackboards.TryGetValue(sq.Pointer, out VeteranAndTacticsPatches.SquadBlackboard sqB))
+            {
+                netDir = sqB.NetDirective;
+            }
+            bool hasEmerg = h.Emergent.HasDecision;
+            string goalLabel = hasEmerg
+                ? (h.Emergent.CurrentDecision.Reflex != EmergentEngine.EmergentReflexKind.None
+                    ? EmergentEngine.GetReflexShortName(h.Emergent.CurrentDecision.Reflex)
+                    : "Harm")
+                : "None";
 
             TraceRecord rec = new TraceRecord
             {
@@ -331,104 +358,64 @@ namespace EasyRed2HumanAI
                 Name = h.CachedFullName,
                 Role = VeteranAndTacticsPatches.GetPersonalityShortLabel(VeteranAndTacticsPatches.GetPersonality(soldier)),
                 Net = VeteranAndTacticsPatches.GetNetDirectiveShortName(netDir),
-                Goal = VeteranAndTacticsPatches.GetGoapGoalShortName(goalBit),
-                Act0 = VeteranAndTacticsPatches.GetGoapActionShortName(step0),
-                Act1 = VeteranAndTacticsPatches.GetGoapActionShortName(step1),
+                Goal = goalLabel,
+                Act0 = hasEmerg ? EmergentEngine.GetActionShortName(h.Emergent.CurrentDecision.Step0) : "None",
+                Act1 = hasEmerg ? EmergentEngine.GetActionShortName(h.Emergent.CurrentDecision.Step1) : "None",
                 Reason = reason ?? string.Empty
             };
             PushRecord(ref rec);
         }
 
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        public static void RecordGoapState(
+        public static void RecordEmergentDecision(
             SoldierAI ai,
             Soldier soldier,
+            AiCore.SoldierFastHandles h,
             VeteranAndTacticsPatches.SoldierPersonality personality,
-            VeteranAndTacticsPatches.SquadNetDirective netDir,
-            VeteranAndTacticsPatches.GoapStateBits goalBit,
-            VeteranAndTacticsPatches.GoapActionId step0,
-            VeteranAndTacticsPatches.GoapActionId step1,
-            bool isEvacCrew,
+            EmergentEngine.Tier2SquadDirective squadDir,
+            in EmergentEngine.EmergentDecision dec,
+            int activeStamps,
+            uint inputFlags,
             float suppression,
             float enemyDist,
             float now)
         {
-            if (!_enabled || ReferenceEquals(soldier, null) || ReferenceEquals(ai, null))
+            if (!_enabled || ReferenceEquals(soldier, null) || h == null || h.Tr == null)
                 return;
 
-            RecordGoapStateInternal(ai, soldier, personality, netDir, goalBit, step0, step1, isEvacCrew, suppression, enemyDist, now);
+            RecordEmergentDecisionInternal(ai, soldier, h, personality, squadDir, in dec, activeStamps, inputFlags, suppression, enemyDist, now);
         }
 
-        private static void RecordGoapStateInternal(
+        private static void RecordEmergentDecisionInternal(
             SoldierAI ai,
             Soldier soldier,
+            AiCore.SoldierFastHandles h,
             VeteranAndTacticsPatches.SoldierPersonality personality,
-            VeteranAndTacticsPatches.SquadNetDirective netDir,
-            VeteranAndTacticsPatches.GoapStateBits goalBit,
-            VeteranAndTacticsPatches.GoapActionId step0,
-            VeteranAndTacticsPatches.GoapActionId step1,
-            bool isEvacCrew,
+            EmergentEngine.Tier2SquadDirective squadDir,
+            in EmergentEngine.EmergentDecision dec,
+            int activeStamps,
+            uint inputFlags,
             float suppression,
             float enemyDist,
             float now)
         {
-            AiCore.SoldierFastHandles h = AiCore.GetOrCreateSoldierHandles(soldier);
-            if (h == null || h.Tr == null)
+            ulong sig = ((ulong)(byte)dec.Step0) |
+                        ((ulong)(byte)dec.Step1 << 8) |
+                        ((ulong)(byte)dec.Reflex << 16) |
+                        ((ulong)(byte)squadDir << 24) |
+                        ((ulong)(dec.UnsafePrereqRejected ? 1 : 0) << 32) |
+                        ((ulong)(soldier.isBleeding ? 1 : 0) << 33);
+
+            bool changed = h.Emergent.LastTraceSig != sig;
+            bool periodicDue = h.Emergent.LastTraceTime <= 0f || (now - h.Emergent.LastTraceTime) >= 3.25f || now < h.Emergent.LastTraceTime;
+            if (!changed && !periodicDue && dec.Reflex == EmergentEngine.EmergentReflexKind.None)
                 return;
 
-            IntPtr ptr = h.Ptr;
+            h.Emergent.LastTraceSig = sig;
+            h.Emergent.LastTraceTime = now;
+
             Vector3 pos = h.Tr.position;
-            Vector3 dest = ai.MoveDestination;
-            byte bleed = (byte)(soldier.isBleeding ? 1 : 0);
-            byte inCov = (byte)(soldier.IsOnCover() ? 1 : 0);
-            byte pose = (byte)soldier.m_pose;
-            byte activeOvr = (byte)((h.MoveOverride.Kind > AiCore.BotMoveOverrideKind.GoapAction && now < h.MoveOverride.ExpireTime)
-                ? (byte)h.MoveOverride.Kind
-                : (byte)0);
-
-            ulong actionSig = ((ulong)(byte)step0) |
-                              ((ulong)(byte)step1 << 8) |
-                              ((ulong)(byte)netDir << 16) |
-                              ((ulong)bleed << 24) |
-                              ((ulong)(isEvacCrew ? 1 : 0) << 28) |
-                              ((ulong)activeOvr << 56);
-
-            ulong sig = actionSig | (((ulong)goalBit >> 26) << 32);
-
-            _botStates.TryGetValue(ptr, out BotLastTraceState st);
-
-            bool emitPlanChange = st.LastActionSig != actionSig ||
-                                  (st.LastPlanSig != sig &&
-                                   (st.LastPlanEmitTime <= 0f || now - st.LastPlanEmitTime >= 2.50f || now < st.LastPlanEmitTime));
-            bool emitStuck = false;
-
-            if (st.AnchorTime <= 0f || (pos - st.AnchorPos).sqrMagnitude >= 0.36f)
-            {
-                st.AnchorPos = pos;
-                st.AnchorTime = now;
-            }
-            else if (now - st.AnchorTime >= 6.5f &&
-                     now >= st.NextStuckEmitTime &&
-                     inCov == 0 &&
-                     !soldier.UsingBipod() &&
-                     ai.visibleTarget == null &&
-                     (dest - pos).sqrMagnitude > 16.0f)
-            {
-                emitStuck = true;
-                st.NextStuckEmitTime = now + 10.0f;
-            }
-
-            if (emitPlanChange)
-            {
-                st.LastActionSig = actionSig;
-                st.LastPlanSig = sig;
-                st.LastPlanEmitTime = now;
-            }
-            _botStates[ptr] = st;
-
-            if (!emitPlanChange && !emitStuck)
-                return;
-
+            Vector3 dest = ai != null ? ai.MoveDestination : pos;
             string fac = AiCore.GetCachedFaction(h, now);
             if (!VisionPatches.TryGetNearestEnemyGunfire(pos, fac, 25.0f, 3.0f, out float gfDist))
                 gfDist = -1f;
@@ -443,26 +430,238 @@ namespace EasyRed2HumanAI
                 Time = now,
                 BotId = h.DiagId,
                 SquadId = sqId,
-                Kind = emitStuck ? BotTraceEventKind.StuckAlert : (isEvacCrew ? BotTraceEventKind.CrewEvac : BotTraceEventKind.GoapPlan),
-                Pose = pose,
-                Bleed = bleed,
-                InCover = inCov,
+                Kind = dec.Reflex != EmergentEngine.EmergentReflexKind.None ? BotTraceEventKind.EmergentReflex : BotTraceEventKind.EmergentPlan,
+                Pose = (byte)soldier.m_pose,
+                Bleed = (byte)(soldier.isBleeding ? 1 : 0),
+                InCover = (byte)(soldier.IsOnCover() ? 1 : 0),
                 Suppression = (short)Mathf.Clamp(Mathf.RoundToInt(suppression), 0, 999),
                 Ammo = ammo,
-                EnemyDist = ai.visibleTarget != null ? enemyDist : -1f,
+                EnemyDist = (ai != null && ai.visibleTarget != null) ? enemyDist : -1f,
                 GunfireDist = gfDist,
                 Pos = pos,
                 Dest = dest,
                 Faction = fac,
                 Name = h.CachedFullName,
                 Role = VeteranAndTacticsPatches.GetPersonalityShortLabel(personality),
-                Net = VeteranAndTacticsPatches.GetNetDirectiveShortName(netDir),
-                Goal = VeteranAndTacticsPatches.GetGoapGoalShortName(goalBit),
-                Act0 = VeteranAndTacticsPatches.GetGoapActionShortName(step0),
-                Act1 = VeteranAndTacticsPatches.GetGoapActionShortName(step1),
-                Reason = emitStuck ? "no_progress_6s" :
-                         (isEvacCrew ? "bailed_crew_evac" :
-                         (activeOvr != 0 ? GetOverrideTraceReason((AiCore.BotMoveOverrideKind)activeOvr) : "plan_transition"))
+                Net = squadDir.ToString(),
+                Goal = dec.Reflex != EmergentEngine.EmergentReflexKind.None ? ("Reflex:" + EmergentEngine.GetReflexShortName(dec.Reflex)) : "SurviveWin",
+                Act0 = EmergentEngine.GetActionShortName(dec.Step0),
+                Act1 = EmergentEngine.GetActionShortName(dec.Step1),
+                Reason = dec.Reason ?? string.Empty,
+                IsEmergent = 1,
+                Stamps = activeStamps,
+                Flags = inputFlags,
+                HNow = dec.HarmNow,
+                HProj = dec.HarmProj,
+                Win = dec.WinUrgency,
+                CanH = dec.CanHarm,
+                Score = dec.Score,
+                RunnerScore = dec.RunnerUpScore,
+                RunnerUp = EmergentEngine.GetActionShortName(dec.RunnerUp)
+            };
+            PushRecord(ref rec);
+        }
+
+        public static void RecordBotProfile(
+            Soldier soldier,
+            AiCore.SoldierFastHandles h,
+            VeteranAndTacticsPatches.SoldierPersonality personality,
+            int vetTier,
+            in EmergentEngine.EmergentWeights w,
+            float desp,
+            float now)
+        {
+            if (!_enabled || ReferenceEquals(soldier, null) || h == null)
+                return;
+
+            Squad sq = AiCore.GetCachedSquad(h, now);
+            int sqId = sq != null ? AiCore.GetSquadDiagId(sq.Pointer) : 0;
+
+            TraceRecord rec = new TraceRecord
+            {
+                Time = now,
+                BotId = h.DiagId,
+                SquadId = sqId,
+                Kind = BotTraceEventKind.BotProfile,
+                Faction = AiCore.GetCachedFaction(h, now),
+                Name = h.CachedFullName,
+                Role = VeteranAndTacticsPatches.GetPersonalityShortLabel(personality),
+                Net = (sq != null && !string.IsNullOrEmpty(sq.squadName)) ? sq.squadName : string.Empty,
+                Goal = AiCore.GetSoldierClassLabel(soldier),
+                ExtraIntA = vetTier,
+                HNow = w.WSurvive,
+                Win = w.WWin,
+                CanH = w.WAid,
+                Score = w.RiskThreshold,
+                RunnerScore = w.Individualism,
+                ExtraA = desp
+            };
+            PushRecord(ref rec);
+        }
+
+        public static void RecordBotKilled(
+            Soldier victim,
+            AiCore.SoldierFastHandles h,
+            VeteranAndTacticsPatches.SoldierPersonality personality,
+            byte killerKind,
+            float killerDist,
+            float holdSec,
+            float moved5s,
+            uint lastFlags,
+            float now)
+        {
+            if (!_enabled || ReferenceEquals(victim, null) || h == null)
+                return;
+
+            byte pose = 0;
+            byte bleed = 0;
+            byte inCov = 0;
+            short sup = 0;
+            short ammo = -1;
+            float enemyDist = -1f;
+            Vector3 pos = Vector3.zero;
+            int sqId = 0;
+            string fac = string.Empty;
+
+            try
+            {
+                SoldierAI ai = h.Ai ?? victim.aiController;
+                if (h.Tr != null)
+                    pos = h.Tr.position;
+                else if (victim.transform != null)
+                    pos = victim.transform.position;
+
+                pose = (byte)victim.m_pose;
+                bleed = (byte)(victim.isBleeding ? 1 : 0);
+                inCov = (byte)(victim.IsOnCover() ? 1 : 0);
+                sup = (short)Mathf.Clamp(Mathf.RoundToInt(victim.GetSuppressionValue()), 0, 999);
+                GenericGun heldGun = victim.GetHeldGun();
+                ammo = (short)(heldGun != null ? Mathf.Clamp(heldGun.GetCurrentAmmoCount(), 0, 999) : -1);
+                enemyDist = (ai != null && ai.visibleTarget != null) ? ai.distFromTarget : -1f;
+                fac = AiCore.GetCachedFaction(h, now);
+                Squad sq = AiCore.GetCachedSquad(h, now);
+                sqId = sq != null ? AiCore.GetSquadDiagId(sq.Pointer) : 0;
+            }
+            catch { }
+
+            string act0 = "None";
+            string act1 = "None";
+            string why = "no_decision";
+            float hNow = 0f;
+            float hProj = 0f;
+            float canH = 0f;
+            if (h.Emergent.HasDecision)
+            {
+                ref readonly var dec = ref h.Emergent.CurrentDecision;
+                act0 = EmergentEngine.GetActionShortName(dec.Step0);
+                act1 = EmergentEngine.GetActionShortName(dec.Step1);
+                why = dec.Reason ?? string.Empty;
+                hNow = dec.HarmNow;
+                hProj = dec.HarmProj;
+                canH = dec.CanHarm;
+            }
+
+            TraceRecord rec = new TraceRecord
+            {
+                Time = now,
+                BotId = h.DiagId,
+                SquadId = sqId,
+                Kind = BotTraceEventKind.BotKilled,
+                Pose = pose,
+                Bleed = bleed,
+                InCover = inCov,
+                Suppression = sup,
+                Ammo = ammo,
+                EnemyDist = enemyDist,
+                Pos = pos,
+                Faction = fac,
+                Name = h.CachedFullName,
+                Role = VeteranAndTacticsPatches.GetPersonalityShortLabel(personality),
+                Act0 = act0,
+                Act1 = act1,
+                Reason = why,
+                HNow = hNow,
+                HProj = hProj,
+                CanH = canH,
+                Flags = lastFlags,
+                ExtraA = holdSec,
+                ExtraB = moved5s,
+                ExtraC = killerDist,
+                ExtraIntA = killerKind
+            };
+            PushRecord(ref rec);
+        }
+
+        public static void RecordTier3Lever(
+            int sideIdx,
+            string faction,
+            EmergentEngine.Tier3NetLever lever,
+            string reason,
+            float netH,
+            float netW,
+            int balks,
+            int mias,
+            float desp,
+            float now)
+        {
+            if (!_enabled)
+                return;
+
+            TraceRecord rec = new TraceRecord
+            {
+                Time = now,
+                BotId = sideIdx,
+                Kind = BotTraceEventKind.Tier3Lever,
+                Faction = faction ?? string.Empty,
+                Net = GetTier3LeverShortName(lever),
+                Reason = reason ?? string.Empty,
+                HNow = netH,
+                Win = netW,
+                ExtraIntA = balks,
+                ExtraIntB = mias,
+                ExtraA = desp
+            };
+            PushRecord(ref rec);
+        }
+
+        public static void RecordMatchPulse(
+            string tag,
+            int s0Active,
+            int s1Active,
+            float s0Tickets,
+            float s1Tickets,
+            int s0Balk,
+            int s1Balk,
+            int s0Mia,
+            int s1Mia,
+            float s0Heat,
+            float s1Heat,
+            EmergentEngine.Tier3NetLever s0Lever,
+            EmergentEngine.Tier3NetLever s1Lever,
+            int totalT1Decs,
+            int thrashCount,
+            float now)
+        {
+            if (!_enabled)
+                return;
+
+            TraceRecord rec = new TraceRecord
+            {
+                Time = now,
+                Kind = BotTraceEventKind.MatchPulse,
+                Reason = tag ?? "60s",
+                BotId = s0Active,
+                SquadId = s1Active,
+                HNow = s0Tickets,
+                HProj = s1Tickets,
+                Win = s0Heat,
+                CanH = s1Heat,
+                ExtraIntA = Mathf.Clamp(s0Balk, 0, 65535) | (Mathf.Clamp(s1Balk, 0, 65535) << 16),
+                ExtraIntB = Mathf.Clamp(s0Mia, 0, 65535) | (Mathf.Clamp(s1Mia, 0, 65535) << 16),
+                Goal = GetTier3LeverShortName(s0Lever),
+                Act0 = GetTier3LeverShortName(s1Lever),
+                Stamps = totalT1Decs,
+                Flags = (uint)Math.Max(0, thrashCount)
             };
             PushRecord(ref rec);
         }
@@ -475,6 +674,7 @@ namespace EasyRed2HumanAI
                 case AiCore.BotMoveOverrideKind.UnstickSidestep: return "ovr_unstick";
                 case AiCore.BotMoveOverrideKind.SapperStepBack: return "ovr_sapper_back";
                 case AiCore.BotMoveOverrideKind.EmergencyFallback: return "ovr_fallback";
+                case AiCore.BotMoveOverrideKind.VehicleEvade: return "ovr_veh_evade";
                 default: return "ovr_active";
             }
         }
@@ -578,6 +778,160 @@ namespace EasyRed2HumanAI
                 sb.Append("}\n");
                 return;
             }
+            if (r.Kind == BotTraceEventKind.BotProfile)
+            {
+                sb.Append("{\"t\":");
+                AppendFloat2(sb, r.Time);
+                sb.Append(",\"id\":");
+                AppendInt(sb, r.BotId);
+                sb.Append(",\"name\":\"");
+                AppendEscaped(sb, r.Name);
+                sb.Append("\",\"sq\":");
+                AppendInt(sb, r.SquadId);
+                sb.Append(",\"sqName\":\"");
+                AppendEscaped(sb, r.Net);
+                sb.Append("\",\"fac\":\"");
+                AppendEscaped(sb, r.Faction);
+                sb.Append("\",\"role\":\"");
+                AppendEscaped(sb, r.Role);
+                sb.Append("\",\"cls\":\"");
+                AppendEscaped(sb, r.Goal);
+                sb.Append("\",\"ev\":\"bot_profile\",\"vet\":");
+                AppendInt(sb, r.ExtraIntA);
+                sb.Append(",\"wSurv\":");
+                AppendFloat2(sb, r.HNow);
+                sb.Append(",\"wWin\":");
+                AppendFloat2(sb, r.Win);
+                sb.Append(",\"wAid\":");
+                AppendFloat2(sb, r.CanH);
+                sb.Append(",\"risk\":");
+                AppendFloat2(sb, r.Score);
+                sb.Append(",\"ind\":");
+                AppendFloat2(sb, r.RunnerScore);
+                sb.Append(",\"desp\":");
+                AppendFloat2(sb, r.ExtraA);
+                sb.Append("}\n");
+                return;
+            }
+            if (r.Kind == BotTraceEventKind.BotKilled)
+            {
+                sb.Append("{\"t\":");
+                AppendFloat2(sb, r.Time);
+                sb.Append(",\"id\":");
+                AppendInt(sb, r.BotId);
+                sb.Append(",\"name\":\"");
+                AppendEscaped(sb, r.Name);
+                sb.Append("\",\"sq\":");
+                AppendInt(sb, r.SquadId);
+                sb.Append(",\"fac\":\"");
+                AppendEscaped(sb, r.Faction);
+                sb.Append("\",\"role\":\"");
+                AppendEscaped(sb, r.Role);
+                sb.Append("\",\"ev\":\"bot_killed\",\"act0\":\"");
+                sb.Append(r.Act0 ?? "None");
+                sb.Append("\",\"act1\":\"");
+                sb.Append(r.Act1 ?? "None");
+                sb.Append("\",\"why\":\"");
+                AppendEscaped(sb, r.Reason);
+                sb.Append("\",\"pose\":\"");
+                sb.Append(GetPoseShortName(r.Pose));
+                sb.Append("\",\"cov\":");
+                AppendInt(sb, r.InCover);
+                sb.Append(",\"bleed\":");
+                AppendInt(sb, r.Bleed);
+                sb.Append(",\"sup\":");
+                AppendInt(sb, r.Suppression);
+                sb.Append(",\"ammo\":");
+                AppendInt(sb, r.Ammo);
+                sb.Append(",\"enemyDist\":");
+                AppendFloat1(sb, r.EnemyDist);
+                sb.Append(",\"hNow\":");
+                AppendFloat2(sb, r.HNow);
+                sb.Append(",\"hProj\":");
+                AppendFloat2(sb, r.HProj);
+                sb.Append(",\"canH\":");
+                AppendFloat2(sb, r.CanH);
+                sb.Append(",\"flags\":");
+                AppendUInt(sb, r.Flags);
+                sb.Append(",\"hold\":");
+                AppendFloat1(sb, r.ExtraA);
+                sb.Append(",\"moved\":");
+                AppendFloat1(sb, r.ExtraB);
+                sb.Append(",\"kKind\":\"");
+                sb.Append(GetKillerKindName(r.ExtraIntA));
+                sb.Append("\",\"kDist\":");
+                AppendFloat1(sb, r.ExtraC);
+                sb.Append(",\"pos\":[");
+                AppendFloat1(sb, r.Pos.x);
+                sb.Append(',');
+                AppendFloat1(sb, r.Pos.y);
+                sb.Append(',');
+                AppendFloat1(sb, r.Pos.z);
+                sb.Append("]}\n");
+                return;
+            }
+            if (r.Kind == BotTraceEventKind.Tier3Lever)
+            {
+                sb.Append("{\"t\":");
+                AppendFloat2(sb, r.Time);
+                sb.Append(",\"ev\":\"tier3_lever\",\"side\":");
+                AppendInt(sb, r.BotId);
+                sb.Append(",\"fac\":\"");
+                AppendEscaped(sb, r.Faction);
+                sb.Append("\",\"net\":\"");
+                sb.Append(r.Net ?? "None");
+                sb.Append("\",\"why\":\"");
+                AppendEscaped(sb, r.Reason);
+                sb.Append("\",\"hNow\":");
+                AppendFloat2(sb, r.HNow);
+                sb.Append(",\"win\":");
+                AppendFloat2(sb, r.Win);
+                sb.Append(",\"balk\":");
+                AppendInt(sb, r.ExtraIntA);
+                sb.Append(",\"mia\":");
+                AppendInt(sb, r.ExtraIntB);
+                sb.Append(",\"desp\":");
+                AppendFloat2(sb, r.ExtraA);
+                sb.Append("}\n");
+                return;
+            }
+            if (r.Kind == BotTraceEventKind.MatchPulse)
+            {
+                sb.Append("{\"t\":");
+                AppendFloat2(sb, r.Time);
+                sb.Append(",\"ev\":\"match_pulse\",\"why\":\"");
+                AppendEscaped(sb, r.Reason);
+                sb.Append("\",\"s0Act\":");
+                AppendInt(sb, r.BotId);
+                sb.Append(",\"s1Act\":");
+                AppendInt(sb, r.SquadId);
+                sb.Append(",\"s0Tkt\":");
+                AppendFloat2(sb, r.HNow);
+                sb.Append(",\"s1Tkt\":");
+                AppendFloat2(sb, r.HProj);
+                sb.Append(",\"s0Balk\":");
+                AppendInt(sb, r.ExtraIntA & 0xFFFF);
+                sb.Append(",\"s1Balk\":");
+                AppendInt(sb, (r.ExtraIntA >> 16) & 0xFFFF);
+                sb.Append(",\"s0Mia\":");
+                AppendInt(sb, r.ExtraIntB & 0xFFFF);
+                sb.Append(",\"s1Mia\":");
+                AppendInt(sb, (r.ExtraIntB >> 16) & 0xFFFF);
+                sb.Append(",\"s0H\":");
+                AppendFloat2(sb, r.Win);
+                sb.Append(",\"s1H\":");
+                AppendFloat2(sb, r.CanH);
+                sb.Append(",\"s0Lev\":\"");
+                sb.Append(r.Goal ?? "None");
+                sb.Append("\",\"s1Lev\":\"");
+                sb.Append(r.Act0 ?? "None");
+                sb.Append("\",\"t1Dec\":");
+                AppendInt(sb, r.Stamps);
+                sb.Append(",\"thrash\":");
+                AppendUInt(sb, r.Flags);
+                sb.Append("}\n");
+                return;
+            }
 
             sb.Append("{\"t\":");
             AppendFloat2(sb, r.Time);
@@ -629,7 +983,32 @@ namespace EasyRed2HumanAI
             AppendFloat1(sb, r.Dest.z);
             sb.Append("],\"why\":\"");
             AppendEscaped(sb, r.Reason);
-            sb.Append("\"}\n");
+            if (r.IsEmergent != 0)
+            {
+                sb.Append("\",\"hNow\":");
+                AppendFloat2(sb, r.HNow);
+                sb.Append(",\"hProj\":");
+                AppendFloat2(sb, r.HProj);
+                sb.Append(",\"win\":");
+                AppendFloat2(sb, r.Win);
+                sb.Append(",\"canH\":");
+                AppendFloat2(sb, r.CanH);
+                sb.Append(",\"score\":");
+                AppendFloat2(sb, r.Score);
+                sb.Append(",\"runUp\":\"");
+                sb.Append(r.RunnerUp ?? "None");
+                sb.Append("\",\"runScore\":");
+                AppendFloat2(sb, r.RunnerScore);
+                sb.Append(",\"stamps\":");
+                AppendInt(sb, r.Stamps);
+                sb.Append(",\"flags\":");
+                AppendUInt(sb, r.Flags);
+                sb.Append("}\n");
+            }
+            else
+            {
+                sb.Append("\"}\n");
+            }
         }
 
         private static string GetEventKindName(BotTraceEventKind k)
@@ -656,7 +1035,50 @@ namespace EasyRed2HumanAI
                 case BotTraceEventKind.AnomalyAlert: return "anomaly_alert";
                 case BotTraceEventKind.EmplacementBoard: return "emplacement_board";
                 case BotTraceEventKind.EmplacementBail: return "emplacement_bail";
+                case BotTraceEventKind.GrenadeKick: return "grenade_kick";
+                case BotTraceEventKind.GrenadeEvade: return "grenade_evade";
+                case BotTraceEventKind.EmergentPlan: return "emergent_plan";
+                case BotTraceEventKind.EmergentReflex: return "emergent_reflex";
+                case BotTraceEventKind.Tier2Balk: return "tier2_balk";
+                case BotTraceEventKind.Tier3Lever: return "tier3_lever";
+                case BotTraceEventKind.TroopInteract: return "troop_interact";
+                case BotTraceEventKind.BotProfile: return "bot_profile";
+                case BotTraceEventKind.BotKilled: return "bot_killed";
+                case BotTraceEventKind.MatchPulse: return "match_pulse";
                 default: return "event";
+            }
+        }
+
+        private static string GetKillerKindName(int kind)
+        {
+            switch (kind)
+            {
+                case 1: return "inf";
+                case 2: return "veh";
+                case 3: return "blast";
+                case 4: return "bleed";
+                default: return "unk";
+            }
+        }
+
+        private static string GetTier3LeverShortName(EmergentEngine.Tier3NetLever lev)
+        {
+            switch (lev)
+            {
+                case EmergentEngine.Tier3NetLever.SmokeBarrage: return "SmokeBarrage";
+                case EmergentEngine.Tier3NetLever.ArtilleryHE: return "ArtilleryHE";
+                case EmergentEngine.Tier3NetLever.TankDispatch: return "TankDispatch";
+                case EmergentEngine.Tier3NetLever.ArmorInfantryPair: return "ArmorInfantryPair";
+                case EmergentEngine.Tier3NetLever.CasVector: return "CasVector";
+                case EmergentEngine.Tier3NetLever.AtCounterRoute: return "AtCounterRoute";
+                case EmergentEngine.Tier3NetLever.MassAssault: return "MassAssault";
+                case EmergentEngine.Tier3NetLever.HoldAndFormUp: return "HoldAndFormUp";
+                case EmergentEngine.Tier3NetLever.ShiftAxisFlank: return "ShiftAxisFlank";
+                case EmergentEngine.Tier3NetLever.AnvilAssign: return "AnvilAssign";
+                case EmergentEngine.Tier3NetLever.FireBrigade: return "FireBrigade";
+                case EmergentEngine.Tier3NetLever.AuthorizeWithdraw: return "AuthorizeWithdraw";
+                case EmergentEngine.Tier3NetLever.SectorDesperationBias: return "SectorDesperationBias";
+                default: return "None";
             }
         }
 
@@ -712,6 +1134,30 @@ namespace EasyRed2HumanAI
             {
                 sb.Append((char)('0' + (val % 10)));
                 val /= 10;
+            }
+            int end = sb.Length - 1;
+            while (start < end)
+            {
+                char tmp = sb[start];
+                sb[start] = sb[end];
+                sb[end] = tmp;
+                start++;
+                end--;
+            }
+        }
+
+        private static void AppendUInt(StringBuilder sb, uint val)
+        {
+            if (val == 0u)
+            {
+                sb.Append('0');
+                return;
+            }
+            int start = sb.Length;
+            while (val > 0u)
+            {
+                sb.Append((char)('0' + (val % 10u)));
+                val /= 10u;
             }
             int end = sb.Length - 1;
             while (start < end)

@@ -712,126 +712,6 @@ namespace EasyRed2HumanAI
             return false;
         }
 
-        private static bool TryEvadeArmorToCover(SoldierAI ai, Soldier soldier, Vehicle targetVeh, float dist)
-        {
-            if (ai == null || !AiCore.IsLocallyOwnedBot(soldier) || targetVeh == null || targetVeh.transform == null || soldier.transform == null)
-                return false;
-
-            if (dist > 85f || soldier.IsOnVehicle() || soldier.UsingBipod() || soldier.isInBodyAnimation)
-                return false;
-
-            IntPtr ptr = soldier.Pointer;
-            float now = Time.time;
-            Vector3 myPos = soldier.transform.position;
-
-            // Defer cleanly if the soldier is already executing a GOAP/individual fallback sprint OR sprinting to grab a nearby fallen AT weapon!
-            if (IsInIndividualOrGoapFallback(ptr, now) ||
-                (soldier.GetSuppressionValue() < 62f && HasPendingAtWeaponScavenge(ptr, myPos, 24.0f)))
-            {
-                return false;
-            }
-
-            // If the soldier carries any usable AT capability (launcher, AT grenade, satchel, Molotov, Gammon) within assault range,
-            // stalk the tank's blind flank / low-crawl in its dead zone rather than fleeing!
-            if (dist <= 42f && HasUsableAntiTankCapability(soldier))
-            {
-                TryStalkTankBlindFlank(ai, soldier, targetVeh, myPos, dist, now);
-                return false;
-            }
-
-            bool tankThreatening = IsTankThreateningPosition(targetVeh, myPos, 85f);
-            if (!tankThreatening)
-            {
-                // Tank & Commander are currently looking away: stay low and quiet in cover/concealment so we aren't spotted!
-                if (dist <= 52f && !ai.IsMoving())
-                {
-                    SetBotPose(ai, soldier, (dist <= 36f && !soldier.IsOnCover()) ? SoldierPose.Prone : SoldierPose.Crouch);
-                }
-                return false;
-            }
-
-            Vector3 toTank = targetVeh.transform.position - myPos;
-            toTank.y = 0f;
-            Vector3 threatDir = toTank.sqrMagnitude > 0.01f ? toTank.normalized : soldier.transform.forward;
-            Transform ignoreRoot = soldier.transform.root;
-
-            // If already sheltered behind a front wall relative to the tank, stay low and concealed
-            if (IsPositionShelteredByFrontCover(myPos, threatDir, ignoreRoot))
-            {
-                if (!ai.IsMoving())
-                    SetBotPose(ai, soldier, dist <= 34f ? SoldierPose.Prone : SoldierPose.Crouch);
-                return false;
-            }
-
-            // If already in cover (trench, crater, building) when the tank is looking our way, drop Prone to stay hidden!
-            if (soldier.IsOnCover() && !ai.IsMoving())
-            {
-                SetBotPose(ai, soldier, dist <= 48f ? SoldierPose.Prone : SoldierPose.Crouch);
-                return false;
-            }
-
-            // 1. If standing on the exposed front face of a wall, duck around to the leeward side immediately
-            if (TryFindShelteredSideOfWall(myPos, threatDir, ignoreRoot, out Vector3 behindWallPos))
-            {
-                SetBotPose(ai, soldier, SoldierPose.Idle, true);
-                AiCore.MoveBotTowardPosition(ai, soldier, behindWallPos, 0f, 2.4f);
-                AiCore.LogDebug("AntiArmor", $"{soldier.faction} rifleman scrambling behind wall to evade {targetVeh.name} at {dist:F0}m.", 6.0f);
-                return true;
-            }
-
-            // 2. Search for local cover around the soldier's current position (or assigned cover)
-            if (!soldier.IsOnCover() && TrySeekNearbyCover(ai, soldier))
-            {
-                if (ai.IsMoving() || ai.HasPathRequest)
-                {
-                    SetBotPose(ai, soldier, SoldierPose.Idle, true);
-                    return true;
-                }
-            }
-
-            // 3. If caught in the open within 68m with no way to hurt the tank, bound diagonally away toward cover
-            if (!soldier.IsOnCover() && !ai.IsMoving() && !ai.HasPathRequest && dist <= 68f)
-            {
-                Vector3 away = -threatDir;
-                Vector3 right = new Vector3(threatDir.z, 0f, -threatDir.x);
-                float sideSign = (soldier.Pointer.ToInt64() & 1L) == 0L ? 1f : -1f;
-
-                Vector3 fleeDir1 = (away * 0.78f + right * (0.62f * sideSign)).normalized;
-                Vector3 fleeDir2 = (away * 0.78f - right * (0.62f * sideSign)).normalized;
-
-                Vector3 chosenDir = Vector3.zero;
-                float fleeDist = 8.5f;
-                Vector3 rayOrigin = myPos + Vector3.up * 0.48f;
-                if (!AiCore.IsMovementBlockedByObstacle(rayOrigin, fleeDir1, 8.5f))
-                    chosenDir = fleeDir1;
-                else if (!AiCore.IsMovementBlockedByObstacle(rayOrigin, fleeDir2, 8.5f))
-                    chosenDir = fleeDir2;
-                else if (!AiCore.IsMovementBlockedByObstacle(rayOrigin, away, 8.5f))
-                    chosenDir = away;
-                else
-                {
-                    fleeDist = 3.5f;
-                    if (!AiCore.IsMovementBlockedByObstacle(rayOrigin, fleeDir1, 3.5f))
-                        chosenDir = fleeDir1;
-                    else if (!AiCore.IsMovementBlockedByObstacle(rayOrigin, fleeDir2, 3.5f))
-                        chosenDir = fleeDir2;
-                    else if (!AiCore.IsMovementBlockedByObstacle(rayOrigin, away, 3.5f))
-                        chosenDir = away;
-                }
-
-                if (chosenDir.sqrMagnitude > 0.01f)
-                {
-                    Vector3 retreatPos = myPos + chosenDir * fleeDist;
-                    SetBotPose(ai, soldier, SoldierPose.Idle, true);
-                    AiCore.MoveBotTowardPosition(ai, soldier, retreatPos, 0f, 1.4f);
-                    AiCore.LogDebug("AntiArmor", $"{soldier.faction} infantryman fleeing open ground from {targetVeh.name} ({dist:F0}m).", 6.0f);
-                    return true;
-                }
-            }
-
-            return false;
-        }
-
         // =====================================================================
         // Sheltered Tank & Vehicle Crew Repair Patches (VehicleRepairTask)
         // =====================================================================
@@ -936,6 +816,20 @@ namespace EasyRed2HumanAI
                     if (!__instance.VehicleStillneedsRepair || !__0.IsAI() || !AiCore.IsLocallyOwnedBot(__0))
                         return true;
 
+                    if (VisionConfig.EnableEmergentDecisionEngine != null &&
+                        VisionConfig.EnableEmergentDecisionEngine.Value &&
+                        __instance.vehToRepair != null &&
+                        EmergentRuntimeBridge.TryEvaluateEmergentVehicleCrew(__instance.vehToRepair, out _, out _))
+                    {
+                        var vhRep = AiCore.GetOrCreateVehicleHandles(__instance.vehToRepair);
+                        if (vhRep != null &&
+                            vhRep.Emergent.HasDecision &&
+                            vhRep.Emergent.CurrentDecision.UnsafePrereqRejected)
+                        {
+                            return false;
+                        }
+                    }
+
                     // Ensure the crewman automatically remounts his tank/vehicle once repair finishes!
                     __instance.getOnVehicleAfter = true;
 
@@ -967,6 +861,19 @@ namespace EasyRed2HumanAI
             }
         }
 
+        internal static bool IsSquadVehicleSeekingRepairStation(Squad sq)
+        {
+            if (sq == null || sq.Pointer == IntPtr.Zero || sq.Leader == null || !sq.Leader.IsOnVehicle())
+                return false;
+
+            Vehicle v = sq.Leader.GetCurrentVehicle();
+            return v != null &&
+                   v.Pointer != IntPtr.Zero &&
+                   _vehiclesSeekingRepairStation.TryGetValue(v.Pointer, out RepairStation st) &&
+                   st != null &&
+                   st.Pointer != IntPtr.Zero;
+        }
+
         private static bool TryRouteVehicleToRepairStation(AIVehicle aiVeh, Vehicle veh, float now)
         {
             if (aiVeh == null || veh == null || veh.Pointer == IntPtr.Zero || veh.transform == null)
@@ -987,10 +894,11 @@ namespace EasyRed2HumanAI
             if (mov == null)
                 return false;
 
-            // Cannot drive to a repair station if tracks or engine are 100% broken (crew must field-repair first)
-            float tracksDmg = mov.GetPercentageDamageFor(VehicleInternalPart.tracks);
-            float engineDmg = mov.GetPercentageDamageFor(VehicleInternalPart.engine);
-            if (tracksDmg >= 0.98f || engineDmg >= 0.98f)
+            // MovableVehicle.GetPercentageDamageFor (0x1808270C0) returns remaining health ratio [0..1] (1.0f = undamaged).
+            // Cannot drive to a repair station if tracks or engine are destroyed (<= 5% health remaining; crew must field-repair first).
+            float tracksHealth = Mathf.Clamp01(mov.GetPercentageDamageFor(VehicleInternalPart.tracks));
+            float engineHealth = Mathf.Clamp01(mov.GetPercentageDamageFor(VehicleInternalPart.engine));
+            if (tracksHealth <= 0.05f || engineHealth <= 0.05f)
             {
                 _vehiclesSeekingRepairStation.Remove(veh.Pointer);
                 return false;
@@ -1003,9 +911,11 @@ namespace EasyRed2HumanAI
                 return false;
             }
 
-            float hullDmg = mov.GetPercentageDamageFor(VehicleInternalPart.hull);
-            float fuelDmg = mov.GetPercentageDamageFor(VehicleInternalPart.fuelTank);
-            float maxPartDamage = Mathf.Max(Mathf.Max(hullDmg, fuelDmg), Mathf.Max(engineDmg, tracksDmg));
+            float hullDamage = 1.0f - Mathf.Clamp01(mov.GetPercentageDamageFor(VehicleInternalPart.hull));
+            float fuelDamage = 1.0f - Mathf.Clamp01(mov.GetPercentageDamageFor(VehicleInternalPart.fuelTank));
+            float tracksDamage = 1.0f - tracksHealth;
+            float engineDamage = 1.0f - engineHealth;
+            float maxPartDamage = Mathf.Max(Mathf.Max(hullDamage, fuelDamage), Mathf.Max(tracksDamage, engineDamage));
 
             Turret mainTurret = veh.GetMainTurret(false);
             bool outOfTurretAmmo = false;
@@ -1016,26 +926,41 @@ namespace EasyRed2HumanAI
             }
 
             IntPtr vehPtr = veh.Pointer;
+            AiCore.VehicleFastHandles vh = AiCore.GetOrCreateVehicleHandles(veh);
             bool alreadySeeking = _vehiclesSeekingRepairStation.TryGetValue(vehPtr, out RepairStation activeStation) &&
                                   activeStation != null && activeStation.Pointer != IntPtr.Zero &&
                                   activeStation.gameObject != null && activeStation.gameObject.activeInHierarchy &&
                                   activeStation.transform != null;
 
+            if (!alreadySeeking && vh != null && now < vh.NextRepairStationAttemptTime)
+                return false;
+
+            Vector3 vehPos = veh.transform.position;
+            float activeRadius = alreadySeeking ? Mathf.Max(5.0f, activeStation.radius) : 0f;
+            bool insideStationNow = alreadySeeking &&
+                                    (activeStation.transform.position - vehPos).sqrMagnitude <= activeRadius * activeRadius;
             bool needsStation = alreadySeeking
-                ? (outOfTurretAmmo || maxPartDamage > 0.02f || veh.CanRefillAmmmo())
-                : (outOfTurretAmmo || maxPartDamage >= 0.35f);
+                ? (outOfTurretAmmo || maxPartDamage > 0.08f || (insideStationNow && (maxPartDamage > 0.02f || veh.CanRefillAmmmo())))
+                : (outOfTurretAmmo || maxPartDamage >= 0.40f);
 
             if (!needsStation)
             {
                 if (alreadySeeking)
                 {
                     _vehiclesSeekingRepairStation.Remove(vehPtr);
+                    if (vh != null)
+                    {
+                        vh.RepairStationRouteStartedAt = 0f;
+                        vh.RepairStationBestDist = 0f;
+                    }
                     Squad sq = aiVeh.squadInside;
                     if (sq != null && !AiCore.HasAnyHumanPlayerInSquad(sq) && sq.Leader != null)
                     {
+                        sq.timed_order_end = 0f;
                         sq.Leader_OrderAttackCurrentTask(sq.Leader);
                     }
                     aiVeh.rerollDestination = true;
+                    try { aiVeh.UpdatePath(); } catch { }
                     if (VisionConfig.DebugLogging.Value)
                     {
                         AiCore.LogDebug("RepairStation", $"Vehicle finished repairing/re-arming at RepairStation and is returning to battle.");
@@ -1044,7 +969,6 @@ namespace EasyRed2HumanAI
                 return false;
             }
 
-            Vector3 vehPos = veh.transform.position;
             string myFaction = GetVehicleCrewFaction(veh, mainTurret);
             RepairStation bestStation = alreadySeeking ? activeStation : null;
 
@@ -1095,10 +1019,59 @@ namespace EasyRed2HumanAI
             if (bestStation == null)
                 return false;
 
+            bool startedNewRoute = !alreadySeeking || activeStation.Pointer != bestStation.Pointer;
             _vehiclesSeekingRepairStation[vehPtr] = bestStation;
             Vector3 stationPos = bestStation.transform.position;
             float stationRadius = Mathf.Max(5.0f, bestStation.radius);
             float distToStation = Vector3.Distance(vehPos, stationPos);
+
+            if (vh != null)
+            {
+                if (startedNewRoute || vh.RepairStationRouteStartedAt <= 0f)
+                {
+                    vh.RepairStationRouteStartedAt = now;
+                    vh.RepairStationBestDist = distToStation;
+                }
+                else if (distToStation > stationRadius * 0.95f)
+                {
+                    if (distToStation < vh.RepairStationBestDist - 8.0f)
+                    {
+                        vh.RepairStationBestDist = distToStation;
+                        vh.RepairStationRouteStartedAt = now;
+                    }
+                    else if ((now - vh.RepairStationRouteStartedAt) >= 24.0f)
+                    {
+                        _vehiclesSeekingRepairStation.Remove(vehPtr);
+                        vh.RepairStationRouteStartedAt = 0f;
+                        vh.RepairStationBestDist = 0f;
+                        vh.NextRepairStationAttemptTime = now + 45.0f;
+                        Squad abortSq = aiVeh.squadInside;
+                        if (abortSq != null && !AiCore.HasAnyHumanPlayerInSquad(abortSq) && abortSq.Leader != null)
+                        {
+                            abortSq.timed_order_end = 0f;
+                            abortSq.Leader_OrderAttackCurrentTask(abortSq.Leader);
+                        }
+                        aiVeh.rerollDestination = true;
+                        try { aiVeh.UpdatePath(); } catch { }
+                        return false;
+                    }
+                }
+                else
+                {
+                    vh.RepairStationBestDist = distToStation;
+                    vh.RepairStationRouteStartedAt = now;
+                }
+            }
+
+            Squad crewSq = aiVeh.squadInside;
+            if (crewSq != null && !AiCore.HasAnyHumanPlayerInSquad(crewSq))
+            {
+                crewSq.order = Order.defend;
+                crewSq.moveOrderPosition = stationPos;
+                crewSq.moveOrderRadius = Mathf.Max(4.0f, stationRadius * 0.65f);
+                if (crewSq.timed_order_end < now + 6.0f)
+                    crewSq.timed_order_end = now + 6.0f;
+            }
 
             if (distToStation <= stationRadius * 0.85f)
             {
@@ -1109,19 +1082,11 @@ namespace EasyRed2HumanAI
                 return true;
             }
 
-            Squad crewSq = aiVeh.squadInside;
-            if (crewSq != null && !AiCore.HasAnyHumanPlayerInSquad(crewSq))
-            {
-                if (crewSq.order == Order.follow)
-                    crewSq.order = Order.defend;
-                crewSq.moveOrderPosition = stationPos;
-                crewSq.moveOrderRadius = Mathf.Max(4.0f, stationRadius * 0.65f);
-            }
-
             if ((aiVeh.setVehicleDestination - stationPos).sqrMagnitude > 4.0f * 4.0f)
             {
                 aiVeh.setVehicleDestination = stationPos;
                 aiVeh.rerollDestination = false;
+                try { aiVeh.UpdatePath(); } catch { }
                 if (TryRecordCombinedArmsAssist(vehPtr, now))
                 {
                     AiCore.LogDebug(
@@ -1172,10 +1137,12 @@ namespace EasyRed2HumanAI
             Squad crewSq = aiVeh.squadInside;
 
             // 2. Answer explicit friendly RadioRequest.tankSupport calls when within 320m;
-            //    otherwise let vanilla AIVehicle road/node pathfinding pilot the vehicle naturally!
+            //    otherwise let combat tanks/TDs intercept Radio-Net-confirmed enemy armor,
+            //    keeping vanilla AIVehicle road/node pathfinding untouched!
             Vector3 bestFocusPos = Vector3.zero;
             float bestFocusScore = -999f;
             Squad focusSupportSquad = null;
+            bool isCounterArmorIntercept = false;
 
             for (int r = 0; r < _activeRadioRequests.Count; r++)
             {
@@ -1196,8 +1163,58 @@ namespace EasyRed2HumanAI
                 }
             }
 
+            if (focusSupportSquad == null &&
+                !veh.IsTransportVehicle() &&
+                (veh.TryCast<VehicleTank>() != null || GetVehicleMaxHullArmorMm(veh) >= 12.0f))
+            {
+                int clusterCount = _knownEnemyClusters.Count;
+                for (int c = 0; c < clusterCount; c++)
+                {
+                    KnownEnemyCluster cluster = _knownEnemyClusters[c];
+                    if (cluster.VehicleTarget == null || AiCore.AreSameSideFactions(cluster.Faction, myFaction))
+                        continue;
+
+                    Vehicle enemyVeh = cluster.VehicleTarget.TryCast<Vehicle>();
+                    if (enemyVeh == null ||
+                        enemyVeh.Pointer == IntPtr.Zero ||
+                        enemyVeh.transform == null ||
+                        enemyVeh.IsAirVehicle() ||
+                        !enemyVeh.IsWheeledVehicleOrTank() ||
+                        !enemyVeh.CanFight() ||
+                        GetVehicleMaxHullArmorMm(enemyVeh) < 12.0f)
+                    {
+                        continue;
+                    }
+
+                    Vector3 enemyPos = enemyVeh.transform.position;
+                    float distToVeh = Vector3.Distance(vehPos, enemyPos);
+                    if (distToVeh < 45.0f || distToVeh > 340.0f)
+                        continue;
+
+                    if (Vector3.Distance(squadDest, enemyPos) > 320.0f)
+                        continue;
+
+                    if (!CanTurretEffectivelyDamageArmoredVehicle(mainTurret, enemyVeh, distToVeh))
+                        continue;
+
+                    float spreadBonus = (AiCore.GetDeterministicHash(vehPtr, c + 11) & 3) * 3.0f;
+                    float score = cluster.BasePriority +
+                                  (cluster.IsEngagingFriendlies ? 32.0f : 0f) +
+                                  (cluster.IsMarkedOrPinPoint ? 15.0f : 0f) +
+                                  spreadBonus -
+                                  (distToVeh * 0.14f);
+                    if (score > bestFocusScore)
+                    {
+                        bestFocusScore = score;
+                        bestFocusPos = enemyPos;
+                        isCounterArmorIntercept = true;
+                    }
+                }
+            }
+
             float maxAllowedOffset = Mathf.Max(15.0f, aiVeh.GetCurrentSquadDestinationAreaSize() * 0.84f);
-            bool answeringFarTankSupport = focusSupportSquad != null && Vector3.Distance(squadDest, bestFocusPos) > maxAllowedOffset;
+            bool hasMissionFocus = focusSupportSquad != null || (isCounterArmorIntercept && bestFocusScore > -900f);
+            bool answeringFarTankSupport = hasMissionFocus && Vector3.Distance(squadDest, bestFocusPos) > maxAllowedOffset;
             if (!answeringFarTankSupport)
             {
                 if (_vehiclesAnsweringTankSupport.Remove(vehPtr))
@@ -1215,7 +1232,8 @@ namespace EasyRed2HumanAI
             Vector3 fromFocusToTank = vehPos - bestFocusPos;
             fromFocusToTank.y = 0f;
             Vector3 standoffDir = fromFocusToTank.sqrMagnitude > 0.25f ? fromFocusToTank.normalized : -veh.transform.forward;
-            Vector3 desiredDest = bestFocusPos + standoffDir * 38.0f;
+            float standoffDist = isCounterArmorIntercept ? 82.0f : 38.0f;
+            Vector3 desiredDest = bestFocusPos + standoffDir * standoffDist;
             if (Physics.Raycast(
                     new Vector3(desiredDest.x, bestFocusPos.y + 22.0f, desiredDest.z),
                     Vector3.down,
@@ -1252,21 +1270,26 @@ namespace EasyRed2HumanAI
                 aiVeh.rerollDestination = false;
                 _claimedVehicleDestinations[vehPtr] = desiredDest;
 
-                Vector3? listenerPos = (focusSupportSquad.Leader != null && focusSupportSquad.Leader.transform != null)
-                    ? focusSupportSquad.Leader.transform.position
-                    : (Vector3?)desiredDest;
-                string armorLabel = AiCore.FormatVehicleSupportCallsign(veh, crewSq, listenerPos);
-                AiCore.TryShowLocalPlayerRadioHint(
-                    focusSupportSquad,
-                    $"Radio Net: {armorLabel} moving to support your position",
-                    requireLeader: false,
-                    minInterval: 22.0f);
+                if (focusSupportSquad != null)
+                {
+                    Vector3? listenerPos = (focusSupportSquad.Leader != null && focusSupportSquad.Leader.transform != null)
+                        ? focusSupportSquad.Leader.transform.position
+                        : (Vector3?)desiredDest;
+                    string armorLabel = AiCore.FormatVehicleSupportCallsign(veh, crewSq, listenerPos);
+                    AiCore.TryShowLocalPlayerRadioHint(
+                        focusSupportSquad,
+                        $"Radio Net: {armorLabel} moving to support your position",
+                        requireLeader: false,
+                        minInterval: 22.0f);
+                }
 
                 if (TryRecordCombinedArmsAssist(vehPtr, now))
                 {
                     AiCore.LogDebug(
-                        "CombArmsTank",
-                        $"{myFaction} combat vehicle answering friendly tank support radio request.");
+                        isCounterArmorIntercept ? "CombArmsAntiArmor" : "CombArmsTank",
+                        isCounterArmorIntercept
+                            ? $"{myFaction} combat vehicle moving to intercept Radio-Net-reported enemy armor."
+                            : $"{myFaction} combat vehicle answering friendly tank support radio request.");
                 }
             }
         }
@@ -1315,8 +1338,23 @@ namespace EasyRed2HumanAI
             if (!hasDismountablePassengers)
                 return;
 
+            bool closeEnemyTank = false;
+            if (aiVeh != null && aiVeh.hasEnemyTank)
+            {
+                if (veh.CurrentVisibleTarget != null &&
+                    veh.CurrentVisibleTarget.Pointer != IntPtr.Zero &&
+                    veh.transform != null &&
+                    AiCore.TryGetSpottableCenter(veh.CurrentVisibleTarget, out Vector3 visTankPos))
+                {
+                    closeEnemyTank = (visTankPos - veh.transform.position).sqrMagnitude <= 140.0f * 140.0f;
+                }
+                else if (veh.GetDamage() > 0)
+                {
+                    closeEnemyTank = true;
+                }
+            }
             bool shouldDismount = forcedBySuppression ||
-                                  (aiVeh != null && aiVeh.hasEnemyTank) ||
+                                  closeEnemyTank ||
                                   (aiVeh != null && aiVeh.SomeoneIsSuppressed()) ||
                                   (aiVeh != null && aiVeh.hasEnemy && veh.GetDamage() > 0);
 
@@ -1353,8 +1391,38 @@ namespace EasyRed2HumanAI
                 {
                     wheeled.Brake();
                 }
+                if (aiVeh != null && aiVeh.resumeDriveTime < now + 3.0f)
+                {
+                    aiVeh.resumeDriveTime = now + 3.0f;
+                }
 
-                veh.DropInfantry(false);
+                bool isUnarmedTransport = true;
+                try
+                {
+                    var dismountSeats = veh.seats;
+                    if (dismountSeats != null)
+                    {
+                        for (int i = 0; i < dismountSeats.Length; i++)
+                        {
+                            Seats s = dismountSeats[i];
+                            if (s != null && s.hasTurret && s.connectedTurret != null && s.connectedTurret.WeaponsCount() > 0)
+                            {
+                                isUnarmedTransport = false;
+                                break;
+                            }
+                        }
+                    }
+                }
+                catch { }
+
+                if (isUnarmedTransport)
+                {
+                    veh.EjectAll(false, true);
+                }
+                else
+                {
+                    veh.DropInfantry(false);
+                }
                 Squad sqInside = veh.GetSquadInside();
                 if (sqInside != null && !AiCore.HasAnyHumanPlayerInSquad(sqInside))
                 {
@@ -1424,8 +1492,8 @@ namespace EasyRed2HumanAI
 
                     float throttleY = __instance.GetMovingDir().y;
                     if (Mathf.Abs(throttleY) <= 0.25f ||
-                        __instance.GetPercentageDamageFor(VehicleInternalPart.tracks) >= 0.98f ||
-                        __instance.GetPercentageDamageFor(VehicleInternalPart.engine) >= 0.98f)
+                        __instance.GetPercentageDamageFor(VehicleInternalPart.tracks) <= 0.05f ||
+                        __instance.GetPercentageDamageFor(VehicleInternalPart.engine) <= 0.05f)
                     {
                         vh.HighCenteredDuration = 0f;
                         vh.UnstickApplyForce = false;
@@ -1495,10 +1563,742 @@ namespace EasyRed2HumanAI
                         }
                     }
                 }
-                catch { }
+                catch (Exception ex)
+                {
+                    AiCore.ReportPatchException("TankFixedUpd", ex);
+                }
                 finally
                 {
                     HitchProfiler.End(HitchBucket.VehFixedUpdate, __state);
+                }
+            }
+        }
+
+        // =====================================================================
+        // Urgent Straightaway AI Vehicle Cruise Speed (Preserves Corner Braking)
+        // =====================================================================
+        [HarmonyPatch(typeof(AIVehicle), nameof(AIVehicle.MoveTowardCurrentNodeWheeledVehicle))]
+        public static class AIVehicle_MoveTowardCurrentNodeWheeledVehicle_Patch
+        {
+            public static void Postfix(AIVehicle __instance)
+            {
+                try
+                {
+                    ApplyUrgentStraightawayCruiseBoost(__instance, isTank: false);
+                }
+                catch { }
+            }
+        }
+
+        [HarmonyPatch(typeof(AIVehicle), nameof(AIVehicle.MoveTowardCurrentNodeTank))]
+        public static class AIVehicle_MoveTowardCurrentNodeTank_Patch
+        {
+            public static void Postfix(AIVehicle __instance)
+            {
+                try
+                {
+                    ApplyUrgentStraightawayCruiseBoost(__instance, isTank: true);
+                }
+                catch { }
+            }
+        }
+
+        private static void ApplyUrgentStraightawayCruiseBoost(AIVehicle ai, bool isTank)
+        {
+            if (!VisionConfig.EnableMod.Value || !VisionConfig.EnableUrgentVehicleCruiseSpeed.Value)
+                return;
+
+            if (ai == null || ai.going_in_retro || ai.lastDriveThrottle < 0f || ai.placingInUnstuck)
+                return;
+
+            Vehicle veh = ai.veh;
+            if (veh == null || veh.Pointer == IntPtr.Zero || veh.transform == null ||
+                veh.IsDisabled() || veh.IsAirVehicle() || veh.PlayerIsDriving() ||
+                !AiCore.IsLocallyOwnedVehicle(veh))
+            {
+                return;
+            }
+
+            VehicleWithWheels wheeled = veh.TryCast<VehicleWithWheels>();
+            if (wheeled == null)
+                return;
+
+            if (wheeled.floatingObject != null && wheeled.floatingObject.OnWater)
+                return;
+
+            A.d path = ai.path;
+            if (ReferenceEquals(path, null) || path.Pointer == IntPtr.Zero)
+                return;
+
+            int nodesCount = path.NodesCount;
+            if (nodesCount <= 0)
+                return;
+
+            if (nodesCount == 1 && ai.distFronCurrentNode < 18.0f)
+                return;
+
+            ai.GetDriveData(out float dirAngle, out _, out float kmhSpeed, out int movingDir);
+            if (movingDir < 0 || dirAngle > 24.0f)
+                return;
+
+            if (kmhSpeed < 12.5f && ai.lastDriveThrottle >= 0.95f)
+                return;
+
+            float vehMaxKmh = wheeled.maxKmhSpeed;
+            if (vehMaxKmh <= 5.0f)
+                vehMaxKmh = isTank ? 32.0f : 48.0f;
+
+            float straightCap;
+            if (isTank)
+            {
+                straightCap = Mathf.Clamp(vehMaxKmh * 0.78f, 22.0f, 34.0f);
+                if (ai.hasEnemy)
+                    straightCap = Mathf.Min(straightCap, 25.0f);
+            }
+            else
+            {
+                bool isTransport = veh.IsTransportVehicle();
+                straightCap = isTransport
+                    ? Mathf.Clamp(vehMaxKmh * 0.74f, 28.0f, 46.0f)
+                    : Mathf.Clamp(vehMaxKmh * 0.70f, 26.0f, 40.0f);
+                if (!isTransport && ai.hasEnemy)
+                    straightCap = Mathf.Min(straightCap, 30.0f);
+            }
+
+            Vector3 vPos = veh.transform.position;
+            Vector3 n0 = path.A(0);
+            Vector3 seg0 = n0 - vPos;
+            seg0.y = 0f;
+            float dist0 = seg0.magnitude;
+            float cornerCap = straightCap;
+
+            if (nodesCount >= 2 && dist0 > 0.25f)
+            {
+                Vector3 n1 = path.A(1);
+                Vector3 seg1 = n1 - n0;
+                seg1.y = 0f;
+                if (seg1.sqrMagnitude > 0.25f)
+                {
+                    float turn1 = Vector3.Angle(seg0, seg1);
+                    if (turn1 > 20.0f && dist0 < 28.0f)
+                    {
+                        float prox1 = Mathf.Clamp01(dist0 / 28.0f);
+                        float turn1Max = turn1 >= 45.0f
+                            ? 14.0f
+                            : Mathf.Lerp(28.0f, 15.0f, (turn1 - 20.0f) / 25.0f);
+                        cornerCap = Mathf.Min(cornerCap, Mathf.Lerp(turn1Max, straightCap, prox1 * prox1));
+                    }
+
+                    if (nodesCount >= 3)
+                    {
+                        float dist1 = dist0 + seg1.magnitude;
+                        if (dist1 < 34.0f)
+                        {
+                            Vector3 n2 = path.A(2);
+                            Vector3 seg2 = n2 - n1;
+                            seg2.y = 0f;
+                            if (seg2.sqrMagnitude > 0.25f)
+                            {
+                                float turn2 = Vector3.Angle(seg1, seg2);
+                                if (turn2 > 28.0f)
+                                {
+                                    float prox2 = Mathf.Clamp01(dist1 / 34.0f);
+                                    float turn2Max = turn2 >= 50.0f
+                                        ? 15.0f
+                                        : Mathf.Lerp(28.0f, 16.0f, (turn2 - 28.0f) / 22.0f);
+                                    cornerCap = Mathf.Min(cornerCap, Mathf.Lerp(turn2Max, straightCap, prox2 * prox2));
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            else if (nodesCount == 1)
+            {
+                float destProx = Mathf.Clamp01((dist0 - 18.0f) / 26.0f);
+                cornerCap = Mathf.Min(cornerCap, Mathf.Lerp(17.0f, straightCap, destProx));
+            }
+
+            float alignFactor = dirAngle <= 8.0f ? 1.0f : Mathf.Clamp01(1.0f - (dirAngle - 8.0f) / 16.0f);
+            float vanillaCap = isTank ? 17.0f : 16.0f;
+            float targetKmh = Mathf.Lerp(vanillaCap, cornerCap, alignFactor);
+            if (targetKmh <= vanillaCap + 0.5f)
+                return;
+
+            float brakeKmh = targetKmh * 1.10f;
+            if (kmhSpeed <= targetKmh)
+            {
+                float throttle = kmhSpeed < (targetKmh - 3.0f)
+                    ? 1.0f
+                    : Mathf.Lerp(1.0f, 0.35f, (kmhSpeed - (targetKmh - 3.0f)) / 3.0f);
+                wheeled.lastHoldBrakeFrame = -10;
+                wheeled.lastBrakeRequestFrame = -10;
+                ai.lastDriveThrottle = throttle;
+                veh.Move(new Vector2(veh.movingDir.x, throttle));
+            }
+            else if (kmhSpeed <= brakeKmh)
+            {
+                wheeled.lastHoldBrakeFrame = -10;
+                wheeled.lastBrakeRequestFrame = -10;
+                ai.lastDriveThrottle = 0f;
+                veh.Move(new Vector2(veh.movingDir.x, 0f));
+            }
+        }
+
+        // =====================================================================
+        // Vehicle & Tank Road-Preferring & Clear-Corridor Pathing (A.F.vehicleGrid)
+        // =====================================================================
+        private const byte VehicleCellClearOpen = 1;
+        private const byte VehicleCellModerateClutter = 2;
+        private const byte VehicleCellTightObstructed = 3;
+        private const int MaxVehicleRoadCells = 45000;
+        private const int MaxVehicleClearanceCacheEntries = 24000;
+
+        private static IntPtr _cachedVehicleGridPtr;
+        private static int _cachedVehicleStaticObstacleMask;
+        private static readonly HashSet<long> _vehicleRoadCells = new HashSet<long>(2048);
+        private static readonly Dictionary<long, byte> _vehicleCellClearanceCache = new Dictionary<long, byte>(4096);
+        private static IntPtr _vehicleRoadCacheDbPtr;
+        private static int _vehicleRoadCacheStreetCount = -1;
+        private static float _vehicleRoadCacheNextSyncTime;
+        private static int _vehicleRoadCacheSyncAttempts;
+        private static readonly Dictionary<int, Vector4> _reusableRoadNodes = new Dictionary<int, Vector4>(512);
+        private static readonly HashSet<string> _reusableRiverProfileIds = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+        private static long PackVehicleCell(int cx, int cz)
+        {
+            return ((long)cx << 32) | (uint)cz;
+        }
+
+        private static long PackVehicleCell(Vector3 worldPos)
+        {
+            int cx = Mathf.RoundToInt(worldPos.x * 0.25f);
+            int cz = Mathf.RoundToInt(worldPos.z * 0.25f);
+            return PackVehicleCell(cx, cz);
+        }
+
+        private static bool IsVehicleGrid(global::A.f grid)
+        {
+            if (ReferenceEquals(grid, null) || grid == null || grid.Pointer == IntPtr.Zero)
+                return false;
+
+            if (_cachedVehicleGridPtr == IntPtr.Zero)
+            {
+                global::A.f vg = global::A.F.vehicleGrid;
+                if (!ReferenceEquals(vg, null) && vg != null)
+                    _cachedVehicleGridPtr = vg.Pointer;
+            }
+
+            if (_cachedVehicleGridPtr != IntPtr.Zero)
+                return grid.Pointer == _cachedVehicleGridPtr;
+
+            return grid.preferOpenFieldNodes || grid.nodeWidth >= 3.5f;
+        }
+
+        private static int GetVehicleStaticObstacleMask()
+        {
+            if (_cachedVehicleStaticObstacleMask != 0)
+                return _cachedVehicleStaticObstacleMask;
+
+            int mask = 1 << 0; // Default (buildings, rocks, trees, walls, fences)
+            int invWallLayer = LayerMask.NameToLayer("InvisibleWall");
+            if (invWallLayer >= 0)
+                mask |= (1 << invWallLayer);
+            int invTrepLayer = LayerMask.NameToLayer("InvisibleTrepassableWall");
+            if (invTrepLayer >= 0)
+                mask |= (1 << invTrepLayer);
+
+            _cachedVehicleStaticObstacleMask = mask;
+            return mask;
+        }
+
+        internal static void ClearVehiclePathingCaches(bool keepRoadMap = false)
+        {
+            _vehicleCellClearanceCache.Clear();
+            if (!keepRoadMap)
+            {
+                _vehicleRoadCells.Clear();
+                _cachedVehicleGridPtr = IntPtr.Zero;
+                _vehicleRoadCacheDbPtr = IntPtr.Zero;
+                _vehicleRoadCacheStreetCount = -1;
+                _vehicleRoadCacheNextSyncTime = 0f;
+                _vehicleRoadCacheSyncAttempts = 0;
+            }
+        }
+
+        private static void MarkRoadDisk(float wx, float wz, float radius)
+        {
+            if (_vehicleRoadCells.Count >= MaxVehicleRoadCells)
+                return;
+
+            int centerCx = Mathf.RoundToInt(wx * 0.25f);
+            int centerCz = Mathf.RoundToInt(wz * 0.25f);
+            _vehicleRoadCells.Add(PackVehicleCell(centerCx, centerCz));
+
+            int minCx = Mathf.RoundToInt((wx - radius) * 0.25f);
+            int maxCx = Mathf.RoundToInt((wx + radius) * 0.25f);
+            int minCz = Mathf.RoundToInt((wz - radius) * 0.25f);
+            int maxCz = Mathf.RoundToInt((wz + radius) * 0.25f);
+            float rSq = radius * radius;
+
+            for (int cx = minCx; cx <= maxCx; cx++)
+            {
+                float dx = (cx * 4.0f) - wx;
+                float dxSq = dx * dx;
+                if (dxSq > rSq)
+                    continue;
+
+                for (int cz = minCz; cz <= maxCz; cz++)
+                {
+                    float dz = (cz * 4.0f) - wz;
+                    if (dxSq + (dz * dz) <= rSq)
+                    {
+                        _vehicleRoadCells.Add(PackVehicleCell(cx, cz));
+                        if (_vehicleRoadCells.Count >= MaxVehicleRoadCells)
+                            return;
+                    }
+                }
+            }
+        }
+
+        private static bool IsRiverProfileId(string profileId)
+        {
+            if (string.IsNullOrEmpty(profileId))
+                return false;
+            if (_reusableRiverProfileIds.Contains(profileId))
+                return true;
+
+            return profileId.IndexOf("river", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                   profileId.IndexOf("stream", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                   profileId.IndexOf("canal", StringComparison.OrdinalIgnoreCase) >= 0;
+        }
+
+        private static void EnsureVehicleRoadCellsBuilt()
+        {
+            MapPropManager.MapPropDatabase db = null;
+            IntPtr dbPtr = IntPtr.Zero;
+            try
+            {
+                db = MapPropManager.MapPropDatabase.instance;
+                if (!ReferenceEquals(db, null) && db != null)
+                    dbPtr = db.Pointer;
+            }
+            catch { }
+
+            Il2CppSystem.Collections.Generic.List<StreetColliderData> streetList = null;
+            int streetCount = 0;
+            try
+            {
+                streetList = StreetColliderManager.collidersToManage;
+                streetCount = streetList != null ? streetList.Count : 0;
+            }
+            catch { }
+
+            bool dbChanged = dbPtr != _vehicleRoadCacheDbPtr;
+            bool streetChanged = streetCount != _vehicleRoadCacheStreetCount &&
+                (_vehicleRoadCacheSyncAttempts < 3 || streetCount > _vehicleRoadCacheStreetCount + 4);
+            bool retryEmpty = _vehicleRoadCells.Count == 0 &&
+                _vehicleRoadCacheSyncAttempts < 2 &&
+                Time.time >= _vehicleRoadCacheNextSyncTime;
+
+            if (!dbChanged && !streetChanged && !retryEmpty)
+                return;
+
+            _vehicleRoadCells.Clear();
+            _vehicleRoadCacheDbPtr = dbPtr;
+            _vehicleRoadCacheStreetCount = streetCount;
+            _vehicleRoadCacheNextSyncTime = Time.time + 5.0f;
+            _vehicleRoadCacheSyncAttempts++;
+
+            // Source 1: Corvostudio.Roads RoadNetwork (modern ER2 maps)
+            if (db != null)
+            {
+                try
+                {
+                    Corvostudio.Roads.RoadSystem rs = db.roadSystem;
+                    Corvostudio.Roads.RoadNetwork net = (rs != null && rs.network != null) ? rs.network : db.bakedRoadNetwork;
+                    if (net != null && net.nodes != null && net.segments != null && net.segments.Count > 0)
+                    {
+                        _reusableRiverProfileIds.Clear();
+                        var snapshots = db.bakedRoadProfileSnapshots;
+                        if (snapshots != null)
+                        {
+                            int snapCount = snapshots.Count;
+                            for (int i = 0; i < snapCount; i++)
+                            {
+                                RoadProfileSnapshot snap = snapshots[i];
+                                if (snap != null &&
+                                    snap.kind == Corvostudio.Roads.RoadProfileKind.River &&
+                                    !string.IsNullOrEmpty(snap.profileId))
+                                {
+                                    _reusableRiverProfileIds.Add(snap.profileId);
+                                }
+                            }
+                        }
+
+                        _reusableRoadNodes.Clear();
+                        var nodes = net.nodes;
+                        int nodeCount = nodes.Count;
+                        for (int i = 0; i < nodeCount; i++)
+                        {
+                            Corvostudio.Roads.RoadNode node = nodes[i];
+                            if (node != null)
+                            {
+                                // Pack junction radius into node width upper bound only for endpoint disks when touched by non-river segments.
+                                float endpointHalfW = Mathf.Max(node.width * 0.5f, node.junctionRadius > 0.5f ? node.junctionRadius : 0f);
+                                _reusableRoadNodes[node.id] = new Vector4(node.positionX, node.junctionRadius > 0.5f ? endpointHalfW : node.width * 0.5f, node.positionZ, node.width);
+                            }
+                        }
+
+                        var segments = net.segments;
+                        int segCount = segments.Count;
+                        for (int i = 0; i < segCount; i++)
+                        {
+                            if (_vehicleRoadCells.Count >= MaxVehicleRoadCells)
+                                break;
+
+                            Corvostudio.Roads.RoadSegment seg = segments[i];
+                            if (seg == null)
+                                continue;
+
+                            // Strict river exclusion across all 4 signals so vehicles never treat rivers as roads.
+                            if (rs != null && rs.SegmentIsRiver(seg.id))
+                                continue;
+                            Corvostudio.Roads.RoadProfile prof = seg.cachedProfile;
+                            if (prof != null && (prof.IsRiver || prof.kind == Corvostudio.Roads.RoadProfileKind.River))
+                                continue;
+                            if (IsRiverProfileId(seg.profileId))
+                                continue;
+
+                            if (!_reusableRoadNodes.TryGetValue(seg.nodeAId, out Vector4 nA) ||
+                                !_reusableRoadNodes.TryGetValue(seg.nodeBId, out Vector4 nB))
+                            {
+                                continue;
+                            }
+
+                            float halfWidth = Mathf.Clamp(Mathf.Max(nA.w, nB.w) * 0.5f, 2.5f, 10.0f) + 1.5f;
+                            float endHalfA = Mathf.Clamp(nA.y, 2.5f, 14.0f) + 1.5f;
+                            float endHalfB = Mathf.Clamp(nB.y, 2.5f, 14.0f) + 1.5f;
+
+                            float dx = nB.x - nA.x;
+                            float dz = nB.z - nA.z;
+                            float segLen = Mathf.Sqrt((dx * dx) + (dz * dz));
+                            int steps = Mathf.Clamp((int)(segLen * 0.5f) + 1, 1, 256);
+
+                            MarkRoadDisk(nA.x, nA.z, endHalfA);
+                            for (int s = 0; s <= steps; s++)
+                            {
+                                float t = steps > 0 ? ((float)s / steps) : 0f;
+                                MarkRoadDisk(nA.x + (dx * t), nA.z + (dz * t), halfWidth);
+                                if (_vehicleRoadCells.Count >= MaxVehicleRoadCells)
+                                    break;
+                            }
+                            MarkRoadDisk(nB.x, nB.z, endHalfB);
+                        }
+
+                        _reusableRoadNodes.Clear();
+                        _reusableRiverProfileIds.Clear();
+                    }
+                }
+                catch
+                {
+                    _reusableRoadNodes.Clear();
+                    _reusableRiverProfileIds.Clear();
+                }
+            }
+
+            // Source 2: Legacy StreetColliderManager street pieces (oriented BoxCollider or bounded AABB)
+            if (streetList != null && streetCount > 0 && _vehicleRoadCells.Count < MaxVehicleRoadCells)
+            {
+                try
+                {
+                    for (int i = 0; i < streetCount; i++)
+                    {
+                        if (_vehicleRoadCells.Count >= MaxVehicleRoadCells)
+                            break;
+
+                        StreetColliderData data = streetList[i];
+                        if (data == null)
+                            continue;
+
+                        bool handledBox = false;
+                        Collider col = data.collider;
+                        if (col != null)
+                        {
+                            BoxCollider box = col.TryCast<BoxCollider>();
+                            if (box != null && box.transform != null)
+                            {
+                                Vector3 ls = box.transform.lossyScale;
+                                Vector3 localSize = box.size;
+                                float worldX = Mathf.Abs(localSize.x * ls.x);
+                                float worldZ = Mathf.Abs(localSize.z * ls.z);
+                                float minAxis = Mathf.Min(worldX, worldZ);
+                                float maxAxis = Mathf.Max(worldX, worldZ);
+                                if (maxAxis >= 1.5f && minAxis <= 22.0f && maxAxis <= 85.0f)
+                                {
+                                    Vector3 center = box.center;
+                                    Transform tf = box.transform;
+                                    if (worldX >= worldZ)
+                                    {
+                                        float halfLen = localSize.x * 0.5f;
+                                        float halfWidth = Mathf.Clamp(worldZ * 0.5f, 2.0f, 11.0f) + 1.5f;
+                                        int steps = Mathf.Clamp((int)(worldX * 0.5f) + 1, 1, 64);
+                                        for (int s = 0; s <= steps; s++)
+                                        {
+                                            float lx = Mathf.Lerp(-halfLen, halfLen, (float)s / steps);
+                                            Vector3 wp = tf.TransformPoint(new Vector3(center.x + lx, center.y, center.z));
+                                            MarkRoadDisk(wp.x, wp.z, halfWidth);
+                                        }
+                                    }
+                                    else
+                                    {
+                                        float halfLen = localSize.z * 0.5f;
+                                        float halfWidth = Mathf.Clamp(worldX * 0.5f, 2.0f, 11.0f) + 1.5f;
+                                        int steps = Mathf.Clamp((int)(worldZ * 0.5f) + 1, 1, 64);
+                                        for (int s = 0; s <= steps; s++)
+                                        {
+                                            float lz = Mathf.Lerp(-halfLen, halfLen, (float)s / steps);
+                                            Vector3 wp = tf.TransformPoint(new Vector3(center.x, center.y, center.z + lz));
+                                            MarkRoadDisk(wp.x, wp.z, halfWidth);
+                                        }
+                                    }
+                                }
+                                handledBox = true;
+                            }
+                        }
+
+                        if (!handledBox)
+                        {
+                            Bounds b = data.bound;
+                            float sizeX = b.size.x;
+                            float sizeZ = b.size.z;
+                            float minXZ = Mathf.Min(sizeX, sizeZ);
+                            float maxXZ = Mathf.Max(sizeX, sizeZ);
+                            if (maxXZ < 1.5f || minXZ > 22.0f || maxXZ > 85.0f)
+                                continue;
+
+                            int minCx = Mathf.RoundToInt((b.min.x - 1.0f) * 0.25f);
+                            int maxCx = Mathf.RoundToInt((b.max.x + 1.0f) * 0.25f);
+                            int minCz = Mathf.RoundToInt((b.min.z - 1.0f) * 0.25f);
+                            int maxCz = Mathf.RoundToInt((b.max.z + 1.0f) * 0.25f);
+                            for (int cx = minCx; cx <= maxCx; cx++)
+                            {
+                                for (int cz = minCz; cz <= maxCz; cz++)
+                                {
+                                    _vehicleRoadCells.Add(PackVehicleCell(cx, cz));
+                                    if (_vehicleRoadCells.Count >= MaxVehicleRoadCells)
+                                        break;
+                                }
+                                if (_vehicleRoadCells.Count >= MaxVehicleRoadCells)
+                                    break;
+                            }
+                        }
+                    }
+                }
+                catch { }
+            }
+        }
+
+        private static byte ProbeVehicleCellClearance(Vector3 worldPos)
+        {
+            int mask = GetVehicleStaticObstacleMask();
+            Vector3 outerCenter = new Vector3(worldPos.x, worldPos.y + 2.6f, worldPos.z);
+            bool hitOuter = Physics.CheckBox(
+                outerCenter,
+                new Vector3(5.0f, 1.0f, 5.0f),
+                Quaternion.identity,
+                mask,
+                QueryTriggerInteraction.Ignore);
+            if (!hitOuter)
+                return VehicleCellClearOpen;
+
+            Vector3 innerCenter = new Vector3(worldPos.x, worldPos.y + 2.3f, worldPos.z);
+            bool hitInner = Physics.CheckBox(
+                innerCenter,
+                new Vector3(3.2f, 1.0f, 3.2f),
+                Quaternion.identity,
+                mask,
+                QueryTriggerInteraction.Ignore);
+            return hitInner ? VehicleCellTightObstructed : VehicleCellModerateClutter;
+        }
+
+        private static byte GetOrClassifyVehicleCell(long cellKey, Vector3 worldPos, bool storeInCache = true)
+        {
+            if (_vehicleCellClearanceCache.TryGetValue(cellKey, out byte cached))
+                return cached;
+
+            byte cls = ProbeVehicleCellClearance(worldPos);
+            if (storeInCache)
+            {
+                if (_vehicleCellClearanceCache.Count >= MaxVehicleClearanceCacheEntries)
+                    _vehicleCellClearanceCache.Clear();
+                _vehicleCellClearanceCache[cellKey] = cls;
+            }
+            return cls;
+        }
+
+        [HarmonyPatch(typeof(global::A.f), nameof(global::A.f.A), new[] { typeof(global::A.G), typeof(float) })]
+        public static class A_f_EnqueueOrUpdateOpenNode_Patch
+        {
+            static void Prefix(global::A.f __instance, global::A.G __0, ref float __1)
+            {
+                if (!VisionConfig.EnableVehicleRoadAndClearPathing.Value)
+                    return;
+                if (!IsVehicleGrid(__instance))
+                    return;
+                if (__0 == null || __0.Pointer == IntPtr.Zero || __instance.pathIsInsideCollider)
+                    return;
+
+                float hCost = __0.h_cost;
+                if (hCost <= 0.01f || float.IsNaN(hCost) || float.IsInfinity(hCost))
+                    return;
+
+                EnsureVehicleRoadCellsBuilt();
+
+                Vector3 pos = __0.worldPosition;
+                long cellKey = PackVehicleCell(pos);
+                bool isRoad = pos.y >= -0.35f && _vehicleRoadCells.Count > 0 && _vehicleRoadCells.Contains(cellKey);
+                byte clearance = GetOrClassifyVehicleCell(cellKey, pos, storeInCache: true);
+
+                float desiredMult;
+                if (isRoad)
+                {
+                    desiredMult = clearance == VehicleCellClearOpen ? 0.62f
+                        : (clearance == VehicleCellModerateClutter ? 0.72f : 0.92f);
+                    if (__1 > 1.05f)
+                        desiredMult *= 1.10f;
+                }
+                else
+                {
+                    desiredMult = clearance == VehicleCellClearOpen ? 1.00f
+                        : (clearance == VehicleCellModerateClutter ? 1.48f : 2.05f);
+                    desiredMult *= (__1 > 0.01f ? __1 : 1.0f);
+                }
+
+                global::A.G prev = __0.PreviousNode;
+                if (prev != null && prev.Pointer != IntPtr.Zero && prev.Pointer != __0.Pointer)
+                {
+                    Vector3 prevPos = prev.worldPosition;
+                    float dx = pos.x - prevPos.x;
+                    float dz = pos.z - prevPos.z;
+                    float horizSq = (dx * dx) + (dz * dz);
+                    if (horizSq > 0.25f)
+                    {
+                        float grade = Mathf.Abs(pos.y - prevPos.y) / Mathf.Sqrt(horizSq);
+                        if (grade > 0.25f)
+                        {
+                            float slopePenalty = 1.0f + Mathf.Clamp01((grade - 0.25f) / 0.20f) * 0.45f;
+                            desiredMult *= slopePenalty;
+                        }
+                    }
+                }
+
+                desiredMult = Mathf.Clamp(desiredMult, 0.55f, 3.20f);
+                if (hCost < 400f)
+                    desiredMult = Mathf.Lerp(__1, desiredMult, Mathf.Clamp01(hCost / 400f));
+
+                __1 = desiredMult;
+            }
+        }
+
+        [HarmonyPatch(typeof(global::A.f), nameof(global::A.f.A), new[] { typeof(global::A.G), typeof(global::A.G), typeof(byte) })]
+        public static class A_f_CanSkipStringPullNode_Patch
+        {
+            static bool Prefix(global::A.f __instance, global::A.G __0, global::A.G __1, byte __2, ref bool __result)
+            {
+                if (!VisionConfig.EnableVehicleRoadAndClearPathing.Value)
+                    return true;
+                if (!IsVehicleGrid(__instance))
+                    return true;
+                if (__0 == null || __0.Pointer == IntPtr.Zero || __1 == null || __1.Pointer == IntPtr.Zero)
+                    return true;
+
+                Vector3 a = __0.worldPosition;
+                Vector3 b = __1.worldPosition;
+                Vector3 mid = (a + b) * 0.5f;
+                long keyA = PackVehicleCell(a);
+                long keyB = PackVehicleCell(b);
+                long keyMid = PackVehicleCell(mid);
+
+                bool hasRoads = _vehicleRoadCells.Count > 0;
+                bool aRoad = hasRoads && _vehicleRoadCells.Contains(keyA);
+                bool bRoad = hasRoads && _vehicleRoadCells.Contains(keyB);
+
+                // Preserve road curve anchors while still string-pulling straight road segments cleanly.
+                if (aRoad && bRoad)
+                {
+                    if (!_vehicleRoadCells.Contains(keyMid))
+                    {
+                        __result = false;
+                        return false;
+                    }
+
+                    float chordSq = (a.x - b.x) * (a.x - b.x) + (a.z - b.z) * (a.z - b.z);
+                    if (chordSq > 256f)
+                    {
+                        Vector3 p1 = Vector3.Lerp(a, b, 0.333f);
+                        Vector3 p2 = Vector3.Lerp(a, b, 0.667f);
+                        if (!_vehicleRoadCells.Contains(PackVehicleCell(p1)) ||
+                            !_vehicleRoadCells.Contains(PackVehicleCell(p2)))
+                        {
+                            __result = false;
+                            return false;
+                        }
+                    }
+                }
+
+                // Prevent string-pulling from cutting across cluttered woods, fences, or rubble corners.
+                byte midClear = GetOrClassifyVehicleCell(keyMid, mid, storeInCache: false);
+                if (midClear == VehicleCellTightObstructed)
+                {
+                    byte aClear = GetOrClassifyVehicleCell(keyA, a, storeInCache: true);
+                    byte bClear = GetOrClassifyVehicleCell(keyB, b, storeInCache: true);
+                    if (aClear != VehicleCellTightObstructed || bClear != VehicleCellTightObstructed)
+                    {
+                        __result = false;
+                        return false;
+                    }
+                }
+                else if (midClear == VehicleCellModerateClutter && __2 >= 3)
+                {
+                    byte aClear = GetOrClassifyVehicleCell(keyA, a, storeInCache: true);
+                    byte bClear = GetOrClassifyVehicleCell(keyB, b, storeInCache: true);
+                    if (aRoad || bRoad || aClear == VehicleCellClearOpen || bClear == VehicleCellClearOpen)
+                    {
+                        __result = false;
+                        return false;
+                    }
+                }
+
+                return true;
+            }
+        }
+
+        [HarmonyPatch(typeof(global::A.f), nameof(global::A.f.A), new[] { typeof(bool) })]
+        public static class A_f_ClearGrid_Patch
+        {
+            static void Postfix(global::A.f __instance)
+            {
+                if (IsVehicleGrid(__instance))
+                    ClearVehiclePathingCaches(keepRoadMap: false);
+            }
+        }
+
+        [HarmonyPatch(typeof(global::A.f), nameof(global::A.f.A), new[] { typeof(Vector3), typeof(float) })]
+        public static class A_f_InvalidateRadius_Patch
+        {
+            static void Postfix(global::A.f __instance, Vector3 __0, float __1)
+            {
+                if (!IsVehicleGrid(__instance) || _vehicleCellClearanceCache.Count == 0)
+                    return;
+
+                int cellRadius = Mathf.Clamp(Mathf.CeilToInt((__1 + 5.0f) * 0.25f), 1, 16);
+                int centerCx = Mathf.RoundToInt(__0.x * 0.25f);
+                int centerCz = Mathf.RoundToInt(__0.z * 0.25f);
+                for (int dx = -cellRadius; dx <= cellRadius; dx++)
+                {
+                    for (int dz = -cellRadius; dz <= cellRadius; dz++)
+                        _vehicleCellClearanceCache.Remove(PackVehicleCell(centerCx + dx, centerCz + dz));
                 }
             }
         }

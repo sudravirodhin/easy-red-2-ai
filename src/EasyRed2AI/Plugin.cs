@@ -16,7 +16,7 @@ namespace EasyRed2HumanAI
     {
         public const string PluginGuid = "com.antigravity.easyred2.humanai";
         public const string PluginName = "Easy Red 2 - Battle Hardened";
-        public const string PluginVersion = "0.9.12";
+        public const string PluginVersion = "0.10.1";
 
         internal static Plugin Instance;
         internal static new ManualLogSource Log;
@@ -127,10 +127,17 @@ namespace EasyRed2HumanAI
             SafePatch(typeof(VeteranAndTacticsPatches.Vehicle_OnRepaired_Patch));
             SafePatch(typeof(VeteranAndTacticsPatches.AIVehicle_RetreatCrew_Patch));
             SafePatch(typeof(VeteranAndTacticsPatches.AIVehicle_MovableVehicleRoutine_Patch));
+            SafePatch(typeof(VeteranAndTacticsPatches.AIVehicle_MoveTowardCurrentNodeWheeledVehicle_Patch));
+            SafePatch(typeof(VeteranAndTacticsPatches.AIVehicle_MoveTowardCurrentNodeTank_Patch));
             SafePatch(typeof(VeteranAndTacticsPatches.VehicleTank_FixedUpdate_Patch));
+            SafePatch(typeof(VeteranAndTacticsPatches.A_f_EnqueueOrUpdateOpenNode_Patch));
+            SafePatch(typeof(VeteranAndTacticsPatches.A_f_CanSkipStringPullNode_Patch));
+            SafePatch(typeof(VeteranAndTacticsPatches.A_f_ClearGrid_Patch));
+            SafePatch(typeof(VeteranAndTacticsPatches.A_f_InvalidateRadius_Patch));
             SafePatch(typeof(VeteranAndTacticsPatches.Vehicle_OnVehicleSuppressed_Patch));
             SafePatch(typeof(VeteranAndTacticsPatches.VehicleWithWheels_OnTriggerEnter_Patch));
             SafePatch(typeof(VeteranAndTacticsPatches.VehiclePlane_OnSquadSpawnInside_Patch));
+            SafePatch(typeof(VeteranAndTacticsPatches.VehiclePlane_FixedUpdate_Patch));
             SafePatch(typeof(VeteranAndTacticsPatches.TurretGun_SelectBestAmmo_Patch));
             SafePatch(typeof(VeteranAndTacticsPatches.TurretWeapon_Reload_Patch));
             SafePatch(typeof(VeteranAndTacticsPatches.SoldierAI_UseBestWearedWeaponCheck_Patch));
@@ -159,6 +166,7 @@ namespace EasyRed2HumanAI
             SafePatch(typeof(VeteranAndTacticsPatches.ServerListMenu_Start_Patch));
             SafePatch(typeof(VeteranAndTacticsPatches.ServerListMenu_OnCreateMatchPressed_Patch));
             SafePatch(typeof(VeteranAndTacticsPatches.MatchData_SetMultiplayerRoomSettings_Patch));
+            SafePatch(typeof(VeteranAndTacticsPatches.MatchData_UpdateNetworkMatchInfo_Patch));
             SafePatch(typeof(VeteranAndTacticsPatches.BattleManager_AddBattleStat_Patch));
             SafePatch(typeof(VeteranAndTacticsPatches.BattleManager_CountBattleStat_Patch));
             SafePatch(typeof(VeteranAndTacticsPatches.BattleManager_OnWin_Patch));
@@ -167,6 +175,7 @@ namespace EasyRed2HumanAI
             SafePatch(typeof(VeteranAndTacticsPatches.BattleLoader_OnJoinedRoom_Patch));
             SafePatch(typeof(VeteranAndTacticsPatches.BattleLoader_OnPlayerEnteredRoom_Patch));
             SafePatch(typeof(VeteranAndTacticsPatches.BattleLoader_OnPlayerPropertiesUpdate_Patch));
+            SafePatch(typeof(VeteranAndTacticsPatches.BattleLoader_RequestOwnershipAndSpawnOn_Patch));
             SafePatch(typeof(VeteranAndTacticsPatches.PlayerController_OnSquadTaskUpdated_Patch));
             SafePatch(typeof(VeteranAndTacticsPatches.DamageFeedback_OnSoldierHit_Patch));
             SafePatch(typeof(VeteranAndTacticsPatches.DamageFeedback_OnVehicleHit_Patch));
@@ -180,6 +189,10 @@ namespace EasyRed2HumanAI
             SafePatch(typeof(VeteranAndTacticsPatches.PlayerGUI_ClearSquadList_Patch));
             SafePatch(typeof(VeteranAndTacticsPatches.PlayerGUI_ShowSquadList_Patch));
             SafePatch(typeof(VeteranAndTacticsPatches.PlayerGUI_LayoutSquadEntries_Patch));
+            SafePatch(typeof(VeteranAndTacticsPatches.PlayerGUI_UpdateSquadGUI_Patch));
+            SafePatch(typeof(VeteranAndTacticsPatches.PlayerGUI_GetSquadOrderPosition_Patch));
+            SafePatch(typeof(VeteranAndTacticsPatches.SquadSoldierLabel_BeginSpawnOnUnit_Patch));
+            SafePatch(typeof(VeteranAndTacticsPatches.SyncSoldier_SetControlledByPlayer_Patch));
             SafePatch(typeof(VeteranAndTacticsPatches.PlayerController_SetPlayer_Patch));
             SafePatch(typeof(VeteranAndTacticsPatches.MiniMapGUI_ShowPlayerList_Patch));
             SafePatch(typeof(VeteranAndTacticsPatches.Soldier_UseSyryngeCR_Patch));
@@ -189,6 +202,7 @@ namespace EasyRed2HumanAI
             SafePatch(typeof(VeteranAndTacticsPatches.VehiclePlane_UpdateMotorSound_Patch));
             SafePatch(typeof(VeteranAndTacticsPatches.Soldier_Say_Patch));
             SafePatch(typeof(VeteranAndTacticsPatches.Soldier_SyncSay_Patch));
+            SafePatch(typeof(VeteranAndTacticsPatches.Soldier_SayClip_Patch));
             SafePatch(typeof(VeteranAndTacticsPatches.BulletInstance_OnHit_Patch));
             SafePatch(typeof(VeteranAndTacticsPatches.BulletInstance_OnTracerPopped_Patch));
             SafePatch(typeof(VeteranAndTacticsPatches.BulletInstance_DestroyFX_Patch));
@@ -200,6 +214,7 @@ namespace EasyRed2HumanAI
             SafePatch(typeof(VeteranAndTacticsPatches.LoadBalancingClient_OnEvent_Patch));
             SafePatch(typeof(VeteranAndTacticsPatches.ResourcesManager_FactionCanDamageFaction_Patch));
             SafePatch(typeof(VeteranAndTacticsPatches.BodyPart_TryDamageWithExplosion_Patch));
+            SafePatch(typeof(VeteranAndTacticsPatches.ItemGrenade_ActivateGrenade_Patch));
             SafePatch(typeof(VeteranAndTacticsPatches.ItemGrenade_ExplodeAfter_Patch));
             SafePatch(typeof(VeteranAndTacticsPatches.VehicleDamageableTrackPart_TryDamageWithExplosion_Patch));
             SafePatch(typeof(VeteranAndTacticsPatches.VehicleDamagablePart_TryDamageWithExplosion_Patch));
@@ -208,6 +223,11 @@ namespace EasyRed2HumanAI
             SafePatch(typeof(VeteranAndTacticsPatches.VehicleDamagablePart_InternalPartToDamageText_Patch));
             SafePatch(typeof(VeteranAndTacticsPatches.VehicleParachute_MoveDown_Patch));
             SafePatch(typeof(VeteranAndTacticsPatches.CinematicCameraGUI_EnableCinematicCamera_Patch));
+            SafePatch(typeof(VeteranAndTacticsPatches.CinematicCameraGUI_Close_Patch));
+            SafePatch(typeof(VeteranAndTacticsPatches.PlayerController_LateUpdate_Patch));
+            SafePatch(typeof(VeteranAndTacticsPatches.PlayerController_ShakeCameraRoutine_Patch));
+            SafePatch(typeof(VeteranAndTacticsPatches.CinematicCameraController_TrackingRigidbody_Patch));
+            SafePatch(typeof(VeteranAndTacticsPatches.CinematicCameraController_MoveAndRotateCamera_Patch));
             SafePatch(typeof(VeteranAndTacticsPatches.MissionStatusGUI_LateUpdate_Patch));
             SafePatch(typeof(VeteranAndTacticsPatches.ObjectiveGUI_LateUpdate_Patch));
             SafePatch(typeof(VeteranAndTacticsPatches.ObjectiveGUI_SetPhase_Patch));
@@ -219,13 +239,20 @@ namespace EasyRed2HumanAI
             SafePatch(typeof(VeteranAndTacticsPatches.Soldier_ToggleInventoryKnife_ReloadCancel_Patch));
             SafePatch(typeof(VeteranAndTacticsPatches.Soldier_CycleInventoryKnife_ReloadCancel_Patch));
             SafePatch(typeof(VeteranAndTacticsPatches.Soldier_Throw_ReloadCancel_Patch));
+            SafePatch(typeof(VeteranAndTacticsPatches.Soldier_Throw_SmokeAim_Patch));
+            SafePatch(typeof(VeteranAndTacticsPatches.Soldier_InstantiateAndThrowAfter_MoveNext_Patch));
+            SafePatch(typeof(VeteranAndTacticsPatches.Soldier_CalculateBallisticThrow_Patch));
             SafePatch(typeof(VeteranAndTacticsPatches.Soldier_Vault_ReloadCancel_Patch));
             SafePatch(typeof(VeteranAndTacticsPatches.PlayerController_Update_ReloadAndBipodCancel_Patch));
 
-            // HitchAutopsy Flight Recorder & Per-Bot JSONL Action Trace (both default OFF)
+            // HitchAutopsy Flight Recorder, Live Perf Overlay & Per-Bot JSONL Action Trace (all default OFF)
             HitchProfiler.RefreshConfigState();
             BotActionTrace.RefreshConfigState();
-            string hitchTag = HitchProfiler.Enabled ? " [HitchAutopsy Flight Recorder ACTIVE]" : "";
+            string hitchTag = (HitchProfiler.FlightRecorderActive && HitchProfiler.PerfOverlayActive)
+                ? " [HitchAutopsy + PerfOverlay ACTIVE]"
+                : (HitchProfiler.FlightRecorderActive
+                    ? " [HitchAutopsy Flight Recorder ACTIVE]"
+                    : (HitchProfiler.PerfOverlayActive ? " [Live Perf Overlay ACTIVE]" : ""));
             string traceTag = BotActionTrace.IsEnabled ? " [BotActionTrace ACTIVE]" : "";
 
             string osLabel = OperatingSystem.IsWindows() ? "Windows"

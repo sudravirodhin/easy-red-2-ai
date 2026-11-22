@@ -1331,12 +1331,12 @@ namespace EasyRed2HumanAI
             bool hasActiveWater,
             float waterLevel)
         {
-            // Check chest/head horizontal clearance first so nearby boulders, rising hillside banks, or walls
-            // never cause an elevated probe origin to start underground or look like an open drop.
-            Vector3 horizOrigin = feetPos + Vector3.up * 1.85f;
-            for (int k = 0; k < 2; k++)
+            // Check horizontal clearance above stone bridge parapets / steel rails (<= 2.2m) so bridge sides
+            // still register as open drop-offs while tall building walls, cliffs, and rising hillsides return false.
+            Vector3 horizOrigin = feetPos + Vector3.up * 2.25f;
+            for (int k = 0; k < 3; k++)
             {
-                float d = k == 0 ? 3.8f : 6.2f;
+                float d = k == 0 ? 3.8f : (k == 1 ? 6.5f : 9.2f);
                 if (Physics.Raycast(horizOrigin, horizDir, d, mask, QueryTriggerInteraction.Ignore))
                     return false;
 
@@ -1445,6 +1445,9 @@ namespace EasyRed2HumanAI
                    IsVehicleCollider(hit.collider);
         }
 
+        private static readonly Vector3 BridgeDiagNE = new Vector3(0.70710678f, 0f, 0.70710678f);
+        private static readonly Vector3 BridgeDiagNW = new Vector3(0.70710678f, 0f, -0.70710678f);
+
         public static bool IsOnBridgeOrNarrowCrossing(Vector3 feetPos)
         {
             // Quantize to 2m x 1m x 2m spatial grid cell so bridge/crossing checks are O(1) after first probe
@@ -1470,16 +1473,35 @@ namespace EasyRed2HumanAI
                     // Only allow TerrainCollider if near active water so true land-causeways still qualify.
                     if (!isTerrain || (hasActiveWater && centerHit.point.y <= waterLevel + 5.5f))
                     {
-                        bool dropPosX = IsBridgeSideOpenDropOff(feetPos, Vector3.right, mask, isTerrain, hasActiveWater, waterLevel);
-                        if (dropPosX && IsBridgeSideOpenDropOff(feetPos, Vector3.left, mask, isTerrain, hasActiveWater, waterLevel))
+                        bool isBuildingRoof = false;
+                        if (!isTerrain &&
+                            Physics.Raycast(centerHit.point + Vector3.down * 0.45f, Vector3.down, out RaycastHit underHit, 5.5f, mask) &&
+                            underHit.collider != null &&
+                            underHit.distance >= 1.15f &&
+                            !IsTerrainCollider(underHit.collider))
                         {
-                            isBridge = true;
+                            isBuildingRoof = true;
                         }
-                        else
+
+                        if (!isBuildingRoof)
                         {
-                            bool dropPosZ = IsBridgeSideOpenDropOff(feetPos, Vector3.forward, mask, isTerrain, hasActiveWater, waterLevel);
-                            if (dropPosZ && IsBridgeSideOpenDropOff(feetPos, Vector3.back, mask, isTerrain, hasActiveWater, waterLevel))
+                            bool dropX = IsBridgeSideOpenDropOff(feetPos, Vector3.right, mask, isTerrain, hasActiveWater, waterLevel) &&
+                                         IsBridgeSideOpenDropOff(feetPos, Vector3.left, mask, isTerrain, hasActiveWater, waterLevel);
+                            bool dropZ = IsBridgeSideOpenDropOff(feetPos, Vector3.forward, mask, isTerrain, hasActiveWater, waterLevel) &&
+                                         IsBridgeSideOpenDropOff(feetPos, Vector3.back, mask, isTerrain, hasActiveWater, waterLevel);
+                            if (dropX ^ dropZ)
+                            {
                                 isBridge = true;
+                            }
+                            else if (!dropX && !dropZ)
+                            {
+                                bool dropD1 = IsBridgeSideOpenDropOff(feetPos, BridgeDiagNE, mask, isTerrain, hasActiveWater, waterLevel) &&
+                                              IsBridgeSideOpenDropOff(feetPos, -BridgeDiagNE, mask, isTerrain, hasActiveWater, waterLevel);
+                                bool dropD2 = IsBridgeSideOpenDropOff(feetPos, BridgeDiagNW, mask, isTerrain, hasActiveWater, waterLevel) &&
+                                              IsBridgeSideOpenDropOff(feetPos, -BridgeDiagNW, mask, isTerrain, hasActiveWater, waterLevel);
+                                if (dropD1 ^ dropD2)
+                                    isBridge = true;
+                            }
                         }
                     }
                 }
@@ -1489,6 +1511,56 @@ namespace EasyRed2HumanAI
                 _bridgeCellCache.Clear();
             _bridgeCellCache[cellKey] = isBridge;
             return isBridge;
+        }
+
+        /// <summary>
+        /// Checks whether the soldier is currently on, targeting, or approaching within <c>10.5m</c> of a bridge
+        /// or narrow crossing along their active path so vanilla's sideways squad-spacing scatter is cancelled
+        /// before it can pull bots down embankment ravines adjacent to bridge approaches.
+        /// </summary>
+        public static bool IsApproachingOrOnBridge(SoldierAI ai, SoldierFastHandles h, Vector3 myPos, Vector3 moveDest)
+        {
+            if (IsOnBridgeOrNarrowCrossing(myPos) || IsOnBridgeOrNarrowCrossing(moveDest))
+                return true;
+
+            Vector3 probeTarget = moveDest;
+            if (ai != null && h != null)
+            {
+                A.d path = GetCachedAiPath(h, ai);
+                if (!ReferenceEquals(path, null) && path.Pointer != IntPtr.Zero && path.NodesCount >= 1)
+                {
+                    Vector3 nodePt = path.CurrentNode.point;
+                    if (IsOnBridgeOrNarrowCrossing(nodePt))
+                        return true;
+
+                    Vector3 toNode = nodePt - myPos;
+                    toNode.y = 0f;
+                    if (toNode.sqrMagnitude > 10.5f * 10.5f)
+                        probeTarget = nodePt;
+                }
+            }
+
+            Vector3 toProbe = probeTarget - myPos;
+            toProbe.y = 0f;
+            float probeDistSq = toProbe.sqrMagnitude;
+            if (probeDistSq > 10.5f * 10.5f)
+            {
+                Vector3 dir = toProbe / Mathf.Sqrt(probeDistSq);
+                Vector3 probeXZ = myPos + dir * 10.5f;
+                if (Physics.Raycast(
+                        new Vector3(probeXZ.x, myPos.y + 4.0f, probeXZ.z),
+                        Vector3.down,
+                        out RaycastHit aheadHit,
+                        9.0f,
+                        GetSolidEnvironmentMask(),
+                        QueryTriggerInteraction.Ignore) &&
+                    IsOnBridgeOrNarrowCrossing(aheadHit.point))
+                {
+                    return true;
+                }
+            }
+
+            return false;
         }
 
         /// <summary>
@@ -1703,6 +1775,219 @@ namespace EasyRed2HumanAI
         public static readonly PlayerAimLane[] ActivePlayerAimLanes = new PlayerAimLane[12];
         public static int ActivePlayerAimLaneCount;
         private static float _nextPlayerAimLaneRefreshTime;
+
+        public struct VehicleDangerCorridor
+        {
+            public IntPtr VehiclePtr;
+            public Vehicle Ref;
+            public string Faction;
+            public Vector3 HullCenter;
+            public Vector3 TravelDirFlat;
+            public Vector3 RightFlat;
+            public float HalfWidth;
+            public float HalfLength;
+            public float SpeedMs;
+            public float MinFwd;
+            public float MaxFwd;
+            public float CorridorHalfWidth;
+            public bool IsTank;
+            public bool IsPlayerDriven;
+            public bool IsReversing;
+        }
+
+        public static readonly VehicleDangerCorridor[] ActiveVehicleDangerCorridors = new VehicleDangerCorridor[32];
+        public static int ActiveVehicleDangerCorridorCount;
+        private static float _nextVehicleDangerCorridorRefreshTime;
+
+        public static void EnsureVehicleDangerCorridorsUpdated(float now)
+        {
+            if (now < _nextVehicleDangerCorridorRefreshTime && now >= _nextVehicleDangerCorridorRefreshTime - 2.0f)
+                return;
+
+            _nextVehicleDangerCorridorRefreshTime = now + 0.10f;
+            int prevCount = ActiveVehicleDangerCorridorCount;
+            ActiveVehicleDangerCorridorCount = 0;
+
+            try
+            {
+                var allVehicles = Vehicle.allVehicles;
+                if (allVehicles != null)
+                {
+                    int vCount = allVehicles.Count;
+                    for (int i = 0; i < vCount && ActiveVehicleDangerCorridorCount < ActiveVehicleDangerCorridors.Length; i++)
+                    {
+                        Vehicle v = allVehicles[i];
+                        if (ReferenceEquals(v, null) || v == null || v.Pointer == IntPtr.Zero || !v.CanFight())
+                            continue;
+
+                        VehicleFastHandles vh = GetOrCreateVehicleHandles(v);
+                        if (vh == null || !vh.IsWheeledOrTank)
+                            continue;
+
+                        Transform tr = vh.Tr != null ? vh.Tr : v.transform;
+                        if (tr == null)
+                            continue;
+
+                        string vehFaction = VeteranAndTacticsPatches.GetVehicleCrewFaction(v);
+                        if (string.IsNullOrEmpty(vehFaction))
+                            continue;
+
+                        MovableVehicle mv = v.TryCast<MovableVehicle>();
+                        float speedMs = mv != null ? Mathf.Abs(mv.GetCurrentSpeed()) : 0f;
+                        Rigidbody rb = mv != null ? mv.rb : null;
+                        Vector3 rbVel = (rb != null && rb.Pointer != IntPtr.Zero) ? rb.velocity : Vector3.zero;
+                        float rbFlatSpeed = Mathf.Sqrt(rbVel.x * rbVel.x + rbVel.z * rbVel.z);
+
+                        bool isPlayerDriven = v.PlayerIsDriving();
+                        AIVehicle aiVeh = vh.AiVeh;
+                        bool isReversing = aiVeh != null && aiVeh.going_in_retro;
+                        bool aiMovingIntent = aiVeh != null &&
+                                              !aiVeh.placingInUnstuck &&
+                                              (isReversing ||
+                                               (!aiVeh.stopToShoot &&
+                                                aiVeh.path != null &&
+                                                aiVeh.path.NodesCount > 0 &&
+                                                now >= aiVeh.resumeDriveTime - 0.50f));
+
+                        bool hullPivoting = false;
+                        if (vh.IsTank && speedMs < 0.45f && rbFlatSpeed < 0.45f)
+                        {
+                            VehicleTank tank = v.TryCast<VehicleTank>();
+                            if (tank != null && Mathf.Abs(tank.curRotationSpeed) >= 0.15f)
+                                hullPivoting = true;
+                        }
+
+                        if (speedMs < 0.45f && rbFlatSpeed < 0.45f && !isPlayerDriven && !aiMovingIntent && !hullPivoting)
+                            continue;
+
+                        Vector3 fwd = tr.forward;
+                        fwd.y = 0f;
+                        fwd = fwd.sqrMagnitude > 0.001f ? fwd.normalized : Vector3.forward;
+
+                        Vector3 right = tr.right;
+                        right.y = 0f;
+                        right = right.sqrMagnitude > 0.001f ? right.normalized : new Vector3(fwd.z, 0f, -fwd.x);
+
+                        Vector3 travelDir = rbFlatSpeed >= 1.15f
+                            ? new Vector3(rbVel.x / rbFlatSpeed, 0f, rbVel.z / rbFlatSpeed)
+                            : (isReversing ? -fwd : fwd);
+                        Vector3 travelRight = new Vector3(travelDir.z, 0f, -travelDir.x);
+
+                        Vector4 obb = VeteranAndTacticsPatches.GetCachedVehicleLocalHullObb(v);
+                        float halfWidth = obb.x;
+                        float halfLength = obb.y;
+                        Vector3 hullCenter = tr.position + right * obb.z + fwd * obb.w;
+
+                        float effSpeed = Mathf.Max(speedMs, rbFlatSpeed);
+                        bool pivotOnly = !isPlayerDriven && effSpeed < 0.45f && !aiMovingIntent && hullPivoting;
+                        float minFwd = pivotOnly ? (-halfLength - 1.2f) : (-halfLength * 0.40f);
+                        float maxFwd = pivotOnly
+                            ? (halfLength + 2.6f)
+                            : Mathf.Clamp(halfLength + (vh.IsTank ? 6.5f : 5.5f) + effSpeed * 1.15f, 6.5f, 18.5f);
+
+                        ActiveVehicleDangerCorridors[ActiveVehicleDangerCorridorCount++] = new VehicleDangerCorridor
+                        {
+                            VehiclePtr = v.Pointer,
+                            Ref = v,
+                            Faction = vehFaction,
+                            HullCenter = hullCenter,
+                            TravelDirFlat = travelDir,
+                            RightFlat = travelRight,
+                            HalfWidth = halfWidth,
+                            HalfLength = halfLength,
+                            SpeedMs = effSpeed,
+                            MinFwd = minFwd,
+                            MaxFwd = maxFwd,
+                            CorridorHalfWidth = halfWidth + (vh.IsTank ? 1.85f : 1.45f),
+                            IsTank = vh.IsTank,
+                            IsPlayerDriven = isPlayerDriven,
+                            IsReversing = isReversing
+                        };
+                    }
+                }
+            }
+            catch { }
+
+            if (prevCount > ActiveVehicleDangerCorridorCount)
+                Array.Clear(ActiveVehicleDangerCorridors, ActiveVehicleDangerCorridorCount, prevCount - ActiveVehicleDangerCorridorCount);
+        }
+
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        public static bool IsPointInFriendlyVehicleDangerCorridor(Vector3 worldPoint, string faction, float extraWidth = 0f)
+        {
+            if (string.IsNullOrEmpty(faction))
+                return false;
+
+            EnsureVehicleDangerCorridorsUpdated(Time.time);
+            int count = ActiveVehicleDangerCorridorCount;
+            if (count == 0)
+                return false;
+
+            for (int i = 0; i < count; i++)
+            {
+                ref VehicleDangerCorridor c = ref ActiveVehicleDangerCorridors[i];
+                if (!AreSameSideFactions(faction, c.Faction))
+                    continue;
+                if (Mathf.Abs(worldPoint.y - c.HullCenter.y) > 3.2f)
+                    continue;
+
+                float dx = worldPoint.x - c.HullCenter.x;
+                float dz = worldPoint.z - c.HullCenter.z;
+                float fwd = dx * c.TravelDirFlat.x + dz * c.TravelDirFlat.z;
+                if (fwd < c.MinFwd || fwd > c.MaxFwd)
+                    continue;
+
+                float lat = Mathf.Abs(dx * c.RightFlat.x + dz * c.RightFlat.z);
+                if (lat <= c.CorridorHalfWidth + extraWidth)
+                    return true;
+            }
+
+            return false;
+        }
+
+        public static bool TryGetBlockingFriendlyVehicleDangerCorridor(
+            Vector3 worldPoint,
+            string faction,
+            float extraWidth,
+            out VehicleDangerCorridor corridor,
+            out float forwardDist,
+            out float signedLateral,
+            out Vector3 clearStepDir)
+        {
+            EnsureVehicleDangerCorridorsUpdated(Time.time);
+            int count = ActiveVehicleDangerCorridorCount;
+            for (int i = 0; i < count; i++)
+            {
+                ref VehicleDangerCorridor c = ref ActiveVehicleDangerCorridors[i];
+                if (!AreSameSideFactions(faction, c.Faction))
+                    continue;
+                if (Mathf.Abs(worldPoint.y - c.HullCenter.y) > 3.2f)
+                    continue;
+
+                float dx = worldPoint.x - c.HullCenter.x;
+                float dz = worldPoint.z - c.HullCenter.z;
+                float fwd = dx * c.TravelDirFlat.x + dz * c.TravelDirFlat.z;
+                if (fwd < c.MinFwd || fwd > c.MaxFwd)
+                    continue;
+
+                float latSigned = dx * c.RightFlat.x + dz * c.RightFlat.z;
+                if (Mathf.Abs(latSigned) <= c.CorridorHalfWidth + extraWidth)
+                {
+                    corridor = c;
+                    forwardDist = fwd;
+                    signedLateral = latSigned;
+                    float sideSign = latSigned >= 0f ? 1f : -1f;
+                    clearStepDir = c.RightFlat * sideSign;
+                    return true;
+                }
+            }
+
+            corridor = default;
+            forwardDist = 0f;
+            signedLateral = 0f;
+            clearStepDir = Vector3.zero;
+            return false;
+        }
         private static Camera _cachedMainCamera;
         private static float _nextMainCameraLookupTime;
 
@@ -2106,6 +2391,7 @@ namespace EasyRed2HumanAI
             public bool IsPlayer;
             public bool IsOnVehicle;
             public bool IsSquadLeader;
+            public bool IsRadioman;
             public bool HasSurrendered;
             public bool IsSpotted;
             public bool IsInjured;
@@ -2240,6 +2526,8 @@ namespace EasyRed2HumanAI
                                         Faction = GetCachedFaction(uHandles, now),
                                         IsPlayer = u.IsPlayer(),
                                         IsOnVehicle = u.IsOnVehicle(),
+                                        IsSquadLeader = u.IsSquadLeader(),
+                                        IsRadioman = u.IsRadioman(),
                                         IsInjured = true
                                     };
                                 }
@@ -2303,6 +2591,7 @@ namespace EasyRed2HumanAI
                                 IsPlayer = isHuman,
                                 IsOnVehicle = isOnVeh,
                                 IsSquadLeader = leaderAlive && uHandles.Ptr == leaderHandles.Ptr,
+                                IsRadioman = u.IsRadioman(),
                                 HasSurrendered = uSurr,
                                 IsSpotted = u.IsSpotted,
                                 IsInjured = u.IsInjured,
@@ -2504,6 +2793,107 @@ namespace EasyRed2HumanAI
             HitchProfiler.End(HitchBucket.WorldSnapshot, profSnapStart);
         }
 
+        private static float _nextVehicleAnomalyScanTime;
+
+        private static void AuditVehiclesForAnomalies(float now)
+        {
+            if (now < _nextVehicleAnomalyScanTime && (now + 5.0f) >= _nextVehicleAnomalyScanTime)
+                return;
+
+            _nextVehicleAnomalyScanTime = now + 2.0f;
+            try
+            {
+                var allVehicles = Vehicle.allVehicles;
+                if (allVehicles == null)
+                    return;
+
+                int vCount = allVehicles.Count;
+                for (int i = 0; i < vCount; i++)
+                {
+                    Vehicle v = allVehicles[i];
+                    if (ReferenceEquals(v, null) || v == null || v.Pointer == IntPtr.Zero ||
+                        v.vehicleDisabled || v.IsDisabled() || v.peopleInside <= 0)
+                    {
+                        continue;
+                    }
+
+                    VehicleFastHandles vh = GetOrCreateVehicleHandles(v);
+                    if (vh == null || !vh.IsWheeledOrTank || vh.IsStaticEmplacement ||
+                        vh.Tr == null || !IsLocallyOwnedVehicle(v))
+                    {
+                        continue;
+                    }
+
+                    AIVehicle aiVeh = GetOrCacheAIVehicle(v, vh);
+                    if (aiVeh == null || aiVeh.hasEnemy || aiVeh.wasBeingRepaired ||
+                        aiVeh.stopToShoot || !aiVeh.destinationActive || aiVeh.DestinationReached)
+                    {
+                        vh.WatchdogStationarySince = 0f;
+                        continue;
+                    }
+
+                    Soldier driverOrOccupant = null;
+                    bool hasHuman = false;
+                    var seats = v.seats;
+                    if (seats != null)
+                    {
+                        int sc = seats.Length;
+                        for (int sIdx = 0; sIdx < sc; sIdx++)
+                        {
+                            Seats seat = seats[sIdx];
+                            if (seat == null)
+                                continue;
+                            Soldier occ = seat.unitSet;
+                            if (occ == null || occ.Pointer == IntPtr.Zero || !occ.IsAlive)
+                                continue;
+                            if (occ.IsPlayer())
+                            {
+                                hasHuman = true;
+                                break;
+                            }
+                            if (driverOrOccupant == null || seat.isDriver)
+                                driverOrOccupant = occ;
+                        }
+                    }
+
+                    if (hasHuman || driverOrOccupant == null)
+                    {
+                        vh.WatchdogStationarySince = 0f;
+                        continue;
+                    }
+
+                    Vector3 pos = vh.Tr.position;
+                    Vector3 dest = aiVeh.setVehicleDestination;
+                    if (dest.sqrMagnitude < 1.0f || (dest - pos).sqrMagnitude <= 30.0f * 30.0f)
+                    {
+                        vh.WatchdogStationarySince = 0f;
+                        continue;
+                    }
+
+                    if (vh.WatchdogStationarySince <= 0f ||
+                        now < vh.WatchdogStationarySince ||
+                        (pos - vh.WatchdogAnchorPos).sqrMagnitude > 1.5f * 1.5f)
+                    {
+                        vh.WatchdogAnchorPos = pos;
+                        vh.WatchdogStationarySince = now;
+                    }
+                    else if (now - vh.WatchdogStationarySince > 25.0f && now >= vh.NextAnomalyAlertTime)
+                    {
+                        vh.NextAnomalyAlertTime = now + 20.0f;
+                        AnomalyVehicleStuckCount++;
+                        float remDist = Vector3.Distance(pos, dest);
+                        float stuckDur = now - vh.WatchdogStationarySince;
+                        BotActionTrace.RecordEvent(driverOrOccupant, BotTraceEventKind.AnomalyAlert, "vehicle_stuck_25s", remDist, stuckDur);
+                        LogDebug("VehWatchdog", $"{v.name} stuck {stuckDur:F0}s ({remDist:F0}m from MoveDestination).", 6.0f);
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                ReportPatchException("Watchdog.Veh", ex);
+            }
+        }
+
         private static void AuditWorldSoldiersForAnomalies(float now)
         {
             if (now < _nextAnomalyWatchdogScanTime && (now + 5.0f) >= _nextAnomalyWatchdogScanTime)
@@ -2511,6 +2901,7 @@ namespace EasyRed2HumanAI
 
             _nextAnomalyWatchdogScanTime = now + 1.05f;
             bool traceEnabled = BotActionTrace.IsEnabled;
+            AuditVehiclesForAnomalies(now);
 
             for (int i = 0; i < WorldSoldierCount; i++)
             {
@@ -2538,6 +2929,7 @@ namespace EasyRed2HumanAI
                             if (now >= h.NextAnomalyAlertTime)
                             {
                                 h.NextAnomalyAlertTime = now + 8.0f;
+                                AnomalySurrenderCount++;
                                 BotActionTrace.RecordEvent(u, BotTraceEventKind.AnomalyAlert, "surrender_pose_mismatch", now - h.SurrenderedSinceTime);
                             }
                             VeteranAndTacticsPatches.EnsureSurrenderedPrisonerAnimatorAndPose(u);
@@ -2545,6 +2937,12 @@ namespace EasyRed2HumanAI
                     }
 
                     // Detector 2: Surrendered prisoner ignored by unengaged nearby friendly foot bots
+                    if (h.Goap.FootStuck.SurrenderedFromTrap)
+                    {
+                        h.UnliberatedWithNearbyAllySince = 0f;
+                        continue;
+                    }
+
                     float nearestAllyDistSq = 18.0f * 18.0f;
                     bool hasNearbyUnengagedAlly = false;
                     for (int j = 0; j < WorldSoldierCount; j++)
@@ -2586,6 +2984,7 @@ namespace EasyRed2HumanAI
                         else if (now - h.UnliberatedWithNearbyAllySince > 12.0f && now >= h.NextAnomalyAlertTime)
                         {
                             h.NextAnomalyAlertTime = now + 10.0f;
+                            AnomalyPrisonerCount++;
                             BotActionTrace.RecordEvent(
                                 u,
                                 BotTraceEventKind.AnomalyAlert,
@@ -2604,9 +3003,8 @@ namespace EasyRed2HumanAI
                     h.SurrenderedSinceTime = 0f;
                     h.UnliberatedWithNearbyAllySince = 0f;
 
-                    // Detector 3: Idle-in-open zombie bot while actual endpoint is > 20m away (only when trace logging is active)
-                    bool eligibleZombieAudit = traceEnabled &&
-                                               !ws.IsPlayer &&
+                    // Detector 3: Idle-in-open zombie bot while actual endpoint is > 20m away
+                    bool eligibleZombieAudit = !ws.IsPlayer &&
                                                !ws.IsOnVehicle &&
                                                !ws.IsInjured &&
                                                !ws.IsSquadLeader &&
@@ -2642,12 +3040,17 @@ namespace EasyRed2HumanAI
                                 if (destDistSq > 20.0f * 20.0f)
                                 {
                                     h.NextAnomalyAlertTime = now + 15.0f;
-                                    BotActionTrace.RecordEvent(
-                                        u,
-                                        BotTraceEventKind.AnomalyAlert,
-                                        "idle_in_open_zombie",
-                                        Mathf.Sqrt(destDistSq),
-                                        now - h.WatchdogStationarySince);
+                                    AnomalyZombieCount++;
+                                    if (traceEnabled)
+                                    {
+                                        string whyDetail = $"idle_in_open_zombie:p={(ai.HasPath ? 1 : 0)},r={(ai.HasPathRequest ? 1 : 0)},lk={(ai.PathCalculationLocked ? 1 : 0)},td={(u.HasDestinationAssigned ? 1 : 0)}";
+                                        BotActionTrace.RecordEvent(
+                                            u,
+                                            BotTraceEventKind.AnomalyAlert,
+                                            whyDetail,
+                                            Mathf.Sqrt(destDistSq),
+                                            now - h.WatchdogStationarySince);
+                                    }
                                 }
                             }
                         }
@@ -3019,6 +3422,10 @@ namespace EasyRed2HumanAI
                 Array.Clear(ActivePlayerAimLanes, 0, ActivePlayerAimLaneCount);
             ActivePlayerAimLaneCount = 0;
             _nextPlayerAimLaneRefreshTime = 0f;
+            if (ActiveVehicleDangerCorridorCount > 0)
+                Array.Clear(ActiveVehicleDangerCorridors, 0, ActiveVehicleDangerCorridorCount);
+            ActiveVehicleDangerCorridorCount = 0;
+            _nextVehicleDangerCorridorRefreshTime = 0f;
             _cachedMainCamera = null;
             _nextMainCameraLookupTime = 0f;
             _throwablePrefabCache.Clear();
@@ -3031,7 +3438,7 @@ namespace EasyRed2HumanAI
             WorldSoldierCount = 0;
             WorldInjuredSoldierCount = 0;
             _lastWorldSnapshotTime = -999f;
-            _nextAllowedBotRpcTime = 0f;
+            ResetCoopRpcNetworkState();
             _nextLocalPlayerRadioHintTime = 0f;
             TotalAdaptiveAiExtraTicks = 0;
             TotalPingGovernorSkippedCycles = 0;
@@ -3044,6 +3451,9 @@ namespace EasyRed2HumanAI
             _nextFrameWindowRolloverTime = 0f;
             _nextWatchObjectiveSnapshotTime = 0f;
             _watchObjectiveSnapshotCount = 0;
+            _nextVehicleAnomalyScanTime = 0f;
+            VeteranAndTacticsPatches.ClearActiveLiveGrenades();
+            ResetMatchTelemetryAndExceptions();
         }
 
         public static void PruneSpatialCachesIfOversized()

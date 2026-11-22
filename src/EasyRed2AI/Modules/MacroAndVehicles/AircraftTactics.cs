@@ -8,8 +8,19 @@ namespace EasyRed2HumanAI
     public static partial class VeteranAndTacticsPatches
     {
         private static Spottable FindBestAirborneEnemyAircraft(AIPlane plane, string myFaction, Vector3 planePos, out bool anyEnemyAirborne)
+            => FindBestAirborneEnemyAircraft(plane, myFaction, planePos, out anyEnemyAirborne, out _, out _);
+
+        private static Spottable FindBestAirborneEnemyAircraft(
+            AIPlane plane,
+            string myFaction,
+            Vector3 planePos,
+            out bool anyEnemyAirborne,
+            out float nearestAirDist,
+            out bool bestIsBomber)
         {
             anyEnemyAirborne = false;
+            nearestAirDist = 99999f;
+            bestIsBomber = false;
             Spottable bestTarget = null;
             float bestScore = -99999f;
 
@@ -40,6 +51,9 @@ namespace EasyRed2HumanAI
                     continue;
 
                 anyEnemyAirborne = true;
+                if (dist < nearestAirDist)
+                    nearestAirDist = dist;
+
                 // Prioritize enemy fighters over bombers, and penalize point-blank (< 240m) targets when picking a fresh
                 // dogfight target so fighters set up proper lead turns instead of initiating instant head-on merges.
                 float score = (info.IsBomber ? 100.0f : 350.0f) - (dist * 0.25f);
@@ -49,6 +63,7 @@ namespace EasyRed2HumanAI
                 {
                     bestScore = score;
                     bestTarget = info.Spottable;
+                    bestIsBomber = info.IsBomber;
                 }
             }
 
@@ -107,6 +122,115 @@ namespace EasyRed2HumanAI
                 }
             }
 
+            if (planeVh != null &&
+                now < planeVh.UnderFireUntil &&
+                now >= planeVh.NextUnderFireWakeTime &&
+                AiCore.IsValidAliveSpottable(planeVh.UnderFireAttacker) &&
+                (plane.PilotGunHasAnyAmmo() || plane.HasBombsToDeliver()) &&
+                curPlaneState != AIPlane.PlaneAIState.takeOff &&
+                curPlaneState != AIPlane.PlaneAIState.gatheringSpeed &&
+                curPlaneState != AIPlane.PlaneAIState.landing &&
+                curPlaneState != AIPlane.PlaneAIState.exitDive &&
+                curPlaneState != AIPlane.PlaneAIState.goingTorefill &&
+                curPlaneState != AIPlane.PlaneAIState.doingRefill &&
+                curPlaneState != AIPlane.PlaneAIState.bomberAligning &&
+                curPlaneState != AIPlane.PlaneAIState.bomberApproaching &&
+                curPlaneState != AIPlane.PlaneAIState.bomberRetreating)
+            {
+                planeVh.NextUnderFireWakeTime = now + 0.50f;
+                Spottable ufAtk = planeVh.UnderFireAttacker;
+                string ufFac = GetVehicleCrewFaction(plane.veh);
+                if (!string.IsNullOrEmpty(ufFac))
+                {
+                    if (ufAtk.IsAirVehicle())
+                    {
+                        VehiclePlane atkPlane = ufAtk.TryCast<VehiclePlane>();
+                        if (atkPlane != null &&
+                            !atkPlane.isGrounded &&
+                            atkPlane.CanFight() &&
+                            plane.PilotGunHasAnyAmmo())
+                        {
+                            Vector3 atkPos = atkPlane.transform != null ? atkPlane.transform.position : ufAtk.GetPosition();
+                            bool shouldEngageAirAttacker =
+                                curPlaneState == AIPlane.PlaneAIState.flyingAroundArea ||
+                                curPlaneState == AIPlane.PlaneAIState.preparingDive;
+                            if (!shouldEngageAirAttacker && curPlaneState == AIPlane.PlaneAIState.doingDive)
+                            {
+                                Spottable diveTgt = plane.targetToAttack;
+                                if ((diveTgt == null || !diveTgt.IsAirVehicle()) &&
+                                    plane.transform.forward.y > -0.35f &&
+                                    (plane.transform.position.y - atkPos.y) > -600f)
+                                {
+                                    shouldEngageAirAttacker = true;
+                                }
+                            }
+                            else if (!shouldEngageAirAttacker && curPlaneState == AIPlane.PlaneAIState.targetingPlane)
+                            {
+                                Spottable curAirTgt = plane.targetToAttack;
+                                if (curAirTgt == null || curAirTgt.Pointer == IntPtr.Zero)
+                                {
+                                    shouldEngageAirAttacker = true;
+                                }
+                                else if (curAirTgt.Pointer != ufAtk.Pointer)
+                                {
+                                    float ufDist = Vector3.Distance(plane.transform.position, atkPos);
+                                    float curDist = Vector3.Distance(plane.transform.position, curAirTgt.GetPosition());
+                                    if (curDist > ufDist * 2.2f)
+                                        shouldEngageAirAttacker = true;
+                                }
+                            }
+
+                            if (shouldEngageAirAttacker)
+                            {
+                                plane.DoAttackTarget(ufAtk);
+                                planeVh.FlyingAroundAreaSince = 0f;
+                                return;
+                            }
+                        }
+                    }
+                    else if (curPlaneState == AIPlane.PlaneAIState.flyingAroundArea)
+                    {
+                        Spottable airThreat = FindBestAirborneEnemyAircraft(plane, ufFac, plane.transform.position, out bool anyEnemyAir, out float nearestAirDist, out bool bestAirBomber);
+                        bool hasBombs = plane.HasBombsToDeliver();
+                        bool hasApCannons = HasAircraftAntiArmorCannons(plane, out float bestPenMm);
+                        bool emergentAirOn = VisionConfig.EnableEmergentDecisionEngine != null && VisionConfig.EnableEmergentDecisionEngine.Value;
+                        if (CanAircraftCounterAttackGroundUnit(
+                                ufFac,
+                                plane.transform.position,
+                                plane.transform.root,
+                                ufAtk,
+                                hasBombs,
+                                hasApCannons,
+                                bestPenMm,
+                                out float ufDist))
+                        {
+                            bool allowCounter = !anyEnemyAir;
+                            if (emergentAirOn &&
+                                EmergentRuntimeBridge.TryEvaluateEmergentAirDecision(
+                                    plane,
+                                    airThreat,
+                                    bestAirBomber,
+                                    nearestAirDist,
+                                    hasGroundTarget: true,
+                                    Mathf.Clamp01(0.75f - ufDist * 0.0005f),
+                                    groundIsArmorOrCluster: true,
+                                    hasApCannons,
+                                    out var airDec))
+                            {
+                                allowCounter = airDec.Action == EmergentEngine.AirActionId.AttackGround;
+                            }
+
+                            if (allowCounter)
+                            {
+                                plane.DoAttackTarget(ufAtk);
+                                planeVh.FlyingAroundAreaSince = 0f;
+                                return;
+                            }
+                        }
+                    }
+                }
+            }
+
             if (_nextPlaneOrbitSteerTime.TryGetValue(vehPtr, out float nextSteer) && now < nextSteer)
                 return;
 
@@ -146,9 +270,54 @@ namespace EasyRed2HumanAI
                 }
             }
 
-            // Air Superiority First ("Clear Skies Only" Ground Support):
-            // Ensure fighter dogfight leash isn't truncated, and if an armed plane is patrolling in flyingAroundArea
-            // with an enemy aircraft in the airspace, hand off the air target via DoAttackTarget.
+            bool emergentAir = VisionConfig.EnableEmergentDecisionEngine != null && VisionConfig.EnableEmergentDecisionEngine.Value;
+            if (emergentAir)
+            {
+                if (plane.planeState != AIPlane.PlaneAIState.flyingAroundArea)
+                    return;
+
+                if (!plane.PilotGunHasAnyAmmo() && !plane.HasBombsToDeliver())
+                    return;
+
+                Spottable emergentTarget = null;
+                TrySelectKnownAircraftTarget(plane, ref emergentTarget);
+                if (emergentTarget == null || emergentTarget.Pointer == IntPtr.Zero)
+                    return;
+
+                if (emergentTarget.IsAirVehicle())
+                {
+                    if (AIPlane.fighterDogfightExtraLeash < 1800.0f)
+                        AIPlane.fighterDogfightExtraLeash = 1800.0f;
+
+                    Spottable curAtk = plane.targetToAttack;
+                    bool alreadyTargetingAir = curAtk != null && curAtk.Pointer != IntPtr.Zero && curAtk.IsAirVehicle();
+                    if (!alreadyTargetingAir && plane.veh.planeType != PlaneType.Bomber && plane.PilotGunHasAnyAmmo())
+                    {
+                        planeVh.FlyingAroundAreaSince = 0f;
+                        plane.DoAttackTarget(emergentTarget);
+                        if (TryRecordCombinedArmsAssist(vehPtr, now))
+                        {
+                            AiCore.LogDebug("CombArmsAirSup", $"{myFaction} fighter intercepted enemy aircraft via H.A.R.M.");
+                        }
+                    }
+                }
+                else
+                {
+                    bool canLaunchCasBreakout = (plane.veh.planeType == PlaneType.Fighter || (!plane.veh.BomberDestination.HasValue && plane.HasBombsToDeliver())) &&
+                                                (plane.targetToAttack == null || plane.targetToAttack.Pointer == IntPtr.Zero) &&
+                                                planeVh != null &&
+                                                planeVh.FlyingAroundAreaSince > 0f &&
+                                                (now - planeVh.FlyingAroundAreaSince) >= 2.0f;
+                    if (canLaunchCasBreakout)
+                    {
+                        planeVh.FlyingAroundAreaSince = 0f;
+                        plane.DoAttackTarget(emergentTarget);
+                    }
+                }
+                return;
+            }
+
+            // Legacy Air Superiority First ("Clear Skies Only" Ground Support) when H.A.R.M. is toggled OFF:
             Spottable bestEnemyAir = FindBestAirborneEnemyAircraft(plane, myFaction, plane.transform.position, out bool anyEnemyAirborne);
             if (anyEnemyAirborne)
             {
@@ -228,7 +397,7 @@ namespace EasyRed2HumanAI
             if (sqCount <= 0)
                 return false;
 
-            float safeRadius = hasBombsToDeliver ? 38.0f : 18.0f;
+            float safeRadius = hasBombsToDeliver ? 26.0f : 15.0f;
             float safeRadiusSq = safeRadius * safeRadius;
             float maxVertDelta = hasBombsToDeliver ? 28.0f : 20.0f;
             var squads = AiCore.WorldSquads;
@@ -296,14 +465,57 @@ namespace EasyRed2HumanAI
             return bestPenMm >= 22.0f;
         }
 
+        private static bool CanAircraftCounterAttackGroundUnit(
+            string myFaction,
+            Vector3 planePos,
+            Transform planeRoot,
+            Spottable target,
+            bool hasBombs,
+            bool hasAntiArmorCannons,
+            float bestPlanePenMm,
+            out float dist)
+        {
+            dist = 0f;
+            if (!AiCore.IsValidAliveSpottable(target) || target.IsAirVehicle())
+                return false;
+
+            Vector3 targetPos = target.GetCenterOfUnit();
+            Vector3 toTarget = targetPos - planePos;
+            dist = toTarget.magnitude;
+            if (dist < 95.0f || dist > 1150.0f)
+                return false;
+
+            if (IsAircraftTargetDangerCloseToFriendlySquad(myFaction, targetPos, hasBombs))
+                return false;
+
+            if (target.IsWheeledVehicleOrTank())
+            {
+                Vehicle v = target.TryCast<Vehicle>();
+                if (v != null)
+                {
+                    float armorMm = GetVehicleMaxHullArmorMm(v);
+                    bool canPierceTopOrSide = hasAntiArmorCannons && bestPlanePenMm >= armorMm * 0.40f;
+                    if (!hasBombs && !v.IsStatic() && armorMm >= 12.0f && !canPierceTopOrSide)
+                        return false;
+                }
+            }
+
+            return !AiCore.RaycastEnvironment(planePos, toTarget / dist, dist - 4.0f, planeRoot, out _);
+        }
+
         public static void TrySelectKnownAircraftTarget(AIPlane plane, ref Spottable currentResult)
         {
             if (plane == null || plane.veh == null || plane.transform == null)
                 return;
 
-            // Air-to-air dogfights always retain top priority
-            if (currentResult != null && currentResult.Pointer != IntPtr.Zero && currentResult.IsAirVehicle())
-                return;
+            bool emergentOn = VisionConfig.EnableEmergentDecisionEngine != null && VisionConfig.EnableEmergentDecisionEngine.Value;
+
+            if (!emergentOn)
+            {
+                // Air-to-air dogfights always retain top priority
+                if (currentResult != null && currentResult.Pointer != IntPtr.Zero && currentResult.IsAirVehicle())
+                    return;
+            }
 
             string myFaction = GetVehicleCrewFaction(plane.veh);
             if (string.IsNullOrEmpty(myFaction))
@@ -313,29 +525,35 @@ namespace EasyRed2HumanAI
 
             Vector3 planePos = plane.transform.position;
 
-            // Air Superiority Gate ("Clear Skies Only" Ground Support):
-            // Fix vanilla's 850m PointOctree radius cap in GetBestAircraftVisibleEnemy (0x180571BC6) and enforce
-            // strict air superiority: if any enemy aircraft is airborne in the battle airspace, never assign
-            // ground CAS targets, and direct armed fighters/attack planes to dogfight the enemy aircraft first.
-            Spottable bestEnemyAir = FindBestAirborneEnemyAircraft(plane, myFaction, planePos, out bool anyEnemyAirborne);
-            if (anyEnemyAirborne)
+            Spottable bestEnemyAir = FindBestAirborneEnemyAircraft(plane, myFaction, planePos, out bool anyEnemyAirborne, out float nearestAirDist, out bool bestAirIsBomber);
+            if (!emergentOn)
             {
-                if (bestEnemyAir != null && plane.PilotGunHasAnyAmmo())
+                if (anyEnemyAirborne)
                 {
-                    currentResult = bestEnemyAir;
-                    if (TryRecordCombinedArmsAssist(plane.veh.Pointer, Time.time))
+                    if (bestEnemyAir != null && plane.PilotGunHasAnyAmmo())
                     {
-                        AiCore.LogDebug(
-                            "CombArmsAirSup",
-                            $"{myFaction} aircraft detected enemy plane in airspace; prioritizing dogfight over ground attack.");
+                        currentResult = bestEnemyAir;
+                        if (TryRecordCombinedArmsAssist(plane.veh.Pointer, Time.time))
+                        {
+                            AiCore.LogDebug(
+                                "CombArmsAirSup",
+                                $"{myFaction} aircraft detected enemy plane in airspace; prioritizing dogfight over ground attack.");
+                        }
                     }
+                    else if (!IsJapaneseKamikazeActive(plane))
+                    {
+                        currentResult = null;
+                    }
+                    return;
                 }
-                else if (!IsJapaneseKamikazeActive(plane))
-                {
-                    // Never initiate ground attacks while enemy aircraft contest the airspace (unless executing a final Kamikaze dive)
-                    currentResult = null;
-                }
-                return;
+            }
+            else if (currentResult != null && currentResult.Pointer != IntPtr.Zero && currentResult.IsAirVehicle() && bestEnemyAir == null)
+            {
+                bestEnemyAir = currentResult;
+                anyEnemyAirborne = true;
+                nearestAirDist = Vector3.Distance(planePos, currentResult.GetCenterOfUnit());
+                VehiclePlane vp = currentResult.TryCast<VehiclePlane>();
+                bestAirIsBomber = vp != null && vp.planeType == PlaneType.Bomber;
             }
 
             Vector3 planeFwd = plane.transform.forward;
@@ -349,12 +567,16 @@ namespace EasyRed2HumanAI
             bool isOrbitingArea = plane.planeState == AIPlane.PlaneAIState.flyingAroundArea;
             float effectiveMaxAngle = isOrbitingArea ? 135.0f : 62.0f;
 
-            float curScore = currentResult != null
-                ? EvaluateExistingTargetPriority(currentResult, myFaction, planePos, true)
+            Spottable groundBase = (currentResult != null && AiCore.IsValidAliveSpottable(currentResult) && !currentResult.IsAirVehicle())
+                ? currentResult
+                : null;
+            float curScore = groundBase != null
+                ? EvaluateExistingTargetPriority(groundBase, myFaction, planePos, true)
                 : -999f;
 
             Spottable bestCandidate = null;
             float bestScore = curScore + 15.0f;
+            bool bestIsArmorOrCluster = groundBase != null && groundBase.IsWheeledVehicleOrTank();
 
             bool limitUnmarkedInfantry = VisionConfig.LimitAircraftInfantrySpotting.Value;
             float altitudeCompensation = Mathf.Max(0f, planePos.y) * 1.25f;
@@ -363,6 +585,34 @@ namespace EasyRed2HumanAI
                 Mathf.Max(VisionConfig.AircraftUnmarkedInfantryMaxDist.Value * 2.5f + altitudeCompensation, 680.0f));
             bool hasLiveBombsNow = plane.HasBombsToDeliver();
             bool hasAntiArmorCannons = HasAircraftAntiArmorCannons(plane, out float bestPlanePenMm);
+
+            AiCore.VehicleFastHandles planeVh = AiCore.GetOrCreateVehicleHandles(plane.veh);
+            float now = Time.time;
+            if (planeVh != null &&
+                now < planeVh.UnderFireUntil &&
+                AiCore.IsValidAliveSpottable(planeVh.UnderFireAttacker) &&
+                !planeVh.UnderFireAttacker.IsAirVehicle())
+            {
+                Spottable ufCand = planeVh.UnderFireAttacker;
+                if (CanAircraftCounterAttackGroundUnit(
+                        myFaction,
+                        planePos,
+                        planeRoot,
+                        ufCand,
+                        hasLiveBombsNow,
+                        hasAntiArmorCannons,
+                        bestPlanePenMm,
+                        out float ufDist))
+                {
+                    float ufScore = 125.0f - (ufDist * 0.05f);
+                    if (ufScore > bestScore)
+                    {
+                        bestScore = ufScore;
+                        bestCandidate = ufCand;
+                        bestIsArmorOrCluster = ufCand.IsWheeledVehicleOrTank();
+                    }
+                }
+            }
 
             int clusterCount = _knownEnemyClusters.Count;
             for (int i = 0; i < clusterCount; i++)
@@ -411,6 +661,12 @@ namespace EasyRed2HumanAI
                             if (!hasLiveBombsNow && !canPierceTopOrSide)
                                 continue;
                             vehBonus = hasLiveBombsNow ? 30.0f : (hasAntiArmorCannons ? 35.0f : 8.0f);
+                            if (cluster.IsEngagingFriendlies || cluster.IsMarkedOrPinPoint || cluster.NearRadioRequest)
+                            {
+                                vehBonus += 32.0f;
+                                if (cluster.IsEngagingFriendlies && hasLiveBombsNow)
+                                    vehBonus += 10.0f;
+                            }
                         }
                         else
                         {
@@ -430,13 +686,14 @@ namespace EasyRed2HumanAI
 
                     bestScore = candScore;
                     bestCandidate = cand;
+                    bestIsArmorOrCluster = isVehCand || cluster.SecondarySoldier != null || cluster.IsEngagingFriendlies;
                     break;
                 }
             }
 
             // Fallback for island / infantry-defense maps (e.g. Battle of Makin) when orbiting with no target:
             // scan WorldSquads for any exposed/standing or combat-aware enemy squad or ground vehicle in LOS.
-            if (bestCandidate == null && currentResult == null && isOrbitingArea)
+            if (bestCandidate == null && groundBase == null && (isOrbitingArea || (emergentOn && hasLiveBombsNow)))
             {
                 AiCore.EnsureWorldSnapshot();
                 int sqCount = AiCore.WorldSquadCount;
@@ -509,12 +766,63 @@ namespace EasyRed2HumanAI
 
                     bestScore = candScore;
                     bestCandidate = cand;
+                    bestIsArmorOrCluster = isVeh || sqSnap.UnitCount >= 3;
                 }
             }
 
-            if (bestCandidate != null && (currentResult == null || bestCandidate.Pointer != currentResult.Pointer))
+            if (bestCandidate != null && (groundBase == null || bestCandidate.Pointer != groundBase.Pointer))
+                groundBase = bestCandidate;
+            else if (groundBase != null)
+                bestScore = curScore;
+
+            if (emergentOn && !IsJapaneseKamikazeActive(plane))
             {
-                currentResult = bestCandidate;
+                float groundScore01 = groundBase != null ? Mathf.Clamp01(Mathf.Max(20f, bestScore) / 120f) : 0f;
+                if (EmergentRuntimeBridge.TryEvaluateEmergentAirDecision(
+                        plane,
+                        bestEnemyAir,
+                        bestAirIsBomber,
+                        nearestAirDist,
+                        groundBase != null,
+                        groundScore01,
+                        bestIsArmorOrCluster,
+                        hasAntiArmorCannons,
+                        out var airDec))
+                {
+                    if (airDec.Action == EmergentEngine.AirActionId.InterceptAir && bestEnemyAir != null)
+                    {
+                        if (AIPlane.fighterDogfightExtraLeash < 1800.0f)
+                            AIPlane.fighterDogfightExtraLeash = 1800.0f;
+                        currentResult = bestEnemyAir;
+                        if (TryRecordCombinedArmsAssist(plane.veh.Pointer, Time.time))
+                        {
+                            AiCore.LogDebug("CombArmsAirSup", $"{myFaction} aircraft selected {airDec.Reason} over ground CAS via H.A.R.M.");
+                        }
+                        return;
+                    }
+                    if (airDec.Action == EmergentEngine.AirActionId.AttackGround && groundBase != null)
+                    {
+                        if (currentResult == null || groundBase.Pointer != currentResult.Pointer)
+                        {
+                            currentResult = groundBase;
+                            if (TryRecordCombinedArmsAssist(plane.veh.Pointer, Time.time))
+                            {
+                                AiCore.LogDebug("CombArmsCAS", $"{myFaction} aircraft prioritized ground CAS ({airDec.Reason}) via H.A.R.M.");
+                            }
+                        }
+                        return;
+                    }
+                    if (airDec.Action == EmergentEngine.AirActionId.RefillOrEvade)
+                    {
+                        currentResult = (!hasLiveBombsNow && !plane.PilotGunHasAnyAmmo()) ? null : (groundBase ?? bestEnemyAir);
+                        return;
+                    }
+                }
+            }
+
+            if (groundBase != null && (currentResult == null || groundBase.Pointer != currentResult.Pointer))
+            {
+                currentResult = groundBase;
                 if (TryRecordCombinedArmsAssist(plane.veh.Pointer, Time.time))
                 {
                     AiCore.LogDebug(
@@ -1077,39 +1385,115 @@ namespace EasyRed2HumanAI
             return Mathf.Max(55.0f, Mathf.Max(vp.startLiftVelocity * 1.35f, (vp.maxKmhSpeed / 3.6f) * 0.80f));
         }
 
-        internal static void TryHotStartAirbornePlane(VehiclePlane vp, bool allowAiPilot)
+        private static bool IsPlaneOnGroundOrRunway(VehiclePlane vp)
+        {
+            if (vp == null || vp.transform == null)
+                return true;
+
+            vp.RefreshGrounded();
+            if (vp.isGrounded)
+                return true;
+
+            Vector3 pos = vp.transform.position;
+            if (pos.y <= 6.0f)
+                return true;
+
+            if (AiCore.RaycastEnvironment(pos + Vector3.up * 1.8f, Vector3.down, 11.0f, vp.transform.root, out _))
+                return true;
+
+            return ResourcesManager.GetDistanceFromTerrain(pos, 5.0f, false) <= 10.0f;
+        }
+
+        internal static void TryStartAirborneSpawnHold(VehiclePlane vp)
         {
             if (vp == null ||
                 vp.Pointer == IntPtr.Zero ||
+                vp.transform == null ||
                 !VisionConfig.EnableMod.Value ||
-                !VisionConfig.EnableCoopAirborneSpawnFix.Value ||
-                !vp.OwnDriverOrVehicle() ||
-                (!allowAiPilot && !vp.PlayerIsInside()) ||
-                vp.IsDisabled() ||
-                vp.transform == null)
+                !VisionConfig.EnableCoopAirborneSpawnFix.Value)
             {
                 return;
             }
 
-            IntPtr ptr = vp.Pointer;
-            if (_hotStartedPlayerPlanes.Contains(ptr))
+            if (Photon.Pun.PhotonNetwork.InRoom && !AiCore.IsMasterClient())
                 return;
 
-            vp.RefreshGrounded();
-            bool onGroundOrRunway =
-                vp.isGrounded ||
-                (vp.transform.position.y < 45.0f &&
-                 AiCore.RaycastEnvironment(vp.transform.position + Vector3.up * 1.8f, Vector3.down, 11.0f, vp.transform.root, out _));
-
-            _hotStartedPlayerPlanes.Add(ptr);
-            if (onGroundOrRunway)
+            if (vp.IsDisabled() || !vp.HasNeverExploded() || vp.HasDriver())
                 return;
 
-            vp.SetPhysicsEnabled(true);
+            AiCore.VehicleFastHandles vh = AiCore.GetOrCreateVehicleHandles(vp);
+            if (vh == null)
+                return;
+
+            if (IsPlaneOnGroundOrRunway(vp))
+            {
+                vh.PlaneGroundSpawnChecked = true;
+                return;
+            }
+
+            float now = Time.time;
+            float holdDuration = (Photon.Pun.PhotonNetwork.InRoom && AiCore.IsMasterClient()) ? 5.0f : 2.5f;
+            vh.AirborneSpawnHoldActive = true;
+            vh.AirborneSpawnHoldUntil = now + holdDuration;
+            vh.AirborneSpawnHoldPos = vp.transform.position;
+            vh.AirborneSpawnHoldRot = vp.transform.rotation;
+            vp.nextCollisionDamageTime = Mathf.Max(vp.nextCollisionDamageTime, now + 2.0f);
+
+            Rigidbody rb = vp.rb;
+            if (rb != null)
+            {
+                rb.useGravity = false;
+                if (!rb.isKinematic)
+                {
+                    rb.velocity = Vector3.zero;
+                    rb.angularVelocity = Vector3.zero;
+                }
+            }
+        }
+
+        internal static void ReleaseAirborneSpawnHold(VehiclePlane vp, AiCore.VehicleFastHandles vh)
+        {
+            if (vh == null || !vh.AirborneSpawnHoldActive)
+                return;
+
+            vh.AirborneSpawnHoldActive = false;
+            vh.AirborneSpawnHoldUntil = 0f;
+
+            if (vp != null && vp.rb != null && !vp.rb.useGravity)
+            {
+                vp.rb.useGravity = true;
+            }
+        }
+
+        private static bool ApplyPlaneHotStartState(VehiclePlane vp, AiCore.VehicleFastHandles vh, bool forceVelocity)
+        {
+            ReleaseAirborneSpawnHold(vp, vh);
+
+            if (vp == null ||
+                vp.transform == null ||
+                vp.IsDisabled() ||
+                !vp.CanStartEngine ||
+                !vp.HasAtLeastAPropeller() ||
+                !vp.HasNeverExploded())
+            {
+                return false;
+            }
+
+            if (!vp.IsPhysicsEnabled)
+                vp.SetPhysicsEnabled(true);
+
+            Rigidbody rb = vp.rb;
+            if (rb != null && !rb.useGravity)
+                rb.useGravity = true;
+
+            float now = Time.time;
             if (!vp.engineStarted)
                 vp.StartEngine();
 
-            vp.engineStartTime = Time.time - 8.0f;
+            vp.startingCanceled = false;
+            // Native MovableVehicle.get_engineStarted checks engineStartTime > 0f && Time.time >= engineStartTime.
+            vp.engineStartTime = now > 0.05f ? Mathf.Max(0.01f, now - 8.0f) : 0.001f;
+            vp.isBraking = false;
             vp.throttle = 100.0f;
             float maxThrust = Mathf.Max(100.0f, vp.thrustForceMultiplier * 100.0f);
             vp.thrustForce = maxThrust;
@@ -1119,12 +1503,93 @@ namespace EasyRed2HumanAI
             vp.SetGearClosed();
             vp.isGrounded = false;
 
-            float cruiseMs = GetPlaneCruiseVelocityMs(vp);
-            Rigidbody rb = vp.rb;
-            if (rb != null && !rb.isKinematic && rb.velocity.sqrMagnitude < (cruiseMs * 0.72f) * (cruiseMs * 0.72f))
+            Quaternion rot = vp.transform.rotation;
+            vp.targetRotation = rot;
+            vp.previousDir = rot;
+            vp.nextCollisionDamageTime = Mathf.Max(vp.nextCollisionDamageTime, now + 1.0f);
+
+            SyncVehicle syncher = vp.vehicleSyncher;
+            if (syncher != null && vp.OwnDriver())
             {
-                rb.velocity = vp.transform.forward * cruiseMs;
+                syncher.syncDestPos = new Il2CppSystem.Nullable<Vector3>();
+                syncher.syncDestRot = new Il2CppSystem.Nullable<Quaternion>();
             }
+
+            float cruiseMs = GetPlaneCruiseVelocityMs(vp);
+            bool velReady = false;
+            if (rb != null && !rb.isKinematic)
+            {
+                float minCruiseSq = (cruiseMs * 0.72f) * (cruiseMs * 0.72f);
+                if (forceVelocity || rb.velocity.sqrMagnitude < minCruiseSq)
+                {
+                    rb.velocity = vp.transform.forward * cruiseMs;
+                    rb.angularVelocity = Vector3.zero;
+                }
+                velReady = rb.velocity.sqrMagnitude >= (cruiseMs * 0.65f) * (cruiseMs * 0.65f);
+            }
+
+            return vp.engineStarted && vp.throttle >= 95.0f && velReady;
+        }
+
+        internal static void BeginPlaneHotStartWindow(VehiclePlane vp, bool allowAiPilot, bool forceRecheck = false)
+        {
+            if (vp == null ||
+                vp.Pointer == IntPtr.Zero ||
+                !VisionConfig.EnableMod.Value ||
+                !VisionConfig.EnableCoopAirborneSpawnFix.Value ||
+                vp.IsDisabled() ||
+                vp.transform == null)
+            {
+                return;
+            }
+
+            AiCore.VehicleFastHandles vh = AiCore.GetOrCreateVehicleHandles(vp);
+            if (vh == null)
+                return;
+
+            vp.CheckDriverAndOwnership();
+
+            if (vp.HasDriverAlive)
+                ReleaseAirborneSpawnHold(vp, vh);
+
+            if (forceRecheck)
+            {
+                vh.PlaneGroundSpawnChecked = false;
+                vh.PlaneHotStarted = false;
+            }
+
+            float now = Time.time;
+            if (!vp.OwnDriverOrVehicle())
+            {
+                vh.PlaneHotStartPendingUntil = Mathf.Max(vh.PlaneHotStartPendingUntil, now + 3.0f);
+                vh.PlaneHotStartAllowAi = vh.PlaneHotStartAllowAi || allowAiPilot;
+                return;
+            }
+
+            if (!allowAiPilot && !vp.PlayerIsInside())
+                return;
+
+            if (vh.PlaneGroundSpawnChecked)
+                return;
+
+            if (IsPlaneOnGroundOrRunway(vp))
+            {
+                vh.PlaneGroundSpawnChecked = true;
+                vh.PlaneHotStartPendingUntil = 0f;
+                vh.PlaneHotStartWindowUntil = 0f;
+                return;
+            }
+
+            vh.PlaneHotStartWindowUntil = Mathf.Max(vh.PlaneHotStartWindowUntil, now + 2.5f);
+            vh.PlaneHotStartPendingUntil = 0f;
+            vh.PlaneHotStartAllowAi = vh.PlaneHotStartAllowAi || allowAiPilot;
+            if (ApplyPlaneHotStartState(vp, vh, forceVelocity: false))
+                vh.PlaneHotStarted = true;
+        }
+
+        internal static void TryHotStartAirbornePlane(VehiclePlane vp, bool allowAiPilot)
+        {
+            BeginPlaneHotStartWindow(vp, allowAiPilot, false);
         }
 
         [HarmonyPatch(typeof(VehiclePlane), nameof(VehiclePlane.OnSquadSpawnInside))]
@@ -1141,7 +1606,157 @@ namespace EasyRed2HumanAI
                     RegisterPlaneCrewFromSeats(__instance);
                     if (VisionConfig.EnableCoopAirborneSpawnFix.Value)
                     {
-                        TryHotStartAirbornePlane(__instance, true);
+                        BeginPlaneHotStartWindow(__instance, allowAiPilot: true, forceRecheck: false);
+                    }
+                }
+                catch { }
+            }
+        }
+
+        [HarmonyPatch(typeof(VehiclePlane), nameof(VehiclePlane.FixedUpdate))]
+        public static class VehiclePlane_FixedUpdate_Patch
+        {
+            public static void Prefix(VehiclePlane __instance)
+            {
+                try
+                {
+                    if (__instance == null || __instance.Pointer == IntPtr.Zero)
+                        return;
+
+                    AiCore.VehicleFastHandles vh = AiCore.GetOrCreateVehicleHandles(__instance);
+                    if (vh == null || !vh.AirborneSpawnHoldActive)
+                        return;
+
+                    if (!VisionConfig.EnableMod.Value ||
+                        !VisionConfig.EnableCoopAirborneSpawnFix.Value ||
+                        Time.time >= vh.AirborneSpawnHoldUntil ||
+                        __instance.HasDriver() ||
+                        __instance.IsDisabled() ||
+                        !__instance.HasNeverExploded())
+                    {
+                        ReleaseAirborneSpawnHold(__instance, vh);
+                    }
+                    else if (__instance.rb != null && __instance.rb.useGravity)
+                    {
+                        __instance.rb.useGravity = false;
+                    }
+                }
+                catch { }
+            }
+
+            public static void Postfix(VehiclePlane __instance)
+            {
+                try
+                {
+                    if (__instance == null || __instance.Pointer == IntPtr.Zero)
+                        return;
+
+                    AiCore.VehicleFastHandles vh = AiCore.GetOrCreateVehicleHandles(__instance);
+                    if (vh == null)
+                        return;
+
+                    if (!VisionConfig.EnableMod.Value || !VisionConfig.EnableCoopAirborneSpawnFix.Value)
+                    {
+                        if (vh.AirborneSpawnHoldActive)
+                            ReleaseAirborneSpawnHold(__instance, vh);
+                        return;
+                    }
+
+                    float now = Time.time;
+                    bool ownNow = __instance.OwnDriverOrVehicle();
+                    bool hadObserved = vh.HasObservedOwnershipState;
+                    bool prevOwn = vh.WasOwnDriverOrVehicle;
+                    vh.WasOwnDriverOrVehicle = ownNow;
+                    vh.HasObservedOwnershipState = true;
+
+                    if (vh.AirborneSpawnHoldActive)
+                    {
+                        if (!ownNow ||
+                            __instance.HasDriverAlive ||
+                            __instance.IsDisabled() ||
+                            !__instance.HasNeverExploded() ||
+                            now >= vh.AirborneSpawnHoldUntil)
+                        {
+                            ReleaseAirborneSpawnHold(__instance, vh);
+                        }
+                        else
+                        {
+                            Rigidbody holdRb = __instance.rb;
+                            if (holdRb != null)
+                            {
+                                if (holdRb.useGravity)
+                                    holdRb.useGravity = false;
+                                if (!holdRb.isKinematic)
+                                {
+                                    holdRb.velocity = Vector3.zero;
+                                    holdRb.angularVelocity = Vector3.zero;
+                                }
+                            }
+
+                            if (__instance.transform != null)
+                            {
+                                __instance.transform.SetPositionAndRotation(vh.AirborneSpawnHoldPos, vh.AirborneSpawnHoldRot);
+                            }
+
+                            __instance.nextCollisionDamageTime = Mathf.Max(__instance.nextCollisionDamageTime, now + 1.5f);
+                            return;
+                        }
+                    }
+
+                    if (!ownNow)
+                        return;
+
+                    if (hadObserved && !prevOwn &&
+                        __instance.HasDriverAlive &&
+                        !__instance.IsDisabled() &&
+                        (!__instance.engineStarted || __instance.throttle < 50.0f))
+                    {
+                        BeginPlaneHotStartWindow(__instance, allowAiPilot: true, forceRecheck: true);
+                        return;
+                    }
+
+                    if (vh.PlaneHotStartPendingUntil > 0f)
+                    {
+                        if (now < vh.PlaneHotStartPendingUntil)
+                        {
+                            bool allowAi = vh.PlaneHotStartAllowAi;
+                            vh.PlaneHotStartPendingUntil = 0f;
+                            BeginPlaneHotStartWindow(__instance, allowAi, forceRecheck: true);
+                            return;
+                        }
+                        vh.PlaneHotStartPendingUntil = 0f;
+                    }
+
+                    if (vh.PlaneHotStartWindowUntil > 0f)
+                    {
+                        if (now >= vh.PlaneHotStartWindowUntil ||
+                            __instance.IsDisabled() ||
+                            !__instance.HasDriverAlive ||
+                            vh.PlaneGroundSpawnChecked)
+                        {
+                            vh.PlaneHotStartWindowUntil = 0f;
+                            return;
+                        }
+
+                        float cruiseMs = GetPlaneCruiseVelocityMs(__instance);
+                        Rigidbody rb = __instance.rb;
+                        bool stalled = rb != null &&
+                            !rb.isKinematic &&
+                            rb.velocity.sqrMagnitude < (cruiseMs * 0.55f) * (cruiseMs * 0.55f);
+                        bool deadStick =
+                            !__instance.engineStarted ||
+                            __instance.throttle < 10.0f ||
+                            __instance.isBraking ||
+                            __instance.isGrounded ||
+                            !__instance.IsPhysicsEnabled;
+
+                        if (!vh.PlaneHotStarted || deadStick || stalled)
+                        {
+                            if (ApplyPlaneHotStartState(__instance, vh, forceVelocity: stalled))
+                            {
+                                vh.PlaneHotStarted = true;
+                            }
+                        }
                     }
                 }
                 catch { }

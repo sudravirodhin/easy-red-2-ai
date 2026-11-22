@@ -85,8 +85,12 @@ namespace EasyRed2HumanAI
                     AiCore.RecordFrameTiming();
                     AiCore.UpdateNightVisionSnapshotIfDue();
                     AiCore.WarmWorldSnapshotIfDue();
+                    EmergentRuntimeBridge.TickPeriodicTelemetry(Time.time);
                     if (Time.timeScale > 0.01f)
+                    {
                         AiCore.RefreshActiveLandMinesIfDue();
+                        VeteranAndTacticsPatches.RefreshActiveLiveGrenadesIfDue();
+                    }
                     UpdatePendingMpMapSwitch();
                     CleanupExpiredFiringRecords();
                     try { VeteranAndTacticsPatches.RenderVeteran3DMarkersAndCleanup(); } catch { }
@@ -161,6 +165,7 @@ namespace EasyRed2HumanAI
                         else if (input.GetKeyDown(KeyCode.F8))
                         {
                             VisionConfig.EnableMod.Value = !VisionConfig.EnableMod.Value;
+                            HitchProfiler.NotifyModToggled();
                             Plugin.Instance.Config.Save();
                             VeteranAndTacticsPatches.RefreshBottomLeftSquadRosterVisuals();
                             string state = VisionConfig.EnableMod.Value
@@ -186,11 +191,11 @@ namespace EasyRed2HumanAI
                                 : "";
                             ShowToast(
                                 $"[Battle Hardened v{Plugin.PluginVersion} Telemetry] MaxFrame:{AiCore.RollingMaxFrameMs:F1}ms (Hitches:{AiCore.TotalHitchesOver28ms}) | Vets:{VeteranAndTacticsPatches.ActiveVeteransCount} (Prom:{VeteranAndTacticsPatches.FieldPromotionsCount}) | ExtraTicks:{AiCore.TotalAdaptiveAiExtraTicks} (PingSkip:{AiCore.TotalPingGovernorSkippedCycles}) | FFSaved:{VeteranAndTacticsPatches.FriendlyFirePrevented} (Yield:{VeteranAndTacticsPatches.PlayerCrosshairYieldsCount}) | MedRedirect:{VeteranAndTacticsPatches.MedicTriageRedirectsCount}\n" +
-                                $"GOAP:{VeteranAndTacticsPatches.GoapPlansExecutedCount} (Anvil:{VeteranAndTacticsPatches.TeamNetAnvilHammerCount} Flank:{VeteranAndTacticsPatches.GoapPinAndFlankCount} Charge:{VeteranAndTacticsPatches.SquadChargesOrderedCount} Balk:{VeteranAndTacticsPatches.SquadLeaderBalksCount}/{VeteranAndTacticsPatches.IndividualSelfPreservationBalksCount} Covert:{VeteranAndTacticsPatches.SquadCovertOrdersCount} Follow:{VeteranAndTacticsPatches.SquadFollowOrdersCount} Retreat:{VeteranAndTacticsPatches.TacticalRetreatsCount} Smoke:{VeteranAndTacticsPatches.GoapSmokeScreensCount} RadioCut:{VeteranAndTacticsPatches.RadioNetCutoffsCount}) | WepUp:{VeteranAndTacticsPatches.RoleWeaponUpgradesCount} | BuddyResup:{VeteranAndTacticsPatches.BuddyResuppliesCount} | RadioLoot:{VeteranAndTacticsPatches.FieldRadiosInheritedCount} | Helmets:{VeteranAndTacticsPatches.HelmetsRecoveredCount} | Dragged:{VeteranAndTacticsPatches.CasualtiesDraggedCount} | Sap:{AiCore.SpecialMunitionsUsedCount}\n" +
+                                $"HARM:{EmergentRuntimeBridge.TotalT1DecisionsCount} (Flank:{VeteranAndTacticsPatches.GoapPinAndFlankCount} Balk:{VeteranAndTacticsPatches.SquadLeaderBalksCount} Retreat:{VeteranAndTacticsPatches.TacticalRetreatsCount} Smoke:{VeteranAndTacticsPatches.GoapSmokeScreensCount} RadioCut:{VeteranAndTacticsPatches.RadioNetCutoffsCount}) | WepUp:{VeteranAndTacticsPatches.RoleWeaponUpgradesCount} | BuddyResup:{VeteranAndTacticsPatches.BuddyResuppliesCount} | RadioLoot:{VeteranAndTacticsPatches.FieldRadiosInheritedCount} | Helmets:{VeteranAndTacticsPatches.HelmetsRecoveredCount} | Dragged:{VeteranAndTacticsPatches.CasualtiesDraggedCount} | Sap:{AiCore.SpecialMunitionsUsedCount}\n" +
                                 $"Drops:{VeteranAndTacticsPatches.SelfPreservationDrops} | Peeks:{VeteranAndTacticsPatches.AutoPeeksTriggered} | BndBlk:{VeteranAndTacticsPatches.UnsafeBandagesBlockedCount} | IndoorCrouch:{VeteranAndTacticsPatches.IndoorPronePreventedCount} | Pies:{VeteranAndTacticsPatches.CornerPiesExecutedCount} | TankCov:{VeteranAndTacticsPatches.TankHullCoverUsesCount} | Bounds:{VeteranAndTacticsPatches.BoundingOverwatchHoldsCount} | Doors:{VeteranAndTacticsPatches.DoorsStrategicallyClosedCount} | Bipods:{VeteranAndTacticsPatches.BipodsDeployed} | WallBlk:{VeteranAndTacticsPatches.WallsBlocked} | FragBlk:{VeteranAndTacticsPatches.UselessTankFragsBlockedCount} | Melee:{VeteranAndTacticsPatches.MeleeAttacksTriggered} (Sup:{VeteranAndTacticsPatches.CloseGunfireMeleeSuppressedCount}) | Vault:{VeteranAndTacticsPatches.WallsVaulted} (Rej:{VeteranAndTacticsPatches.SlopedVaultsRejectedCount}) | Surr:{VeteranAndTacticsPatches.ShellShockSurrendersCount}/Lib:{VeteranAndTacticsPatches.ComradesLiberated}\n" +
                                 $"Garrisons:{VeteranAndTacticsPatches.MacroGarrisonsAssignedCount} (Pivots:{VeteranAndTacticsPatches.MacroObjectivePivotsCount}) | SpawnSaved:{VeteranAndTacticsPatches.UnderwaterSpawnsRescuedCount} | Emplace:{VeteranAndTacticsPatches.StaticGunsStaffedCount} | APC:{VeteranAndTacticsPatches.SmartApcDismountsCount} | TankHold:{VeteranAndTacticsPatches.TankStandoffHoldsCount} | TankSpread:{VeteranAndTacticsPatches.ArmoredDispersionAdjustmentsCount} | SmartAmmo:{VeteranAndTacticsPatches.SmartAmmoSwitchesCount} | Unsticks:{VeteranAndTacticsPatches.TankRockUnsticksCount} (Unstk:{VeteranAndTacticsPatches.FootBotUnsticksCount}) | Repairs:{VeteranAndTacticsPatches.ShelteredRepairsCount} | RoadkillSaved:{VeteranAndTacticsPatches.FriendlyRoadkillsPreventedCount} (ClientRK:{VeteranAndTacticsPatches.RemoteClientRoadkillsAssistedCount})\n" +
                                 $"CombArms:{VeteranAndTacticsPatches.CombinedArmsPriorityAssistsCount} (Intercom:{VeteranAndTacticsPatches.TankIntercomHandoffsCount} Kamikaze:{VeteranAndTacticsPatches.KamikazeDivesTriggeredCount}) | Callouts:{VeteranAndTacticsPatches.LocalCalloutsSharedCount} | Supp:{VeteranAndTacticsPatches.SuppressiveEventsCount} | WoodPen:{VeteranAndTacticsPatches.ThinCoverPenetrationsCount} | TopAP:{VeteranAndTacticsPatches.AircraftTopAttackPenetrationsAssistedCount} (HostAssist:{VeteranAndTacticsPatches.HostVanillaClientApAssistsCount}) | CrewBlastBlk:{VeteranAndTacticsPatches.EnclosedCrewExplosionHitsBlockedCount} | CrewClipBlk:{VeteranAndTacticsPatches.EnclosedCrewBulletClipsBlockedCount} | AirMgBlk:{VeteranAndTacticsPatches.AirplanePilotMgHitsBlockedCount} | Chutes:{VeteranAndTacticsPatches.ParachutesDriftedCount} | BloodOcc:{VeteranAndTacticsPatches.BloodSmokeWaterOccludedCount}\n" +
-                                $"Handles:{AiCore.ActiveSoldierHandlesCount}/{AiCore.ActiveVehicleHandlesCount} | MoveOvr:{AiCore.MoveOverridePreemptionsCount} | BotRPC:{AiCore.BotRpcBudgetGrantedCount}/{AiCore.BotRpcBudgetThrottledCount} | NetFlush:{VeteranAndTacticsPatches.ScoreboardCoalescedFlushesCount} (Sup:{VeteranAndTacticsPatches.ScoreboardVanillaPacketsSuppressedCount}){mpSbSummary}",
+                                $"Handles:{AiCore.ActiveSoldierHandlesCount}/{AiCore.ActiveVehicleHandlesCount} | MoveOvr:{AiCore.MoveOverridePreemptionsCount} | BotRPC:{AiCore.BotRpcBudgetGrantedCount}/{AiCore.BotRpcBudgetThrottledCount}{AiCore.GetCoopRpcTelemetrySuffix()} | NetFlush:{VeteranAndTacticsPatches.ScoreboardCoalescedFlushesCount} (Sup:{VeteranAndTacticsPatches.ScoreboardVanillaPacketsSuppressedCount}) | PatchErrs:{AiCore.TotalCaughtPatchExceptions} | Anoms[Z:{AiCore.AnomalyZombieCount} V:{AiCore.AnomalyVehicleStuckCount} P:{AiCore.AnomalyPrisonerCount} M:{AiCore.AnomalyMeleeCount}]{mpSbSummary}",
                                 9.5f);
                         }
                         else if (input.GetKeyDown(KeyCode.F) &&
@@ -218,23 +223,23 @@ namespace EasyRed2HumanAI
                         AiCore.LogDebug(
                             "Heartbeat",
                             $"FPS:{fps:F0} ({dtMs:F1}ms, Max15s:{AiCore.RollingMaxFrameMs:F1}ms, Hitches:{AiCore.TotalHitchesOver28ms}) | Vets:{VeteranAndTacticsPatches.ActiveVeteransCount} (Prom:{VeteranAndTacticsPatches.FieldPromotionsCount}) | " +
-                            $"GOAP:{VeteranAndTacticsPatches.GoapPlansExecutedCount} (Anvil:{VeteranAndTacticsPatches.TeamNetAnvilHammerCount} PinFlank:{VeteranAndTacticsPatches.GoapPinAndFlankCount} Charge:{VeteranAndTacticsPatches.SquadChargesOrderedCount} Balk:{VeteranAndTacticsPatches.SquadLeaderBalksCount}/{VeteranAndTacticsPatches.IndividualSelfPreservationBalksCount} Covert:{VeteranAndTacticsPatches.SquadCovertOrdersCount} Follow:{VeteranAndTacticsPatches.SquadFollowOrdersCount} Retreat:{VeteranAndTacticsPatches.TacticalRetreatsCount} Smoke:{VeteranAndTacticsPatches.GoapSmokeScreensCount} WepUp:{VeteranAndTacticsPatches.RoleWeaponUpgradesCount} BuddyResup:{VeteranAndTacticsPatches.BuddyResuppliesCount} RadioLoot:{VeteranAndTacticsPatches.FieldRadiosInheritedCount} Helmets:{VeteranAndTacticsPatches.HelmetsRecoveredCount} Dragged:{VeteranAndTacticsPatches.CasualtiesDraggedCount} Sap:{AiCore.SpecialMunitionsUsedCount} RadioCut:{VeteranAndTacticsPatches.RadioNetCutoffsCount}) | " +
+                            $"HARM:{EmergentRuntimeBridge.TotalT1DecisionsCount} (PinFlank:{VeteranAndTacticsPatches.GoapPinAndFlankCount} Balk:{VeteranAndTacticsPatches.SquadLeaderBalksCount} Retreat:{VeteranAndTacticsPatches.TacticalRetreatsCount} Smoke:{VeteranAndTacticsPatches.GoapSmokeScreensCount} WepUp:{VeteranAndTacticsPatches.RoleWeaponUpgradesCount} BuddyResup:{VeteranAndTacticsPatches.BuddyResuppliesCount} RadioLoot:{VeteranAndTacticsPatches.FieldRadiosInheritedCount} Helmets:{VeteranAndTacticsPatches.HelmetsRecoveredCount} Dragged:{VeteranAndTacticsPatches.CasualtiesDraggedCount} Sap:{AiCore.SpecialMunitionsUsedCount} RadioCut:{VeteranAndTacticsPatches.RadioNetCutoffsCount}) | " +
                             $"Drops:{VeteranAndTacticsPatches.SelfPreservationDrops} | Peeks:{VeteranAndTacticsPatches.AutoPeeksTriggered} | BndBlk:{VeteranAndTacticsPatches.UnsafeBandagesBlockedCount} | IndoorCrouch:{VeteranAndTacticsPatches.IndoorPronePreventedCount} | Pies:{VeteranAndTacticsPatches.CornerPiesExecutedCount} | TankCov:{VeteranAndTacticsPatches.TankHullCoverUsesCount} | " +
                             $"Callouts:{VeteranAndTacticsPatches.LocalCalloutsSharedCount} (KillVoice:{VeteranAndTacticsPatches.BotKillCalloutsCount}) | Supp:{VeteranAndTacticsPatches.SuppressiveEventsCount} | " +
                             $"Bounds:{VeteranAndTacticsPatches.BoundingOverwatchHoldsCount} | Garrisons:{VeteranAndTacticsPatches.MacroGarrisonsAssignedCount} (Pivots:{VeteranAndTacticsPatches.MacroObjectivePivotsCount}) | SpawnSaved:{VeteranAndTacticsPatches.UnderwaterSpawnsRescuedCount} | " +
                             $"Emplace:{VeteranAndTacticsPatches.StaticGunsStaffedCount} | APC:{VeteranAndTacticsPatches.SmartApcDismountsCount} | " +
                             $"TankHold:{VeteranAndTacticsPatches.TankStandoffHoldsCount} | TankSpread:{VeteranAndTacticsPatches.ArmoredDispersionAdjustmentsCount} | SmartAmmo:{VeteranAndTacticsPatches.SmartAmmoSwitchesCount} | Unsticks:{VeteranAndTacticsPatches.TankRockUnsticksCount} (Unstk:{VeteranAndTacticsPatches.FootBotUnsticksCount}) | MedRedirect:{VeteranAndTacticsPatches.MedicTriageRedirectsCount} | RoadkillSaved:{VeteranAndTacticsPatches.FriendlyRoadkillsPreventedCount} (ClientRK:{VeteranAndTacticsPatches.RemoteClientRoadkillsAssistedCount}) | CombArms:{VeteranAndTacticsPatches.CombinedArmsPriorityAssistsCount} (Intercom:{VeteranAndTacticsPatches.TankIntercomHandoffsCount} Kamikaze:{VeteranAndTacticsPatches.KamikazeDivesTriggeredCount}) | " +
-                            $"Bridges:{VeteranAndTacticsPatches.BridgeCrossingsAssistedCount} | Surr:{VeteranAndTacticsPatches.ShellShockSurrendersCount} (Lib:{VeteranAndTacticsPatches.ComradesLiberated}) | " +
+                            $"Bridges:{VeteranAndTacticsPatches.BridgeCrossingsAssistedCount} | Grenades:{VeteranAndTacticsPatches.GrenadesKickedCount}/{VeteranAndTacticsPatches.GrenadesEvadedCount} | Surr:{VeteranAndTacticsPatches.ShellShockSurrendersCount} (Lib:{VeteranAndTacticsPatches.ComradesLiberated}) | " +
                             $"WoodPen:{VeteranAndTacticsPatches.ThinCoverPenetrationsCount} | TopAP:{VeteranAndTacticsPatches.AircraftTopAttackPenetrationsAssistedCount} (HostAssist:{VeteranAndTacticsPatches.HostVanillaClientApAssistsCount}) | CrewBlastBlk:{VeteranAndTacticsPatches.EnclosedCrewExplosionHitsBlockedCount} | CrewClipBlk:{VeteranAndTacticsPatches.EnclosedCrewBulletClipsBlockedCount} | AirMgBlk:{VeteranAndTacticsPatches.AirplanePilotMgHitsBlockedCount} | PlaneAudio:{VeteranAndTacticsPatches.PlaneAudioLoopsDesyncedCount} | Chutes:{VeteranAndTacticsPatches.ParachutesDriftedCount} | BloodOcc:{VeteranAndTacticsPatches.BloodSmokeWaterOccludedCount} | " +
                             $"Doors:{VeteranAndTacticsPatches.DoorsStrategicallyClosedCount} | Bipods:{VeteranAndTacticsPatches.BipodsDeployed} | WallBlk:{VeteranAndTacticsPatches.WallsBlocked} | " +
                             $"Melee:{VeteranAndTacticsPatches.MeleeAttacksTriggered} (Sup:{VeteranAndTacticsPatches.CloseGunfireMeleeSuppressedCount}) | Vault:{VeteranAndTacticsPatches.WallsVaulted} (Rej:{VeteranAndTacticsPatches.SlopedVaultsRejectedCount}) | TankBlk:{VeteranAndTacticsPatches.UselessTankFirePrevented} (Crew:{VeteranAndTacticsPatches.ExposedCrewTargeted}, Frag:{VeteranAndTacticsPatches.UselessTankFragsBlockedCount}) | " +
-                            $"Ticks:{AiCore.TotalAdaptiveAiExtraTicks} (PingSkip:{AiCore.TotalPingGovernorSkippedCycles}) | FFSaved:{VeteranAndTacticsPatches.FriendlyFirePrevented} (Yield:{VeteranAndTacticsPatches.PlayerCrosshairYieldsCount}) | Repairs:{VeteranAndTacticsPatches.ShelteredRepairsCount} | Handles:{AiCore.ActiveSoldierHandlesCount}/{AiCore.ActiveVehicleHandlesCount} | MoveOvr:{AiCore.MoveOverridePreemptionsCount} | BotRPC:{AiCore.BotRpcBudgetGrantedCount}/{AiCore.BotRpcBudgetThrottledCount} | NetFlush:{VeteranAndTacticsPatches.ScoreboardCoalescedFlushesCount}(Sup:{VeteranAndTacticsPatches.ScoreboardVanillaPacketsSuppressedCount}){mpSbHb}",
+                            $"Ticks:{AiCore.TotalAdaptiveAiExtraTicks} (PingSkip:{AiCore.TotalPingGovernorSkippedCycles}) | FFSaved:{VeteranAndTacticsPatches.FriendlyFirePrevented} (Yield:{VeteranAndTacticsPatches.PlayerCrosshairYieldsCount}) | Repairs:{VeteranAndTacticsPatches.ShelteredRepairsCount} | Handles:{AiCore.ActiveSoldierHandlesCount}/{AiCore.ActiveVehicleHandlesCount} | MoveOvr:{AiCore.MoveOverridePreemptionsCount} | BotRPC:{AiCore.BotRpcBudgetGrantedCount}/{AiCore.BotRpcBudgetThrottledCount}{AiCore.GetCoopRpcTelemetrySuffix()} | NetFlush:{VeteranAndTacticsPatches.ScoreboardCoalescedFlushesCount}(Sup:{VeteranAndTacticsPatches.ScoreboardVanillaPacketsSuppressedCount}){mpSbHb}",
                             15.0f);
                     }
                 }
                 catch (Exception ex)
                 {
-                    AiCore.LogDebug("UpdateErr", ex.Message, 10.0f);
+                    AiCore.ReportPatchException("BM.Update", ex);
                 }
                 finally
                 {
@@ -269,13 +274,9 @@ namespace EasyRed2HumanAI
         [HarmonyPatch(typeof(BattleManager), nameof(BattleManager.OnGUI))]
         public static partial class BattleManager_OnGUI_Patch
         {
-            public static void Prefix(out long __state)
+            public static void Postfix()
             {
-                __state = HitchProfiler.BeginTopLevel();
-            }
-
-            public static void Postfix(long __state)
-            {
+                long guiProfStart = HitchProfiler.BeginModScope(true);
                 Matrix4x4 oldGuiMatrix = GUI.matrix;
                 try
                 {
@@ -433,13 +434,84 @@ namespace EasyRed2HumanAI
                     {
                         VeteranAndTacticsPatches.DrawSpectatorBotInspectorGui(virtualW, virtualH, toastBottomY);
                     }
+                    DrawPerformanceOverlayPill(virtualW);
                 }
-                catch { }
+                catch (Exception ex)
+                {
+                    AiCore.ReportPatchException("BM.OnGUI", ex);
+                }
                 finally
                 {
                     GUI.matrix = oldGuiMatrix;
-                    HitchProfiler.End(HitchBucket.OnGUI, __state);
+                    HitchProfiler.EndModScope(HitchBucket.OnGUI, guiProfStart);
                 }
+            }
+
+            private static void DrawPerformanceOverlayPill(float virtualW)
+            {
+                if (!HitchProfiler.TryGetPerfOverlaySnapshot(out string line1, out string line2, out bool modEnabled, out double avgModMs))
+                    return;
+
+                float pillW = Mathf.Min(virtualW - 40f, 560f);
+                float pillH = 44f;
+                float pillX = virtualW - pillW - 14f;
+                float pillY = 12f;
+
+                GUI.color = new Color(0.03f, 0.04f, 0.06f, 0.88f);
+                GUI.Box(new Rect(pillX, pillY, pillW, pillH), "");
+
+                Color accentColor;
+                if (!modEnabled)
+                    accentColor = new Color(0.38f, 0.78f, 0.98f, 0.95f);
+                else if (avgModMs < 1.5)
+                    accentColor = new Color(0.30f, 0.92f, 0.48f, 0.95f);
+                else if (avgModMs < 3.5)
+                    accentColor = new Color(1.0f, 0.78f, 0.25f, 0.95f);
+                else
+                    accentColor = new Color(0.98f, 0.36f, 0.36f, 0.95f);
+
+                GUI.color = accentColor;
+                GUI.DrawTexture(new Rect(pillX + 2f, pillY + 2f, 4f, pillH - 4f), Texture2D.whiteTexture);
+
+                GUIStyle lbl = GUI.skin != null ? GUI.skin.label : null;
+                int oldSize = 0;
+                FontStyle oldStyle = FontStyle.Normal;
+                TextAnchor oldAlign = TextAnchor.UpperLeft;
+                bool oldWrap = false;
+                if (lbl != null)
+                {
+                    oldSize = lbl.fontSize;
+                    oldStyle = lbl.fontStyle;
+                    oldAlign = lbl.alignment;
+                    oldWrap = lbl.wordWrap;
+                    lbl.alignment = TextAnchor.MiddleLeft;
+                    lbl.wordWrap = false;
+                    lbl.fontSize = 13;
+                    lbl.fontStyle = FontStyle.Bold;
+                }
+
+                GUI.color = modEnabled
+                    ? new Color(0.98f, 0.92f, 0.56f, 1.0f)
+                    : new Color(0.62f, 0.88f, 1.0f, 1.0f);
+                GUI.Label(new Rect(pillX + 12f, pillY + 3f, pillW - 18f, 19f), line1);
+
+                if (lbl != null)
+                {
+                    lbl.fontSize = 12;
+                    lbl.fontStyle = FontStyle.Normal;
+                }
+
+                GUI.color = new Color(0.86f, 0.91f, 0.96f, 1.0f);
+                GUI.Label(new Rect(pillX + 12f, pillY + 22f, pillW - 18f, 18f), line2);
+
+                if (lbl != null)
+                {
+                    lbl.fontSize = oldSize;
+                    lbl.fontStyle = oldStyle;
+                    lbl.alignment = oldAlign;
+                    lbl.wordWrap = oldWrap;
+                }
+                GUI.color = Color.white;
             }
 
             private static KeyCode _cachedCfgHeaderKey = (KeyCode)(-999);
@@ -537,16 +609,16 @@ namespace EasyRed2HumanAI
 
                 switch (_activeConfigTab)
                 {
-                    case 0: // 1. GOAP & Bot Behaviors
-                        DrawSectionHeaderWithBundle(colLeftX, ref yL, colW, "GOAP Planner & Macro Command",
-                            VisionConfig.EnableTacticalGoapPlanner,
+                    case 0: // 1. H.A.R.M. & Bot Behaviors
+                        DrawSectionHeaderWithBundle(colLeftX, ref yL, colW, "H.A.R.M. 3-Tier Emergent AI & Macro Command",
+                            VisionConfig.EnableEmergentDecisionEngine,
                             VisionConfig.EnableTacticalVoiceCallouts,
                             VisionConfig.EnableRadiomanIntelNet,
                             VisionConfig.EnableMacroObjectiveDirector,
                             VisionConfig.EnableProactiveEmplacementStaffing,
                             VisionConfig.EnableCombinedArmsPrioritySupport);
-                        DrawToggleButton(colLeftX, ref yL, colW, rowH, "3-Tier GOAP Planner & Squad Blackboard", VisionConfig.EnableTacticalGoapPlanner);
-                        DrawToggleButton(colLeftX, ref yL, colW, rowH, "Audible GOAP Plan Voice Callouts", VisionConfig.EnableTacticalVoiceCallouts);
+                        DrawToggleButton(colLeftX, ref yL, colW, rowH, "H.A.R.M. 3-Tier Emergent Decision Engine", VisionConfig.EnableEmergentDecisionEngine);
+                        DrawToggleButton(colLeftX, ref yL, colW, rowH, "Audible Tactical Voice Callouts", VisionConfig.EnableTacticalVoiceCallouts);
                         DrawToggleButton(colLeftX, ref yL, colW, rowH, "Radioman-Gated Team Intel Net", VisionConfig.EnableRadiomanIntelNet);
                         DrawToggleButton(colLeftX, ref yL, colW, rowH, "Objective Garrison, Pivot & Counterattack", VisionConfig.EnableMacroObjectiveDirector);
                         DrawToggleButton(colLeftX, ref yL, colW, rowH, "Proactive Static Gun & Halftrack Staffing", VisionConfig.EnableProactiveEmplacementStaffing);
@@ -571,27 +643,25 @@ namespace EasyRed2HumanAI
 
                         DrawSectionHeaderWithBundle(colRightX, ref yR, colW, "Infantry Combat, Cover & CQB",
                             VisionConfig.EnableBoundingOverwatch,
-                            VisionConfig.EnableSelfPreservationStance,
                             VisionConfig.EnableSmartWallSideCover,
-                            VisionConfig.BandageOnlyAfterFindingCover,
                             VisionConfig.EnableAutoPeekOverCover,
                             VisionConfig.EnableGunnerBipodWallMounting,
                             VisionConfig.EnablePointBlankMelee,
                             VisionConfig.EnableStrategicDoorDiscipline,
                             VisionConfig.EnableBridgeCrossingDiscipline,
+                            VisionConfig.EnableLiveGrenadeReflexes,
                             VisionConfig.EnableWallVaulting,
                             VisionConfig.EnableAntiStacking,
                             VisionConfig.EnableSmartApcDismount,
                             VisionConfig.EnableTankStandoffAndReverse);
                         DrawToggleButton(colRightX, ref yR, colW, rowH, "Attacker Bounding Overwatch", VisionConfig.EnableBoundingOverwatch);
-                        DrawToggleButton(colRightX, ref yR, colW, rowH, "Self-Preservation Stances Under Fire", VisionConfig.EnableSelfPreservationStance);
                         DrawToggleButton(colRightX, ref yR, colW, rowH, "Stand BEHIND Walls (Smart Wall Cover)", VisionConfig.EnableSmartWallSideCover);
-                        DrawToggleButton(colRightX, ref yR, colW, rowH, "Seek Cover Before Bandaging", VisionConfig.BandageOnlyAfterFindingCover);
                         DrawToggleButton(colRightX, ref yR, colW, rowH, "Auto-Peek Over Low Cover", VisionConfig.EnableAutoPeekOverCover);
                         DrawToggleButton(colRightX, ref yR, colW, rowH, "Gunner Bipod Wall, Bridge & Ground Mounting", VisionConfig.EnableGunnerBipodWallMounting);
                         DrawToggleButton(colRightX, ref yR, colW, rowH, "Point-Blank Bayonet & Melee CQB", VisionConfig.EnablePointBlankMelee);
                         DrawToggleButton(colRightX, ref yR, colW, rowH, "Strategic Door & Shutter Discipline", VisionConfig.EnableStrategicDoorDiscipline);
                         DrawToggleButton(colRightX, ref yR, colW, rowH, "Bridge Cover, Wall Hug & Crossing Discipline", VisionConfig.EnableBridgeCrossingDiscipline);
+                        DrawToggleButton(colRightX, ref yR, colW, rowH, "Live Grenade Kick-Back & Evasion Reflexes", VisionConfig.EnableLiveGrenadeReflexes);
                         DrawToggleButton(colRightX, ref yR, colW, rowH, "Wall & Fence Vaulting", VisionConfig.EnableWallVaulting);
                         DrawToggleButton(colRightX, ref yR, colW, rowH, "Anti-Stacking Personal Spacing", VisionConfig.EnableAntiStacking);
                         DrawToggleButton(colRightX, ref yR, colW, rowH, "Smart APC / Transport Dismount Under Fire", VisionConfig.EnableSmartApcDismount);
@@ -619,19 +689,25 @@ namespace EasyRed2HumanAI
                             VisionConfig.EnableSmartVehicleAmmoSelection,
                             VisionConfig.EnableSmartTankCrewRepair,
                             VisionConfig.EnableTankRockUnstickAssist,
+                            VisionConfig.EnableUrgentVehicleCruiseSpeed,
+                            VisionConfig.EnableVehicleRoadAndClearPathing,
                             VisionConfig.EnableCoopAirborneSpawnFix,
                             VisionConfig.EnableMultiplayerBattleStatSyncFix,
                             VisionConfig.EnableFriendlyVehicleRightOfWay,
                             VisionConfig.PreventSmallArmsFireAtTanks,
-                            VisionConfig.EnablePlaneAudioSmoothing);
+                            VisionConfig.EnablePlaneAudioSmoothing,
+                            VisionConfig.EnableDynamicSoldierVoicePitch);
                         DrawToggleButton(colRightX, ref yR, colW, rowH, "Smart Vehicle & Plane Ammo (HE vs AP)", VisionConfig.EnableSmartVehicleAmmoSelection);
                         DrawToggleButton(colRightX, ref yR, colW, rowH, "Sheltered Tank Crew Repair & Remount Fix", VisionConfig.EnableSmartTankCrewRepair);
                         DrawToggleButton(colRightX, ref yR, colW, rowH, "Tank Rock / Obstacle Unstick Assist", VisionConfig.EnableTankRockUnstickAssist);
+                        DrawToggleButton(colRightX, ref yR, colW, rowH, "Urgent AI Vehicle Straightaway Cruise Speed", VisionConfig.EnableUrgentVehicleCruiseSpeed);
+                        DrawToggleButton(colRightX, ref yR, colW, rowH, "Vehicle & Tank Road / Clear-Route Pathing", VisionConfig.EnableVehicleRoadAndClearPathing);
                         DrawToggleButton(colRightX, ref yR, colW, rowH, "Co-op Airborne Plane Spawn Hot-Start Fix", VisionConfig.EnableCoopAirborneSpawnFix);
                         DrawToggleButton(colRightX, ref yR, colW, rowH, "MP Scoreboard, Casualties & Stat Sync Fix", VisionConfig.EnableMultiplayerBattleStatSyncFix);
                         DrawToggleButton(colRightX, ref yR, colW, rowH, "Friendly Right-of-Way & Client Roadkill Fix", VisionConfig.EnableFriendlyVehicleRightOfWay);
                         DrawToggleButton(colRightX, ref yR, colW, rowH, "Stop Small-Arms Fire at Tanks / Aim Crew", VisionConfig.PreventSmallArmsFireAtTanks);
                         DrawToggleButton(colRightX, ref yR, colW, rowH, "Plane Engine Audio Loop De-Throbber", VisionConfig.EnablePlaneAudioSmoothing);
+                        DrawToggleButton(colRightX, ref yR, colW, rowH, "Individualistic Soldier Voice Pitch", VisionConfig.EnableDynamicSoldierVoicePitch);
                         break;
 
                     case 2: // 3. Vision & Realism
@@ -696,13 +772,16 @@ namespace EasyRed2HumanAI
                         DrawToggleButton(colLeftX, ref yL, colW, rowH, "Adaptive AI Brain Tick Scaling (SP & Co-op)", VisionConfig.EnableAdaptiveAiTickScaling);
 
                         yL += 10f;
-                        DrawSectionHeaderWithBundle(colLeftX, ref yL, colW, "Developer Diagnostics (Default OFF)",
-                            VisionConfig.DebugLogging,
+                        DrawSectionHeaderWithBundle(colLeftX, ref yL, colW, "Performance & Diagnostics (Default OFF)",
+                            VisionConfig.EnablePerformanceOverlay,
                             VisionConfig.EnableHitchFlightRecorder,
-                            VisionConfig.EnableBotActionTrace);
-                        DrawToggleButton(colLeftX, ref yL, colW, rowH, "Diagnostic Debug Logs (BepInEx Console)", VisionConfig.DebugLogging);
-                        DrawToggleButton(colLeftX, ref yL, colW, rowH, "Hitch Flight Recorder (LogOutput)", VisionConfig.EnableHitchFlightRecorder);
+                            VisionConfig.EnableBotActionTrace,
+                            VisionConfig.DebugLogging);
+                        DrawToggleButton(colLeftX, ref yL, colW, rowH, "Live Performance & Mod CPU Overlay (F8 A/B)", VisionConfig.EnablePerformanceOverlay);
+                        DrawToggleButton(colLeftX, ref yL, colW, rowH, "Hitch Flight Recorder (LogOutput + 15s Benchmarks)", VisionConfig.EnableHitchFlightRecorder);
                         DrawToggleButton(colLeftX, ref yL, colW, rowH, "Per-Bot Action Trace (BotActionTrace.jsonl)", VisionConfig.EnableBotActionTrace);
+                        DrawToggleButton(colLeftX, ref yL, colW, rowH, "Emergent Signal Debug Telemetry", VisionConfig.EnableEmergentDebugTelemetry);
+                        DrawToggleButton(colLeftX, ref yL, colW, rowH, "Diagnostic Debug Logs (BepInEx Console)", VisionConfig.DebugLogging);
 
                         yL += 10f;
                         DrawSectionHeaderWithBundle(colLeftX, ref yL, colW, "Multiplayer Gameplay Enhancements (Default OFF)",
@@ -741,7 +820,7 @@ namespace EasyRed2HumanAI
                         DrawToggleButton(colRightX, ref yR, colW, rowH, "Dogtag Collection Archive (F7)", VisionConfig.EnableDogTagArchive);
                         DrawToggleButton(colRightX, ref yR, colW, rowH, "Objective Bar Faction + Side Names", VisionConfig.EnableObjectiveBarFactionNames);
                         DrawToggleButton(colRightX, ref yR, colW, rowH, "Spectator Tactical HUD + Overhead Net (F Cycles)", VisionConfig.EnableSpectatorHudRetention);
-                        DrawToggleButton(colRightX, ref yR, colW, rowH, "Spectator Hovered-Bot GOAP Inspector (F Cycles)", VisionConfig.EnableSpectatorBotInspector);
+                        DrawToggleButton(colRightX, ref yR, colW, rowH, "Spectator Hovered-Bot H.A.R.M./GOAP Inspector (F Cycles)", VisionConfig.EnableSpectatorBotInspector);
                         DrawToggleButton(colRightX, ref yR, colW, rowH, "64-Char Multiplayer Room Names", VisionConfig.EnableExtendedRoomNames);
                         DrawToggleButton(colRightX, ref yR, colW, rowH, "Host Lobby Welcome MOTD (Joiners)", VisionConfig.EnableLobbyJoinMotd);
                         DrawToggleButton(colRightX, ref yR, colW, rowH, "Tactical Reload & Bipod Animation Cancel", VisionConfig.EnableTacticalReloadAndBipodCancel);
@@ -888,7 +967,8 @@ namespace EasyRed2HumanAI
                     {
                         VeteranAndTacticsPatches.ApplyExtendedRoomNameLimits();
                     }
-                    else if (entry == VisionConfig.EnableHitchFlightRecorder)
+                    else if (entry == VisionConfig.EnableHitchFlightRecorder ||
+                             entry == VisionConfig.EnablePerformanceOverlay)
                     {
                         HitchProfiler.RefreshConfigState();
                     }
@@ -900,6 +980,8 @@ namespace EasyRed2HumanAI
                              entry == VisionConfig.EnableMultiplayerBattleStatSyncFix ||
                              entry == VisionConfig.EnableMod)
                     {
+                        if (entry == VisionConfig.EnableMod)
+                            HitchProfiler.NotifyModToggled();
                         VeteranAndTacticsPatches.SyncPtfoRoomPropertyIfMaster();
                     }
                     VeteranAndTacticsPatches.RefreshBottomLeftSquadRosterVisuals();
@@ -1039,7 +1121,7 @@ namespace EasyRed2HumanAI
             }
 
             // Anchor at Top-Center right beneath the Objective Bar so it NEVER overlaps bottom-center "Free Camera"!
-            float cardW = Mathf.Min(virtualW - 48f, 880f);
+            float cardW = Mathf.Min(virtualW - 48f, 960f);
             float cardH = 74f;
             float cardX = (virtualW - cardW) * 0.5f;
             float cardY = toastBottomY > 0f ? Mathf.Max(68f, toastBottomY + 8f) : 68f;
@@ -1248,25 +1330,40 @@ namespace EasyRed2HumanAI
             string displayFac = AiCore.FormatFactionWithAlliance(fac);
             SoldierPersonality pers = GetPersonality(s);
             string roleStr = GetPersonalityShortLabel(pers);
+            string classLabel = AiCore.GetSoldierClassLabel(s);
+            string sqName = (sq != null && !string.IsNullOrEmpty(sq.squadName)) ? sq.squadName.Trim() : null;
             int vetTier = GetVeteranTier(s);
             int vetPct = Mathf.RoundToInt(GetVeterancy01(s) * 100f);
             string vetLabel = vetTier == 0 ? "Recruit" : (vetTier == 1 ? "Vet I" : (vetTier == 2 ? "Vet II" : "Vet III \u2605"));
 
-            // Line 1: Header (Bot# matching BotActionTrace.jsonl, Squad#, Name, Faction, Personality, Veterancy)
+            // Line 1: Header (Bot# matching BotActionTrace.jsonl, Squad#, Name, Faction, Class (Personality), Veterancy)
             _specSb.Length = 0;
             _specSb.Append("[Bot #").Append(botId);
             if (sqId > 0)
+            {
                 _specSb.Append(" | Sq#").Append(sqId);
+                if (!string.IsNullOrEmpty(sqName))
+                    _specSb.Append(" '").Append(sqName.Length > 10 ? sqName.Substring(0, 10) : sqName).Append('\'');
+            }
             _specSb.Append("]  ").Append(rawName)
                    .Append("  \u2022  ").Append(string.IsNullOrEmpty(displayFac) ? "Unknown" : displayFac)
-                   .Append("  \u2022  ").Append(roleStr)
+                   .Append("  \u2022  ").Append(classLabel).Append(" (").Append(roleStr).Append(')')
                    .Append("  \u2022  ").Append(vetLabel).Append(" (").Append(vetPct).Append("%)");
             if (s.IsPlayer())
                 _specSb.Append("  [PLAYER]");
-            else if (s.IsSquadLeader())
+            if (!s.IsPlayer() && s.IsSquadLeader() && classLabel.IndexOf("Leader", StringComparison.OrdinalIgnoreCase) < 0)
                 _specSb.Append("  [SL]");
-            else if (s.IsRadioman())
+            if (s.IsRadioman() && classLabel.IndexOf("Radio", StringComparison.OrdinalIgnoreCase) < 0)
                 _specSb.Append("  [RADIO]");
+            if (HasSoldierRisenToOccasion(s))
+                _specSb.Append("  [RISEN SL]");
+            if (sq != null &&
+                sq.Pointer != IntPtr.Zero &&
+                _squadBlackboards.TryGetValue(sq.Pointer, out SquadBlackboard spB) &&
+                Time.time < spB.LeaderShockUntil)
+            {
+                _specSb.Append("  [SL SHOCK]");
+            }
             _specHeaderLine = _specSb.ToString();
 
             // Line 2: 3-Tier GOAP Plan / Vehicle State
@@ -1298,48 +1395,43 @@ namespace EasyRed2HumanAI
                     _specSb.Append("Squad: ").Append(sq.order.ToString()).Append("  |  ");
                 _specSb.Append("GOAP: [VANILLA ER2 AI \u2014 Mod Disabled via F8]");
             }
-            else
+            else if (VisionConfig.EnableEmergentDecisionEngine.Value && h != null && h.Emergent.HasDecision)
             {
-                bool hasPlan = TryGetBotGoapSummary(
-                    s,
-                    out SquadNetDirective netDir,
-                    out GoapStateBits goalBit,
-                    out GoapActionId step0,
-                    out GoapActionId step1,
-                    out byte stepIdx,
-                    out bool isEvacCrew);
-
-                _specSb.Append("Net: ").Append(GetNetDirectiveShortName(netDir));
-                if (sq != null)
-                    _specSb.Append("  |  Squad: ").Append(sq.order.ToString());
-
-                _specSb.Append("  |  GOAP: ");
-                if (!hasPlan || step0 == GoapActionId.None)
-                {
-                    _specSb.Append(s.IsCharging() ? "SquadChargeAssault" : "NativeSquadCombat");
-                }
-                else
-                {
-                    _specSb.Append(GetGoapGoalShortName(goalBit)).Append(" -> ");
-                    if (stepIdx == 0)
-                        _specSb.Append('[').Append(GetGoapActionShortName(step0)).Append(']');
-                    else
-                        _specSb.Append(GetGoapActionShortName(step0));
-
-                    if (step1 != GoapActionId.None)
-                    {
-                        _specSb.Append(" -> ");
-                        if (stepIdx > 0)
-                            _specSb.Append('[').Append(GetGoapActionShortName(step1)).Append(']');
-                        else
-                            _specSb.Append(GetGoapActionShortName(step1));
-                    }
-                }
-
-                if (isEvacCrew)
+                ref var ed = ref h.Emergent.CurrentDecision;
+                EmergentRuntimeBridge.GetSquadDirectiveForSpectator(sq, out var sqDir, out var balkReason, out _);
+                _specSb.Append("[Emergent] T2:").Append(sqDir.ToString());
+                if (balkReason != EmergentEngine.Tier2BalkReason.None)
+                    _specSb.Append('(').Append(balkReason.ToString()).Append(')');
+                _specSb.Append("  |  H:").Append(ed.TotalHarm.ToString("0.00"))
+                       .Append("(n:").Append(ed.HarmNow.ToString("0.00"))
+                       .Append(",p:").Append(ed.HarmProj.ToString("0.00")).Append(')')
+                       .Append(" W:").Append(ed.WinUrgency.ToString("0.00"))
+                       .Append(" CanH:").Append(ed.CanHarm.ToString("0.00"))
+                       .Append("  |  Act:").Append(EmergentEngine.GetActionShortName(ed.Step0))
+                       .Append('(').Append(ed.Score >= 0f ? "+" : "").Append(ed.Score.ToString("0.00")).Append(')');
+                if (ed.Step1 != EmergentEngine.EmergentActionId.None)
+                    _specSb.Append(" -> ").Append(EmergentEngine.GetActionShortName(ed.Step1));
+                else if (ed.RunnerUp != EmergentEngine.EmergentActionId.None)
+                    _specSb.Append(" > ").Append(EmergentEngine.GetActionShortName(ed.RunnerUp)).Append('(').Append(ed.RunnerUpScore.ToString("0.00")).Append(')');
+                if (ed.Reflex != EmergentEngine.EmergentReflexKind.None)
+                    _specSb.Append("  [REFLEX:").Append(EmergentEngine.GetReflexShortName(ed.Reflex)).Append(']');
+                if (Time.time < h.Goap.Plan.PlanExpireTime && h.Goap.Plan.IsEvacuatingBailedCrew)
                     _specSb.Append("  [EVAC CREW]");
                 else if (s.IsCharging())
                     _specSb.Append("  [CHARGE!]");
+                if (h.MoveOverride.Kind > AiCore.BotMoveOverrideKind.GoapAction &&
+                    Time.time < h.MoveOverride.ExpireTime)
+                {
+                    _specSb.Append("  [OVR:").Append(AiCore.GetMoveOverrideShortLabel(h.MoveOverride.Kind)).Append(']');
+                }
+            }
+            else
+            {
+                if (sq != null)
+                    _specSb.Append("Squad: ").Append(sq.order.ToString()).Append("  |  ");
+                _specSb.Append(s.IsCharging() ? "[Emergent] SquadChargeAssault" : "[Emergent] Pending / NativeSquadCombat");
+                if (h != null && Time.time < h.Goap.Plan.PlanExpireTime && h.Goap.Plan.IsEvacuatingBailedCrew)
+                    _specSb.Append("  [EVAC CREW]");
                 if (h != null &&
                     h.MoveOverride.Kind > AiCore.BotMoveOverrideKind.GoapAction &&
                     Time.time < h.MoveOverride.ExpireTime)
@@ -1396,6 +1488,12 @@ namespace EasyRed2HumanAI
                 _specSb.Append(Mathf.RoundToInt(gfDist)).Append('m');
             else
                 _specSb.Append("--");
+
+            if (VisionConfig.EnableEmergentDecisionEngine.Value && h != null && h.Emergent.WeightsInitialized)
+            {
+                _specSb.Append("  |  Ind:").Append(h.Emergent.Weights.Individualism.ToString("0.00"))
+                       .Append(" Risk:").Append(h.Emergent.Weights.RiskThreshold.ToString("0.00"));
+            }
 
             _specVitalsLine = _specSb.ToString();
         }
@@ -1815,7 +1913,23 @@ namespace EasyRed2HumanAI
                     Soldier localPlayer = Soldier.CurrentControlledSoldierOrNull();
                     if (localPlayer != null && localPlayer.Pointer != IntPtr.Zero && localPlayer.IsAlive)
                     {
+                        GetOrCreateRecord(localPlayer);
                         Squad pSq = localPlayer.joinedSquad;
+                        IntPtr curLpPtr = localPlayer.Pointer;
+                        IntPtr curSqPtr = pSq != null ? pSq.Pointer : IntPtr.Zero;
+                        bool curIsSl = curSqPtr != IntPtr.Zero && localPlayer.IsSquadLeader();
+                        bool becameActingSl = curLpPtr == _lastTrackedLocalPlayerPtr &&
+                                              curSqPtr == _lastTrackedLocalSquadPtr &&
+                                              curSqPtr != IntPtr.Zero &&
+                                              !_lastTrackedLocalPlayerWasSl &&
+                                              curIsSl &&
+                                              !localPlayer.IsInjured &&
+                                              !localPlayer.HasSurrended() &&
+                                              pSq.CountMembers >= 2;
+                        _lastTrackedLocalPlayerPtr = curLpPtr;
+                        _lastTrackedLocalSquadPtr = curSqPtr;
+                        _lastTrackedLocalPlayerWasSl = curIsSl;
+
                         if (pSq != null && pSq.Pointer != IntPtr.Zero && (pSq.CountMembers > 1 || pSq.isOpenForJoiners))
                         {
                             Squad guiSq = PlayerGUI.GUISquad;
@@ -1839,6 +1953,59 @@ namespace EasyRed2HumanAI
                                 PlayerGUI.UpdateSquadGUI();
                             }
                         }
+
+                        if (becameActingSl)
+                        {
+                            SquadBlackboard lpBoard = default;
+                            bool hasLpBoard = _squadBlackboards.TryGetValue(curSqPtr, out lpBoard);
+                            float curTime = Time.time;
+                            bool prevSlMissingOrLost = false;
+                            if (hasLpBoard)
+                            {
+                                if (lpBoard.PendingLeaderSuccession)
+                                {
+                                    prevSlMissingOrLost = true;
+                                }
+                                else if (lpBoard.LastAliveLeaderPtr != IntPtr.Zero && lpBoard.LastAliveLeaderPtr != curLpPtr)
+                                {
+                                    prevSlMissingOrLost = !AiCore.TryGetSoldierHandles(lpBoard.LastAliveLeaderPtr, out AiCore.SoldierFastHandles prevSlH) ||
+                                                          prevSlH == null ||
+                                                          prevSlH.Ref == null ||
+                                                          !prevSlH.Ref.IsAlive ||
+                                                          prevSlH.Ref.IsInjured ||
+                                                          prevSlH.Ref.HasSurrended();
+                                    if (prevSlMissingOrLost)
+                                        TriggerSquadLeaderLossShock(pSq, ref lpBoard, lpBoard.LastAliveLeaderPtr, curTime);
+                                }
+                            }
+
+                            bool playerRose = false;
+                            if (prevSlMissingOrLost)
+                            {
+                                playerRose = TryEvaluateRiseToTheOccasion(localPlayer, pSq, ref lpBoard, curTime, hasLpBoard);
+                                lpBoard.PendingLeaderSuccession = false;
+                            }
+
+                            if (hasLpBoard)
+                            {
+                                lpBoard.LastAliveLeaderPtr = curLpPtr;
+                                lpBoard.LeaderBraveryAura = ComputeLeaderBraveryAura(localPlayer);
+                                lpBoard.LeaderRoseToOccasion = HasSoldierRisenToOccasion(localPlayer);
+                                _squadBlackboards[curSqPtr] = lpBoard;
+                            }
+
+                            if (!playerRose && !HasSoldierRisenToOccasion(localPlayer))
+                            {
+                                try { PlayerController.HintToPlayer("Chain of Command: You are now Acting Squad Leader!", false); } catch { }
+                            }
+                            RefreshBottomLeftSquadRosterVisuals();
+                        }
+                    }
+                    else
+                    {
+                        _lastTrackedLocalPlayerPtr = IntPtr.Zero;
+                        _lastTrackedLocalSquadPtr = IntPtr.Zero;
+                        _lastTrackedLocalPlayerWasSl = false;
                     }
                 }
 
@@ -1879,6 +2046,9 @@ namespace EasyRed2HumanAI
         private static IntPtr _lastObservedBattleManagerPtr;
         private static float _lastSceneTimeObserved;
         private static int _cleanupSlice;
+        private static IntPtr _lastTrackedLocalPlayerPtr;
+        private static IntPtr _lastTrackedLocalSquadPtr;
+        private static bool _lastTrackedLocalPlayerWasSl;
 
         public static void CleanupDictionaries(bool forceFull = true)
         {
@@ -1906,6 +2076,9 @@ namespace EasyRed2HumanAI
                 _specTargetSoldier = null;
                 _specTargetPtr = IntPtr.Zero;
                 _lastFormattedSpecPtr = IntPtr.Zero;
+                _lastTrackedLocalPlayerPtr = IntPtr.Zero;
+                _lastTrackedLocalSquadPtr = IntPtr.Zero;
+                _lastTrackedLocalPlayerWasSl = false;
                 _coverExposureCache.Clear();
                 _medicPatientClaims.Clear();
                 _cachedVehiclePersonalities.Clear();
@@ -1915,7 +2088,9 @@ namespace EasyRed2HumanAI
                 ClearBallisticsCaches(forceClear: true);
                 ClearDoorCaches(forceFull: true);
                 ClearCombinedArmsCaches();
+                VeteranAndTacticsPatches.ClearVehiclePathingCaches();
                 ClearGoapCaches();
+                EmergentRuntimeBridge.ResetOnSceneRestart();
                 VeteranAndTacticsPatches.PruneExpiredDamageAttributions(Time.time, forceClear: true);
             }
 
@@ -2010,22 +2185,11 @@ namespace EasyRed2HumanAI
                 }
                 AiCore.PruneDict(_squadBlackboards, _reusableAlivePtrs);
                 AiCore.PruneDict(_nextSquadVoiceTime, _reusableAlivePtrs);
-                AiCore.PruneDict(_pincerOrderedTaskBySquad, _reusableAlivePtrs);
                 AiCore.PruneDict(_garrisonAssignedObjectiveBySquad, _reusableAlivePtrs);
                 AiCore.PruneDict(_squadTaskCommittedUntil, _reusableAlivePtrs);
                 AiCore.PruneDict(_nextSquadAttritionPivotTime, _reusableAlivePtrs);
                 AiCore.PruneDict(_squadOrderedToVehicle, _reusableAlivePtrs);
-                AiCore.PruneDict(_aiCovertHoldFireExpireTime, _reusableAlivePtrs);
-                AiCore.PruneDict(_aiFollowColumnUntil, _reusableAlivePtrs);
-                AiCore.PruneDict(_nextAiSquadChargeTime, _reusableAlivePtrs);
-                AiCore.PruneDict(_nextAiCovertOrderTime, _reusableAlivePtrs);
-                AiCore.PruneDict(_nextAiFollowOrderTime, _reusableAlivePtrs);
-                AiCore.PruneDict(_nextAiSquadRetreatTime, _reusableAlivePtrs);
                 AiCore.PruneDict(_nextSquadRadioScavengeTime, _reusableAlivePtrs);
-                AiCore.PruneDict(_aiSquadRetreatUntil, _reusableAlivePtrs);
-                AiCore.PruneDict(_aiChargeBaselineDeaths, _reusableAlivePtrs);
-                AiCore.PruneSet(_aiCovertHoldFireSquads, _reusableAlivePtrs);
-                AiCore.PruneSet(_aiOrderedChargeSquads, _reusableAlivePtrs);
                 AiCore.PruneSet(_initialHqSpawnBriefingConsumed, _reusableAlivePtrs);
                 AiCore.PruneSquadClassificationCaches(_reusableAlivePtrs);
 
@@ -2165,6 +2329,19 @@ namespace EasyRed2HumanAI
 
                         if (allMatch && labelCount == unitCount)
                         {
+                            for (int i = 0; i < childCount; i++)
+                            {
+                                Transform child = panel.GetChild(i);
+                                if (child == null)
+                                    continue;
+
+                                SquadSoldierLabel lbl = child.GetComponent<SquadSoldierLabel>();
+                                if (lbl != null && !lbl.isRespawnAction)
+                                {
+                                    lbl.RefreshVisual();
+                                }
+                            }
+                            PlayerGUI.UpdateSquadGUI();
                             RefreshSquadHeaderLabel();
                             return false;
                         }
@@ -2178,6 +2355,43 @@ namespace EasyRed2HumanAI
             {
                 RefreshSquadHeaderLabel();
             }
+        }
+
+        internal static void RefreshSquadSoldierLabelIfShown(Soldier s)
+        {
+            try
+            {
+                if (s == null || s.Pointer == IntPtr.Zero)
+                    return;
+
+                PlayerGUI pgui = PlayerGUI.instance;
+                if (pgui == null || pgui.squadGUI_Panel == null || !pgui.squadGUI_Panel.gameObject.activeInHierarchy)
+                    return;
+
+                Squad guiSq = PlayerGUI.GUISquad;
+                if (guiSq == null || s.joinedSquad == null || guiSq.Pointer != s.joinedSquad.Pointer)
+                    return;
+
+                Transform panel = pgui.squadGUI_Panel;
+                int childCount = panel.childCount;
+                IntPtr soldierPtr = s.Pointer;
+                for (int i = 0; i < childCount; i++)
+                {
+                    Transform child = panel.GetChild(i);
+                    if (child == null)
+                        continue;
+
+                    SquadSoldierLabel lbl = child.GetComponent<SquadSoldierLabel>();
+                    if (lbl != null &&
+                        !lbl.isRespawnAction &&
+                        lbl.assignedSoldier != null &&
+                        lbl.assignedSoldier.Pointer == soldierPtr)
+                    {
+                        lbl.RefreshVisual();
+                    }
+                }
+            }
+            catch { }
         }
 
         [HarmonyPatch(typeof(PlayerGUI), nameof(PlayerGUI.LayoutSquadEntries))]
@@ -2334,6 +2548,39 @@ namespace EasyRed2HumanAI
         {
             private const string ActiveSoldierPrefix = "\u25ba ";
 
+            public static void Prefix(SquadSoldierLabel __instance)
+            {
+                try
+                {
+                    if (!VisionConfig.EnableMod.Value ||
+                        __instance == null ||
+                        __instance.Pointer == IntPtr.Zero ||
+                        __instance.isRespawnAction)
+                        return;
+
+                    if (AiCore.IsInMultiplayerRoom() && PlayerGUI.IsSelectingSquad())
+                    {
+                        Soldier s = __instance.assignedSoldier;
+                        if (s != null && s.Pointer != IntPtr.Zero)
+                        {
+                            SyncSoldier syn = s.soldierSyncher;
+                            if (syn != null &&
+                                syn.OwnSyncher &&
+                                !s.IsPlayer() &&
+                                !PlayerController.CharacterIsPlayer(s) &&
+                                s.IsAlive &&
+                                !s.IsInjured &&
+                                !s.HasSurrended() &&
+                                syn.controlled_by_player)
+                            {
+                                syn.UnsetAsControlledByPlayer();
+                            }
+                        }
+                    }
+                }
+                catch { }
+            }
+
             public static void Postfix(SquadSoldierLabel __instance)
             {
                 try
@@ -2352,6 +2599,18 @@ namespace EasyRed2HumanAI
                     }
 
                     bool isSelecting = PlayerGUI.IsSelectingSquad();
+                    if (isSelecting)
+                    {
+                        Button btn = __instance.GetComponent<Button>();
+                        if (btn != null)
+                        {
+                            bool canSelect = PlayerGUI.CanSelectSquadMember(s);
+                            if (btn.interactable != canSelect)
+                            {
+                                btn.interactable = canSelect;
+                            }
+                        }
+                    }
                     bool isHighlightedInSelect = isSelecting &&
                         ((PlayerGUI.highLightedUnit != null && PlayerGUI.highLightedUnit.Pointer == s.Pointer) ||
                          (SquadSoldierLabel.currentHighlighted != null && SquadSoldierLabel.currentHighlighted.Pointer == __instance.Pointer));
@@ -2369,15 +2628,28 @@ namespace EasyRed2HumanAI
                     int bracketIdx = curText.IndexOf(" [", StringComparison.Ordinal);
                     string baseText = bracketIdx >= 0 ? curText.Substring(0, bracketIdx) : curText;
 
-                    string tag = (showVet || showPers) ? BuildSoldierBracketTag(s, showVet, showPers, true) : "";
+                    bool showSl = !isSelecting && s.IsAlive && !s.IsInjured && s.IsSquadLeader();
+                    string inner = showSl ? "SL" : "";
+                    if (showVet || showPers)
+                    {
+                        string rawTag = BuildSoldierBracketTag(s, showVet, showPers, true);
+                        if (!string.IsNullOrEmpty(rawTag) &&
+                            rawTag.StartsWith(" [", StringComparison.Ordinal) &&
+                            rawTag.EndsWith("]", StringComparison.Ordinal))
+                        {
+                            string rawInner = rawTag.Substring(2, rawTag.Length - 3);
+                            inner = string.IsNullOrEmpty(inner) ? rawInner : $"{inner} \u2022 {rawInner}";
+                        }
+                    }
+                    string tag = string.IsNullOrEmpty(inner) ? "" : $" [{inner}]";
                     string desiredText = (isActiveMarkerRow ? ActiveSoldierPrefix : "") + baseText + tag;
                     if (nameLabel.text != desiredText)
                     {
                         nameLabel.text = desiredText;
                     }
 
-                    // Preserve vanilla's urgent red injuredNameColor when a squadmate is bleeding or incapacitated
-                    if (!s.IsInjured && !s.isBleeding)
+                    // Preserve vanilla's urgent red injuredNameColor when a squadmate is incapacitated or surrendered
+                    if (!s.IsInjured && !s.HasSurrended())
                     {
                         bool isOtherHumanPlayer = __instance.EvaluateState() == SquadSoldierLabel.LabelState.OtherPlayer;
 

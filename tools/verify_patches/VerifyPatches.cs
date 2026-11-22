@@ -34,6 +34,7 @@ internal static class VerifyPatches
         Assembly modAsm = Assembly.LoadFrom(modDll);
         int checkedCount = 0;
         int mismatchCount = 0;
+        var coroutineTargets = new SortedSet<string>(StringComparer.Ordinal);
 
         HashSet<Type> registeredInLoad = new HashSet<Type>();
         Type pluginType = modAsm.GetType("EasyRed2HumanAI.Plugin");
@@ -127,6 +128,12 @@ internal static class VerifyPatches
             }
             ParameterInfo[] targetParams = targetMethod.GetParameters();
             checkedCount++;
+            int dIdx = (targetType.Name ?? "").IndexOf("_d__", StringComparison.Ordinal);
+            if (dIdx >= 0 && dIdx + 4 < targetType.Name.Length && char.IsDigit(targetType.Name[dIdx + 4]))
+            {
+                string ownerName = targetType.DeclaringType != null ? $"{targetType.DeclaringType.Name}.{targetType.Name}" : targetType.Name;
+                coroutineTargets.Add($"{ownerName}.{lookupMethodName}");
+            }
 
             foreach (MethodInfo patchMethod in t.GetMethods(BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Static))
             {
@@ -188,9 +195,13 @@ internal static class VerifyPatches
             return 1;
 
         Console.WriteLine($"  -> Verified {checkedCount} HarmonyPatch signatures against IL2CPP interop (0 mismatches)");
+        if (coroutineTargets.Count > 0)
+            Console.WriteLine($"  -> Coroutine patch watch-list ({coroutineTargets.Count}): {string.Join(", ", coroutineTargets)}");
 
         string workspaceDir = Path.GetFullPath(Path.Combine(Path.GetDirectoryName(modDll), ".."));
         if (VerifyAnimatorStrings(workspaceDir) > 0)
+            return 1;
+        if (VerifyStaticCodeSafety(workspaceDir) > 0)
             return 1;
 
         try
@@ -667,6 +678,165 @@ internal static class VerifyPatches
             return errors;
 
         Console.WriteLine($"  -> Verified {checkedStrings} Animator parameter/state string literals against native Soldier.asm (0 mismatches)");
+        return 0;
+    }
+
+    private static bool ContainsWholeWordBefore(string s, int limit, string word)
+    {
+        int start = 0;
+        while (start < limit)
+        {
+            int idx = s.IndexOf(word, start, limit - start, StringComparison.Ordinal);
+            if (idx < 0)
+                return false;
+            bool leftOk = idx == 0 || !IsIdentChar(s[idx - 1]);
+            int after = idx + word.Length;
+            bool rightOk = after >= s.Length || !IsIdentChar(s[after]);
+            if (leftOk && rightOk)
+                return true;
+            start = idx + 1;
+        }
+        return false;
+    }
+
+    private static bool ContainsIdentPrefix(string haystack, string needle)
+    {
+        int start = 0;
+        while (start < haystack.Length)
+        {
+            int idx = haystack.IndexOf(needle, start, StringComparison.Ordinal);
+            if (idx < 0)
+                return false;
+            if (idx == 0 || !IsIdentChar(haystack[idx - 1]))
+                return true;
+            start = idx + 1;
+        }
+        return false;
+    }
+
+    private static bool ContainsPruneDictCall(string haystack, string dictName)
+    {
+        int start = 0;
+        while (start < haystack.Length)
+        {
+            int idx = haystack.IndexOf("PruneDict(", start, StringComparison.Ordinal);
+            if (idx < 0)
+                return false;
+            int p = idx + "PruneDict(".Length;
+            while (p < haystack.Length && char.IsWhiteSpace(haystack[p]))
+                p++;
+            if (p + dictName.Length <= haystack.Length &&
+                string.CompareOrdinal(haystack, p, dictName, 0, dictName.Length) == 0 &&
+                (p + dictName.Length >= haystack.Length || !IsIdentChar(haystack[p + dictName.Length])))
+            {
+                return true;
+            }
+            start = idx + 1;
+        }
+        return false;
+    }
+
+    private static int VerifyStaticCodeSafety(string workspaceDir)
+    {
+        string srcRoot = Path.Combine(workspaceDir, @"src\EasyRed2AI");
+        if (!Directory.Exists(srcRoot))
+            return 0;
+
+        string[] files = Directory.GetFiles(srcRoot, "*.cs", SearchOption.AllDirectories)
+            .OrderBy(p => p, StringComparer.OrdinalIgnoreCase)
+            .ToArray();
+
+        int errors = 0;
+        var intPtrDicts = new List<(string RelPath, int LineNo, string Name)>();
+        var strippedSources = new List<string>(files.Length);
+
+        string[] forbiddenIl2CppMarkers =
+        {
+            "TryCast<TerrainCollider>(",
+            "GetComponent<TerrainCollider>(",
+            "GetComponent<ImpactSpecifier>(",
+            "GetComponent<Spottable>(",
+            ".ForceControllerEnabled("
+        };
+
+        foreach (string filePath in files)
+        {
+            string relPath = Path.GetRelativePath(workspaceDir, filePath).Replace('\\', '/');
+            string rawText = File.ReadAllText(filePath);
+            string[] lines = File.ReadAllLines(filePath);
+            bool inBlockComment = false;
+            var fileStripped = new System.Text.StringBuilder(rawText.Length);
+            bool hasDllImport = false;
+
+            for (int li = 0; li < lines.Length; li++)
+            {
+                string code = StripCSharpCommentsPreservingStrings(lines[li], ref inBlockComment);
+                fileStripped.AppendLine(code);
+                if (string.IsNullOrWhiteSpace(code))
+                    continue;
+
+                foreach (string bad in forbiddenIl2CppMarkers)
+                {
+                    if (code.Contains(bad, StringComparison.Ordinal))
+                    {
+                        Console.Error.WriteLine($"  [STATIC LINT ERROR] {relPath}:{li + 1} uses unsafe IL2CPP pattern '{bad}'");
+                        errors++;
+                    }
+                }
+
+                if (code.Contains("[DllImport(", StringComparison.Ordinal))
+                    hasDllImport = true;
+
+                int dictIdx = code.IndexOf("Dictionary<IntPtr,", StringComparison.Ordinal);
+                int eqIdx = dictIdx >= 0 ? code.IndexOf('=') : -1;
+                if (dictIdx >= 0 && (eqIdx < 0 || dictIdx < eqIdx) && ContainsWholeWordBefore(code, dictIdx, "static"))
+                {
+                    int depth = 1;
+                    int pos = dictIdx + "Dictionary<".Length;
+                    while (pos < code.Length && depth > 0)
+                    {
+                        if (code[pos] == '<') depth++;
+                        else if (code[pos] == '>') depth--;
+                        pos++;
+                    }
+                    while (pos < code.Length && char.IsWhiteSpace(code[pos]))
+                        pos++;
+                    int idStart = pos;
+                    while (pos < code.Length && IsIdentChar(code[pos]))
+                        pos++;
+                    if (pos > idStart && !char.IsDigit(code[idStart]))
+                        intPtrDicts.Add((relPath, li + 1, code.Substring(idStart, pos - idStart)));
+                }
+            }
+
+            string noComments = fileStripped.ToString();
+            strippedSources.Add(noComments);
+
+            if (hasDllImport && !noComments.Contains("OperatingSystem.IsWindows()", StringComparison.Ordinal))
+            {
+                Console.Error.WriteLine($"  [STATIC LINT ERROR] {relPath} uses [DllImport] without an OperatingSystem.IsWindows() runtime guard.");
+                errors++;
+            }
+        }
+
+        string allCodeNoComments = string.Join("\n", strippedSources);
+        foreach (var d in intPtrDicts)
+        {
+            bool hasClean =
+                ContainsIdentPrefix(allCodeNoComments, d.Name + ".Clear(") ||
+                ContainsIdentPrefix(allCodeNoComments, d.Name + ".Remove(") ||
+                ContainsPruneDictCall(allCodeNoComments, d.Name);
+            if (!hasClean)
+            {
+                Console.Error.WriteLine($"  [STATIC LINT ERROR] {d.RelPath}:{d.LineNo} static Dictionary<IntPtr, ...> '{d.Name}' has no Clear/Remove/PruneDict eviction path.");
+                errors++;
+            }
+        }
+
+        if (errors > 0)
+            return errors;
+
+        Console.WriteLine($"  -> Verified {intPtrDicts.Count} static IntPtr dictionaries have Clear/Prune/Remove cleanup (0 leaks) & 0 IL2CPP footguns");
         return 0;
     }
 }
