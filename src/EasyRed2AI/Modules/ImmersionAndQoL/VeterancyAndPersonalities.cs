@@ -336,14 +336,18 @@ namespace EasyRed2HumanAI
 
             float vet01 = GetVeterancy01(leader);
             SoldierPersonality pers = GetPersonality(leader);
+            float baseAura;
             switch (pers)
             {
                 case SoldierPersonality.Leader_Spearhead:
-                    return 0.09f + 0.07f * vet01;
+                    baseAura = 0.09f + 0.07f * vet01;
+                    break;
                 case SoldierPersonality.Leader_Tactician:
-                    return 0.05f + 0.05f * vet01;
+                    baseAura = 0.05f + 0.05f * vet01;
+                    break;
                 case SoldierPersonality.Leader_OldGuard:
-                    return 0.04f + 0.05f * vet01;
+                    baseAura = 0.04f + 0.05f * vet01;
+                    break;
                 case SoldierPersonality.Assaulter_Shock:
                 case SoldierPersonality.Assaulter_Breacher:
                 case SoldierPersonality.Assaulter_Skirmisher:
@@ -354,7 +358,8 @@ namespace EasyRed2HumanAI
                 case SoldierPersonality.TankCrew_Brawler:
                 case SoldierPersonality.LightCrew_Outrider:
                 case SoldierPersonality.Pilot_Daredevil:
-                    return 0.04f + 0.04f * vet01;
+                    baseAura = 0.04f + 0.04f * vet01;
+                    break;
                 case SoldierPersonality.Rifleman_Regular:
                 case SoldierPersonality.Rifleman_Grenadier:
                 case SoldierPersonality.Gunner_Overwatch:
@@ -363,12 +368,21 @@ namespace EasyRed2HumanAI
                 case SoldierPersonality.TankCrew_Support:
                 case SoldierPersonality.LightCrew_Escort:
                 case SoldierPersonality.Pilot_Ace:
-                    return 0.01f + 0.03f * vet01;
+                    baseAura = 0.01f + 0.03f * vet01;
+                    break;
                 case SoldierPersonality.None:
                     return 0f;
                 default:
                     return -0.03f + 0.04f * vet01;
             }
+
+            if (baseAura > 0f)
+            {
+                float auraMult = GetFactionCommandProfile(AiCore.GetCachedFaction(leader)).LeaderAuraMult;
+                if (auraMult > 0.01f)
+                    baseAura = Mathf.Min(0.22f, baseAura * auraMult);
+            }
+            return baseAura;
         }
 
         internal static bool TryEvaluateRiseToTheOccasion(Soldier s, Squad sq, ref SquadBlackboard board, float now, bool hasBoard)
@@ -835,12 +849,33 @@ namespace EasyRed2HumanAI
         [HarmonyPatch(typeof(TurretAI), nameof(TurretAI.RefreshTargets))]
         public static class TurretAI_RefreshTargets_Patch
         {
-            public static void Prefix(out long __state)
+            public struct TurretRefreshState
             {
-                __state = HitchProfiler.Begin();
+                public long ProfStart;
+                public Spottable PrevTarget;
+                public IntPtr PrevTargetPtr;
             }
 
-            public static void Postfix(TurretAI __instance, Soldier __0, bool __result, long __state)
+            public static void Prefix(TurretAI __instance, out TurretRefreshState __state)
+            {
+                __state = new TurretRefreshState
+                {
+                    ProfStart = HitchProfiler.Begin()
+                };
+                try
+                {
+                    if (__instance != null &&
+                        !ReferenceEquals(__instance.CurrentVisibleTarget, null) &&
+                        __instance.CurrentVisibleTarget != null)
+                    {
+                        __state.PrevTarget = __instance.CurrentVisibleTarget;
+                        __state.PrevTargetPtr = __instance.CurrentVisibleTarget.Pointer;
+                    }
+                }
+                catch { }
+            }
+
+            public static void Postfix(TurretAI __instance, Soldier __0, bool __result, TurretRefreshState __state)
             {
                 try
                 {
@@ -869,6 +904,52 @@ namespace EasyRed2HumanAI
                             traits.VehHandles.CommanderSpotTime = Time.time;
                         }
                         return;
+                    }
+
+                    // Turret Infantry Target Commitment Hysteresis:
+                    // Prevent vanilla TurretAI.FindBestTarget (0x180831A80) from oscillating between equally distant
+                    // infantrymen in dense firefights (never blocks upgrading onto vehicles/aircraft or TryPrioritizeKnownTargetForTurret).
+                    Spottable newTurretTarget = __instance.CurrentVisibleTarget;
+                    if (__state.PrevTargetPtr != IntPtr.Zero &&
+                        !ReferenceEquals(newTurretTarget, null) &&
+                        newTurretTarget != null &&
+                        newTurretTarget.Pointer != __state.PrevTargetPtr &&
+                        AiCore.IsValidAliveSpottable(__state.PrevTarget))
+                    {
+                        Spottable prevT = __state.PrevTarget;
+                        bool prevIsInfantry = !prevT.IsWheeledVehicleOrTank() && !prevT.IsAirVehicle();
+                        bool newIsInfantry = !newTurretTarget.IsWheeledVehicleOrTank() && !newTurretTarget.IsAirVehicle();
+                        if (prevIsInfantry && newIsInfantry)
+                        {
+                            float nowT = Time.time;
+                            Turret turretObj = __instance.turret;
+                            Vector3 tFirePos = turretObj.GetFirePos();
+                            Vector3 prevPos = prevT.GetCenterOfUnit();
+                            Vector3 toPrev = prevPos - tFirePos;
+                            float prevDist = toPrev.magnitude;
+                            float newDist = Vector3.Distance(tFirePos, newTurretTarget.GetCenterOfUnit());
+                            float prevOffBore = prevDist > 0.5f ? Vector3.Angle(turretObj.GetFireDir(), toPrev) : 0f;
+
+                            _turretSightReaction.TryGetValue(turretObj.Pointer, out TurretSightReactionState tReact);
+                            bool turretCommitted = nowT < tReact.LockedUntil || prevOffBore <= 15.0f;
+                            bool newIsCloseEmergency = newDist <= 22.0f && newDist < prevDist - 6.0f;
+                            float tMargin = turretCommitted ? Mathf.Max(18.0f, prevDist * 0.30f) : Mathf.Max(8.0f, prevDist * 0.15f);
+
+                            if (!newIsCloseEmergency &&
+                                prevDist >= 4.0f &&
+                                newDist >= prevDist - tMargin &&
+                                turretObj.CanShootInDirection(toPrev / prevDist, 1.0f))
+                            {
+                                float prevAngleAdj = Corvostudio.Weapons.BulletInstance.CalculateTrajectory(
+                                    prevDist, turretObj.GetBulletSpeed(), turretObj.GetBulletGravity(), out bool prevReach);
+                                if (prevReach && __instance.CanSee(prevT))
+                                {
+                                    __instance.CurrentVisibleTarget = prevT;
+                                    __instance.targetAngleAdjust = prevAngleAdj;
+                                    __instance.targetInWeaponRange = true;
+                                }
+                            }
+                        }
                     }
 
                     // Always run danger-close indirect-fire target sanitization & combined-arms / intercom priority
@@ -906,7 +987,7 @@ namespace EasyRed2HumanAI
                 catch { }
                 finally
                 {
-                    HitchProfiler.End(HitchBucket.TurretRefresh, __state);
+                    HitchProfiler.End(HitchBucket.TurretRefresh, __state.ProfStart);
                 }
             }
         }
@@ -1051,9 +1132,15 @@ namespace EasyRed2HumanAI
                                     delay = 0.34f + Mathf.Clamp01(offBoreDeg / 120.0f) * 0.34f + jitter;
                                 }
 
+                                if (rState.LastSeenTime > 0f && (now - rState.LastSeenTime) <= 2.0f && offBoreDeg <= 16.0f)
+                                {
+                                    delay = Mathf.Min(delay, 0.18f);
+                                }
+
                                 delay *= Mathf.Lerp(1.0f, 0.78f, vet01);
                                 __instance.nextFireCheckTime = Mathf.Max(__instance.nextFireCheckTime, now + delay);
                                 __instance.nextFireStopTime = 0f;
+                                rState.LockedUntil = now + 3.2f;
                             }
 
                             rState.LastTargetPtr = curTarget.Pointer;
@@ -1120,8 +1207,11 @@ namespace EasyRed2HumanAI
         [HarmonyPatch(typeof(Soldier), nameof(Soldier.Throw))]
         public static class Soldier_Throw_Patch
         {
-            public static bool Prefix(Soldier __instance, VirtualItem __0, Spottable __1)
+            public static bool Prefix(Soldier __instance, VirtualItem __0, Spottable __1, out float __state)
             {
+                __state = (!ReferenceEquals(__instance, null) && __instance.Pointer != IntPtr.Zero)
+                    ? __instance.stopHandsAnim_end
+                    : -1f;
                 try
                 {
                     if (!VisionConfig.EnableMod.Value ||
@@ -1206,6 +1296,53 @@ namespace EasyRed2HumanAI
                 }
                 catch { }
                 return true;
+            }
+
+            public static void Postfix(Soldier __instance, float __state)
+            {
+                try
+                {
+                    if (!VisionConfig.EnableMod.Value ||
+                        ReferenceEquals(__instance, null) ||
+                        __instance.Pointer == IntPtr.Zero ||
+                        __state < 0f)
+                    {
+                        return;
+                    }
+
+                    // Only act if vanilla Soldier.Throw actually succeeded (consumed item and set stopHandsAnim_end = now + 3.0f).
+                    // Blocked throws (Prefix returning false, CanPlaySpecialAnim false, vehicle seat, or failed item removal) leave stopHandsAnim_end unchanged.
+                    float now = Time.time;
+                    if (__instance.stopHandsAnim_end <= __state + 0.5f || __instance.stopHandsAnim_end < now + 1.5f)
+                        return;
+
+                    if (!AiCore.IsLocallyOwnedSoldier(__instance))
+                        return;
+
+                    // Immediately cut any active full-auto burst on Frame 0 and push SyncStopFire to Co-op clients.
+                    __instance.SetGunTriggerPressed(false);
+                    if (__instance.triggerState == Soldier.TriggerState.Firing)
+                        __instance.StopFire();
+
+                    // Hold AI bot fire through the full throw animation. In Co-op MP, vanilla delays SynchItemThrow
+                    // by 1.5s (sent at release), so remote clients play ThrowItem from t=1.5s to t=4.5s; holding bot
+                    // gunfire until 4.55s keeps vanilla clients from seeing full-auto gunfire mid-throw without delaying human players.
+                    AiCore.SoldierFastHandles h = AiCore.GetOrCreateSoldierHandles(__instance);
+                    if (AiCore.IsLocallyOwnedBot(h))
+                    {
+                        float holdUntil = now + (AiCore.IsInMultiplayerRoom() ? 4.55f : 3.15f);
+                        if (holdUntil > h.Combat.ThrowFireHoldUntil)
+                            h.Combat.ThrowFireHoldUntil = holdUntil;
+                        h.Combat.RotateFireFrame.Frame = -1;
+                        if (h.Ai != null)
+                        {
+                            h.Ai.shotFiresEnd = 0f;
+                            if (h.Ai.nextAvailableShotFires < holdUntil)
+                                h.Ai.nextAvailableShotFires = holdUntil;
+                        }
+                    }
+                }
+                catch { }
             }
         }
 

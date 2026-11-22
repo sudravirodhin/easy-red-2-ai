@@ -96,6 +96,8 @@ namespace EasyRed2HumanAI
         public static ConfigEntry<bool> EnableRadiomanIntelNet;
         public static ConfigEntry<bool> EnableTacticalVoiceCallouts;
         public static ConfigEntry<bool> EnableFactionNetDoctrines;
+        public static ConfigEntry<bool> EnableBattleAtmosphereDirectives;
+        public static ConfigEntry<bool> BroadcastBattleAtmosphereChat;
         public static ConfigEntry<bool> EnableCoopAirborneSpawnFix;
         public static ConfigEntry<bool> EnableTankRockUnstickAssist;
         public static ConfigEntry<bool> EnableUrgentVehicleCruiseSpeed;
@@ -613,6 +615,18 @@ namespace EasyRed2HumanAI
                 "EnableFactionNetDoctrines",
                 true,
                 "Nation-Specific Team Net & GOAP Doctrines: gives all 20 Easy Red 2 factions (USA, Germany, USSR, UK, Japan, France, Italy, Poland, China, Finland, Mongolia, Manchukuo, Canada, Australia, New Zealand, India, Gurkha, Greece, Romania, Hungary + balanced default fallback) historically authentic radio net, flanking, emplacement, and GOAP cost habits.");
+
+            EnableBattleAtmosphereDirectives = config.Bind(
+                "6. Tactical Self-Preservation & Muzzle Discipline",
+                "EnableBattleAtmosphereDirectives",
+                true,
+                "Battle Atmosphere Directives (9 Theater Archetypes): applies bounded +/-10-25% historical theater & mission-specific doctrine modifiers at battle load (Order No. 227, Kessel Pocket, Urban Fortress, Amphibious Beachhead, Siege of Bastogne, Pacific Bunker & Night Gyokusai, Mountain Ridge Grind, Blitzkrieg Schwerpunkt, Night Airborne Coup de Main).");
+
+            BroadcastBattleAtmosphereChat = config.Bind(
+                "6. Tactical Self-Preservation & Muzzle Discipline",
+                "BroadcastBattleAtmosphereChat",
+                true,
+                "Broadcast [HQ Dispatch] Atmosphere Banner in Chat: posts a single brief historical theater directive dispatch ~4s after battle load (local chat in Solo; Host-synced to all vanilla & modded players in Co-op).");
 
             EnableCoopAirborneSpawnFix = config.Bind(
                 "6. Tactical Self-Preservation & Muzzle Discipline",

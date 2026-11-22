@@ -761,6 +761,12 @@ namespace EasyRed2HumanAI
                     if (veh == null || veh.Pointer == IntPtr.Zero || veh.transform == null)
                         return;
 
+                    if (AiCore.IsFootBotStandingOnVehicleHull(__0))
+                    {
+                        __result = false;
+                        return;
+                    }
+
                     IntPtr taskPtr = __instance.Pointer;
                     if (!_repairTaskStartTime.TryGetValue(taskPtr, out float startTime))
                     {
@@ -874,6 +880,15 @@ namespace EasyRed2HumanAI
                    st.Pointer != IntPtr.Zero;
         }
 
+        internal static bool IsSquadVehicleAnsweringTankSupport(Squad sq)
+        {
+            if (sq == null || sq.Pointer == IntPtr.Zero || sq.Leader == null || !sq.Leader.IsOnVehicle())
+                return false;
+
+            Vehicle v = sq.Leader.GetCurrentVehicle();
+            return v != null && v.Pointer != IntPtr.Zero && _vehiclesAnsweringTankSupport.Contains(v.Pointer);
+        }
+
         private static bool TryRouteVehicleToRepairStation(AIVehicle aiVeh, Vehicle veh, float now)
         {
             if (aiVeh == null || veh == null || veh.Pointer == IntPtr.Zero || veh.transform == null)
@@ -882,8 +897,8 @@ namespace EasyRed2HumanAI
             if (!AiCore.IsLocallyOwnedVehicle(veh) ||
                 veh.IsDisabled() ||
                 veh.IsAirVehicle() ||
-                veh.PlayerIsInside() ||
-                veh.PlayerIsDriving() ||
+                AiCore.IsAnyHumanPlayerInsideVehicle(veh) ||
+                AiCore.IsAnyHumanPlayerDriving(veh) ||
                 !veh.HasDriver())
             {
                 _vehiclesSeekingRepairStation.Remove(veh.Pointer);
@@ -1111,8 +1126,8 @@ namespace EasyRed2HumanAI
                 !AiCore.IsLocallyOwnedVehicle(veh) ||
                 !veh.CanFight() ||
                 veh.IsAirVehicle() ||
-                veh.PlayerIsInside() ||
-                veh.PlayerIsDriving())
+                AiCore.IsAnyHumanPlayerInsideVehicle(veh) ||
+                AiCore.IsAnyHumanPlayerDriving(veh))
             {
                 return;
             }
@@ -1212,17 +1227,32 @@ namespace EasyRed2HumanAI
                 }
             }
 
+            AiCore.VehicleFastHandles vh = AiCore.GetOrCreateVehicleHandles(veh);
             float maxAllowedOffset = Mathf.Max(15.0f, aiVeh.GetCurrentSquadDestinationAreaSize() * 0.84f);
             bool hasMissionFocus = focusSupportSquad != null || (isCounterArmorIntercept && bestFocusScore > -900f);
             bool answeringFarTankSupport = hasMissionFocus && Vector3.Distance(squadDest, bestFocusPos) > maxAllowedOffset;
             if (!answeringFarTankSupport)
             {
-                if (_vehiclesAnsweringTankSupport.Remove(vehPtr))
+                if (_vehiclesAnsweringTankSupport.Contains(vehPtr))
                 {
-                    if (crewSq != null && !AiCore.HasAnyHumanPlayerInSquad(crewSq) && crewSq.Leader != null &&
-                        (!Photon.Pun.PhotonNetwork.InRoom || AiCore.TryConsumeBotRpcBudget(0.45f)))
+                    if (vh != null && now < vh.TankSupportHoldUntil)
                     {
-                        crewSq.Leader_OrderAttackCurrentTask(crewSq.Leader);
+                        if (crewSq != null && !AiCore.HasAnyHumanPlayerInSquad(crewSq))
+                            crewSq.timed_order_end = Mathf.Max(crewSq.timed_order_end, vh.TankSupportHoldUntil);
+                        return;
+                    }
+
+                    _vehiclesAnsweringTankSupport.Remove(vehPtr);
+                    if (vh != null)
+                        vh.TankSupportHoldUntil = 0f;
+                    if (crewSq != null && !AiCore.HasAnyHumanPlayerInSquad(crewSq))
+                    {
+                        crewSq.timed_order_end = 0f;
+                        if (crewSq.Leader != null &&
+                            (!Photon.Pun.PhotonNetwork.InRoom || AiCore.TryConsumeBotRpcBudget(0.45f)))
+                        {
+                            crewSq.Leader_OrderAttackCurrentTask(crewSq.Leader);
+                        }
                     }
                     aiVeh.rerollDestination = true;
                 }
@@ -1250,8 +1280,18 @@ namespace EasyRed2HumanAI
                 desiredDest.y = bestFocusPos.y;
             }
 
-            bool destChanged = (aiVeh.setVehicleDestination - desiredDest).sqrMagnitude > 10.0f * 10.0f;
-            if (destChanged || !_vehiclesAnsweringTankSupport.Contains(vehPtr))
+            bool alreadyAnswering = _vehiclesAnsweringTankSupport.Contains(vehPtr);
+            Vector3 currentAnchor = (crewSq != null && crewSq.moveOrderPosition.sqrMagnitude > 0.01f)
+                ? crewSq.moveOrderPosition
+                : aiVeh.setVehicleDestination;
+            bool destChanged = !alreadyAnswering || (currentAnchor - desiredDest).sqrMagnitude > 24.0f * 24.0f;
+
+            if (vh != null)
+                vh.TankSupportHoldUntil = now + 5.0f;
+            if (crewSq != null && !AiCore.HasAnyHumanPlayerInSquad(crewSq))
+                crewSq.timed_order_end = Mathf.Max(crewSq.timed_order_end, now + 10.0f);
+
+            if (destChanged)
             {
                 _vehiclesAnsweringTankSupport.Add(vehPtr);
                 if (crewSq != null && !AiCore.HasAnyHumanPlayerInSquad(crewSq))
@@ -1262,10 +1302,7 @@ namespace EasyRed2HumanAI
                     crewSq.moveOrderPosition = desiredDest;
                     crewSq.moveOrderRadius = isTank ? 46.0f : 34.0f;
                 }
-            }
 
-            if (destChanged)
-            {
                 aiVeh.setVehicleDestination = desiredDest;
                 aiVeh.rerollDestination = false;
                 _claimedVehicleDestinations[vehPtr] = desiredDest;
@@ -1302,7 +1339,7 @@ namespace EasyRed2HumanAI
             if (veh == null || veh.Pointer == IntPtr.Zero || veh.transform == null)
                 return;
 
-            if (!AiCore.IsLocallyOwnedVehicle(veh) || !veh.IsTransportVehicle() || veh.IsAirVehicle() || veh.PlayerIsDriving())
+            if (!AiCore.IsLocallyOwnedVehicle(veh) || !veh.IsTransportVehicle() || veh.IsAirVehicle() || AiCore.IsAnyHumanPlayerDriving(veh))
                 return;
 
             IntPtr vehPtr = veh.Pointer;
@@ -1613,7 +1650,7 @@ namespace EasyRed2HumanAI
 
             Vehicle veh = ai.veh;
             if (veh == null || veh.Pointer == IntPtr.Zero || veh.transform == null ||
-                veh.IsDisabled() || veh.IsAirVehicle() || veh.PlayerIsDriving() ||
+                veh.IsDisabled() || veh.IsAirVehicle() || AiCore.IsAnyHumanPlayerDriving(veh) ||
                 !AiCore.IsLocallyOwnedVehicle(veh))
             {
                 return;
@@ -1719,11 +1756,30 @@ namespace EasyRed2HumanAI
                 cornerCap = Mathf.Min(cornerCap, Mathf.Lerp(17.0f, straightCap, destProx));
             }
 
-            float alignFactor = dirAngle <= 8.0f ? 1.0f : Mathf.Clamp01(1.0f - (dirAngle - 8.0f) / 16.0f);
+            float alignFactor = isTank
+                ? (dirAngle <= 5.0f ? 1.0f : Mathf.Clamp01(1.0f - (dirAngle - 5.0f) / 15.0f))
+                : (dirAngle <= 8.0f ? 1.0f : Mathf.Clamp01(1.0f - (dirAngle - 8.0f) / 16.0f));
             float vanillaCap = isTank ? 17.0f : 16.0f;
             float targetKmh = Mathf.Lerp(vanillaCap, cornerCap, alignFactor);
             if (targetKmh <= vanillaCap + 0.5f)
                 return;
+
+            float steerX = veh.movingDir.x;
+            if (isTank)
+            {
+                if (dirAngle <= 3.5f)
+                {
+                    steerX = 0f;
+                }
+                else if (Mathf.Abs(steerX) > 0.001f)
+                {
+                    float speedRatio = Mathf.Clamp01(kmhSpeed / Mathf.Max(10.0f, vehMaxKmh));
+                    float vanillaRatio = Mathf.Clamp01(17.0f / Mathf.Max(10.0f, vehMaxKmh));
+                    float gainComp = (1.0f + vanillaRatio) / (1.0f + speedRatio);
+                    float dampedMag = Mathf.Clamp01((dirAngle - 3.5f) / 28.0f) * gainComp;
+                    steerX = Mathf.Sign(steerX) * Mathf.Min(Mathf.Abs(steerX), dampedMag);
+                }
+            }
 
             float brakeKmh = targetKmh * 1.10f;
             if (kmhSpeed <= targetKmh)
@@ -1734,14 +1790,14 @@ namespace EasyRed2HumanAI
                 wheeled.lastHoldBrakeFrame = -10;
                 wheeled.lastBrakeRequestFrame = -10;
                 ai.lastDriveThrottle = throttle;
-                veh.Move(new Vector2(veh.movingDir.x, throttle));
+                veh.Move(new Vector2(steerX, throttle));
             }
             else if (kmhSpeed <= brakeKmh)
             {
                 wheeled.lastHoldBrakeFrame = -10;
                 wheeled.lastBrakeRequestFrame = -10;
                 ai.lastDriveThrottle = 0f;
-                veh.Move(new Vector2(veh.movingDir.x, 0f));
+                veh.Move(new Vector2(steerX, 0f));
             }
         }
 
@@ -2105,7 +2161,7 @@ namespace EasyRed2HumanAI
             Vector3 outerCenter = new Vector3(worldPos.x, worldPos.y + 2.6f, worldPos.z);
             bool hitOuter = Physics.CheckBox(
                 outerCenter,
-                new Vector3(5.0f, 1.0f, 5.0f),
+                new Vector3(3.8f, 0.9f, 3.8f),
                 Quaternion.identity,
                 mask,
                 QueryTriggerInteraction.Ignore);
@@ -2115,7 +2171,7 @@ namespace EasyRed2HumanAI
             Vector3 innerCenter = new Vector3(worldPos.x, worldPos.y + 2.3f, worldPos.z);
             bool hitInner = Physics.CheckBox(
                 innerCenter,
-                new Vector3(3.2f, 1.0f, 3.2f),
+                new Vector3(2.2f, 0.85f, 2.2f),
                 Quaternion.identity,
                 mask,
                 QueryTriggerInteraction.Ignore);
@@ -2201,6 +2257,21 @@ namespace EasyRed2HumanAI
             }
         }
 
+        private static bool IsRoadCellOrAdjacent(Vector3 worldPos)
+        {
+            int cx = Mathf.RoundToInt(worldPos.x * 0.25f);
+            int cz = Mathf.RoundToInt(worldPos.z * 0.25f);
+            for (int dx = -1; dx <= 1; dx++)
+            {
+                for (int dz = -1; dz <= 1; dz++)
+                {
+                    if (_vehicleRoadCells.Contains(PackVehicleCell(cx + dx, cz + dz)))
+                        return true;
+                }
+            }
+            return false;
+        }
+
         [HarmonyPatch(typeof(global::A.f), nameof(global::A.f.A), new[] { typeof(global::A.G), typeof(global::A.G), typeof(byte) })]
         public static class A_f_CanSkipStringPullNode_Patch
         {
@@ -2227,19 +2298,18 @@ namespace EasyRed2HumanAI
                 // Preserve road curve anchors while still string-pulling straight road segments cleanly.
                 if (aRoad && bRoad)
                 {
-                    if (!_vehicleRoadCells.Contains(keyMid))
+                    float chordSq = (a.x - b.x) * (a.x - b.x) + (a.z - b.z) * (a.z - b.z);
+                    if (chordSq > 144f && !IsRoadCellOrAdjacent(mid))
                     {
                         __result = false;
                         return false;
                     }
 
-                    float chordSq = (a.x - b.x) * (a.x - b.x) + (a.z - b.z) * (a.z - b.z);
-                    if (chordSq > 256f)
+                    if (chordSq > 324f)
                     {
                         Vector3 p1 = Vector3.Lerp(a, b, 0.333f);
                         Vector3 p2 = Vector3.Lerp(a, b, 0.667f);
-                        if (!_vehicleRoadCells.Contains(PackVehicleCell(p1)) ||
-                            !_vehicleRoadCells.Contains(PackVehicleCell(p2)))
+                        if (!IsRoadCellOrAdjacent(p1) || !IsRoadCellOrAdjacent(p2))
                         {
                             __result = false;
                             return false;
@@ -2247,23 +2317,13 @@ namespace EasyRed2HumanAI
                     }
                 }
 
-                // Prevent string-pulling from cutting across cluttered woods, fences, or rubble corners.
+                // Prevent string-pulling from cutting across tight obstructed woods, fences, or rubble corners.
                 byte midClear = GetOrClassifyVehicleCell(keyMid, mid, storeInCache: false);
                 if (midClear == VehicleCellTightObstructed)
                 {
                     byte aClear = GetOrClassifyVehicleCell(keyA, a, storeInCache: true);
                     byte bClear = GetOrClassifyVehicleCell(keyB, b, storeInCache: true);
                     if (aClear != VehicleCellTightObstructed || bClear != VehicleCellTightObstructed)
-                    {
-                        __result = false;
-                        return false;
-                    }
-                }
-                else if (midClear == VehicleCellModerateClutter && __2 >= 3)
-                {
-                    byte aClear = GetOrClassifyVehicleCell(keyA, a, storeInCache: true);
-                    byte bClear = GetOrClassifyVehicleCell(keyB, b, storeInCache: true);
-                    if (aRoad || bRoad || aClear == VehicleCellClearOpen || bClear == VehicleCellClearOpen)
                     {
                         __result = false;
                         return false;

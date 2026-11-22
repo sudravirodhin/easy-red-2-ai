@@ -65,6 +65,8 @@ namespace EasyRed2HumanAI
         private static int _lastPulseS1Mia;
         private static float _lastPulseS0Heat;
         private static float _lastPulseS1Heat;
+        private static readonly List<Squad> _reusableConnectedInfSquads = new List<Squad>(32);
+        private static readonly List<Squad> _reusableActiveVehAnvils = new List<Squad>(16);
 
         public static void ResetOnSceneRestart()
         {
@@ -75,6 +77,8 @@ namespace EasyRed2HumanAI
             _squadHeartbeats.Clear();
             _seenAliveSquadPtrs.Clear();
             _miaCheckKeyBuffer.Clear();
+            _reusableConnectedInfSquads.Clear();
+            _reusableActiveVehAnvils.Clear();
             Array.Clear(_actionCounts, 0, _actionCounts.Length);
             Array.Clear(_reflexCounts, 0, _reflexCounts.Length);
             _totalT1Decisions = 0;
@@ -127,7 +131,7 @@ namespace EasyRed2HumanAI
             }
         }
 
-        private static int ResolveSideIndex(string faction)
+        internal static int ResolveSideIndex(string faction)
         {
             if (string.IsNullOrEmpty(faction))
                 return 0;
@@ -673,18 +677,56 @@ namespace EasyRed2HumanAI
             bool hasAmmoCrateOrCarrier = false;
             bool isAmmoCarrier = soldier.IsAmmoBoxCarrier();
             bool allyNeedsAmmoNearby = false;
-            bool safeLullForGear = !hasVisible && rawHarmNow < 0.20f && !soldier.IsSquadLeader();
+            bool isBailedCrew = VeteranAndTacticsPatches.IsSoldierBailedOutVehicleCrew(soldier, sq);
+            bool urgentBandageWhileBleeding = soldier.isBleeding && !hasBandage;
+            bool armorThreatPresent = isEvadingArmor ||
+                                      visTargetIsHeavyArmor ||
+                                      (board.HasActiveThreat && (board.ThreatIsArmor || (board.PrimaryTarget != null && board.PrimaryTarget.TryCast<Vehicle>() != null))) ||
+                                      (ai.visibleTarget != null && ai.visibleTarget.TryCast<Vehicle>() != null);
+            bool safeLullForGear = !hasVisible && rawHarmNow < 0.20f && projHarm < 0.20f && suppression < 5.0f && !exposedWall && !isOnBridge;
             bool allowUrgentPrimary = !inPointBlankMelee &&
                                       !soldier.isBleeding &&
                                       rawHarmNow < 0.45f &&
                                       !(hasVisible && dist <= 16.0f) &&
                                       !VeteranAndTacticsPatches.HasRealPrimaryWithAmmo(soldier);
+            bool allowUrgentAt = !inPointBlankMelee &&
+                                 !soldier.isBleeding &&
+                                 !hasAtCap &&
+                                 armorThreatPresent &&
+                                 suppression < 18.0f &&
+                                 !soldier.IsSquadLeader() &&
+                                 !soldier.IsRadioman() &&
+                                 !isMedic &&
+                                 !(hasVisible && !visTargetIsHeavyArmor && dist <= 16.0f);
+            bool allowBailedCrewToolbox = isBailedCrew && !soldier.isBleeding && !isEvadingArmor && suppression < 20.0f && soldier.GetRepairTools() == null;
             bool foundUrgentPrimaryUpgrade = false;
-            if (!hasUsableArms || (isMedic && !hasBandage) || safeLullForGear || allowUrgentPrimary)
+            bool foundAtWeaponScavenge = false;
+            if (!hasUsableArms || urgentBandageWhileBleeding || (isMedic && !hasBandage) || safeLullForGear || allowUrgentPrimary || allowUrgentAt || allowBailedCrewToolbox)
             {
-                hasAmmoCrateOrCarrier = VeteranAndTacticsPatches.EmergentHasNearbyResupplySource(soldier, sq, ref board, myPos, personality, safeLullForGear, allowUrgentPrimary, now, out foundUrgentPrimaryUpgrade);
+                hasAmmoCrateOrCarrier = VeteranAndTacticsPatches.EmergentHasNearbyResupplySource(
+                    ai,
+                    soldier,
+                    h,
+                    sq,
+                    ref board,
+                    myPos,
+                    personality,
+                    suppression,
+                    hasUsableArms,
+                    hasBandage,
+                    hasFrag,
+                    hasSmoke,
+                    hasAtCap,
+                    isBailedCrew,
+                    isEvadingArmor,
+                    exposedWall,
+                    safeLullForGear,
+                    allowUrgentPrimary,
+                    allowUrgentAt,
+                    now,
+                    out foundUrgentPrimaryUpgrade,
+                    out foundAtWeaponScavenge);
             }
-            bool isBailedCrew = VeteranAndTacticsPatches.IsSoldierBailedOutVehicleCrew(soldier, sq);
             if (isBailedCrew &&
                 !inPointBlankMelee &&
                 !soldier.isBleeding &&
@@ -694,7 +736,7 @@ namespace EasyRed2HumanAI
                     sq,
                     hasAmmoCrateOrCarrier,
                     (safeLullForGear && !exposedWall && !isOnBridge && suppression < 5f) ||
-                    (foundUrgentPrimaryUpgrade && !exposedWall && !isOnBridge && suppression < 18f),
+                    ((foundUrgentPrimaryUpgrade || foundAtWeaponScavenge) && !exposedWall && !isOnBridge && suppression < 18f),
                     now))
             {
                 ref var crewPlan = ref h.Goap.Plan;
@@ -821,6 +863,7 @@ namespace EasyRed2HumanAI
                 ObjectiveTickingAgainstUs = capTickingAgainst,
                 NearbyAmmoSource = hasAmmoCrateOrCarrier,
                 NeedsPrimaryWeaponUpgrade = foundUrgentPrimaryUpgrade,
+                NeedsAtWeaponScavenge = foundAtWeaponScavenge,
                 AllyNeedsAmmoDropNearby = allyNeedsAmmoNearby,
                 HasInjuredAlly = hasInjuredAlly,
                 InjuredAllyHarm = projHarm,
@@ -1046,7 +1089,19 @@ namespace EasyRed2HumanAI
                 case EmergentEngine.EmergentActionId.MaintainRadioLink:
                     if (sq != null && sq.Leader != null && sq.Leader.IsAlive && sq.Leader.transform != null)
                     {
-                        Vector3 targetPos = sq.Leader.transform.position - board.ThreatDirection * 3.5f;
+                        Vector3 leaderPos = sq.Leader.transform.position;
+                        if (board.HasActiveObjectiveTask)
+                        {
+                            float leaderObjDistSq = (leaderPos - board.ObjectivePosition).sqrMagnitude;
+                            float myObjDistSq = (myPos - board.ObjectivePosition).sqrMagnitude;
+                            if (leaderObjDistSq > myObjDistSq + 25.0f * 25.0f &&
+                                (leaderPos - myPos).sqrMagnitude > 60.0f * 60.0f)
+                            {
+                                break;
+                            }
+                        }
+
+                        Vector3 targetPos = leaderPos - board.ThreatDirection * 3.5f;
                         plan.HasMoveOverride = true;
                         plan.MoveOverrideDest = targetPos;
                         AiCore.MoveBotTowardPosition(ai, soldier, targetPos, 0.5f, 2.8f);
@@ -1170,6 +1225,22 @@ namespace EasyRed2HumanAI
 
                 case EmergentEngine.EmergentActionId.HoldAndFight:
                 default:
+                    if (ai.visibleTarget != null)
+                    {
+                        Vehicle targetVeh = ai.visibleTarget.TryCast<Vehicle>();
+                        if (targetVeh != null &&
+                            targetVeh.TryCast<VehiclePlane>() == null &&
+                            (board.SquadHasAntiTank || VeteranAndTacticsPatches.HasUsableAntiTankCapability(soldier)))
+                        {
+                            bool isTank = targetVeh.TryCast<VehicleTank>() != null;
+                            VeteranAndTacticsPatches.TrySayTacticalVoice(
+                                soldier,
+                                sq,
+                                isTank ? VoiceManager.VoiceClip.attackThatTank : VoiceManager.VoiceClip.attackThatVehicle,
+                                0.08f);
+                        }
+                    }
+
                     if (!acousticBusy && !soldier.isBleeding && rawHarmNow < 0.20f)
                     {
                         if (board.AliveMemberCount <= 1)
@@ -1413,7 +1484,14 @@ namespace EasyRed2HumanAI
             float[] sideMaxDefCap = { 0f, 0f };
             bool[] sideCollapsingCap = { false, false };
             bool[] sideArmorBlock = { false, false };
+            bool[] sideHasAt = { false, false };
+            bool[] sideHasFlankOpen = { false, false };
+            bool[] sideTankNeedsScreen = { false, false };
             string[] sideFaction = { null, null };
+            bool issuedSquadCoverOrderThisTick = false;
+
+            _reusableConnectedInfSquads.Clear();
+            _reusableActiveVehAnvils.Clear();
 
             var squads = AiCore.WorldSquads;
             _seenAliveSquadPtrs.Clear();
@@ -1478,12 +1556,31 @@ namespace EasyRed2HumanAI
 
                 if (isHumanSq || !AiCore.IsLocallyOwnedBot(leader))
                 {
+                    if (sqSnap.IsVehicleCrew && !sqSnap.RefOnPlane && sqSnap.HasRadioOrRelay)
+                    {
+                        VeteranAndTacticsPatches.SquadBlackboard vehBoard = VeteranAndTacticsPatches.GetOrUpdateSquadBlackboard(sq, leader);
+                        if (vehBoard.HasActiveThreat)
+                            _reusableActiveVehAnvils.Add(sq);
+                    }
                     _squadHeartbeats[sq.Pointer] = hb;
                     continue;
                 }
 
                 // Evaluate Tier 2 SL Approve / Balk Pushback
                 VeteranAndTacticsPatches.SquadBlackboard board = VeteranAndTacticsPatches.GetOrUpdateSquadBlackboard(sq, leader);
+                if (board.SquadHasAntiTank)
+                    sideHasAt[sIdx] = true;
+                if (board.FlankLeftCover != null || board.FlankRightCover != null)
+                    sideHasFlankOpen[sIdx] = true;
+                if (sqSnap.IsVehicleCrew && !sqSnap.RefOnPlane && sqSnap.HasRadioOrRelay && board.HasActiveThreat)
+                {
+                    _reusableActiveVehAnvils.Add(sq);
+                }
+                else if (!sqSnap.IsVehicleCrew && !sqSnap.RefOnPlane && sqSnap.HasRadioOrRelay)
+                {
+                    _reusableConnectedInfSquads.Add(sq);
+                }
+
                 if (board.TicketRatio01 < sideMinTickets[sIdx])
                     sideMinTickets[sIdx] = board.TicketRatio01;
                 if (board.IsDefendingObjective && board.HasActiveObjectiveTask)
@@ -1510,8 +1607,8 @@ namespace EasyRed2HumanAI
                     ThreatDist = board.HasActiveThreat ? Vector3.Distance(sqSnap.RefPos, board.ThreatPosition) : 999f,
                     ThreatIsArmor = board.ThreatIsArmor,
                     SquadHasAT = board.SquadHasAntiTank,
-                    SquadHasSmoke = true,
-                    SquadOutOfAmmo = false,
+                    SquadHasSmoke = board.SquadHasSmokeAvailable,
+                    SquadOutOfAmmo = board.SquadOutOfAmmo,
                     AllySquadPinning = board.IsThreatBeingPinned(now),
                     FlankCoverAvailable = board.FlankLeftCover != null || board.FlankRightCover != null,
                     HasIntactRadio = board.IsConnectedToRadioNet,
@@ -1570,12 +1667,58 @@ namespace EasyRed2HumanAI
                     board.NetDirectiveExpireTime = 0f;
                 }
 
-                VeteranAndTacticsPatches.EmergentCheckChargeAbort(sq, leader, ref board, now);
+                if (!sqSnap.IsVehicleCrew && !sqSnap.RefOnPlane)
+                {
+                    EmergentEngine.Tier3NetLever activeT3Lever = sIdx == 0 ? _lastSide0Lever : _lastSide1Lever;
+                    VeteranAndTacticsPatches.ExecuteEmergentSquadLeaderOrders(
+                        sq,
+                        leader,
+                        ref board,
+                        t2Dec.Directive,
+                        activeT3Lever,
+                        now,
+                        ref issuedSquadCoverOrderThisTick);
+                }
+                else
+                {
+                    VeteranAndTacticsPatches.EmergentCheckChargeAbort(sq, leader, ref board, now);
+                }
                 VeteranAndTacticsPatches._squadBlackboards[sq.Pointer] = board;
                 _squadHeartbeats[sq.Pointer] = hb;
             }
 
+            // Detect whether any engaged ground tank/vehicle anvil lacks close infantry screening (<= 55m)
+            for (int v = 0; v < _reusableActiveVehAnvils.Count; v++)
+            {
+                Squad vehSq = _reusableActiveVehAnvils[v];
+                if (vehSq == null || vehSq.Leader == null || vehSq.Leader.transform == null || string.IsNullOrEmpty(vehSq.Leader.faction))
+                    continue;
+                int vs = ResolveSideIndex(vehSq.Leader.faction);
+                if (sideTankNeedsScreen[vs])
+                    continue;
+
+                Vector3 vPos = vehSq.Leader.transform.position;
+                bool hasCloseInf = false;
+                for (int s = 0; s < sqCount; s++)
+                {
+                    ref AiCore.SquadSnapshot infSnap = ref squads[s];
+                    if (!infSnap.LeaderIsAlive || infSnap.IsVehicleCrew || infSnap.RefOnPlane || string.IsNullOrEmpty(infSnap.Faction))
+                        continue;
+                    if (!AiCore.AreSameSideFactions(vehSq.Leader.faction, infSnap.Faction))
+                        continue;
+                    if ((infSnap.RefPos - vPos).sqrMagnitude <= 55.0f * 55.0f)
+                    {
+                        hasCloseInf = true;
+                        break;
+                    }
+                }
+                if (!hasCloseInf)
+                    sideTankNeedsScreen[vs] = true;
+            }
+
             // Check wiped squads that dropped out of WorldSquads for MIA comms timeout (>18s silent) & prune old (>120s) entries
+            Vector3[] sideLastMiaPos = { Vector3.zero, Vector3.zero };
+            bool[] sideHasMiaPos = { false, false };
             if (_squadHeartbeats.Count > 0)
             {
                 _miaCheckKeyBuffer.Clear();
@@ -1599,6 +1742,8 @@ namespace EasyRed2HumanAI
                         _squadHeartbeats[sqPtr] = hb;
                         _miaTimeoutsCount++;
                         sideMia[sIdx]++;
+                        sideLastMiaPos[sIdx] = hb.LastKnownPos;
+                        sideHasMiaPos[sIdx] = true;
                         if (VisionConfig.EnableEmergentDebugTelemetry.Value)
                         {
                             AiCore.EnqueueAsyncLog(false, $"[HARMMIA] Side={sIdx} wiped squad 0x{sqPtr.ToInt64():X} silent >18s; stamped MIA Harm @ {hb.LastKnownPos:F0}");
@@ -1667,10 +1812,10 @@ namespace EasyRed2HumanAI
                     ArtilleryAvailable = sideHasArty[sIdx],
                     TanksAvailable = sideHasTank[sIdx] || sideArmorBlock[sIdx],
                     CasAvailable = sideHasPlane[sIdx],
-                    AtAssetsAvailable = true,
+                    AtAssetsAvailable = sideHasAt[sIdx],
                     InfantryBlockedByArmor = sideArmorBlock[sIdx],
-                    TankNeedsInfantryScreen = false,
-                    AlternativeFlankOpen = true,
+                    TankNeedsInfantryScreen = sideTankNeedsScreen[sIdx],
+                    AlternativeFlankOpen = sideHasFlankOpen[sIdx] || sideActive[sIdx] >= 2,
                     FreshSpawnNeedsStaging = frontlineHeat >= 0.45f,
                     HasCollapsingFriendlyCap = sideCollapsingCap[sIdx],
                     HasShreddedEncircledSquad = sideBalking[sIdx] >= 2
@@ -1701,8 +1846,19 @@ namespace EasyRed2HumanAI
                     {
                         AiCore.EnqueueAsyncLog(false, $"[HARMT3] Side={sIdx}({sideFaction[sIdx]}) Lever={t3Dec.PrimaryLever} ({t3Dec.Reason}) NetH={t3Dec.NetHarm:F2} NetW={t3Dec.NetWin:F2} Balk={sideBalking[sIdx]} MIA={sideMia[sIdx]} Desp={t3Dec.SectorDesperationBias:F2}");
                     }
+                    VeteranAndTacticsPatches.NotifyPlayerSquadLeaderOfTier3Shift(sideFaction[sIdx], t3Dec.PrimaryLever, sideLastMiaPos[sIdx], sideHasMiaPos[sIdx], now);
                 }
             }
+
+            VeteranAndTacticsPatches.ExecuteEmergentTeamNetManeuvers(
+                _reusableConnectedInfSquads,
+                _reusableActiveVehAnvils,
+                _lastSide0Lever,
+                _lastSide1Lever,
+                now,
+                ref issuedSquadCoverOrderThisTick);
+            _reusableConnectedInfSquads.Clear();
+            _reusableActiveVehAnvils.Clear();
 
             _lastPulseS0Act = sideActive[0];
             _lastPulseS1Act = sideActive[1];
@@ -1827,45 +1983,208 @@ namespace EasyRed2HumanAI
             => VisionConfig.EnableSmartWallSideCover.Value &&
                IsPositionOnExposedSideOfWall(pos, GetEffectiveThreatDirection(s, sq, pos, threatDir), s.transform.root, out _);
 
-        internal static bool EmergentHasNearbyResupplySource(Soldier s, Squad sq, ref SquadBlackboard board, Vector3 pos, SoldierPersonality pers, bool safeLull, bool allowUrgentPrimary, float now, out bool foundUrgentPrimaryUpgrade)
+        internal static bool EmergentHasNearbyResupplySource(
+            SoldierAI ai,
+            Soldier s,
+            AiCore.SoldierFastHandles h,
+            Squad sq,
+            ref SquadBlackboard board,
+            Vector3 pos,
+            SoldierPersonality pers,
+            float suppression,
+            bool hasUsableArms,
+            bool hasBandage,
+            bool hasFrag,
+            bool hasSmoke,
+            bool hasAtCap,
+            bool isBailedCrew,
+            bool isEvadingArmor,
+            bool exposedWall,
+            bool safeLull,
+            bool allowUrgentPrimary,
+            bool allowUrgentAt,
+            float now,
+            out bool foundUrgentPrimaryUpgrade,
+            out bool foundAtWeaponScavenge)
         {
             foundUrgentPrimaryUpgrade = false;
-            bool needAmmo = !AiCore.HasUsableSmallArmsAmmo(s);
-            bool needBandage = s.isBleeding || (AiCore.IsMedicSoldierOrPersonality(s, pers) && s.hasSyringe && s.inventory != null && s.inventory.FindItemOfType<VirtualBandages>() == null);
-            bool needUrgentPrimary = false, wantSquadMg = false, wantRoleUpgrade = false;
-            bool wantRadio = false, wantHelmet = false;
+            foundAtWeaponScavenge = false;
+
             bool onRetreatTask = IsSquadOnRetreatTask(sq);
-            if ((safeLull || allowUrgentPrimary) && !s.isBleeding)
+            bool isRetreatingBailedCrew = isBailedCrew && (onRetreatTask || AiCore.IsConfirmedPlaneCrewSquad(sq));
+            bool urgentBandageWhileBleeding = s.isBleeding && !hasBandage;
+            bool casualScavengeAllowed = !urgentBandageWhileBleeding && !isEvadingArmor && !isRetreatingBailedCrew;
+            bool recentFootContact = h != null && h.Vision.LastKnownTarget.LastSeenTime > 0f && (now - h.Vision.LastKnownTarget.LastSeenTime) < 10.0f;
+            bool inCoverDwellForCalmLoot = s.IsOnCover() &&
+                                           h != null &&
+                                           (now < h.Stance.CoverSettledUntil ||
+                                            (h.Vision.LastKnownTarget.LastSeenTime > 0f && (now - h.Vision.LastKnownTarget.LastSeenTime) <= 3.0f)) &&
+                                           !s.isBleeding &&
+                                           !exposedWall &&
+                                           !isEvadingArmor &&
+                                           (sq == null || sq.IsInsideMoveOrderArea(pos));
+            bool nonUrgentScavengeAllowed = casualScavengeAllowed && safeLull && !recentFootContact && !board.HasActiveThreat && !inCoverDwellForCalmLoot;
+            bool isMedicRole = AiCore.IsMedicSoldierOrPersonality(s, pers);
+            bool isAtRole = AiCore.IsAtSoldierPersonality(pers);
+            bool isRad = s.IsRadioman();
+
+            GenericGun gun0 = s.GetHeldGun(0);
+            GenericGun gun1 = s.GetHeldGun(1);
+            GenericGun gun2 = s.GetHeldGun(2);
+            bool needAmmo = !urgentBandageWhileBleeding &&
+                            !isRetreatingBailedCrew &&
+                            (!hasUsableArms ||
+                             (nonUrgentScavengeAllowed &&
+                              ((gun0 != null && s.IsOutOfAmmosFor(gun0)) ||
+                               (gun1 != null && gun1.IsAtWeapon() && !string.IsNullOrEmpty(gun1.compatibleAmmo) && s.IsOutOfAmmosFor(gun1)) ||
+                               (gun2 != null && !gun2.IsPistol() && !gun2.IsAtWeapon() && s.IsOutOfAmmosFor(gun2)))));
+            bool needBandage = urgentBandageWhileBleeding ||
+                               (!hasBandage && ((isMedicRole && s.hasSyringe) || nonUrgentScavengeAllowed));
+            bool needAtWeapon = !urgentBandageWhileBleeding &&
+                                !hasAtCap &&
+                                !onRetreatTask &&
+                                !s.IsSquadLeader() &&
+                                !isRad &&
+                                !isMedicRole &&
+                                (allowUrgentAt || (isAtRole && nonUrgentScavengeAllowed));
+
+            bool needUrgentPrimary = false, wantSquadMg = false, wantRoleUpgrade = false;
+            if ((nonUrgentScavengeAllowed || allowUrgentPrimary) && casualScavengeAllowed)
             {
-                bool isMedic = AiCore.IsMedicSoldierOrPersonality(s, pers);
-                bool isRad = s.IsRadioman();
-                EvaluateRoleWeaponUpgradeNeed(s, sq, pers, isMedic, onRetreatTask, ref board, now, out needUrgentPrimary, out wantSquadMg, out wantRoleUpgrade);
-                if (!safeLull)
+                EvaluateRoleWeaponUpgradeNeed(s, sq, pers, isMedicRole, onRetreatTask, ref board, now, out needUrgentPrimary, out wantSquadMg, out wantRoleUpgrade);
+                if (!nonUrgentScavengeAllowed)
                 {
                     wantSquadMg = false;
                     wantRoleUpgrade = false;
                 }
-                else if (VisionConfig.EnableEmergentWearableScavenge.Value)
-                {
-                    wantRadio = sq != null &&
-                                !AiCore.IsTrueVehicleCrewSquad(sq) &&
-                                !board.PreviouslyHadAliveRadioman &&
-                                !sq.HasRadioman() &&
-                                (!_nextSquadRadioScavengeTime.TryGetValue(sq.Pointer, out float nextRadT) || now >= nextRadT) &&
-                                !IsRadioPackAlreadyClaimedForSquad(s.Pointer, sq.Pointer, now) &&
-                                !isRad &&
-                                !isMedic &&
-                                (s.vest_Obj == null || !s.vest_Obj.isFuelTank);
-                    wantHelmet = !s.hasHeadgear;
-                }
             }
 
-            if ((needAmmo || needBandage || needUrgentPrimary || wantSquadMg || wantRoleUpgrade || wantRadio || wantHelmet) &&
-                TryGetNearbyScavengeTarget(s, pos, pers, needAmmo, needBandage, false, false, false, needUrgentPrimary, wantSquadMg, wantRoleUpgrade, wantRadio, false, wantHelmet, false, false, false, false, false, false, now, out BotScavengeCache scavRes))
+            bool wantFragGrenade = nonUrgentScavengeAllowed &&
+                                   !onRetreatTask &&
+                                   !isMedicRole &&
+                                   !hasFrag &&
+                                   suppression < 16f &&
+                                   s.inventory != null;
+
+            float nextSmkScav = h != null ? h.Goap.NextSmokeGrenadeTime : 0f;
+            bool wantSmokeGrenade = nonUrgentScavengeAllowed &&
+                                    !onRetreatTask &&
+                                    !hasSmoke &&
+                                    suppression < 16f &&
+                                    (now >= nextSmkScav || nextSmkScav - now > 60.0f) &&
+                                    (s.IsSquadLeader() ||
+                                     isMedicRole ||
+                                     pers == SoldierPersonality.Assaulter_Breacher ||
+                                     pers == SoldierPersonality.Assaulter_Skirmisher) &&
+                                    s.inventory != null;
+
+            bool wantRadio = nonUrgentScavengeAllowed &&
+                             VisionConfig.EnableEmergentWearableScavenge.Value &&
+                             !onRetreatTask &&
+                             sq != null &&
+                             !AiCore.IsTrueVehicleCrewSquad(sq) &&
+                             !board.PreviouslyHadAliveRadioman &&
+                             !sq.HasRadioman() &&
+                             (!_nextSquadRadioScavengeTime.TryGetValue(sq.Pointer, out float nextRadT) || now >= nextRadT) &&
+                             !IsRadioPackAlreadyClaimedForSquad(s.Pointer, sq.Pointer, now) &&
+                             !isRad &&
+                             !isMedicRole &&
+                             (s.vest_Obj == null || !s.vest_Obj.isFuelTank);
+
+            bool wantMedicSyringe = nonUrgentScavengeAllowed &&
+                                    !onRetreatTask &&
+                                    sq != null &&
+                                    !AiCore.IsTrueVehicleCrewSquad(sq) &&
+                                    !board.HasAliveMedic &&
+                                    !s.hasSyringe &&
+                                    !isRad &&
+                                    !s.IsSquadLeader();
+
+            bool wantHelmet = nonUrgentScavengeAllowed &&
+                              VisionConfig.EnableEmergentWearableScavenge.Value &&
+                              !onRetreatTask &&
+                              !s.hasHeadgear &&
+                              suppression < 12f;
+
+            bool canFeedNeedyAlly = nonUrgentScavengeAllowed &&
+                                    VisionConfig.EnableBuddyResupply.Value &&
+                                    !onRetreatTask &&
+                                    !needAmmo &&
+                                    s.IsAmmoBoxCarrier();
+
+            bool wantToolbox = isBailedCrew &&
+                               !isRetreatingBailedCrew &&
+                               !urgentBandageWhileBleeding &&
+                               !isEvadingArmor &&
+                               suppression < 20f &&
+                               s.GetRepairTools() == null;
+
+            bool wantAtMine = nonUrgentScavengeAllowed &&
+                              VisionConfig.EnableSpecialMunitionsAndSappers.Value &&
+                              !onRetreatTask &&
+                              !isMedicRole &&
+                              !s.IsSquadLeader() &&
+                              suppression < 14f &&
+                              (isAtRole || board.IsDefendingObjective) &&
+                              AiCore.AnyEnemyGroundVehiclesPresent(s.faction) &&
+                              !HasPressureAtMineInInventory(s);
+
+            bool wantDeployableTripod = nonUrgentScavengeAllowed &&
+                                        VisionConfig.EnableSpecialMunitionsAndSappers.Value &&
+                                        !onRetreatTask &&
+                                        !isMedicRole &&
+                                        !s.IsSquadLeader() &&
+                                        !isRad &&
+                                        suppression < 12f &&
+                                        s.inventory != null &&
+                                        s.inventory.FindItemOfType<VirtualDeployableVehicle>() == null;
+
+            bool wantShellAmmo = nonUrgentScavengeAllowed &&
+                                 !onRetreatTask &&
+                                 suppression < 14f &&
+                                 h != null &&
+                                 AiCore.HasHeldMortarCached(h, ai, now);
+
+            bool wantRecoverLife = nonUrgentScavengeAllowed &&
+                                   !onRetreatTask &&
+                                   suppression < 6f &&
+                                   s.IsAlive &&
+                                   s.life_total.Value > 0 &&
+                                   s.life_total.Value < 85;
+
+            if ((needAmmo || needBandage || wantFragGrenade || wantSmokeGrenade || needAtWeapon ||
+                 needUrgentPrimary || wantSquadMg || wantRoleUpgrade || wantRadio || wantMedicSyringe ||
+                 wantHelmet || canFeedNeedyAlly || wantToolbox || wantAtMine || wantDeployableTripod ||
+                 wantShellAmmo || wantRecoverLife) &&
+                TryGetNearbyScavengeTarget(
+                    s,
+                    pos,
+                    pers,
+                    needAmmo,
+                    needBandage,
+                    wantFragGrenade,
+                    wantSmokeGrenade,
+                    needAtWeapon,
+                    needUrgentPrimary,
+                    wantSquadMg,
+                    wantRoleUpgrade,
+                    wantRadio,
+                    wantMedicSyringe,
+                    wantHelmet,
+                    canFeedNeedyAlly,
+                    wantToolbox,
+                    wantAtMine,
+                    wantDeployableTripod,
+                    wantShellAmmo,
+                    wantRecoverLife,
+                    now,
+                    out BotScavengeCache scavRes))
             {
-                AiCore.SoldierFastHandles sh = AiCore.GetOrCreateSoldierHandles(s);
+                AiCore.SoldierFastHandles sh = h ?? AiCore.GetOrCreateSoldierHandles(s);
                 foundUrgentPrimaryUpgrade = needUrgentPrimary &&
                                             (scavRes.IsUrgentPrimaryPickup || (sh != null && sh.Goap.Scavenge.IsUrgentPrimaryPickup));
+                foundAtWeaponScavenge = needAtWeapon &&
+                                        (scavRes.IsAtWeaponPickup || (sh != null && sh.Goap.Scavenge.IsAtWeaponPickup));
                 return true;
             }
             if (!needAmmo)

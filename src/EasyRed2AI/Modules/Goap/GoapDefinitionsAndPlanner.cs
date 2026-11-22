@@ -30,6 +30,11 @@ namespace EasyRed2HumanAI
             public byte RadioNetToastInitState;
             public float RadioRelayPendingFlipSince;
             public float NextRadioNetStatusToastTime;
+            public bool PreviouslyHadFootRadioman;
+            public float FirstSeenTime;
+            public bool PlayerWasInSquad;
+            public float PlayerJoinedSquadTime;
+            public bool EverNotifiedRadioCutoff;
             public bool HasActiveThreat;
             public bool ThreatIsArmor;
             public bool HasAliveMachineGunner;
@@ -81,6 +86,30 @@ namespace EasyRed2HumanAI
             public float LeaderBraveryAura;
             public bool LeaderRoseToOccasion;
             public bool PendingLeaderSuccession;
+
+            // Tier 2 / Tier 3 Squad Physical Order State & Live Supply Flags
+            public bool WasHoldingForFriendlyBarrage;
+            public float BarrageSurgeUntil;
+            public Vector3 StallAnchorCenter;
+            public float StallAnchorTime;
+            public int ConsecutiveStallCount;
+            public float NextSquadUnstallTime;
+            public float NextCoverSectorReorientTime;
+            public bool IsAiCovertHoldFireActive;
+            public float AiCovertHoldFireExpireTime;
+            public float NextAiCovertOrderTime;
+            public float AiFollowColumnUntil;
+            public float NextAiFollowOrderTime;
+            public bool IsAiChargeOrdered;
+            public float AiChargeBaselineDeaths;
+            public float NextAiSquadChargeTime;
+            public float AiSquadRetreatUntil;
+            public float NextAiSquadRetreatTime;
+            public float NextHammerOrderTime;
+            public IntPtr PincerOrderedTaskPtr;
+            public float PincerOrderedUntil;
+            public bool SquadHasSmokeAvailable;
+            public bool SquadOutOfAmmo;
 
             // Tier 2 Coordinated Squad Role Slots
             public IntPtr Suppressor0Ptr;
@@ -191,6 +220,8 @@ namespace EasyRed2HumanAI
             public float ScavengeAndResupplyMult;     // Finland: 0.72f, China: 0.74f, Poland: 0.76f, Gurkha/Greece: 0.78f, Germany/USSR: 0.80f, USA/Aus/NZ: 0.82f
             public float ComradeAidAndDragMult;       // USA/USA_Afrikan: 0.74f, Aus/NZ: 0.75f, Finland: 0.76f, Canada/Poland/Gurkha: 0.78f; USSR: 1.08f, Manchukuo: 1.18f, Japan: 1.22f
             public float AttritionPivotThreshold;     // Decayed casualties on a stalled (<20%) objective before Team Net pivots squads to a softer objective (Finland: 5.5, USA: 6.0, Ger/Can/Aus/NZ: 6.5, Default: 7.5, USSR: 10.5, Japan: 12.0)
+            public float LeaderAuraMult;              // Multiplier on SL/NCO Bravery Aura (default 1.0f; boosted by Order No. 227 / Bastogne)
+            public float SurrenderSuppDelta;          // Additive shift on shell-shock surrender suppression requirement (positive = more steadfast)
 
             public static readonly FactionCommandProfile Default = new FactionCommandProfile
             {
@@ -210,7 +241,9 @@ namespace EasyRed2HumanAI
                 EmergencyCoverCostMult = 1.0f,
                 ScavengeAndResupplyMult = 1.0f,
                 ComradeAidAndDragMult = 1.0f,
-                AttritionPivotThreshold = 7.5f
+                AttritionPivotThreshold = 7.5f,
+                LeaderAuraMult = 1.0f,
+                SurrenderSuppDelta = 0f
             };
         }
 
@@ -664,6 +697,150 @@ namespace EasyRed2HumanAI
                 p.FlankLateralBias = Mathf.Max(0.72f, p.FlankLateralBias - 0.06f);
                 p.GarrisonSquadRatio = Mathf.Min(0.36f, p.GarrisonSquadRatio + 0.06f);
                 p.FragFlushCostMult *= 0.88f;
+            }
+
+            // 9 Historical Battle Atmosphere Archetypes (bounded +/-10-25% theater modifiers)
+            if ((VisionConfig.EnableBattleAtmosphereDirectives == null || VisionConfig.EnableBattleAtmosphereDirectives.Value) &&
+                theater.Atmosphere != AiCore.BattleAtmosphereArchetype.None)
+            {
+                bool isInv = !string.IsNullOrEmpty(theater.InvadersFactionId) &&
+                             AiCore.AreSameSideFactions(faction, theater.InvadersFactionId);
+                bool isDef = !string.IsNullOrEmpty(theater.DefendersFactionId) &&
+                             AiCore.AreSameSideFactions(faction, theater.DefendersFactionId);
+
+                switch (theater.Atmosphere)
+                {
+                    case AiCore.BattleAtmosphereArchetype.Order227NotOneStepBack:
+                        if (f == "Ussr")
+                        {
+                            p.LeaderAuraMult *= 1.35f;
+                            p.SurrenderSuppDelta += 14f;
+                            p.SuppressionThresholdBase = Mathf.Min(26f, p.SuppressionThresholdBase + 3f);
+                            p.AttritionPivotThreshold = Mathf.Min(13f, p.AttritionPivotThreshold * 1.18f);
+                            p.FragFlushCostMult *= 0.86f;
+                            p.BayonetBreachCostMult *= 0.88f;
+                            p.GarrisonSquadRatio = Mathf.Min(0.34f, p.GarrisonSquadRatio + 0.06f);
+                        }
+                        break;
+
+                    case AiCore.BattleAtmosphereArchetype.KesselEncircledPocket:
+                        if (isDef)
+                        {
+                            p.ScavengeAndResupplyMult *= 0.78f;
+                            p.GarrisonSquadRatio = Mathf.Min(0.38f, p.GarrisonSquadRatio + 0.08f);
+                            p.EmplacementSearchMult *= 1.16f;
+                            p.OverwatchHoldCostMult *= 0.88f;
+                            p.AttritionPivotThreshold = Mathf.Min(12.5f, p.AttritionPivotThreshold * 1.15f);
+                        }
+                        break;
+
+                    case AiCore.BattleAtmosphereArchetype.UrbanFortress:
+                        p.GarrisonSquadRatio = Mathf.Min(0.38f, p.GarrisonSquadRatio + (isDef ? 0.08f : 0.04f));
+                        p.FragFlushCostMult *= 0.82f;
+                        p.BayonetBreachCostMult *= 0.88f;
+                        p.FlankLateralBias = Mathf.Max(0.72f, p.FlankLateralBias - 0.04f);
+                        if (isDef)
+                        {
+                            p.OverwatchHoldCostMult *= 0.86f;
+                            p.SurrenderSuppDelta += 6f;
+                        }
+                        break;
+
+                    case AiCore.BattleAtmosphereArchetype.AmphibiousBeachhead:
+                        if (isInv)
+                        {
+                            p.SmokeCostMult *= 0.76f;
+                            p.SuppressionThresholdBase = Mathf.Min(25f, p.SuppressionThresholdBase + 2.5f);
+                            p.FlankMoveCostMult *= 0.86f;
+                        }
+                        if (isDef)
+                        {
+                            p.EmplacementSearchMult *= 1.24f;
+                            p.GarrisonSquadRatio = Mathf.Min(0.36f, p.GarrisonSquadRatio + 0.06f);
+                            p.OverwatchHoldCostMult *= 0.84f;
+                        }
+                        break;
+
+                    case AiCore.BattleAtmosphereArchetype.SiegeOfBastogne:
+                        if (isDef)
+                        {
+                            p.GarrisonSquadRatio = Mathf.Min(0.38f, p.GarrisonSquadRatio + 0.08f);
+                            p.ComradeAidAndDragMult *= 0.82f;
+                            p.ScavengeAndResupplyMult *= 0.82f;
+                            p.LeaderAuraMult *= 1.22f;
+                            p.SurrenderSuppDelta += 10f;
+                        }
+                        if (isInv)
+                        {
+                            p.FlankMoveCostMult *= 0.86f;
+                            p.FlankLateralBias = Mathf.Min(0.92f, p.FlankLateralBias + 0.05f);
+                            p.SmokeCostMult *= 0.86f;
+                        }
+                        break;
+
+                    case AiCore.BattleAtmosphereArchetype.PacificBunkerAndNightGyokusai:
+                        if (f == "Japan" || isDef)
+                        {
+                            p.EmplacementSearchMult *= 1.22f;
+                            p.OverwatchHoldCostMult *= 0.82f;
+                            p.PreferAmbushWhenAlone = true;
+                            p.GarrisonSquadRatio = Mathf.Min(0.34f, p.GarrisonSquadRatio + 0.06f);
+                            if (f == "Japan")
+                            {
+                                p.AllowGyokusaiDesperation = true;
+                                p.BayonetBreachCostMult *= 0.88f;
+                                p.SurrenderSuppDelta += 12f;
+                            }
+                        }
+                        if (isInv)
+                        {
+                            p.FragFlushCostMult *= 0.84f;
+                            p.SmokeCostMult *= 0.84f;
+                        }
+                        break;
+
+                    case AiCore.BattleAtmosphereArchetype.MountainRidgeGrind:
+                        p.SuppressCostMult *= 0.84f;
+                        p.OverwatchHoldCostMult *= 0.84f;
+                        p.SmokeCostMult *= 0.78f;
+                        p.EmergencyCoverCostMult *= 0.88f;
+                        break;
+
+                    case AiCore.BattleAtmosphereArchetype.BlitzkriegSchwerpunkt:
+                        if (isInv)
+                        {
+                            p.FlankMoveCostMult *= 0.84f;
+                            p.AttritionPivotThreshold = Mathf.Max(4.5f, p.AttritionPivotThreshold * 0.84f);
+                            p.SmokeCostMult *= 0.86f;
+                            p.GarrisonSquadRatio = Mathf.Max(0.12f, p.GarrisonSquadRatio - 0.04f);
+                        }
+                        if (isDef)
+                        {
+                            p.EmplacementSearchMult *= 1.22f;
+                            p.OverwatchHoldCostMult *= 0.88f;
+                        }
+                        break;
+
+                    case AiCore.BattleAtmosphereArchetype.NightAirborneCoupDeMain:
+                        p.AllowDisconnectedLocalFlank = true;
+                        p.PreferAmbushWhenAlone = true;
+                        p.FlankMoveCostMult *= 0.84f;
+                        p.BayonetBreachCostMult *= 0.86f;
+                        p.FragFlushCostMult *= 0.88f;
+                        break;
+                }
+
+                p.SmokeCostMult = Mathf.Max(0.45f, p.SmokeCostMult);
+                p.FragFlushCostMult = Mathf.Max(0.55f, p.FragFlushCostMult);
+                p.FlankMoveCostMult = Mathf.Max(0.55f, p.FlankMoveCostMult);
+                p.OverwatchHoldCostMult = Mathf.Max(0.60f, p.OverwatchHoldCostMult);
+                p.SuppressCostMult = Mathf.Max(0.55f, p.SuppressCostMult);
+                p.BayonetBreachCostMult = Mathf.Max(0.50f, p.BayonetBreachCostMult);
+                p.ScavengeAndResupplyMult = Mathf.Max(0.55f, p.ScavengeAndResupplyMult);
+                p.ComradeAidAndDragMult = Mathf.Max(0.55f, p.ComradeAidAndDragMult);
+                p.EmergencyCoverCostMult = Mathf.Max(0.60f, p.EmergencyCoverCostMult);
+                p.EmplacementSearchMult = Mathf.Min(1.55f, p.EmplacementSearchMult);
+                p.LeaderAuraMult = Mathf.Clamp(p.LeaderAuraMult, 0.75f, 1.45f);
             }
 
             _factionProfileCache[faction] = p;

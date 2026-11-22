@@ -122,6 +122,10 @@ namespace EasyRed2HumanAI
             if (vh == null)
                 return;
 
+            bool freshUnderFire = now >= vh.Vision.UnderFireUntil;
+            if (freshUnderFire || vh.Vision.UnderFireStartedAt <= 0f || now < vh.Vision.UnderFireStartedAt)
+                vh.Vision.UnderFireStartedAt = now;
+
             vh.Vision.UnderFireAttacker = attacker;
             vh.Vision.UnderFireAttackerPtr = attacker != null ? attacker.Pointer : IntPtr.Zero;
             vh.Vision.UnderFireFromPos = fromPos;
@@ -133,11 +137,28 @@ namespace EasyRed2HumanAI
 
             AiCore.RefreshAlertnessWithoutRaisingGun(victim, 12.0f);
 
-            // Bypass vanilla Projectile.SuppressBots' global 0.5s battle-wide cooldown when suppressed by bullets.
+            float fromDistSq = vh.Tr != null ? (fromPos - vh.Tr.position).sqrMagnitude : 9999f;
+            bool closeAmbush = fromDistSq <= 32.0f * 32.0f;
+
+            // Bypass vanilla Projectile.SuppressBots' global 0.5s battle-wide cooldown when suppressed by bullets,
+            // and gate suppress_time_end on close/direct hits so native Suppress() doesn't lock body rotation or RPC-sync a multi-second cringe to vanilla clients.
             if (now >= vh.Vision.NextIncomingFireSuppressTime)
             {
                 vh.Vision.NextIncomingFireSuppressTime = now + (directHit ? 0.55f : 0.75f);
+                float savedSuppressEnd = victim.suppress_time_end;
+                if (closeAmbush || directHit)
+                    victim.suppress_time_end = now + 10.0f;
                 victim.Suppress(directHit ? 28 : 16, rawShooter);
+                if (closeAmbush || directHit)
+                    victim.suppress_time_end = savedSuppressEnd;
+            }
+
+            if (vh.Ai != null && AiCore.GetRawVisibleTargetPtr(vh.Ai) == IntPtr.Zero)
+            {
+                float vet01 = GetVeterancy01(victim);
+                float baseWake = directHit ? Mathf.Lerp(0.18f, 0.10f, vet01) : Mathf.Lerp(0.32f, 0.18f, vet01);
+                float jitter = (AiCore.GetDeterministicHash(vh.Ptr, 313) & 15) * 0.012f;
+                AiCore.EnqueueUrgentUnderFireWake(vh, now + baseWake + jitter);
             }
         }
 
@@ -235,6 +256,7 @@ namespace EasyRed2HumanAI
                            bulletData.caliber >= 12.5f;
 
             // Step A: Direct impact against a vehicle part or soldier body part (skip terrain colliders)
+            IntPtr directHitFootPtr = IntPtr.Zero;
             if (!AiCore.IsTerrainCollider(hitCol))
             {
                 VehicleDamagablePart vPart = hitCol.GetComponent<VehicleDamagablePart>();
@@ -269,19 +291,25 @@ namespace EasyRed2HumanAI
                             Vehicle sv = hitSol.GetCurrentVehicle();
                             if (sv != null && sv.Pointer != IntPtr.Zero)
                                 RecordVehicleUnderFire(sv, attacker, fromPos, isHeavy: true, now);
+                            return;
                         }
-                        else
-                        {
-                            RecordSoldierUnderFire(hitSol, shooter, attacker, fromPos, directHit: true, now);
-                        }
+
+                        RecordSoldierUnderFire(hitSol, shooter, attacker, fromPos, directHit: true, now);
+                        directHitFootPtr = hitSol.Pointer;
                     }
-                    return;
+                    else
+                    {
+                        return;
+                    }
                 }
             }
 
-            // Step B: Per-shooter throttled near-miss alert using flat cached WorldSoldiers (zero allocations)
+            // Step B: Per-shooter throttled near-miss / companion alert using flat cached WorldSoldiers (zero allocations)
             AiCore.SoldierFastHandles shooterH = AiCore.GetOrCreateSoldierHandles(shooter);
-            if (shooterH == null || now < shooterH.Vision.NextNearMissAlertTime)
+            float minNextAlert = directHitFootPtr != IntPtr.Zero
+                ? (shooterH != null ? shooterH.Vision.NextNearMissAlertTime - 0.16f : 0f)
+                : (shooterH != null ? shooterH.Vision.NextNearMissAlertTime : 0f);
+            if (shooterH == null || now < minNextAlert)
                 return;
 
             shooterH.Vision.NextNearMissAlertTime = now + 0.28f;
@@ -292,7 +320,7 @@ namespace EasyRed2HumanAI
 
             var soldiers = AiCore.WorldSoldiers;
             Vector3 impactPos = hit.point;
-            float footRadiusSq = isHeavy ? (9.0f * 9.0f) : (6.5f * 6.5f);
+            float footRadiusSq = (isHeavy || directHitFootPtr != IntPtr.Zero) ? (10.5f * 10.5f) : (8.0f * 8.0f);
             float vehRadiusSq = isHeavy ? (11.0f * 11.0f) : (6.0f * 6.0f);
             int footAlerted = 0;
             int vehAlerted = 0;
@@ -301,7 +329,8 @@ namespace EasyRed2HumanAI
             for (int i = 0; i < count; i++)
             {
                 ref AiCore.SoldierSnapshot snap = ref soldiers[i];
-                if (snap.IsPlayer ||
+                if (snap.Ptr == directHitFootPtr ||
+                    snap.IsPlayer ||
                     snap.HasSurrendered ||
                     string.IsNullOrEmpty(snap.Faction) ||
                     snap.Ref == null ||
@@ -316,7 +345,7 @@ namespace EasyRed2HumanAI
                 if (!snap.IsOnVehicle)
                 {
                     if (dSq <= footRadiusSq &&
-                        footAlerted < 4 &&
+                        footAlerted < 6 &&
                         snap.Handles != null &&
                         AiCore.IsLocallyOwnedBot(snap.Handles))
                     {
@@ -840,7 +869,7 @@ namespace EasyRed2HumanAI
                 return false;
             }
 
-            if (soldier.GetSuppressionValue() >= 28f || soldier.IsReloading || soldier.MustReload())
+            if (soldier.GetSuppressionValue() >= 28f || soldier.IsReloading || soldier.MustReload() || now < sh.Combat.ThrowFireHoldUntil)
                 return false;
 
             GenericGun heldGun = soldier.GetHeldGun();
@@ -1764,8 +1793,14 @@ namespace EasyRed2HumanAI
                     }
 
                     Vector3 myPos = h.Tr != null ? h.Tr.position : Vector3.zero;
+                    bool hasActiveEscapeMove = HasActiveEscapeOrMoveIntent(__instance, soldier, h, now);
 
-                    if (!__instance.IsMoving())
+                    if (__instance.actualPose == SoldierPose.Prone && hasActiveEscapeMove)
+                    {
+                        __instance.actualPose = SoldierPose.Crouch;
+                    }
+
+                    if (!__instance.IsMoving() && !hasActiveEscapeMove)
                     {
                         // Native MovementRoutine (0x18055D4BD) skips RotateAndFireToward even when stationary if moveLookingTarget is false!
                         if (__instance.HasEnemyAndCanFireAtHim && !soldier.HasMovementsSlowed())
@@ -1801,7 +1836,18 @@ namespace EasyRed2HumanAI
                     // Lift straight to Idle (or Crouch for short shifts, reloads, repair, stealth, or < 0.8m overhangs).
                     if (soldier.m_pose == SoldierPose.Prone)
                     {
-                        if ((__instance.HasPath || __instance.moveDirectlyToward_end > now) &&
+                        bool intentionalBandageHold =
+                            now < h.Stance.BandageLowPoseUntil &&
+                            (soldier.isBleeding || soldier.stopHandsAnim_end > now) &&
+                            !(h.MoveOverride.Kind == AiCore.BotMoveOverrideKind.GrenadeReflex && now < h.MoveOverride.ExpireTime) &&
+                            !(h.MoveOverride.Kind == AiCore.BotMoveOverrideKind.VehicleEvade && now < h.MoveOverride.ExpireTime);
+                        if (intentionalBandageHold)
+                        {
+                            __instance.Stop(true);
+                            return true;
+                        }
+
+                        if ((__instance.HasPath || __instance.moveDirectlyToward_end > now || hasActiveEscapeMove) &&
                             now >= h.Stance.NextStandLiftAttemptTime)
                         {
                             if (now < soldier.stopHandsAnim_end)
@@ -2128,6 +2174,7 @@ namespace EasyRed2HumanAI
                     if (hasWatchDir)
                     {
                         float angle = AiCore.HorizontalAngleToDirection(soldier, watchDir);
+                        float turnDt = now < h.Vision.UnderFireUntil ? (__0 * 1.45f) : __0;
                         if (h.Vision.IsTurningToWatchSector)
                         {
                             if (angle <= 4.0f)
@@ -2136,14 +2183,14 @@ namespace EasyRed2HumanAI
                             }
                             else
                             {
-                                AiCore.RotateBodyWithoutRaisingGun(soldier, watchDir, __0);
+                                AiCore.RotateBodyWithoutRaisingGun(soldier, watchDir, turnDt);
                             }
                         }
                         else if (angle > 14.0f)
                         {
                             h.Vision.IsTurningToWatchSector = true;
                             ThreatSectorOrientationsCount++;
-                            AiCore.RotateBodyWithoutRaisingGun(soldier, watchDir, __0);
+                            AiCore.RotateBodyWithoutRaisingGun(soldier, watchDir, turnDt);
                         }
                     }
                 }

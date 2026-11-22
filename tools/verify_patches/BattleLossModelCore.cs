@@ -112,10 +112,25 @@ namespace EasyRed2HumanAI
     public static class VisionConfig
     {
         public static ConfigBool EnableFactionNetDoctrines = new ConfigBool { Value = true };
+        public static ConfigBool EnableBattleAtmosphereDirectives = new ConfigBool { Value = true };
     }
 
     public static partial class AiCore
     {
+        public enum BattleAtmosphereArchetype : byte
+        {
+            None = 0,
+            Order227NotOneStepBack = 1,
+            KesselEncircledPocket = 2,
+            UrbanFortress = 3,
+            AmphibiousBeachhead = 4,
+            SiegeOfBastogne = 5,
+            PacificBunkerAndNightGyokusai = 6,
+            MountainRidgeGrind = 7,
+            BlitzkriegSchwerpunkt = 8,
+            NightAirborneCoupDeMain = 9
+        }
+
         public struct ScavengeStub { public bool IsAtWeaponPickup; public bool IsUrgentPrimaryPickup; }
         public struct GoapStub { public ScavengeStub Scavenge; }
         public class SoldierFastHandles
@@ -134,6 +149,9 @@ namespace EasyRed2HumanAI
             public string DefendersFactionId;
             public string InvadersBattalionLower;
             public string DefendersBattalionLower;
+            public string LocationLower;
+            public bool IsNightStart;
+            public BattleAtmosphereArchetype Atmosphere;
             public bool IsAmphibiousBeachMap;
             public bool IsOpenDesertOrSteppeMap;
             public bool IsDenseUrbanMap;
@@ -148,6 +166,153 @@ namespace EasyRed2HumanAI
                     return DefendersBattalionLower ?? string.Empty;
                 return string.Empty;
             }
+        }
+
+        public static BattleAtmosphereArchetype ResolveBattleAtmosphere(
+            string mapLower,
+            string locationLower,
+            string invFac,
+            string defFac,
+            string invBatLower,
+            string defBatLower,
+            int year,
+            bool isNightStart,
+            bool isBeach,
+            bool isUrban,
+            bool isJungleAtoll,
+            bool isSteepRidge)
+        {
+            mapLower ??= string.Empty;
+            locationLower ??= string.Empty;
+            invFac ??= string.Empty;
+            defFac ??= string.Empty;
+            invBatLower ??= string.Empty;
+            defBatLower ??= string.Empty;
+
+            if (locationLower.Contains("gumrak") ||
+                locationLower.Contains("pocket") ||
+                locationLower.Contains("noose") ||
+                locationLower.Contains("kessel") ||
+                locationLower.Contains("budapest has fallen") ||
+                locationLower.Contains("encircl") ||
+                locationLower.Contains("trapped") ||
+                (mapLower.Contains("stalingrad") && year >= 1943 && defFac.StartsWith("Germany", StringComparison.OrdinalIgnoreCase)))
+                return BattleAtmosphereArchetype.KesselEncircledPocket;
+
+            if ((mapLower.Contains("stalingrad") ||
+                 locationLower.Contains("volga") ||
+                 locationLower.Contains("mamayev") ||
+                 locationLower.Contains("red october") ||
+                 locationLower.Contains("pavlov") ||
+                 locationLower.Contains("univermag") ||
+                 locationLower.Contains("barrikady") ||
+                 locationLower.Contains("tractor") ||
+                 locationLower.Contains("grain elevator")) &&
+                (defFac.StartsWith("Ussr", StringComparison.OrdinalIgnoreCase) ||
+                 invFac.StartsWith("Ussr", StringComparison.OrdinalIgnoreCase)))
+                return BattleAtmosphereArchetype.Order227NotOneStepBack;
+
+            if (locationLower.Contains("bastogne") ||
+                locationLower.Contains("foy") ||
+                locationLower.Contains("noville") ||
+                locationLower.Contains("marvie") ||
+                locationLower.Contains("nuts") ||
+                ((mapLower.Contains("bulge") || mapLower.Contains("ardennes")) &&
+                 (defBatLower.Contains("101") || defBatLower.Contains("airborne") || locationLower.Contains("siege"))))
+                return BattleAtmosphereArchetype.SiegeOfBastogne;
+
+            if (locationLower.Contains("pegasus") ||
+                locationLower.Contains("sainte-m") ||
+                locationLower.Contains("sainte m") ||
+                locationLower.Contains("st mere") ||
+                locationLower.Contains("advance by darkness") ||
+                locationLower.Contains("airfield drop") ||
+                locationLower.Contains("paradrop") ||
+                locationLower.Contains("drop zone") ||
+                (isNightStart && !isJungleAtoll &&
+                 (invBatLower.Contains("airborne") ||
+                  invBatLower.Contains("parachut") ||
+                  invBatLower.Contains("fallschirm") ||
+                  invBatLower.Contains("glider"))))
+                return BattleAtmosphereArchetype.NightAirborneCoupDeMain;
+
+            bool hasJapan = defFac.StartsWith("Japan", StringComparison.OrdinalIgnoreCase) ||
+                            invFac.StartsWith("Japan", StringComparison.OrdinalIgnoreCase);
+            bool pacificIsland = isJungleAtoll ||
+                                 mapLower.Contains("kwajalein") ||
+                                 mapLower.Contains("makin") ||
+                                 mapLower.Contains("roinamur");
+            if (pacificIsland && hasJapan &&
+                (isNightStart ||
+                 locationLower.Contains("midnight") ||
+                 locationLower.Contains("last of") ||
+                 locationLower.Contains("bunker") ||
+                 locationLower.Contains("pillbox")))
+                return BattleAtmosphereArchetype.PacificBunkerAndNightGyokusai;
+
+            if (locationLower.Contains("omaha") ||
+                locationLower.Contains("utah") ||
+                locationLower.Contains("gold") ||
+                locationLower.Contains("juno") ||
+                locationLower.Contains("sword") ||
+                locationLower.Contains("pointe du hoc") ||
+                locationLower.Contains("beach") ||
+                locationLower.Contains("landing") ||
+                locationLower.Contains("amphib") ||
+                locationLower.Contains("shore") ||
+                locationLower.Contains("anzio") ||
+                locationLower.Contains("d-day") ||
+                locationLower.Contains("red 1") ||
+                locationLower.Contains("red 2") ||
+                locationLower.Contains("blue 1") ||
+                (isBeach && (mapLower.Contains("kos") || locationLower.Contains("invasion") || mapLower.Contains("normandy"))))
+                return BattleAtmosphereArchetype.AmphibiousBeachhead;
+
+            if (pacificIsland && hasJapan)
+                return BattleAtmosphereArchetype.PacificBunkerAndNightGyokusai;
+
+            if ((locationLower.Contains("cassino") && !locationLower.Contains("streets") && !locationLower.Contains("town")) ||
+                locationLower.Contains("snakeshead") ||
+                locationLower.Contains("castle hill") ||
+                locationLower.Contains("takrouna") ||
+                locationLower.Contains("longstop") ||
+                locationLower.Contains("monte") ||
+                locationLower.Contains("ridge") ||
+                locationLower.Contains("summit") ||
+                locationLower.Contains("monastery") ||
+                locationLower.Contains("abbey") ||
+                (isSteepRidge && !isUrban))
+                return BattleAtmosphereArchetype.MountainRidgeGrind;
+
+            if (mapLower.Contains("stonne") ||
+                mapLower.Contains("balaton") ||
+                locationLower.Contains("sedan") ||
+                locationLower.Contains("stonne") ||
+                locationLower.Contains("kasserine") ||
+                locationLower.Contains("sidi-bou-zid") ||
+                locationLower.Contains("sidi bou zid") ||
+                locationLower.Contains("frühlingswind") ||
+                locationLower.Contains("fruhlingswind") ||
+                locationLower.Contains("wiking") ||
+                locationLower.Contains("blitz") ||
+                locationLower.Contains("spearhead") ||
+                locationLower.Contains("breakthrough"))
+                return BattleAtmosphereArchetype.BlitzkriegSchwerpunkt;
+
+            if (isUrban ||
+                locationLower.Contains("sihang") ||
+                locationLower.Contains("warehouse") ||
+                locationLower.Contains("guanghua") ||
+                locationLower.Contains("house to house") ||
+                locationLower.Contains("house-to-house") ||
+                locationLower.Contains("streets") ||
+                locationLower.Contains("block by block") ||
+                locationLower.Contains("factory") ||
+                locationLower.Contains("citadel") ||
+                locationLower.Contains("fortress"))
+                return BattleAtmosphereArchetype.UrbanFortress;
+
+            return BattleAtmosphereArchetype.None;
         }
 
         [ThreadStatic] private static Dictionary<IntPtr, SoldierFastHandles> t_mockHandles;
@@ -773,6 +938,10 @@ namespace EasyRed2HumanAI
             float[] sideDesperation = new float[2];
             var lastSideLever = new EmergentEngine.Tier3NetLever[2];
 
+            string scLocLower = ((sc.Campaign ?? "") + " " + (sc.BattleName ?? "")).ToLowerInvariant();
+            string scMapLower = sc.Map.ToString().ToLowerInvariant();
+            string scInvBat = (sc.InvaderBattalion ?? "").ToLowerInvariant();
+            string scDefBat = (sc.DefenderBattalion ?? "").ToLowerInvariant();
             AiCore.t_nightDarkness01 = sc.IsNight ? 0.78f : 0.0f;
             AiCore.t_hasWater = sc.IsAmphibiousBeach;
             AiCore.t_waterLevel = sc.IsAmphibiousBeach ? 0f : -999f;
@@ -784,8 +953,16 @@ namespace EasyRed2HumanAI
                 Year = sc.Year,
                 InvadersFactionId = sc.InvaderFaction,
                 DefendersFactionId = sc.DefenderFaction,
-                InvadersBattalionLower = (sc.InvaderBattalion ?? "").ToLowerInvariant(),
-                DefendersBattalionLower = (sc.DefenderBattalion ?? "").ToLowerInvariant(),
+                InvadersBattalionLower = scInvBat,
+                DefendersBattalionLower = scDefBat,
+                LocationLower = scLocLower,
+                IsNightStart = sc.IsNight,
+                Atmosphere = AiCore.ResolveBattleAtmosphere(
+                    scMapLower, scLocLower,
+                    sc.InvaderFaction, sc.DefenderFaction,
+                    scInvBat, scDefBat,
+                    sc.Year, sc.IsNight,
+                    sc.IsAmphibiousBeach, sc.IsDenseUrban, sc.IsJungleOrAtoll, sc.IsSteepHillside),
                 IsAmphibiousBeachMap = sc.IsAmphibiousBeach,
                 IsOpenDesertOrSteppeMap = sc.IsOpenDesertOrSteppe,
                 IsDenseUrbanMap = sc.IsDenseUrban,

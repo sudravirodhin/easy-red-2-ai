@@ -774,87 +774,225 @@ namespace EasyRed2HumanAI
         // ============================================================================
         private struct OriginalBloodRendererState
         {
-            public ParticleSystemRenderer Renderer;
+            public Renderer Renderer;
             public int SortingOrder;
+            public ParticleSystemRenderer PsRenderer;
             public float SortingFudge;
-            public Material SharedMat;
+        }
+
+        private struct OriginalBloodMaterialState
+        {
+            public Material Mat;
             public int RenderQueue;
         }
 
         private static readonly HashSet<IntPtr> _inspectedBloodFxRoots = new HashSet<IntPtr>(64);
+        private static readonly HashSet<IntPtr> _inspectedBloodMatPtrs = new HashSet<IntPtr>(32);
+        private static readonly HashSet<IntPtr> _suppressedBloodFxRoots = new HashSet<IntPtr>(64);
         private static readonly List<OriginalBloodRendererState> _modifiedBloodRenderers = new List<OriginalBloodRendererState>(32);
-        private static Il2CppSystem.Action<GameObject> _cachedBloodFxCallback;
+        private static readonly List<OriginalBloodMaterialState> _modifiedBloodMaterials = new List<OriginalBloodMaterialState>(32);
+        private static Il2CppSystem.Action<GameObject> _cachedBloodFxShowCallback;
+        private static Il2CppSystem.Action<GameObject> _cachedBloodFxSuppressCallback;
         private static bool _loggedBloodRendererNormalization;
 
-        private static Il2CppSystem.Action<GameObject> GetOrCreateBloodFxCallback()
+        private static void NormalizeSingleBloodMaterial(Material mat)
         {
-            if (_cachedBloodFxCallback == null)
+            if (mat == null || mat.Pointer == IntPtr.Zero)
+                return;
+
+            int origQueue = mat.renderQueue;
+            if (origQueue > 2950 && origQueue <= 4000)
             {
-                _cachedBloodFxCallback = Il2CppInterop.Runtime.DelegateSupport.ConvertDelegate<Il2CppSystem.Action<GameObject>>(
-                    new Action<GameObject>(OnBloodImpactFxSpawned));
+                if (_inspectedBloodMatPtrs.Add(mat.Pointer) && _modifiedBloodMaterials.Count < 256)
+                {
+                    _modifiedBloodMaterials.Add(new OriginalBloodMaterialState
+                    {
+                        Mat = mat,
+                        RenderQueue = origQueue
+                    });
+                }
+                mat.renderQueue = 2950;
             }
-            return _cachedBloodFxCallback;
         }
 
-        private static void OnBloodImpactFxSpawned(GameObject go)
+        private static void NormalizeBloodImpactRenderers(GameObject go, Renderer[] preFetchedRenderers = null)
+        {
+            if (go == null || go.Pointer == IntPtr.Zero || !_inspectedBloodFxRoots.Add(go.Pointer))
+                return;
+
+            var renderers = preFetchedRenderers ?? go.GetComponentsInChildren<Renderer>(true);
+            if (renderers == null)
+                return;
+
+            for (int i = 0; i < renderers.Length; i++)
+            {
+                Renderer r = renderers[i];
+                if (r == null || r.Pointer == IntPtr.Zero)
+                    continue;
+
+                int origOrder = r.sortingOrder;
+                int targetOrder = origOrder > -20 ? -20 : origOrder;
+                ParticleSystemRenderer psr = r.TryCast<ParticleSystemRenderer>();
+                bool hasPsr = psr != null && psr.Pointer != IntPtr.Zero;
+                float origFudge = hasPsr ? psr.sortingFudge : 0f;
+                float targetFudge = (hasPsr && origFudge < 50.0f) ? 50.0f : origFudge;
+
+                if (targetOrder != origOrder || (hasPsr && !Mathf.Approximately(targetFudge, origFudge)))
+                {
+                    if (_modifiedBloodRenderers.Count < 256)
+                    {
+                        _modifiedBloodRenderers.Add(new OriginalBloodRendererState
+                        {
+                            Renderer = r,
+                            SortingOrder = origOrder,
+                            PsRenderer = hasPsr ? psr : null,
+                            SortingFudge = origFudge
+                        });
+                    }
+
+                    r.sortingOrder = targetOrder;
+                    if (hasPsr)
+                        psr.sortingFudge = targetFudge;
+
+                    if (!_loggedBloodRendererNormalization)
+                    {
+                        _loggedBloodRendererNormalization = true;
+                        AiCore.LogDebug(
+                            "BloodVfx",
+                            $"Normalized pooled blood renderer '{r.name}': order {origOrder}->{targetOrder}, fudge {origFudge:F1}->{targetFudge:F1}",
+                            10.0f);
+                    }
+                }
+
+                NormalizeSingleBloodMaterial(r.sharedMaterial);
+                var mats = r.sharedMaterials;
+                if (mats != null)
+                {
+                    for (int m = 0; m < mats.Length; m++)
+                        NormalizeSingleBloodMaterial(mats[m]);
+                }
+                if (hasPsr)
+                    NormalizeSingleBloodMaterial(psr.trailMaterial);
+            }
+        }
+
+        private static void OnBloodFxSpawned(GameObject go, bool suppressParticles)
         {
             try
             {
-                if (go == null || go.Pointer == IntPtr.Zero || !_inspectedBloodFxRoots.Add(go.Pointer))
+                if (go == null || go.Pointer == IntPtr.Zero)
                     return;
 
-                var renderers = go.GetComponentsInChildren<ParticleSystemRenderer>(true);
-                if (renderers == null)
-                    return;
-
-                for (int i = 0; i < renderers.Length; i++)
+                bool needsInspect = !_inspectedBloodFxRoots.Contains(go.Pointer);
+                Renderer[] renderers = null;
+                if (needsInspect)
                 {
-                    ParticleSystemRenderer psr = renderers[i];
-                    if (psr == null || psr.Pointer == IntPtr.Zero)
-                        continue;
+                    renderers = go.GetComponentsInChildren<Renderer>(true);
+                    NormalizeBloodImpactRenderers(go, renderers);
+                }
 
-                    int origOrder = psr.sortingOrder;
-                    float origFudge = psr.sortingFudge;
-                    Material sharedMat = psr.sharedMaterial;
-                    bool hasMat = sharedMat != null && sharedMat.Pointer != IntPtr.Zero;
-                    int origQueue = hasMat ? sharedMat.renderQueue : -1;
+                if (suppressParticles)
+                {
+                    _suppressedBloodFxRoots.Add(go.Pointer);
+                    Transform graft = go.transform != null ? go.transform.Find("BloodSprayGraft") : null;
+                    if (graft != null && graft.gameObject.activeSelf)
+                        graft.gameObject.SetActive(false);
 
-                    int targetOrder = origOrder > -10 ? -10 : origOrder;
-                    float targetFudge = origFudge < 40.0f ? 40.0f : origFudge;
-                    bool shiftQueueBeforeSmoke = hasMat && origQueue >= 2990;
-                    int targetQueue = shiftQueueBeforeSmoke ? 2990 : origQueue;
-
-                    if (targetOrder != origOrder || !Mathf.Approximately(targetFudge, origFudge) || (hasMat && targetQueue != origQueue))
+                    renderers ??= go.GetComponentsInChildren<Renderer>(true);
+                    if (renderers != null)
                     {
-                        if (_modifiedBloodRenderers.Count < 256)
+                        for (int i = 0; i < renderers.Length; i++)
                         {
-                            _modifiedBloodRenderers.Add(new OriginalBloodRendererState
-                            {
-                                Renderer = psr,
-                                SortingOrder = origOrder,
-                                SortingFudge = origFudge,
-                                SharedMat = hasMat ? sharedMat : null,
-                                RenderQueue = origQueue
-                            });
+                            Renderer r = renderers[i];
+                            if (r != null && r.Pointer != IntPtr.Zero && r.enabled)
+                                r.enabled = false;
                         }
+                    }
 
-                        psr.sortingOrder = targetOrder;
-                        psr.sortingFudge = targetFudge;
-                        if (hasMat && targetQueue != origQueue)
-                            sharedMat.renderQueue = targetQueue;
-
-                        if (!_loggedBloodRendererNormalization)
+                    var systems = go.GetComponentsInChildren<ParticleSystem>(true);
+                    if (systems != null)
+                    {
+                        for (int i = 0; i < systems.Length; i++)
                         {
-                            _loggedBloodRendererNormalization = true;
-                            AiCore.LogDebug(
-                                "BloodVfx",
-                                $"Normalized pooled ImpactFX_flesh renderer '{psr.name}': order {origOrder}->{targetOrder}, fudge {origFudge:F1}->{targetFudge:F1}, queue {origQueue}->{targetQueue}",
-                                10.0f);
+                            ParticleSystem ps = systems[i];
+                            if (ps != null && ps.Pointer != IntPtr.Zero)
+                            {
+                                ps.Stop(true, ParticleSystemStopBehavior.StopEmittingAndClear);
+                                ps.Clear(true);
+                            }
+                        }
+                    }
+                }
+                else if (_suppressedBloodFxRoots.Remove(go.Pointer))
+                {
+                    Transform graft = go.transform != null ? go.transform.Find("BloodSprayGraft") : null;
+                    if (graft != null && !graft.gameObject.activeSelf)
+                        graft.gameObject.SetActive(true);
+
+                    renderers ??= go.GetComponentsInChildren<Renderer>(true);
+                    if (renderers != null)
+                    {
+                        for (int i = 0; i < renderers.Length; i++)
+                        {
+                            Renderer r = renderers[i];
+                            if (r != null && r.Pointer != IntPtr.Zero && !r.enabled)
+                                r.enabled = true;
+                        }
+                    }
+
+                    var systems = go.GetComponentsInChildren<ParticleSystem>(true);
+                    if (systems != null)
+                    {
+                        for (int i = 0; i < systems.Length; i++)
+                        {
+                            ParticleSystem ps = systems[i];
+                            if (ps != null && ps.Pointer != IntPtr.Zero)
+                            {
+                                ps.Clear(true);
+                                ps.Play(true);
+                            }
                         }
                     }
                 }
             }
             catch { }
+        }
+
+        private static void OnBloodFxSpawnedShow(GameObject go) => OnBloodFxSpawned(go, false);
+        private static void OnBloodFxSpawnedSuppress(GameObject go) => OnBloodFxSpawned(go, true);
+
+        private static Il2CppSystem.Action<GameObject> ChainBloodFxCallback(
+            Il2CppSystem.Action<GameObject> existing,
+            bool suppress)
+        {
+            if (suppress)
+            {
+                if (_cachedBloodFxSuppressCallback == null)
+                {
+                    _cachedBloodFxSuppressCallback = Il2CppInterop.Runtime.DelegateSupport.ConvertDelegate<Il2CppSystem.Action<GameObject>>(
+                        new Action<GameObject>(OnBloodFxSpawnedSuppress));
+                }
+                if (existing == null || existing.Pointer == IntPtr.Zero)
+                    return _cachedBloodFxSuppressCallback;
+            }
+            else
+            {
+                if (_cachedBloodFxShowCallback == null)
+                {
+                    _cachedBloodFxShowCallback = Il2CppInterop.Runtime.DelegateSupport.ConvertDelegate<Il2CppSystem.Action<GameObject>>(
+                        new Action<GameObject>(OnBloodFxSpawnedShow));
+                }
+                if (existing == null || existing.Pointer == IntPtr.Zero)
+                    return _cachedBloodFxShowCallback;
+            }
+
+            Il2CppSystem.Action<GameObject> prev = existing;
+            return Il2CppInterop.Runtime.DelegateSupport.ConvertDelegate<Il2CppSystem.Action<GameObject>>(
+                new Action<GameObject>(go =>
+                {
+                    try { prev?.Invoke(go); } catch { }
+                    OnBloodFxSpawned(go, suppress);
+                }));
         }
 
         private static void RestoreBloodRendererDefaults()
@@ -865,19 +1003,27 @@ namespace EasyRed2HumanAI
                 try
                 {
                     if (st.Renderer != null && st.Renderer.Pointer != IntPtr.Zero)
-                    {
                         st.Renderer.sortingOrder = st.SortingOrder;
-                        st.Renderer.sortingFudge = st.SortingFudge;
-                    }
-                    if (st.SharedMat != null && st.SharedMat.Pointer != IntPtr.Zero && st.RenderQueue > 0)
-                    {
-                        st.SharedMat.renderQueue = st.RenderQueue;
-                    }
+                    if (st.PsRenderer != null && st.PsRenderer.Pointer != IntPtr.Zero)
+                        st.PsRenderer.sortingFudge = st.SortingFudge;
+                }
+                catch { }
+            }
+            for (int i = 0; i < _modifiedBloodMaterials.Count; i++)
+            {
+                OriginalBloodMaterialState mst = _modifiedBloodMaterials[i];
+                try
+                {
+                    if (mst.Mat != null && mst.Mat.Pointer != IntPtr.Zero && mst.RenderQueue > 0)
+                        mst.Mat.renderQueue = mst.RenderQueue;
                 }
                 catch { }
             }
             _modifiedBloodRenderers.Clear();
+            _modifiedBloodMaterials.Clear();
             _inspectedBloodFxRoots.Clear();
+            _inspectedBloodMatPtrs.Clear();
+            _suppressedBloodFxRoots.Clear();
         }
 
         [HarmonyPatch(typeof(ResourcesManager), nameof(ResourcesManager.PlayImpactEffect))]
@@ -888,6 +1034,7 @@ namespace EasyRed2HumanAI
                 ref string impact_prefab_name,
                 bool isExplosion,
                 int maxSpawnDistance,
+                bool forceSpawnIfNotLooking,
                 ref Il2CppSystem.Action<GameObject> gameObjectFx,
                 out long __state)
             {
@@ -907,14 +1054,15 @@ namespace EasyRed2HumanAI
                     }
 
                     if (string.IsNullOrEmpty(impact_prefab_name) ||
-                        !string.Equals(impact_prefab_name, "ImpactFX_flesh", StringComparison.OrdinalIgnoreCase))
+                        (!string.Equals(impact_prefab_name, "ImpactFX_flesh", StringComparison.OrdinalIgnoreCase) &&
+                         !string.Equals(impact_prefab_name, "ImpactFX_flesh_noBlood", StringComparison.OrdinalIgnoreCase)))
                     {
                         return;
                     }
 
                     if (!VisionConfig.EnableBloodSmokeWaterOcclusion.Value)
                     {
-                        if (_modifiedBloodRenderers.Count > 0)
+                        if (_modifiedBloodRenderers.Count > 0 || _modifiedBloodMaterials.Count > 0)
                             RestoreBloodRendererDefaults();
                         return;
                     }
@@ -922,7 +1070,7 @@ namespace EasyRed2HumanAI
                     if (!AiCore.TryGetActiveCameraPosition(out Vector3 camPos))
                         return;
 
-                    if (maxSpawnDistance > 0)
+                    if (!forceSpawnIfNotLooking && maxSpawnDistance > 0)
                     {
                         float maxDistSq = (float)maxSpawnDistance * (float)maxSpawnDistance;
                         if ((pos - camPos).sqrMagnitude > maxDistSq)
@@ -933,11 +1081,11 @@ namespace EasyRed2HumanAI
                     {
                         impact_prefab_name = "ImpactFX_flesh_noBlood";
                         BloodSmokeWaterOccludedCount++;
+                        gameObjectFx = ChainBloodFxCallback(gameObjectFx, suppress: true);
                         return;
                     }
 
-                    if (gameObjectFx == null)
-                        gameObjectFx = GetOrCreateBloodFxCallback();
+                    gameObjectFx = ChainBloodFxCallback(gameObjectFx, suppress: false);
                 }
                 catch { }
             }

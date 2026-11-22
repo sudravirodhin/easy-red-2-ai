@@ -743,6 +743,7 @@ namespace EasyRed2HumanAI
             // Interactables & Prerequisites
             public bool NearbyAmmoSource; // crate / box / ammo carrier / buddy / corpse
             public bool NeedsPrimaryWeaponUpgrade; // unarmed/pistol-only soldier (e.g. bailed crew) near a dropped rifle/SMG
+            public bool NeedsAtWeaponScavenge; // dropped AT launcher / AT grenade available nearby
             public bool AllyNeedsAmmoDropNearby;
             public bool HasInjuredAlly;
             public float InjuredAllyHarm;
@@ -1416,6 +1417,27 @@ namespace EasyRed2HumanAI
                         }
                     }
                 }
+                else if (inp.IsBleeding && !inp.HasBandage && inp.NearbyAmmoSource && !prereqResupplyBlocked && !inp.PointBlankThreat)
+                {
+                    float bleedScavHarm = safeInCover ? curHarm * 0.45f : curHarm;
+                    if (IsSafeForDuration(bleedScavHarm, 1.5f, w.RiskThreshold))
+                    {
+                        ConsiderCandidate(
+                            EmergentActionId.ResupplyAmmo,
+                            EmergentActionId.SelfBandage,
+                            bleedScavHarm * 0.65f,
+                            0.38f,
+                            0f,
+                            bleedScavHarm,
+                            0.34f * w.BiasScavenge,
+                            "prereq_bandage_scavenge");
+                    }
+                    else
+                    {
+                        unsafePrereqRejected = true;
+                        rejectedPrereqAction = EmergentActionId.ResupplyAmmo;
+                    }
+                }
 
                 // 3. HoldAndFight (Lethality strictly gated on CanHarmTarget > 0) + Reload/Resupply prereq
                 if (inp.NeedsPrimaryWeaponUpgrade &&
@@ -1439,6 +1461,32 @@ namespace EasyRed2HumanAI
                     }
                 }
 
+                if (inp.NeedsAtWeaponScavenge &&
+                    inp.NearbyAmmoSource &&
+                    !prereqResupplyBlocked &&
+                    !cqbImmediate &&
+                    !(inp.HasVisibleEnemy && inp.CanHarmTarget > 0.05f && inp.VisibleEnemyDist <= 16.0f))
+                {
+                    float atScavHarm = safeInCover ? curHarm * 0.40f : curHarm;
+                    if (IsSafeForDuration(atScavHarm, 1.5f, w.RiskThreshold))
+                    {
+                        ConsiderCandidate(
+                            EmergentActionId.ResupplyAmmo,
+                            EmergentActionId.HoldAndFight,
+                            curHarm * 0.55f,
+                            inp.UncounterableArmorClose ? 0.68f : 0.46f,
+                            0f,
+                            atScavHarm,
+                            (inp.UncounterableArmorClose ? 0.26f : 0.20f) * w.BiasScavenge,
+                            "scavenge_at_weapon");
+                    }
+                    else if (inp.UncounterableArmorClose)
+                    {
+                        unsafePrereqRejected = true;
+                        rejectedPrereqAction = EmergentActionId.ResupplyAmmo;
+                    }
+                }
+
                 if (inp.HasVisibleEnemy && inp.CanHarmTarget > 0.05f)
                 {
                     if (inp.AmmoEmpty)
@@ -1450,10 +1498,10 @@ namespace EasyRed2HumanAI
                                 EmergentActionId.ResupplyAmmo,
                                 EmergentActionId.HoldAndFight,
                                 curHarm * 0.50f,
-                                0.34f,
+                                0.48f,
                                 0f,
                                 resupHarm,
-                                0.08f * w.BiasScavenge,
+                                0.18f * w.BiasScavenge,
                                 "prereq_ammo_fight");
                         }
                         else if (inp.NearbyAmmoSource)
@@ -1496,7 +1544,7 @@ namespace EasyRed2HumanAI
                             cqbImmediate ? "cqb_snap_engage" : "direct_engage");
                     }
                 }
-                else if ((inp.AmmoEmpty || (!inp.HasVisibleEnemy && curHarm < 0.20f)) && inp.NearbyAmmoSource && !prereqResupplyBlocked)
+                else if ((inp.AmmoEmpty || (!inp.HasVisibleEnemy && curHarm < 0.20f && !inp.ObjectiveTickingAgainstUs)) && inp.NearbyAmmoSource && !prereqResupplyBlocked)
                 {
                     float resupHarm2 = safeInCover ? curHarm * 0.45f : curHarm;
                     if (IsSafeForDuration(resupHarm2, 1.5f, w.RiskThreshold))
@@ -1505,10 +1553,10 @@ namespace EasyRed2HumanAI
                             EmergentActionId.ResupplyAmmo,
                             EmergentActionId.None,
                             curHarm * 0.70f,
-                            inp.AmmoEmpty ? 0.30f : 0.22f,
+                            inp.AmmoEmpty ? 0.54f : 0.46f,
                             0f,
                             resupHarm2,
-                            (inp.AmmoEmpty ? 0.10f : 0.14f) * w.BiasScavenge,
+                            (inp.AmmoEmpty ? 0.20f : 0.18f) * w.BiasScavenge,
                             inp.AmmoEmpty ? "resupply_ammo" : "scavenge_gear");
                     }
                     else if (inp.AmmoEmpty)

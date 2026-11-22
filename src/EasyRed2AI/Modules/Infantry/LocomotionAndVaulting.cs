@@ -1414,10 +1414,12 @@ namespace EasyRed2HumanAI
                 return true;
 
             float now = Time.time;
+            bool onVehicleHull = AiCore.IsFootBotStandingOnVehicleHull(myPos);
+            bool isVehicleEvade = h.MoveOverride.Kind == AiCore.BotMoveOverrideKind.VehicleEvade && now < h.MoveOverride.ExpireTime;
             bool isCliffStepOff = now < h.Goap.FootStuck.CliffStepOffUntil;
             bool isUnstickRecovery =
                 (h.MoveOverride.Kind == AiCore.BotMoveOverrideKind.UnstickSidestep && now < h.MoveOverride.ExpireTime) ||
-                (h.MoveOverride.Kind == AiCore.BotMoveOverrideKind.VehicleEvade && now < h.MoveOverride.ExpireTime) ||
+                isVehicleEvade ||
                 now < h.Goap.FootStuck.UnstickOverrideUntil;
             bool isRoomOrTrenchTrapped = isUnstickRecovery &&
                                          h.Goap.FootStuck.RoomTrapSince > 0f &&
@@ -1429,9 +1431,10 @@ namespace EasyRed2HumanAI
                     targetPos,
                     out Vector3 snappedPos,
                     out _,
-                    (isUnstickRecovery || isCliffStepOff) ? 4.8f : (isTrenchOrLedgeStepDown ? 3.6f : 2.8f),
+                    (isUnstickRecovery || isCliffStepOff || onVehicleHull) ? 5.0f : (isTrenchOrLedgeStepDown ? 3.6f : 2.8f),
                     isRoomOrTrenchTrapped ? 1.35f : 0.75f,
-                    isCliffStepOff ? 6.2f : (isUnstickRecovery ? 2.95f : 2.65f)))
+                    isCliffStepOff ? 6.2f : (onVehicleHull ? 4.2f : (isUnstickRecovery ? 2.95f : 2.65f)),
+                    ignoreVehicleObstacles: isVehicleEvade || onVehicleHull))
             {
                 targetPos = snappedPos;
                 return true;

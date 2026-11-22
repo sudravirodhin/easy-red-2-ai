@@ -35,6 +35,7 @@ internal static class VerifyPatches
         int checkedCount = 0;
         int mismatchCount = 0;
         var coroutineTargets = new SortedSet<string>(StringComparer.Ordinal);
+        var verifiedPatches = new List<(string TargetType, string TargetMethod, string PatchClass, string Hooks)>();
 
         HashSet<Type> registeredInLoad = new HashSet<Type>();
         Type pluginType = modAsm.GetType("EasyRed2HumanAI.Plugin");
@@ -135,9 +136,15 @@ internal static class VerifyPatches
                 coroutineTargets.Add($"{ownerName}.{lookupMethodName}");
             }
 
+            bool hasPrefix = false;
+            bool hasPostfix = false;
             foreach (MethodInfo patchMethod in t.GetMethods(BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Static))
             {
-                if (patchMethod.Name != "Prefix" && patchMethod.Name != "Postfix")
+                if (patchMethod.Name == "Prefix")
+                    hasPrefix = true;
+                else if (patchMethod.Name == "Postfix")
+                    hasPostfix = true;
+                else
                     continue;
 
                 foreach (ParameterInfo pp in patchMethod.GetParameters())
@@ -189,6 +196,9 @@ internal static class VerifyPatches
                     }
                 }
             }
+
+            string hookKind = hasPrefix && hasPostfix ? "Prefix+Postfix" : hasPrefix ? "Prefix" : hasPostfix ? "Postfix" : "Other";
+            verifiedPatches.Add((targetType.FullName ?? targetType.Name, lookupMethodName, t.Name, hookKind));
         }
 
         if (mismatchCount > 0)
@@ -207,10 +217,11 @@ internal static class VerifyPatches
         try
         {
             GenerateModIndex(workspaceDir);
+            GenerateModStateAndConfigIndex(modAsm, workspaceDir, verifiedPatches);
         }
         catch (Exception ex)
         {
-            Console.WriteLine($"  [WARN] Failed to update mod_index.md: {ex.Message}");
+            Console.WriteLine($"  [WARN] Failed to update mod indexes: {ex.Message}");
         }
 
         return 0;
@@ -402,9 +413,9 @@ internal static class VerifyPatches
                     ModOutlineEntry entry = default;
                     bool track = false;
 
-                    if ((depth == 1 || depth == 2) && (sig.Contains(" class ") || sig.Contains(" struct ")))
+                    if ((depth == 1 || depth == 2) && (sig.Contains(" class ") || sig.Contains(" struct ") || sig.Contains(" enum ")))
                     {
-                        string tName = ExtractWordAfter(sig, "class") ?? ExtractWordAfter(sig, "struct");
+                        string tName = ExtractWordAfter(sig, "class") ?? ExtractWordAfter(sig, "struct") ?? ExtractWordAfter(sig, "enum");
                         if (!string.IsNullOrEmpty(tName))
                         {
                             if (!string.IsNullOrEmpty(pendingPatchTag))
@@ -412,9 +423,11 @@ internal static class VerifyPatches
                                 entry = new ModOutlineEntry { Kind = "patch", Tag = pendingPatchTag, Name = tName, StartLine = openLine, OpenDepth = depth };
                                 track = true;
                             }
-                            else if (depth == 1 && sig.Contains(" struct "))
+                            else if ((depth == 1 && (sig.Contains(" struct ") || sig.Contains(" enum "))) ||
+                                     (depth == 2 && (sig.Contains(" struct ") || sig.Contains(" enum ") || sig.Contains(" class "))))
                             {
-                                entry = new ModOutlineEntry { Kind = "type", Name = "struct " + tName, StartLine = openLine, OpenDepth = depth };
+                                string kw = sig.Contains(" struct ") ? "struct" : sig.Contains(" enum ") ? "enum" : "class";
+                                entry = new ModOutlineEntry { Kind = "type", Tag = kw, Name = tName, StartLine = openLine, OpenDepth = depth };
                                 track = true;
                             }
                         }
@@ -424,7 +437,7 @@ internal static class VerifyPatches
                         string mName = TryExtractMethodName(sig);
                         if (!string.IsNullOrEmpty(mName))
                         {
-                            string prefix = active.Count > 0 && active.Peek().Kind == "patch"
+                            string prefix = active.Count > 0 && (active.Peek().Kind == "patch" || active.Peek().Kind == "type")
                                 ? active.Peek().Name + "."
                                 : "";
                             entry = new ModOutlineEntry { Kind = "method", Name = prefix + mName, StartLine = openLine, OpenDepth = depth };
@@ -449,7 +462,7 @@ internal static class VerifyPatches
                         var done = active.Pop();
                         done.EndLine = lineNum;
                         int span = done.EndLine - done.StartLine + 1;
-                        if (done.Kind == "patch" || span >= 4)
+                        if (done.Kind == "patch" || done.Kind == "type" || span >= 4)
                             completed.Add(done);
                     }
                 }
@@ -489,24 +502,34 @@ internal static class VerifyPatches
             .OrderBy(p => p, StringComparer.OrdinalIgnoreCase)
             .ToArray();
 
+        var loadedFiles = new List<(string RelPath, string[] Lines)>(files.Length);
+        foreach (string filePath in files)
+        {
+            loadedFiles.Add((Path.GetRelativePath(workspaceDir, filePath).Replace('\\', '/'), File.ReadAllLines(filePath)));
+        }
+
         var sb = new System.Text.StringBuilder(32768);
         sb.AppendLine("# EasyRed2AI — Mod File, HarmonyPatch & Method Index");
         sb.AppendLine();
-        sb.AppendLine($"- **Indexed Files**: `{files.Length}` (auto-updated on `build.ps1` and `--build-cache`)");
+        sb.AppendLine($"- **Indexed Files**: `{files.Length}` (auto-updated on `build.ps1`)");
         sb.AppendLine("- Check exact `LStart-LEnd` ranges here before calling `read_file`.");
         sb.AppendLine();
 
-        foreach (string filePath in files)
-        {
-            string relPath = Path.GetRelativePath(workspaceDir, filePath).Replace('\\', '/');
-            string[] lines = File.ReadAllLines(filePath);
-            var entries = ScanCSharpOutline(lines);
+        sb.AppendLine("## File Map");
+        foreach (var lf in loadedFiles)
+            sb.AppendLine($"- `{lf.RelPath}` ({lf.Lines.Length} lines)");
+        sb.AppendLine();
 
-            sb.AppendLine($"## `{relPath}` ({lines.Length} lines)");
+        foreach (var lf in loadedFiles)
+        {
+            var entries = ScanCSharpOutline(lf.Lines);
+            sb.AppendLine($"## `{lf.RelPath}` ({lf.Lines.Length} lines)");
             foreach (var e in entries)
             {
                 if (e.Kind == "patch")
                     sb.AppendLine($"- `{e.Tag}` `{e.Name}` (L{e.StartLine}-{e.EndLine})");
+                else if (e.Kind == "type")
+                    sb.AppendLine($"- `[{e.Tag}]` `{e.Name}` (L{e.StartLine}-{e.EndLine})");
                 else
                     sb.AppendLine($"- `{e.Name}` (L{e.StartLine}-{e.EndLine})");
             }
@@ -514,6 +537,137 @@ internal static class VerifyPatches
         }
 
         File.WriteAllText(indexPath, sb.ToString(), System.Text.Encoding.UTF8);
+    }
+
+    private static string FormatShortTypeName(Type t)
+    {
+        if (t == null) return "object";
+        if (t.IsArray) return FormatShortTypeName(t.GetElementType()) + "[]";
+        if (t == typeof(float)) return "float";
+        if (t == typeof(int)) return "int";
+        if (t == typeof(uint)) return "uint";
+        if (t == typeof(long)) return "long";
+        if (t == typeof(ulong)) return "ulong";
+        if (t == typeof(bool)) return "bool";
+        if (t == typeof(string)) return "string";
+        if (t == typeof(double)) return "double";
+        if (t == typeof(byte)) return "byte";
+        if (t == typeof(short)) return "short";
+        if (t == typeof(void)) return "void";
+        if (t == typeof(object)) return "object";
+        if (t.IsGenericType)
+        {
+            string baseName = t.Name;
+            int tick = baseName.IndexOf('`');
+            if (tick >= 0) baseName = baseName.Substring(0, tick);
+            string args = string.Join(", ", t.GetGenericArguments().Select(FormatShortTypeName));
+            return $"{baseName}<{args}>";
+        }
+        return t.Name;
+    }
+
+    private static bool IsIndexedRuntimeStateType(Type t)
+    {
+        string ns = t.Namespace ?? "";
+        string fullName = t.FullName ?? "";
+        if (!ns.StartsWith("EasyRed2", StringComparison.Ordinal) && !fullName.StartsWith("EasyRed2", StringComparison.Ordinal))
+            return false;
+        if (t.Name.Contains("<") || t.IsEnum)
+            return false;
+
+        string name = t.Name;
+        return name.EndsWith("Handles", StringComparison.Ordinal) ||
+               name.EndsWith("State", StringComparison.Ordinal) ||
+               name.EndsWith("Blackboard", StringComparison.Ordinal) ||
+               name.EndsWith("Traits", StringComparison.Ordinal) ||
+               name.EndsWith("Snapshot", StringComparison.Ordinal) ||
+               name.EndsWith("Profile", StringComparison.Ordinal) ||
+               name.EndsWith("Info", StringComparison.Ordinal) ||
+               name == "ThreatContact" ||
+               name == "GoapPlan" ||
+               name == "BotMoveOverrideState" ||
+               name == "FactionCommandProfile" ||
+               name == "VeteranPersonality";
+    }
+
+    private static void GenerateModStateAndConfigIndex(
+        Assembly modAsm,
+        string workspaceDir,
+        List<(string TargetType, string TargetMethod, string PatchClass, string Hooks)> verifiedPatches)
+    {
+        string cacheDir = Path.Combine(workspaceDir, @"tools\er2_cache");
+        Directory.CreateDirectory(cacheDir);
+        string outPath = Path.Combine(cacheDir, "mod_state_and_config.md");
+
+        var sb = new System.Text.StringBuilder(32768);
+        sb.AppendLine("# EasyRed2AI — Reverse HarmonyPatch Map, State Structs & VisionConfig");
+        sb.AppendLine();
+        sb.AppendLine("- Auto-generated from `EasyRed2HumanAI.dll` reflection on every `build.ps1`.");
+        sb.AppendLine();
+
+        sb.AppendLine("## 1. Reverse HarmonyPatch Map (By Vanilla Target Type)");
+        sb.AppendLine();
+        foreach (var grp in verifiedPatches
+            .GroupBy(x => x.TargetType, StringComparer.Ordinal)
+            .OrderBy(g => g.Key, StringComparer.Ordinal))
+        {
+            sb.AppendLine($"### `{grp.Key}`");
+            foreach (var item in grp.OrderBy(x => x.TargetMethod, StringComparer.Ordinal).ThenBy(x => x.PatchClass, StringComparer.Ordinal))
+                sb.AppendLine($"- `{item.TargetMethod}` -> `{item.PatchClass}` [`{item.Hooks}`]");
+            sb.AppendLine();
+        }
+
+        sb.AppendLine("## 2. Core Runtime State Structs & Handle Classes");
+        sb.AppendLine();
+        foreach (Type t in modAsm.GetTypes().Where(IsIndexedRuntimeStateType).OrderBy(x => x.FullName, StringComparer.Ordinal))
+        {
+            FieldInfo[] fields;
+            try
+            {
+                fields = t.GetFields(BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance | BindingFlags.DeclaredOnly)
+                    .Where(f => !f.Name.Contains("<"))
+                    .OrderBy(f => f.MetadataToken)
+                    .ToArray();
+            }
+            catch
+            {
+                continue;
+            }
+            if (fields.Length == 0)
+                continue;
+
+            string display = (t.FullName ?? t.Name);
+            if (display.StartsWith("EasyRed2HumanAI.", StringComparison.Ordinal))
+                display = display.Substring("EasyRed2HumanAI.".Length);
+            display = display.Replace('+', '.');
+            string kind = t.IsValueType ? "struct" : "class";
+            sb.AppendLine($"### `{display}` ({kind})");
+            foreach (FieldInfo f in fields)
+                sb.AppendLine($"- `{FormatShortTypeName(f.FieldType)}` `{f.Name}`");
+            sb.AppendLine();
+        }
+
+        Type vcType = modAsm.GetType("EasyRed2HumanAI.VisionConfig");
+        if (vcType != null)
+        {
+            sb.AppendLine("## 3. VisionConfig Entries");
+            sb.AppendLine();
+            try
+            {
+                foreach (FieldInfo f in vcType.GetFields(BindingFlags.Public | BindingFlags.Static).OrderBy(x => x.MetadataToken))
+                {
+                    if (!f.FieldType.Name.StartsWith("ConfigEntry", StringComparison.Ordinal))
+                        continue;
+                    Type[] genArgs = f.FieldType.IsGenericType ? f.FieldType.GetGenericArguments() : Array.Empty<Type>();
+                    string innerType = genArgs.Length > 0 ? FormatShortTypeName(genArgs[0]) : FormatShortTypeName(f.FieldType);
+                    sb.AppendLine($"- `{f.Name}` (`{innerType}`)");
+                }
+            }
+            catch { }
+            sb.AppendLine();
+        }
+
+        File.WriteAllText(outPath, sb.ToString(), System.Text.Encoding.UTF8);
     }
 
     private static readonly string[] AnimatorCallMarkers =

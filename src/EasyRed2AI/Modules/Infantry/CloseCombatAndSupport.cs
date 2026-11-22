@@ -14,26 +14,135 @@ namespace EasyRed2HumanAI
         private static void TryEnsureBayonetMounted(Soldier soldier)
         {
             if (!AiCore.IsLocallyOwnedBot(soldier) ||
-                soldier.IsOnVehicle() ||
+                AiCore.IsSoldierInVehicleOrTransition(soldier) ||
                 soldier.HasBayonetReady ||
                 soldier.isInHandsAnimation ||
-                soldier.IsReloading)
+                soldier.IsReloading ||
+                soldier.HoldsInventoryItem ||
+                soldier.UsingBipod())
             {
                 return;
             }
 
+            float now = Time.time;
             AiCore.SoldierFastHandles bayH = AiCore.GetOrCreateSoldierHandles(soldier);
-            if (bayH == null || bayH.Combat.BayonetChecked)
-                return;
-            bayH.Combat.BayonetChecked = true;
-
-            GenericGun heldGun = soldier.GetHeldGun();
-            if (heldGun == null)
-                return;
-
-            if (heldGun.integratedBayonet != null && !heldGun.integratedBayonet.IsMounted)
+            if (bayH == null ||
+                AiCore.IsSoldierNonCombatantOrSurrendered(soldier, bayH) ||
+                now < bayH.Combat.NextBayonetCheckTime)
             {
-                heldGun.integratedBayonet.SetMounted(true);
+                return;
+            }
+
+            try
+            {
+                GenericGun heldGun = soldier.GetHeldGun();
+                if (heldGun == null || heldGun.Pointer == IntPtr.Zero)
+                    return;
+
+                if (bayH.Combat.LastBayonetCheckedGunPtr == heldGun.Pointer)
+                    return;
+
+                if (heldGun.HasAttachmentInstalled(AttachmentType.bayonet))
+                {
+                    bayH.Combat.LastBayonetCheckedGunPtr = heldGun.Pointer;
+                    return;
+                }
+
+                if (heldGun.integratedBayonet != null)
+                {
+                    if (!heldGun.integratedBayonet.IsMounted)
+                    {
+                        if (AiCore.IsInMultiplayerRoom())
+                        {
+                            if (!AiCore.TryConsumeBotRpcBudget(0.45f))
+                            {
+                                bayH.Combat.NextBayonetCheckTime = now + 2.0f;
+                                return;
+                            }
+
+                            SyncSoldier syncher = bayH.Syncher ?? soldier.soldierSyncher ?? soldier.GetSyncher();
+                            if (syncher != null)
+                                syncher.SetIntegratedBayonet(heldGun, true);
+                            else
+                                heldGun.integratedBayonet.SetMounted(true);
+                        }
+                        else
+                        {
+                            heldGun.integratedBayonet.SetMounted(true);
+                        }
+
+                        AiCore.LogDebug("Bayonet", $"{AiCore.GetCachedFaction(soldier)} unfolded integrated bayonet on '{heldGun.name}'.");
+                    }
+
+                    bayH.Combat.LastBayonetCheckedGunPtr = heldGun.Pointer;
+                    return;
+                }
+
+                Inventory inv = soldier.inventory != null ? soldier.inventory.inventory : null;
+                if (inv == null || heldGun.supportedAttachments == null || heldGun.supportedAttachments.Length == 0)
+                {
+                    bayH.Combat.LastBayonetCheckedGunPtr = heldGun.Pointer;
+                    return;
+                }
+
+                foreach (SupportedAttachment sa in heldGun.supportedAttachments)
+                {
+                    if (sa == null || sa.GetAttachmentType(heldGun) != AttachmentType.bayonet)
+                        continue;
+
+                    string attId = sa.GetAttachmentId(heldGun);
+                    if (string.IsNullOrEmpty(attId))
+                        continue;
+
+                    VirtualItem bayonetItem = inv.FindItemWithID(attId);
+                    if (bayonetItem == null)
+                        continue;
+
+                    if (AiCore.IsInMultiplayerRoom() && !AiCore.TryConsumeBotRpcBudget(0.55f))
+                    {
+                        bayH.Combat.NextBayonetCheckTime = now + 2.5f;
+                        return;
+                    }
+
+                    ItemObject prefab = bayonetItem.GetItemPrefab();
+                    if (prefab == null || prefab.gameObject == null)
+                        continue;
+
+                    UnityEngine.GameObject instGo = UnityEngine.Object.Instantiate(prefab.gameObject);
+                    if (instGo == null)
+                        continue;
+
+                    Attachment att = instGo.GetComponent<Attachment>();
+                    if (att == null)
+                    {
+                        UnityEngine.Object.Destroy(instGo);
+                        continue;
+                    }
+
+                    heldGun.InstallAttachment(att, false);
+                    if (heldGun.HasAttachmentInstalled(AttachmentType.bayonet))
+                    {
+                        inv.RemoveVirtualItem(bayonetItem);
+                        if (AiCore.IsInMultiplayerRoom())
+                        {
+                            SyncSoldier syncher = bayH.Syncher ?? soldier.soldierSyncher ?? soldier.GetSyncher();
+                            if (syncher != null)
+                                syncher.OnEquipmentChanged();
+                        }
+
+                        AiCore.LogDebug("Bayonet", $"{AiCore.GetCachedFaction(soldier)} fixed detachable bayonet '{attId}' on '{heldGun.name}'.");
+                        bayH.Combat.LastBayonetCheckedGunPtr = heldGun.Pointer;
+                        return;
+                    }
+
+                    UnityEngine.Object.Destroy(instGo);
+                }
+
+                bayH.Combat.LastBayonetCheckedGunPtr = heldGun.Pointer;
+            }
+            catch (Exception ex)
+            {
+                AiCore.ReportPatchException("TryEnsureBayonetMounted", ex);
             }
         }
 
@@ -994,6 +1103,19 @@ namespace EasyRed2HumanAI
                 reqSupp += 22f;
             }
 
+            reqSupp += doc.SurrenderSuppDelta;
+            if (isCompletelyOutOfAmmo)
+            {
+                AiCore.BattleTheaterSnapshot surTheater = AiCore.GetBattleTheaterSnapshot();
+                if (surTheater.Atmosphere == AiCore.BattleAtmosphereArchetype.KesselEncircledPocket &&
+                    !string.IsNullOrEmpty(surTheater.DefendersFactionId) &&
+                    AiCore.AreSameSideFactions(soldier.faction, surTheater.DefendersFactionId))
+                {
+                    reqSupp -= 10f;
+                }
+            }
+            reqSupp = Mathf.Clamp(reqSupp, 42f, 98f);
+
             if (suppression < reqSupp)
             {
                 return false;
@@ -1462,11 +1584,6 @@ namespace EasyRed2HumanAI
                             __instance.m_Animator.SetBool("Injured", true);
                             if (__instance.m_Animator.layerCount > 1)
                                 __instance.m_Animator.SetLayerWeight(1, 0f);
-                            if (!__instance.IsOnVehicle())
-                            {
-                                __instance.m_Animator.ResetTrigger("StartInjured");
-                                __instance.ForceAnimatorState("Injured", 0, 0f);
-                            }
                         }
                     }
                     else

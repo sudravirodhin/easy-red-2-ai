@@ -72,7 +72,10 @@ namespace EasyRed2HumanAI
             if (forceClear || _inspectedBloodFxRoots.Count > 128)
             {
                 _inspectedBloodFxRoots.Clear();
+                _inspectedBloodMatPtrs.Clear();
                 _modifiedBloodRenderers.Clear();
+                _modifiedBloodMaterials.Clear();
+                _suppressedBloodFxRoots.Clear();
             }
             if (forceClear || _nextVehicleFireSeepageTime.Count > 64)
                 _nextVehicleFireSeepageTime.Clear();

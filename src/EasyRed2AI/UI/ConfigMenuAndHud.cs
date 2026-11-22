@@ -97,9 +97,11 @@ namespace EasyRed2HumanAI
                     VeteranAndTacticsPatches.UpdateMacroObjectiveAndEmplacementDirector();
                     VeteranAndTacticsPatches.UpdateFriendlyPlayerCrosshairYield();
                     VeteranAndTacticsPatches.UpdateFriendlyVehicleCollisionRestores();
+                    VeteranAndTacticsPatches.UpdatePlayerVehicleInfantryEvacuation();
                     VeteranAndTacticsPatches.UpdateGroundedCrewRetreatTasks();
                     VeteranAndTacticsPatches.UpdateMultiplayerBattleStatSync();
                     VeteranAndTacticsPatches.UpdateLobbyJoinMotdQueue();
+                    VeteranAndTacticsPatches.UpdateBattleAtmosphereBroadcast();
                     VeteranAndTacticsPatches.UpdateLonePlayerSquadStatusAndRejoin();
                     VeteranAndTacticsPatches.UpdateSquadRosterHeaderAndFastSync();
                     VeteranAndTacticsPatches.UpdateQuickTapSpot(_showConfigMenu || _showMapPicker || _showDogTagArchive);
@@ -757,13 +759,17 @@ namespace EasyRed2HumanAI
                             VisionConfig.EnableVehicleAndPilotPersonalities,
                             VisionConfig.VeterancyCuresSkittishness,
                             VisionConfig.ShowPersonalityInSquadRoster,
-                            VisionConfig.EnableFactionNetDoctrines);
+                            VisionConfig.EnableFactionNetDoctrines,
+                            VisionConfig.EnableBattleAtmosphereDirectives,
+                            VisionConfig.BroadcastBattleAtmosphereChat);
                         DrawToggleButton(colRightX, ref yR, colW, rowH, "Enable AI Role Personalities (Master)", VisionConfig.EnableRolePersonalities);
                         DrawToggleButton(colRightX, ref yR, colW, rowH, "Infantry Role Personalities (21 Types)", VisionConfig.EnableInfantryPersonalities);
                         DrawToggleButton(colRightX, ref yR, colW, rowH, "Vehicle & Pilot Personalities (9 Types)", VisionConfig.EnableVehicleAndPilotPersonalities);
                         DrawToggleButton(colRightX, ref yR, colW, rowH, "Veterancy Cures Skittishness", VisionConfig.VeterancyCuresSkittishness);
                         DrawToggleButton(colRightX, ref yR, colW, rowH, "Show Personalities in Squad Roster", VisionConfig.ShowPersonalityInSquadRoster);
                         DrawToggleButton(colRightX, ref yR, colW, rowH, "20-Nation Historical Command Doctrines", VisionConfig.EnableFactionNetDoctrines);
+                        DrawToggleButton(colRightX, ref yR, colW, rowH, "Battle Atmosphere Directives (9 Theater Archetypes)", VisionConfig.EnableBattleAtmosphereDirectives);
+                        DrawToggleButton(colRightX, ref yR, colW, rowH, "Broadcast [HQ Dispatch] Atmosphere Banner in Chat", VisionConfig.BroadcastBattleAtmosphereChat);
                         break;
 
                     case 4: // 5. Optimizations & QoL
@@ -1881,10 +1887,18 @@ namespace EasyRed2HumanAI
 
                 string callsign = AiCore.FormatSquadPhoneticCallsign(guiSquad);
                 string headerStr = !string.IsNullOrEmpty(callsign) ? callsign.ToUpperInvariant() : "SQUAD";
+                bool hasPendingHq = TryGetActivePendingPlayerHqOrder(out PlayerPendingHqOrderState pendingHq) &&
+                                    pendingHq.SquadPtr == guiSquad.Pointer;
+                if (hasPendingHq)
+                {
+                    headerStr = $"{headerStr}  [HQ: {pendingHq.ShortActionLabel} \u2022 Radial]";
+                }
                 if (_squadHeaderText.text != headerStr)
                     _squadHeaderText.text = headerStr;
 
-                _squadHeaderText.color = new Color(1.00f, 0.88f, 0.45f, 0.96f);
+                _squadHeaderText.color = hasPendingHq
+                    ? new Color(0.68f, 1.00f, 0.58f, 0.98f)
+                    : new Color(1.00f, 0.88f, 0.45f, 0.96f);
                 _squadHeaderText.enabled = true;
                 if (!_squadHeaderGo.activeSelf)
                     _squadHeaderGo.SetActive(true);
@@ -2091,6 +2105,7 @@ namespace EasyRed2HumanAI
                 VeteranAndTacticsPatches.ClearVehiclePathingCaches();
                 ClearGoapCaches();
                 EmergentRuntimeBridge.ResetOnSceneRestart();
+                VeteranAndTacticsPatches.ResetBattleAtmosphereBroadcastState();
                 VeteranAndTacticsPatches.PruneExpiredDamageAttributions(Time.time, forceClear: true);
             }
 

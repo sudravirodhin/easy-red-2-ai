@@ -113,9 +113,9 @@ namespace EasyRed2HumanAI
                         st.UnstickDest,
                         out Vector3 contSnapped,
                         out _,
-                        allowStepDown ? 4.8f : 2.8f,
+                        onVehicleHull ? 5.0f : (allowStepDown ? 4.8f : 2.8f),
                         onVehicleHull ? 2.85f : (st.ConsecutiveUnsticks >= 2 ? 1.35f : 0.75f),
-                        isCliffStepOff ? 6.2f : (allowStepDown ? 2.90f : 0.75f)))
+                        isCliffStepOff ? 6.2f : (onVehicleHull ? 4.2f : (allowStepDown ? 2.90f : 0.75f))))
                 {
                     st.UnstickOverrideUntil = 0f;
                     st.CliffStepOffUntil = 0f;
@@ -281,9 +281,9 @@ namespace EasyRed2HumanAI
             bool destSignificantlyAbove = roomTrapped && desiredEnd.sqrMagnitude > 0.01f && desiredEnd.y - myPos.y >= 0.55f;
             float safeCliffDropMax = soldier.isBleeding ? 3.2f : 6.2f;
             bool elevatedOrChronicTrap = onVehicleHull || roomTrapped || st.ConsecutiveUnsticks >= 2 || destSignificantlyBelow;
-            float maxMicroFlatDist = elevatedOrChronicTrap ? 4.8f : 2.5f;
+            float maxMicroFlatDist = onVehicleHull ? 5.0f : (elevatedOrChronicTrap ? 4.8f : 2.5f);
             float maxMicroUpY = onVehicleHull ? 2.85f : (destSignificantlyAbove ? 1.35f : 0.72f);
-            float maxMicroDownY = roomTrapped ? safeCliffDropMax : (elevatedOrChronicTrap ? 2.85f : 0.72f);
+            float maxMicroDownY = roomTrapped ? safeCliffDropMax : (onVehicleHull ? 4.2f : (elevatedOrChronicTrap ? 2.85f : 0.72f));
 
             int tableLen = _playerUnstickCosTable.Length;
             int rotStart = st.ConsecutiveUnsticks % tableLen;
@@ -306,10 +306,11 @@ namespace EasyRed2HumanAI
                     maxMicroUpY,
                     maxMicroDownY);
 
-                // If bot is perched on a wider ledge/porch/wreck (>2.2m to the edge), also probe at 3.25m and 4.4m for a drop-off.
-                if (!onVehicleHull && elevatedOrChronicTrap && (!valid || candPos.y > myPos.y - 0.55f))
+                // If bot is perched on a wider ledge/porch/wreck/tank (>2.2m to the edge), also probe at 3.25m-3.6m and 4.4m-4.6m for ground/drop-off.
+                if (elevatedOrChronicTrap && (!valid || (!onVehicleHull && candPos.y > myPos.y - 0.55f)))
                 {
-                    Vector3 wideProbe = myPos + dir * 3.25f;
+                    float wideDist = onVehicleHull ? 3.6f : 3.25f;
+                    Vector3 wideProbe = myPos + dir * wideDist;
                     if (AiCore.TryValidateAndSnapDirectMicroStep(
                             myPos,
                             wideProbe,
@@ -318,15 +319,16 @@ namespace EasyRed2HumanAI
                             maxMicroFlatDist,
                             maxMicroUpY,
                             maxMicroDownY) &&
-                        wideCand.y <= myPos.y - 0.55f)
+                        (onVehicleHull || wideCand.y <= myPos.y - 0.55f))
                     {
                         candPos = wideCand;
                         rawProbe = wideProbe;
                         valid = true;
                     }
-                    else if (roomTrapped)
+                    else if (roomTrapped || onVehicleHull)
                     {
-                        Vector3 cliffProbe = myPos + dir * 4.4f;
+                        float cliffDist = onVehicleHull ? 4.6f : 4.4f;
+                        Vector3 cliffProbe = myPos + dir * cliffDist;
                         if (AiCore.TryValidateAndSnapDirectMicroStep(
                                 myPos,
                                 cliffProbe,
@@ -335,7 +337,7 @@ namespace EasyRed2HumanAI
                                 maxMicroFlatDist,
                                 maxMicroUpY,
                                 maxMicroDownY) &&
-                            (cliffCand.y <= myPos.y - 0.85f || (destSignificantlyAbove && cliffCand.y >= myPos.y + 0.45f)))
+                            (onVehicleHull || cliffCand.y <= myPos.y - 0.85f || (destSignificantlyAbove && cliffCand.y >= myPos.y + 0.45f)))
                         {
                             candPos = cliffCand;
                             rawProbe = cliffProbe;
@@ -475,7 +477,7 @@ namespace EasyRed2HumanAI
             if (!isOnBridge)
             {
                 const float slopeStepDist = 4.5f;
-                float maxNonTerrainDrop = roomTrapped ? safeCliffDropMax : (elevatedOrChronicTrap ? 2.85f : 2.0f);
+                float maxNonTerrainDrop = roomTrapped ? safeCliffDropMax : (onVehicleHull ? 4.2f : (elevatedOrChronicTrap ? 2.85f : 2.0f));
                 float slopeUpDelta = destSignificantlyAbove ? 2.2f : 2.0f;
                 for (int k = 0; k < tableLen; k++)
                 {
@@ -503,9 +505,9 @@ namespace EasyRed2HumanAI
                             candPos,
                             out Vector3 snappedDropDest,
                             out _,
-                            4.8f,
+                            onVehicleHull ? 5.0f : 4.8f,
                             onVehicleHull ? 2.85f : (destSignificantlyAbove ? 1.35f : 0.75f),
-                            roomTrapped ? safeCliffDropMax : 2.90f))
+                            roomTrapped ? safeCliffDropMax : (onVehicleHull ? 4.2f : 2.90f)))
                     {
                         bool steepCliffDrop = myPos.y - snappedDropDest.y > 2.65f;
                         float duration = steepCliffDrop ? 2.4f : (1.35f + Mathf.Min(st.ConsecutiveUnsticks, 4) * 0.25f);
@@ -539,7 +541,7 @@ namespace EasyRed2HumanAI
                         AiCore.SetBotMoveOverride(stuckH, AiCore.BotMoveOverrideKind.UnstickSidestep, candPos, now + 2.5f);
                     }
 
-                    if (!ai.HasEnemyAndCanFireAtHim || targetDist <= 6.2f)
+                    if (!onVehicleHull && (!ai.HasEnemyAndCanFireAtHim || targetDist <= 6.2f))
                         SetBotPose(ai, soldier, suppression >= 35f ? SoldierPose.Crouch : SoldierPose.Idle, suppression < 35f);
                     AiCore.ResetBotPathLockout(ai);
                     ai.MoveDestination = candPos;
@@ -598,6 +600,8 @@ namespace EasyRed2HumanAI
                 return true;
             }
 
+            if (onVehicleHull)
+                st.NextUnstickTime = now + 1.4f;
             if (stuckH != null)
                 stuckH.Goap.FootStuck = st;
             AiCore.ResetBotPathLockout(ai);
@@ -1054,12 +1058,13 @@ namespace EasyRed2HumanAI
             }
             else
             {
+                bool alreadyMovingToShelter = HasActiveEscapeOrMoveIntent(ai, soldier, shGoap, now);
                 // Open-field / indoor / trench fallback so SeekEmergencyCover is never a no-op!
-                if (soldier.isBleeding && !bandageUnsafeUnderFire)
+                if (soldier.isBleeding && !bandageUnsafeUnderFire && !alreadyMovingToShelter)
                 {
-                    if (ai.IsMoving() && AiCore.CanBotMoveAutonomously(soldier))
-                        ai.Stop(false);
-                    SetBotPose(ai, soldier, onNarrowBridge ? SoldierPose.Crouch : SoldierPose.Prone, true);
+                    if (AiCore.CanBotMoveAutonomously(soldier))
+                        ai.Stop(true);
+                    SetBotPose(ai, soldier, onNarrowBridge ? SoldierPose.Crouch : GetPreferredBandagePose(soldier, shGoap, now), true);
                 }
                 else if (inMultiSidedOrIndoors && !onNarrowBridge)
                 {
@@ -1075,7 +1080,7 @@ namespace EasyRed2HumanAI
                     if (shGoap != null)
                         shGoap.Stance.LocalCoverProtectedUntil = now + 4.5f;
                     plan.LockUnitCoverChange = true;
-                    SoldierPose shelterPose = (!ai.IsMoving() &&
+                    SoldierPose shelterPose = (!alreadyMovingToShelter &&
                                                !ai.HasEnemyAndCanFireAtHim &&
                                                (underShelling || suppression >= 62f) &&
                                                (shGoap == null || now >= shGoap.Stance.NoProneUntil))
@@ -1124,10 +1129,17 @@ namespace EasyRed2HumanAI
                         ApplyDesiredMovingPose(ai, soldier, scatterSq, suppression);
                         GoapPlansExecutedCount++;
                     }
+                    else if (alreadyMovingToShelter)
+                    {
+                        Vector3 activeEnd = GetActualMoveEndpoint(ai, soldier);
+                        float activeDistSq = (activeEnd - myPos).sqrMagnitude;
+                        if (soldier.m_pose == SoldierPose.Prone && activeDistSq > 1.8f * 1.8f)
+                            SetBotPose(ai, soldier, SoldierPose.Crouch, true);
+                        ApplyDesiredMovingPose(ai, soldier, activeDistSq, suppression);
+                    }
                     else
                     {
                         SoldierPose dropPose = (!onNarrowBridge &&
-                                                !ai.IsMoving() &&
                                                 (underShelling || suppression >= 62f) &&
                                                 (!ai.HasEnemyAndCanFireAtHim || suppression >= 72f) &&
                                                 (shGoap == null || now >= shGoap.Stance.NoProneUntil))
@@ -1389,8 +1401,13 @@ namespace EasyRed2HumanAI
             BotScavengeCache scavCache = shGoap != null ? shGoap.Goap.Scavenge : default;
             bool urgentPrimary = scavCache.IsUrgentPrimaryPickup ||
                                  (scavCache.IsRoleWeaponUpgrade && !HasRealPrimaryWithAmmo(soldier));
-            bool combatInterrupt = urgentPrimary
-                ? (suppression >= 22.0f || (ai.HasEnemyAndCanFireAtHim && ai.distFromTarget <= 16.0f))
+            bool urgentAt = scavCache.IsAtWeaponPickup;
+            bool urgentBleed = soldier.isBleeding && scavCache.NeedBandage;
+            bool closeFootEnemy = ai.HasEnemyAndCanFireAtHim &&
+                                  ai.distFromTarget <= 16.0f &&
+                                  (ai.visibleTarget == null || !ai.visibleTarget.IsWheeledVehicleOrTank());
+            bool combatInterrupt = (urgentPrimary || urgentAt || urgentBleed)
+                ? (suppression >= 22.0f || (urgentAt ? closeFootEnemy : (ai.HasEnemyAndCanFireAtHim && ai.distFromTarget <= 16.0f)))
                 : (suppression >= 5.0f || ai.HasEnemyAndCanFireAtHim);
             if (combatInterrupt)
             {
@@ -2241,13 +2258,13 @@ namespace EasyRed2HumanAI
                 plan.LockUnitCoverChange = true;
                 plan.PlanExpireTime = Mathf.Min(fbEnd, Mathf.Max(plan.PlanExpireTime, now + 4.5f));
                 if (shGoap != null)
+                {
                     shGoap.Stance.LocalCoverProtectedUntil = now + 4.5f;
+                    shGoap.Stance.NoProneUntil = Mathf.Max(shGoap.Stance.NoProneUntil, now + 5.0f);
+                }
                 plan.HasMoveOverride = true;
                 plan.MoveOverrideDest = fbDest;
-                if (ai.HasEnemyAndCanFireAtHim && dist > 6.2f && !ai.IsMoving())
-                    SetBotPose(ai, soldier, SoldierPose.Crouch);
-                else
-                    SetBotPose(ai, soldier, remSq <= 5.0f * 5.0f ? SoldierPose.Crouch : SoldierPose.Idle, remSq > 5.0f * 5.0f);
+                SetBotPose(ai, soldier, remSq <= 5.0f * 5.0f ? SoldierPose.Crouch : SoldierPose.Idle, true);
                 AiCore.MoveBotTowardPosition(ai, soldier, fbDest, 2.2f, 3.0f);
             }
         }

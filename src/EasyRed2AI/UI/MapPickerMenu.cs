@@ -132,14 +132,21 @@ namespace EasyRed2HumanAI
             {
                 try
                 {
-                    if (!VisionConfig.EnableMod.Value || !Photon.Pun.PhotonNetwork.InRoom)
-                        return true;
-
                     if (__instance == null || __instance.__1__state != 1)
                         return true;
 
                     AudioSource music = __instance._music_5__2;
-                    if (music == null || music.clip == null || !music.isPlaying)
+                    if (music == null || music.Pointer == IntPtr.Zero || music.clip == null || music.clip.Pointer == IntPtr.Zero)
+                    {
+                        __instance.__1__state = -1;
+                        __result = false;
+                        return false;
+                    }
+
+                    if (!VisionConfig.EnableMod.Value || !Photon.Pun.PhotonNetwork.InRoom)
+                        return true;
+
+                    if (!music.isPlaying)
                         return true;
 
                     IntPtr srcPtr = music.Pointer;

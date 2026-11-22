@@ -189,6 +189,7 @@ namespace EasyRed2HumanAI
         {
             public IntPtr LastTargetPtr;
             public float LastSeenTime;
+            public float LockedUntil;
         }
 
         internal struct PlaneAttackReactionState
@@ -1811,6 +1812,7 @@ namespace EasyRed2HumanAI
                         bool holdTimedOrder =
                             __instance.timed_order_end > now ||
                             IsSquadVehicleSeekingRepairStation(__instance) ||
+                            IsSquadVehicleAnsweringTankSupport(__instance) ||
                             (_garrisonAssignedObjectiveBySquad.TryGetValue(sqPtr, out IntPtr garPtr) &&
                              __instance.currentTask != null &&
                              __instance.currentTask.Pointer == garPtr &&

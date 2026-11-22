@@ -320,6 +320,89 @@ namespace EasyRed2HumanAI
             }
         }
 
+        internal static void UpdatePlayerVehicleInfantryEvacuation()
+        {
+            if (!VisionConfig.EnableMod.Value || !VisionConfig.EnableFriendlyVehicleRightOfWay.Value || Time.timeScale <= 0.01f)
+                return;
+
+            float now = Time.time;
+            AiCore.EnsureVehicleDangerCorridorsUpdated(now);
+            int corrCount = AiCore.ActiveVehicleDangerCorridorCount;
+            if (corrCount <= 0)
+                return;
+
+            bool worldSnapEnsured = false;
+            for (int i = 0; i < corrCount; i++)
+            {
+                ref AiCore.VehicleDangerCorridor c = ref AiCore.ActiveVehicleDangerCorridors[i];
+                if (!c.IsPlayerDriven || c.Ref == null || c.Ref.Pointer == IntPtr.Zero || string.IsNullOrEmpty(c.Faction))
+                    continue;
+
+                AiCore.VehicleFastHandles vh = AiCore.GetOrCreateVehicleHandles(c.Ref);
+                if (vh == null || now < vh.NextPlayerPedestrianSweepTime)
+                    continue;
+
+                vh.NextPlayerPedestrianSweepTime = now + 0.18f;
+                if (!worldSnapEnsured)
+                {
+                    AiCore.EnsureWorldSnapshot();
+                    worldSnapEnsured = true;
+                }
+
+                bool dummyPlayer = false;
+                bool dummyAi = false;
+                float minBrakeFwd = Mathf.Max(0.25f, c.HalfLength * 0.20f);
+                float brakeHalfWidth = c.HalfWidth + 0.85f;
+
+                Squad crewSquad = c.Ref.GetSquadInside();
+                if (crewSquad != null && crewSquad.units != null)
+                {
+                    var crewUnits = crewSquad.units;
+                    int crewCount = crewUnits.Count;
+                    for (int u = 0; u < crewCount; u++)
+                    {
+                        EvaluateFriendlySoldierInVehicleCorridor(
+                            crewUnits[u], c.Ref, c.Faction, c.HullCenter, c.TravelDirFlat, c.RightFlat,
+                            c.HalfWidth, c.MinFwd, minBrakeFwd, c.MaxFwd, c.MaxFwd, c.CorridorHalfWidth, brakeHalfWidth,
+                            now, ref dummyPlayer, ref dummyAi);
+                    }
+                }
+
+                int sqCount = AiCore.WorldSquadCount;
+                if (sqCount <= 0)
+                    continue;
+
+                IntPtr crewSqPtr = crewSquad != null ? crewSquad.Pointer : IntPtr.Zero;
+                var squads = AiCore.WorldSquads;
+                var soldiers = AiCore.WorldSoldiers;
+                for (int s = 0; s < sqCount; s++)
+                {
+                    ref AiCore.SquadSnapshot sqSnap = ref squads[s];
+                    if (sqSnap.Ptr == crewSqPtr || sqSnap.UnitCount == 0 || string.IsNullOrEmpty(sqSnap.Faction))
+                        continue;
+
+                    if (!AiCore.AreSameSideFactions(c.Faction, sqSnap.Faction))
+                        continue;
+
+                    if ((sqSnap.RefPos - c.HullCenter).sqrMagnitude > 48f * 48f)
+                        continue;
+
+                    int uEnd = sqSnap.UnitStartIndex + sqSnap.UnitCount;
+                    for (int u = sqSnap.UnitStartIndex; u < uEnd; u++)
+                    {
+                        Soldier f = soldiers[u].Ref;
+                        if (f != null)
+                        {
+                            EvaluateFriendlySoldierInVehicleCorridor(
+                                f, c.Ref, c.Faction, c.HullCenter, c.TravelDirFlat, c.RightFlat,
+                                c.HalfWidth, c.MinFwd, minBrakeFwd, c.MaxFwd, c.MaxFwd, c.CorridorHalfWidth, brakeHalfWidth,
+                                now, ref dummyPlayer, ref dummyAi);
+                        }
+                    }
+                }
+            }
+        }
+
         internal static bool TryEvadeFriendlyVehicleCorridor(
             Soldier s,
             SoldierAI sAi,
@@ -374,7 +457,7 @@ namespace EasyRed2HumanAI
                 now < sHandles.Combat.NextFriendlyStepAsideTime)
             {
                 if (!ReferenceEquals(sAi, null) && sAi != null &&
-                    !AiCore.IsDirectSegmentBlockedByWall(sHandles.Tr.position, sHandles.MoveOverride.Dest, out _))
+                    !AiCore.IsDirectSegmentBlockedByWall(sHandles.Tr.position, sHandles.MoveOverride.Dest, out _, ignoreVehicleObstacles: true))
                 {
                     sAi.MoveDirectlyToward(sHandles.MoveOverride.Dest, 1.55f);
                 }
@@ -407,8 +490,12 @@ namespace EasyRed2HumanAI
                 if (rayDist > 0.001f)
                     rayDir /= rayDist;
 
-                if (!AiCore.IsDirectionBlockedByEnvironment(sPos + Vector3.up * 0.75f, rayDir, Mathf.Min(rayDist, 3.2f), sRoot) &&
-                    Physics.Raycast(cand + Vector3.up * 0.85f, Vector3.down, out RaycastHit groundHit, 2.65f, solidMask, QueryTriggerInteraction.Ignore))
+                bool blockedBySolidEnv =
+                    AiCore.RaycastEnvironment(sPos + Vector3.up * 0.75f, rayDir, Mathf.Min(rayDist, 3.2f), sRoot, out RaycastHit evadeEnvHit) &&
+                    !AiCore.IsVehicleCollider(evadeEnvHit.collider);
+                if (!blockedBySolidEnv &&
+                    Physics.Raycast(cand + Vector3.up * 0.85f, Vector3.down, out RaycastHit groundHit, 2.65f, solidMask, QueryTriggerInteraction.Ignore) &&
+                    !AiCore.IsVehicleCollider(groundHit.collider))
                 {
                     cand.y = groundHit.point.y;
                     if (!onBridge || AiCore.IsSafeBridgeDeckStep(sPos, cand, out cand))
@@ -431,7 +518,7 @@ namespace EasyRed2HumanAI
 
             AiCore.SetBotMoveOverride(sHandles, AiCore.BotMoveOverrideKind.VehicleEvade, candidatePos, now + 1.85f);
             if ((candidatePos - sPos).sqrMagnitude <= 4.4f * 4.4f &&
-                !AiCore.IsDirectSegmentBlockedByWall(sPos, candidatePos, out _))
+                !AiCore.IsDirectSegmentBlockedByWall(sPos, candidatePos, out _, ignoreVehicleObstacles: true))
             {
                 sAi.MoveDirectlyToward(candidatePos, 1.55f);
             }
@@ -492,7 +579,7 @@ namespace EasyRed2HumanAI
 
             if (fwdDist >= minBrakeFwd && fwdDist <= maxBrakeFwd && latAbs <= brakeHalfWidth)
             {
-                if (s.IsPlayer())
+                if (AiCore.IsAnyHumanPlayerSoldier(s))
                     playerInBrakeCorridor = true;
                 else
                     aiInBrakeCorridor = true;
@@ -504,7 +591,7 @@ namespace EasyRed2HumanAI
             if (veh == null || veh.Pointer == IntPtr.Zero || veh.transform == null)
                 return false;
 
-            if (!AiCore.IsLocallyOwnedVehicle(veh) || veh.PlayerIsDriving())
+            if (!AiCore.IsLocallyOwnedVehicle(veh) || AiCore.IsAnyHumanPlayerDriving(veh))
                 return false;
 
             IntPtr vehPtr = veh.Pointer;
@@ -670,7 +757,7 @@ namespace EasyRed2HumanAI
                         return;
 
                     float now = Time.time;
-                    if (!veh.PlayerIsInside() && AiCore.IsVehicleReservedByNearbyActiveHuman(veh, now))
+                    if (!AiCore.IsAnyHumanPlayerInsideVehicle(veh) && AiCore.IsVehicleReservedByNearbyActiveHuman(veh, now))
                     {
                         float pauseUntil = now + 0.45f;
                         if (__instance.resumeDriveTime < pauseUntil)
@@ -840,11 +927,11 @@ namespace EasyRed2HumanAI
                             TryEvadeFriendlyVehicleCorridor(soldier, sHandles != null ? sHandles.Ai : null, sHandles, __instance, hullCenter, vehFwd, vehRight, obb.x, now, true);
                         }
 
-                        if ((soldier.IsPlayer() || __instance.PlayerIsInside()) && TryRecordFriendlyYieldOrSave(__instance.Pointer, now))
+                        if ((AiCore.IsAnyHumanPlayerSoldier(soldier) || AiCore.IsAnyHumanPlayerInsideVehicle(__instance)) && TryRecordFriendlyYieldOrSave(__instance.Pointer, now))
                         {
                             AiCore.LogDebug(
                                 "FriendlyRightOfWay",
-                                $"Prevented friendly {vehFaction} vehicle from roadkilling friendly {(soldier.IsPlayer() ? "player" : "soldier")}.");
+                                $"Prevented friendly {vehFaction} vehicle from roadkilling friendly {(AiCore.IsAnyHumanPlayerSoldier(soldier) ? "player" : "soldier")}.");
                         }
 
                         return false;

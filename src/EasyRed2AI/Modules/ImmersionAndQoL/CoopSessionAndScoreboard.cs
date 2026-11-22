@@ -1363,7 +1363,15 @@ namespace EasyRed2HumanAI
                     return;
 
                 PtfoVehicleDisablesCount++;
-                AwardLocalPtfoScore(3, $"Enemy Vehicle Disabled ({veh.name})");
+                bool isStatic = veh.IsStatic();
+                bool isAir = veh.IsAirVehicle();
+                bool isArmor = !isStatic && !isAir &&
+                               (veh.TryCast<VehicleTank>() != null || GetVehicleMaxHullArmorMm(veh) >= 20.0f);
+                short vehScore = isStatic ? (short)2 : ((isAir || isArmor) ? (short)5 : (short)3);
+                string tierLabel = isStatic
+                    ? "Enemy Emplacement Disabled"
+                    : (isAir ? "Enemy Aircraft Destroyed" : (isArmor ? "Enemy Armor Destroyed" : "Enemy Vehicle Disabled"));
+                AwardLocalPtfoScore(vehScore, $"{tierLabel} ({veh.name})");
             }
             catch { }
         }
@@ -1568,6 +1576,7 @@ namespace EasyRed2HumanAI
             {
                 ResetLocalPlayerScoreboardLedger();
                 _pendingJoinMotdQueue.Clear();
+                ResetBattleAtmosphereBroadcastState();
                 _inBattleLoaderOnJoinedRoom = true;
             }
 
@@ -1605,6 +1614,80 @@ namespace EasyRed2HumanAI
         private static readonly Il2CppSystem.Object _propKeyFactionObj = (Il2CppSystem.String)"faction";
         private static readonly List<PendingJoinMotdEntry> _pendingJoinMotdQueue = new List<PendingJoinMotdEntry>(8);
         private static readonly HashSet<string> _welcomedMotdPlayerKeys = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        private static IntPtr _lastAtmosphereBroadcastBattlePtr;
+        private static float _atmosphereBroadcastReadyAtUnscaled;
+        private static bool _atmosphereBroadcastSentForBattle;
+
+        internal static void ResetBattleAtmosphereBroadcastState()
+        {
+            _lastAtmosphereBroadcastBattlePtr = IntPtr.Zero;
+            _atmosphereBroadcastReadyAtUnscaled = 0f;
+            _atmosphereBroadcastSentForBattle = false;
+        }
+
+        public static void UpdateBattleAtmosphereBroadcast()
+        {
+            if (!VisionConfig.EnableMod.Value ||
+                (VisionConfig.EnableBattleAtmosphereDirectives != null && !VisionConfig.EnableBattleAtmosphereDirectives.Value) ||
+                (VisionConfig.BroadcastBattleAtmosphereChat != null && !VisionConfig.BroadcastBattleAtmosphereChat.Value))
+            {
+                return;
+            }
+
+            if (BattleManager.instance == null || PlayerGUI.instance == null)
+                return;
+
+            AiCore.BattleTheaterSnapshot theater = AiCore.GetBattleTheaterSnapshot();
+            if (theater.BattleDataPtr == IntPtr.Zero || theater.Atmosphere == AiCore.BattleAtmosphereArchetype.None)
+                return;
+
+            if (theater.BattleDataPtr != _lastAtmosphereBroadcastBattlePtr)
+            {
+                _lastAtmosphereBroadcastBattlePtr = theater.BattleDataPtr;
+                _atmosphereBroadcastSentForBattle = false;
+                _atmosphereBroadcastReadyAtUnscaled = Time.unscaledTime + 4.0f;
+                return;
+            }
+
+            if (_atmosphereBroadcastSentForBattle || Time.unscaledTime < _atmosphereBroadcastReadyAtUnscaled)
+                return;
+
+            _atmosphereBroadcastSentForBattle = true;
+            string msg = AiCore.GetBattleAtmosphereDispatchText(theater.Atmosphere);
+            if (string.IsNullOrEmpty(msg))
+                return;
+
+            bool inMpRoom = AiCore.IsInMultiplayerRoom();
+            if (inMpRoom && !AiCore.IsMasterClient())
+                return;
+
+            Plugin.Log?.LogInfo($"[Atmosphere] Active directive: {theater.Atmosphere} ({theater.Map})");
+            try
+            {
+                new ChatMessage($"<color=#D4B46A>{msg}</color>");
+            }
+            catch { }
+
+            if (!inMpRoom)
+                return;
+
+            try
+            {
+                var room = Photon.Pun.PhotonNetwork.CurrentRoom;
+                var playersMap = room != null ? room.Players : null;
+                if (playersMap == null)
+                    return;
+
+                foreach (var kv in playersMap)
+                {
+                    Photon.Realtime.Player p = kv.Value;
+                    if (p == null || p.IsLocal)
+                        continue;
+                    AiCore.SendTargetedVanillaChatMessage(p, msg, minPlayerInterval: 0f, bypassRpcBudget: true);
+                }
+            }
+            catch { }
+        }
 
         private static bool IsValidPlayableFactionString(string s)
         {

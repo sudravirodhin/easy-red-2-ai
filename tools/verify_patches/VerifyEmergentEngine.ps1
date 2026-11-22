@@ -98,10 +98,25 @@ namespace EasyRed2HumanAI
     public static class VisionConfig
     {
         public static ConfigBool EnableFactionNetDoctrines = new ConfigBool { Value = true };
+        public static ConfigBool EnableBattleAtmosphereDirectives = new ConfigBool { Value = true };
     }
 
     public static partial class AiCore
     {
+        public enum BattleAtmosphereArchetype : byte
+        {
+            None = 0,
+            Order227NotOneStepBack = 1,
+            KesselEncircledPocket = 2,
+            UrbanFortress = 3,
+            AmphibiousBeachhead = 4,
+            SiegeOfBastogne = 5,
+            PacificBunkerAndNightGyokusai = 6,
+            MountainRidgeGrind = 7,
+            BlitzkriegSchwerpunkt = 8,
+            NightAirborneCoupDeMain = 9
+        }
+
         public struct BattleTheaterSnapshot
         {
             public IntPtr BattleDataPtr;
@@ -111,6 +126,9 @@ namespace EasyRed2HumanAI
             public string DefendersFactionId;
             public string InvadersBattalionLower;
             public string DefendersBattalionLower;
+            public string LocationLower;
+            public bool IsNightStart;
+            public BattleAtmosphereArchetype Atmosphere;
             public bool IsAmphibiousBeachMap;
             public bool IsOpenDesertOrSteppeMap;
             public bool IsDenseUrbanMap;
@@ -727,6 +745,56 @@ $partB
                     spikeDec.Reflex == EmergentEngine.EmergentReflexKind.SuddenPenetratingFire &&
                     spikeDec.Step0 == EmergentEngine.EmergentActionId.SeekCover,
                     $"got={gotSpike} {spikeDec.Reflex}/{spikeDec.Step0}");
+            }
+
+            // 19. Battlefield Scavenging: Bandages, AT Weapons, Grenades & Lull Priority
+            Console.WriteLine("[Group 19] Battlefield Scavenging: Bandages, AT Weapons, Grenades & Lull Priority");
+            {
+                var bleedScavInp = new EmergentEngine.EmergentInput
+                {
+                    Now = 96f, IsBleeding = true, HasBandage = false, NearbyAmmoSource = true,
+                    SmoothedHarmNow = 0.22f, ProjectedHarm = 0.0f
+                };
+                var bleedScavDec = EmergentEngine.EvaluateDeliberative(in bleedScavInp, in wDefault, default, 96f);
+                Check("Bleeding soldier without bandage + NearbyAmmoSource chains ResupplyAmmo -> SelfBandage",
+                    bleedScavDec.Step0 == EmergentEngine.EmergentActionId.ResupplyAmmo &&
+                    bleedScavDec.Step1 == EmergentEngine.EmergentActionId.SelfBandage &&
+                    bleedScavDec.Reason == "prereq_bandage_scavenge",
+                    $"{bleedScavDec.Step0}->{bleedScavDec.Step1} ({bleedScavDec.Reason})");
+
+                var atScavInp = new EmergentEngine.EmergentInput
+                {
+                    Now = 98f, HasVisibleEnemy = true, VisibleEnemyDist = 35f, CanHarmTarget = 0.0f,
+                    UncounterableArmorClose = true, InCover = true, CoverAvailable = true,
+                    NeedsAtWeaponScavenge = true, NearbyAmmoSource = true,
+                    SmoothedHarmNow = 0.20f, ProjectedHarm = 0.0f
+                };
+                var atScavDec = EmergentEngine.EvaluateDeliberative(in atScavInp, in wDefault, default, 98f);
+                Check("Covered rifleman facing heavy armor scavenges nearby AT weapon",
+                    atScavDec.Step0 == EmergentEngine.EmergentActionId.ResupplyAmmo &&
+                    atScavDec.Step1 == EmergentEngine.EmergentActionId.HoldAndFight &&
+                    atScavDec.Reason == "scavenge_at_weapon",
+                    $"{atScavDec.Step0}->{atScavDec.Step1} ({atScavDec.Reason})");
+
+                var lullInp = new EmergentEngine.EmergentInput
+                {
+                    Now = 100f, HasVisibleEnemy = false, SmoothedHarmNow = 0.04f, ProjectedHarm = 0.0f,
+                    HasObjectiveTask = true, InsideObjectiveZone = false, ObjectiveDist = 60f, ObjectiveUrgency = 0.45f,
+                    ObjectiveTickingAgainstUs = false, NearbyAmmoSource = true
+                };
+                var lullDec = EmergentEngine.EvaluateDeliberative(in lullInp, in wDefault, default, 100f);
+                Check("Calm-lull soldier picks scavenge_gear over routine marching",
+                    lullDec.Step0 == EmergentEngine.EmergentActionId.ResupplyAmmo &&
+                    lullDec.Reason == "scavenge_gear",
+                    $"{lullDec.Step0} ({lullDec.Reason})");
+
+                var urgentCapInp = lullInp;
+                urgentCapInp.Now = 102f;
+                urgentCapInp.ObjectiveTickingAgainstUs = true;
+                var urgentCapDec = EmergentEngine.EvaluateDeliberative(in urgentCapInp, in wDefault, default, 102f);
+                Check("Urgent ObjectiveTickingAgainstUs skips non-urgent scavenge_gear for AdvanceObjective",
+                    urgentCapDec.Step0 == EmergentEngine.EmergentActionId.AdvanceObjective,
+                    $"{urgentCapDec.Step0} ({urgentCapDec.Reason})");
             }
 
             Console.WriteLine("============================================================");

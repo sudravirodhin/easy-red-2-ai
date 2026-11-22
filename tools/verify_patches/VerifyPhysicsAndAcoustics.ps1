@@ -2,6 +2,7 @@ $ErrorActionPreference = "Stop"
 $workspace = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
 $visFile  = Join-Path $workspace "src\EasyRed2AI\Modules\Vision\VisionRangeAndCamo.cs"
 $wqFile   = Join-Path $workspace "src\EasyRed2AI\Core\AiCore.WorldQuery.cs"
+$goapFile = Join-Path $workspace "src\EasyRed2AI\Modules\Goap\GoapDefinitionsAndPlanner.cs"
 $buildDir = Join-Path $workspace "build"
 New-Item -ItemType Directory -Force -Path $buildDir | Out-Null
 
@@ -26,6 +27,10 @@ $visPartB = Slice-LinesBetween $visLines '^\s*private static void RecordAcoustic
 
 $wqLines  = Get-Content $wqFile
 $wqSnapProbe = Slice-LinesBetween $wqLines '^\s*public static bool TrySnapWalkableGroundProbe\(' 'snappedGroundPos = gHit\.point;\s*$' 2
+
+$goapLines = Get-Content $goapFile
+$goapPartA = Slice-LinesBetween $goapLines '^\s*internal enum SquadNetDirective' 'public Vector3 MoveOverrideDest;' 1
+$goapPartB = Slice-LinesBetween $goapLines '^\s*internal struct BotMicroVariance' '_factionProfileCache\[faction\] = p;' 2
 
 $cqbPath = Join-Path $workspace "src\EasyRed2AI\Modules\Infantry\CloseCombatAndSupport.cs"
 $cqbText = Get-Content $cqbPath -Raw
@@ -239,10 +244,25 @@ namespace EasyRed2HumanAI
     public static class VisionConfig
     {
         public static ConfigBool EnableFactionNetDoctrines = new ConfigBool { Value = true };
+        public static ConfigBool EnableBattleAtmosphereDirectives = new ConfigBool { Value = true };
     }
 
     public static class AiCore
     {
+        public enum BattleAtmosphereArchetype : byte
+        {
+            None = 0,
+            Order227NotOneStepBack = 1,
+            KesselEncircledPocket = 2,
+            UrbanFortress = 3,
+            AmphibiousBeachhead = 4,
+            SiegeOfBastogne = 5,
+            PacificBunkerAndNightGyokusai = 6,
+            MountainRidgeGrind = 7,
+            BlitzkriegSchwerpunkt = 8,
+            NightAirborneCoupDeMain = 9
+        }
+
         public struct ScavengeStub { public bool IsAtWeaponPickup; public bool IsUrgentPrimaryPickup; }
         public struct GoapStub { public ScavengeStub Scavenge; }
         public class SoldierFastHandles
@@ -261,6 +281,9 @@ namespace EasyRed2HumanAI
             public string DefendersFactionId;
             public string InvadersBattalionLower;
             public string DefendersBattalionLower;
+            public string LocationLower;
+            public bool IsNightStart;
+            public BattleAtmosphereArchetype Atmosphere;
             public bool IsAmphibiousBeachMap;
             public bool IsOpenDesertOrSteppeMap;
             public bool IsDenseUrbanMap;
@@ -341,6 +364,12 @@ $visPartB
             RecordAcousticEventInternal(ptr, pos, fac, t, rad, false);
         public static void InjectExplosion(IntPtr ptr, Vector3 pos, string fac, float t, float rad) =>
             RecordAcousticEventInternal(ptr, pos, fac, t, rad, true);
+    }
+
+    public static partial class VeteranAndTacticsPatches
+    {
+$goapPartA
+$goapPartB
     }
     public static class Program
     {
@@ -556,7 +585,78 @@ $visPartB
                 Assert(bayonetStandoff <= 1.65f && bayonetStandoff < bayonetStrikeRange,
                     $"Bayonet standoff ({bayonetStandoff}) must sit inside 1.65m native reach and below strike trigger ({bayonetStrikeRange})!");
             }
-            Console.WriteLine($"  -> Verified Acoustic Ring, Ground Probe & CQB Physics Suite: {_passed} assertions passed (0 failures)");
+            {
+                // 4. 9 Battle Atmosphere Archetype Profile Modifiers (GetFactionCommandProfile)
+                int gen = 100;
+                AiCore.CurrentTheater = new AiCore.BattleTheaterSnapshot { BattleDataPtr = new IntPtr(gen), Map = Gamemap.Stalingrad, InvadersFactionId = "Germany_axis", DefendersFactionId = "Ussr_allies", Atmosphere = AiCore.BattleAtmosphereArchetype.None };
+                AiCore.BattleTheaterGeneration = ++gen;
+                var ussrBase = VeteranAndTacticsPatches.GetFactionCommandProfile("Ussr_allies");
+                var gerBase  = VeteranAndTacticsPatches.GetFactionCommandProfile("Germany_axis");
+
+                // Order No. 227 boosts USSR SL bravery aura & surrender grit
+                AiCore.CurrentTheater.Atmosphere = AiCore.BattleAtmosphereArchetype.Order227NotOneStepBack;
+                AiCore.BattleTheaterGeneration = ++gen;
+                var ussr227 = VeteranAndTacticsPatches.GetFactionCommandProfile("Ussr_allies");
+                Assert(ussr227.LeaderAuraMult > ussrBase.LeaderAuraMult + 0.25f && ussr227.SurrenderSuppDelta >= 14f,
+                    $"Order No. 227 failed to boost USSR LeaderAuraMult ({ussr227.LeaderAuraMult}) / SurrenderSuppDelta ({ussr227.SurrenderSuppDelta})!");
+
+                // Kessel Pocket boosts encircled defender scavenge & garrison hold
+                AiCore.CurrentTheater = new AiCore.BattleTheaterSnapshot { BattleDataPtr = new IntPtr(++gen), Map = Gamemap.Stalingrad, Year = 1943, InvadersFactionId = "Ussr_allies", DefendersFactionId = "Germany_axis", Atmosphere = AiCore.BattleAtmosphereArchetype.KesselEncircledPocket };
+                AiCore.BattleTheaterGeneration = gen;
+                var gerKessel = VeteranAndTacticsPatches.GetFactionCommandProfile("Germany_axis");
+                Assert(gerKessel.ScavengeAndResupplyMult < gerBase.ScavengeAndResupplyMult && gerKessel.GarrisonSquadRatio > gerBase.GarrisonSquadRatio,
+                    $"Kessel Pocket failed to boost defender scavenge ({gerKessel.ScavengeAndResupplyMult} vs {gerBase.ScavengeAndResupplyMult}) / garrison ({gerKessel.GarrisonSquadRatio} vs {gerBase.GarrisonSquadRatio})!");
+
+                // Amphibious Beachhead lowers invader smoke cost & boosts defender emplacement staffing
+                AiCore.CurrentTheater = new AiCore.BattleTheaterSnapshot { BattleDataPtr = new IntPtr(gen), Map = Gamemap.Normandy, InvadersFactionId = "UnitedStates_allies", DefendersFactionId = "Germany_axis", IsAmphibiousBeachMap = false, Atmosphere = AiCore.BattleAtmosphereArchetype.None };
+                AiCore.BattleTheaterGeneration = ++gen;
+                var usBase = VeteranAndTacticsPatches.GetFactionCommandProfile("UnitedStates_allies");
+                AiCore.CurrentTheater.Atmosphere = AiCore.BattleAtmosphereArchetype.AmphibiousBeachhead;
+                AiCore.BattleTheaterGeneration = ++gen;
+                var usBeach = VeteranAndTacticsPatches.GetFactionCommandProfile("UnitedStates_allies");
+                var gerBeach = VeteranAndTacticsPatches.GetFactionCommandProfile("Germany_axis");
+                Assert(usBeach.SmokeCostMult < usBase.SmokeCostMult && gerBeach.EmplacementSearchMult > gerBase.EmplacementSearchMult,
+                    $"Amphibious Beachhead failed: usSmoke={usBeach.SmokeCostMult} vs {usBase.SmokeCostMult}, gerEmp={gerBeach.EmplacementSearchMult}!");
+
+                // Siege of Bastogne boosts defender aid/drag, garrison, and officer aura
+                AiCore.CurrentTheater = new AiCore.BattleTheaterSnapshot { BattleDataPtr = new IntPtr(gen), Map = Gamemap.Ardennes, InvadersFactionId = "Germany_axis", DefendersFactionId = "UnitedStates_allies", Atmosphere = AiCore.BattleAtmosphereArchetype.SiegeOfBastogne };
+                AiCore.BattleTheaterGeneration = ++gen;
+                var usBastogne = VeteranAndTacticsPatches.GetFactionCommandProfile("UnitedStates_allies");
+                Assert(usBastogne.ComradeAidAndDragMult < usBase.ComradeAidAndDragMult && usBastogne.LeaderAuraMult > 1.15f && usBastogne.GarrisonSquadRatio > usBase.GarrisonSquadRatio,
+                    $"Siege of Bastogne failed: aid={usBastogne.ComradeAidAndDragMult}, aura={usBastogne.LeaderAuraMult}, gar={usBastogne.GarrisonSquadRatio}!");
+
+                // Urban Fortress, Pacific Bunker, Mountain Ridge, Blitzkrieg & Night Airborne checks
+                AiCore.CurrentTheater = new AiCore.BattleTheaterSnapshot { BattleDataPtr = new IntPtr(gen), Map = Gamemap.Budapest, InvadersFactionId = "Ussr_allies", DefendersFactionId = "Hungary_axis", Atmosphere = AiCore.BattleAtmosphereArchetype.UrbanFortress };
+                AiCore.BattleTheaterGeneration = ++gen;
+                var hunUrban = VeteranAndTacticsPatches.GetFactionCommandProfile("Hungary_axis");
+                Assert(hunUrban.FragFlushCostMult < 0.80f && hunUrban.GarrisonSquadRatio >= 0.30f,
+                    $"Urban Fortress failed: frag={hunUrban.FragFlushCostMult}, gar={hunUrban.GarrisonSquadRatio}!");
+
+                AiCore.CurrentTheater = new AiCore.BattleTheaterSnapshot { BattleDataPtr = new IntPtr(gen), Map = Gamemap.Kwajalein, InvadersFactionId = "UnitedStates_allies", DefendersFactionId = "Japan_axis", Atmosphere = AiCore.BattleAtmosphereArchetype.PacificBunkerAndNightGyokusai };
+                AiCore.BattleTheaterGeneration = ++gen;
+                var jpnPacific = VeteranAndTacticsPatches.GetFactionCommandProfile("Japan_axis");
+                Assert(jpnPacific.AllowGyokusaiDesperation && jpnPacific.EmplacementSearchMult > 1.15f && jpnPacific.SurrenderSuppDelta >= 12f,
+                    $"Pacific Bunker failed: emp={jpnPacific.EmplacementSearchMult}, sur={jpnPacific.SurrenderSuppDelta}!");
+
+                AiCore.CurrentTheater = new AiCore.BattleTheaterSnapshot { BattleDataPtr = new IntPtr(gen), Map = Gamemap.Cassino, InvadersFactionId = "England_allies", DefendersFactionId = "Germany_axis", Atmosphere = AiCore.BattleAtmosphereArchetype.MountainRidgeGrind };
+                AiCore.BattleTheaterGeneration = ++gen;
+                var ukBaseCheck = VeteranAndTacticsPatches.GetFactionCommandProfile("England_allies");
+                Assert(ukBaseCheck.SmokeCostMult < 0.70f && ukBaseCheck.SuppressCostMult < 0.75f,
+                    $"Mountain Ridge failed: smoke={ukBaseCheck.SmokeCostMult}, supp={ukBaseCheck.SuppressCostMult}!");
+
+                AiCore.CurrentTheater = new AiCore.BattleTheaterSnapshot { BattleDataPtr = new IntPtr(gen), Map = Gamemap.Tunisia, InvadersFactionId = "Germany_axis", DefendersFactionId = "UnitedStates_allies", Atmosphere = AiCore.BattleAtmosphereArchetype.BlitzkriegSchwerpunkt };
+                AiCore.BattleTheaterGeneration = ++gen;
+                var gerBlitz = VeteranAndTacticsPatches.GetFactionCommandProfile("Germany_axis");
+                Assert(gerBlitz.AttritionPivotThreshold < gerBase.AttritionPivotThreshold && gerBlitz.FlankMoveCostMult < gerBase.FlankMoveCostMult,
+                    $"Blitzkrieg Schwerpunkt failed: pivot={gerBlitz.AttritionPivotThreshold}, flank={gerBlitz.FlankMoveCostMult}!");
+
+                AiCore.CurrentTheater = new AiCore.BattleTheaterSnapshot { BattleDataPtr = new IntPtr(gen), Map = Gamemap.Normandy, InvadersFactionId = "England_allies", DefendersFactionId = "Germany_axis", Atmosphere = AiCore.BattleAtmosphereArchetype.NightAirborneCoupDeMain };
+                AiCore.BattleTheaterGeneration = ++gen;
+                var ukAirborne = VeteranAndTacticsPatches.GetFactionCommandProfile("England_allies");
+                Assert(ukAirborne.AllowDisconnectedLocalFlank && ukAirborne.PreferAmbushWhenAlone && ukAirborne.FlankMoveCostMult < 0.90f,
+                    $"Night Airborne failed: localFlank={ukAirborne.AllowDisconnectedLocalFlank}, ambush={ukAirborne.PreferAmbushWhenAlone}!");
+            }
+            Console.WriteLine($"  -> Verified Acoustic Ring, Ground Probe, CQB & Battle Atmosphere Suite: {_passed} assertions passed (0 failures)");
             return 0;
         }
     }

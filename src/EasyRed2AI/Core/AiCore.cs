@@ -199,6 +199,9 @@ namespace EasyRed2HumanAI
             public IntPtr UnderFireAttackerPtr;
             public Vector3 UnderFireFromPos;
             public float UnderFireUntil;
+            public float UnderFireStartedAt;
+            public float UnderFireWakeAt;
+            public float LastAlertStartSeen;
             public float NextNearMissAlertTime;
             public float NextIncomingFireSuppressTime;
         }
@@ -254,7 +257,7 @@ namespace EasyRed2HumanAI
             public float NextMeleeSuppressCountTime;
             public float NextTankDisciplineCountTime;
             public float NextFriendlyStepAsideTime;
-            public bool BayonetChecked;
+            public IntPtr LastBayonetCheckedGunPtr;
             public int LastMeleeEvalFrame;
             public bool CachedInPointBlankMelee;
             public Soldier CachedMeleeEnemy;
@@ -279,6 +282,7 @@ namespace EasyRed2HumanAI
             public Vector3 PendingSmokeAimPoint;
             public float PendingSmokeAimUntil;
             public IntPtr PendingSmokePrefabPtr;
+            public float ThrowFireHoldUntil;
         }
 
         internal struct SoldierGoapState
@@ -430,6 +434,17 @@ namespace EasyRed2HumanAI
             public bool PlaneHotStartAllowAi;
             public bool WasOwnDriverOrVehicle;
             public bool HasObservedOwnershipState;
+            public bool HasRemotePlaneSync;
+            public bool RemotePlaneGravitySuppressed;
+            public Vector3 RemotePlaneSyncPos;
+            public Quaternion RemotePlaneSyncRot;
+            public Vector3 RemotePlaneSyncVel;
+            public float RemotePlaneSyncReceivedAt;
+            public float TankSupportHoldUntil;
+            public Vector3 LastTrackedWorldPos;
+            public float LastTrackedWorldPosTime;
+            public Vector3 EstimatedFlatVel;
+            public float NextPlayerPedestrianSweepTime;
             internal EmergentEngine.VehicleEmergentState Emergent;
         }
 
@@ -1959,6 +1974,72 @@ namespace EasyRed2HumanAI
             return false;
         }
 
+        /// <summary>
+        /// Co-op-safe check for whether ANY alive human player (local Host/Client or remote Photon client)
+        /// is currently occupying a driver seat of <paramref name="veh"/>.
+        /// </summary>
+        public static bool IsAnyHumanPlayerDriving(Vehicle veh)
+        {
+            if (ReferenceEquals(veh, null) || veh == null || veh.Pointer == IntPtr.Zero)
+                return false;
+
+            if (veh.PlayerIsDriving())
+                return true;
+
+            if (!IsInMultiplayerRoom())
+                return false;
+
+            try
+            {
+                var seats = veh.seats;
+                if (seats != null)
+                {
+                    int len = seats.Length;
+                    for (int i = 0; i < len; i++)
+                    {
+                        Seats s = seats[i];
+                        if (s != null && s.isDriver && s.hasUnitSet && IsAnyHumanPlayerSoldier(s.unitSet))
+                            return true;
+                    }
+                }
+            }
+            catch { }
+            return false;
+        }
+
+        /// <summary>
+        /// Co-op-safe check for whether ANY alive human player (local Host/Client or remote Photon client)
+        /// is currently occupying any seat inside <paramref name="veh"/>.
+        /// </summary>
+        public static bool IsAnyHumanPlayerInsideVehicle(Vehicle veh)
+        {
+            if (ReferenceEquals(veh, null) || veh == null || veh.Pointer == IntPtr.Zero)
+                return false;
+
+            if (veh.PlayerIsInside())
+                return true;
+
+            if (!IsInMultiplayerRoom())
+                return false;
+
+            try
+            {
+                var seats = veh.seats;
+                if (seats != null)
+                {
+                    int len = seats.Length;
+                    for (int i = 0; i < len; i++)
+                    {
+                        Seats s = seats[i];
+                        if (s != null && s.hasUnitSet && IsAnyHumanPlayerSoldier(s.unitSet))
+                            return true;
+                    }
+                }
+            }
+            catch { }
+            return false;
+        }
+
         public static bool IsHumanSoldierAfk(Soldier player, float now, float afkSeconds = 25.0f)
         {
             if (ReferenceEquals(player, null) || player == null || !player.IsAlive || !player.IsPlayer())
@@ -1978,7 +2059,7 @@ namespace EasyRed2HumanAI
             if (veh == null || veh.Pointer == IntPtr.Zero)
                 return false;
 
-            if (veh.PlayerIsInside())
+            if (IsAnyHumanPlayerInsideVehicle(veh))
                 return true;
 
             if (!_vehicleHandlesByPtr.TryGetValue(veh.Pointer, out VehicleFastHandles vh) || vh == null || vh.LastHumanInsideTime <= 0f)
@@ -2175,17 +2256,20 @@ namespace EasyRed2HumanAI
             string message,
             bool requireLeader = false,
             float minInterval = 14.0f,
-            bool notifyRemoteVanillaSquadmates = true)
+            bool notifyRemoteVanillaSquadmates = true,
+            bool bypassCooldown = false)
         {
             if (string.IsNullOrEmpty(message))
                 return;
 
             float now = Time.time;
-            if (now >= _nextLocalPlayerRadioHintTime &&
+            if ((bypassCooldown || now >= _nextLocalPlayerRadioHintTime) &&
                 IsLocalPlayerInSquad(targetSquad, out bool isLeader) &&
                 (!requireLeader || isLeader))
             {
-                _nextLocalPlayerRadioHintTime = now + minInterval;
+                _nextLocalPlayerRadioHintTime = bypassCooldown
+                    ? Mathf.Max(_nextLocalPlayerRadioHintTime, now + minInterval)
+                    : (now + minInterval);
                 try
                 {
                     PlayerController.HintToPlayer(message, false);
@@ -2479,6 +2563,20 @@ namespace EasyRed2HumanAI
             }
         }
 
+        public enum BattleAtmosphereArchetype : byte
+        {
+            None = 0,
+            Order227NotOneStepBack = 1,
+            KesselEncircledPocket = 2,
+            UrbanFortress = 3,
+            AmphibiousBeachhead = 4,
+            SiegeOfBastogne = 5,
+            PacificBunkerAndNightGyokusai = 6,
+            MountainRidgeGrind = 7,
+            BlitzkriegSchwerpunkt = 8,
+            NightAirborneCoupDeMain = 9
+        }
+
         public struct BattleTheaterSnapshot
         {
             public IntPtr BattleDataPtr;
@@ -2488,6 +2586,9 @@ namespace EasyRed2HumanAI
             public string DefendersFactionId;
             public string InvadersBattalionLower;
             public string DefendersBattalionLower;
+            public string LocationLower;
+            public bool IsNightStart;
+            public BattleAtmosphereArchetype Atmosphere;
             public bool IsAmphibiousBeachMap;
             public bool IsOpenDesertOrSteppeMap;
             public bool IsDenseUrbanMap;
@@ -2507,6 +2608,210 @@ namespace EasyRed2HumanAI
 
         private static BattleTheaterSnapshot _cachedTheaterSnapshot;
         public static int BattleTheaterGeneration { get; private set; } = 1;
+
+        public static BattleAtmosphereArchetype ResolveBattleAtmosphere(
+            string mapLower,
+            string locationLower,
+            string invFac,
+            string defFac,
+            string invBatLower,
+            string defBatLower,
+            int year,
+            bool isNightStart,
+            bool isBeach,
+            bool isUrban,
+            bool isJungleAtoll,
+            bool isSteepRidge)
+        {
+            mapLower ??= string.Empty;
+            locationLower ??= string.Empty;
+            invFac ??= string.Empty;
+            defFac ??= string.Empty;
+            invBatLower ??= string.Empty;
+            defBatLower ??= string.Empty;
+
+            // 1. Kessel / Encircled Pocket
+            if (locationLower.Contains("gumrak") ||
+                locationLower.Contains("pocket") ||
+                locationLower.Contains("noose") ||
+                locationLower.Contains("kessel") ||
+                locationLower.Contains("budapest has fallen") ||
+                locationLower.Contains("encircl") ||
+                locationLower.Contains("trapped") ||
+                (mapLower.Contains("stalingrad") && year >= 1943 && defFac.StartsWith("Germany", StringComparison.OrdinalIgnoreCase)))
+            {
+                return BattleAtmosphereArchetype.KesselEncircledPocket;
+            }
+
+            // 2. Order No. 227 ("Not One Step Back")
+            if ((mapLower.Contains("stalingrad") ||
+                 locationLower.Contains("volga") ||
+                 locationLower.Contains("mamayev") ||
+                 locationLower.Contains("red october") ||
+                 locationLower.Contains("pavlov") ||
+                 locationLower.Contains("univermag") ||
+                 locationLower.Contains("barrikady") ||
+                 locationLower.Contains("tractor") ||
+                 locationLower.Contains("grain elevator")) &&
+                (defFac.StartsWith("Ussr", StringComparison.OrdinalIgnoreCase) ||
+                 invFac.StartsWith("Ussr", StringComparison.OrdinalIgnoreCase)))
+            {
+                return BattleAtmosphereArchetype.Order227NotOneStepBack;
+            }
+
+            // 3. Siege of Bastogne ("NUTS!")
+            if (locationLower.Contains("bastogne") ||
+                locationLower.Contains("foy") ||
+                locationLower.Contains("noville") ||
+                locationLower.Contains("marvie") ||
+                locationLower.Contains("nuts") ||
+                ((mapLower.Contains("bulge") || mapLower.Contains("ardennes")) &&
+                 (defBatLower.Contains("101") || defBatLower.Contains("airborne") || locationLower.Contains("siege"))))
+            {
+                return BattleAtmosphereArchetype.SiegeOfBastogne;
+            }
+
+            // 4. Night Coup de Main / Airborne
+            if (locationLower.Contains("pegasus") ||
+                locationLower.Contains("sainte-m") ||
+                locationLower.Contains("sainte m") ||
+                locationLower.Contains("st mere") ||
+                locationLower.Contains("advance by darkness") ||
+                locationLower.Contains("airfield drop") ||
+                locationLower.Contains("paradrop") ||
+                locationLower.Contains("drop zone") ||
+                (isNightStart && !isJungleAtoll &&
+                 (invBatLower.Contains("airborne") ||
+                  invBatLower.Contains("parachut") ||
+                  invBatLower.Contains("fallschirm") ||
+                  invBatLower.Contains("glider"))))
+            {
+                return BattleAtmosphereArchetype.NightAirborneCoupDeMain;
+            }
+
+            // 5. Pacific Bunker & Night Gyokusai (night/bunker Pacific island phases beat generic beach tag)
+            bool hasJapan = defFac.StartsWith("Japan", StringComparison.OrdinalIgnoreCase) ||
+                            invFac.StartsWith("Japan", StringComparison.OrdinalIgnoreCase);
+            bool pacificIsland = isJungleAtoll ||
+                                 mapLower.Contains("kwajalein") ||
+                                 mapLower.Contains("makin") ||
+                                 mapLower.Contains("roinamur");
+            if (pacificIsland && hasJapan &&
+                (isNightStart ||
+                 locationLower.Contains("midnight") ||
+                 locationLower.Contains("last of") ||
+                 locationLower.Contains("bunker") ||
+                 locationLower.Contains("pillbox")))
+            {
+                return BattleAtmosphereArchetype.PacificBunkerAndNightGyokusai;
+            }
+
+            // 6. Amphibious Beachhead Assault
+            if (locationLower.Contains("omaha") ||
+                locationLower.Contains("utah") ||
+                locationLower.Contains("gold") ||
+                locationLower.Contains("juno") ||
+                locationLower.Contains("sword") ||
+                locationLower.Contains("pointe du hoc") ||
+                locationLower.Contains("beach") ||
+                locationLower.Contains("landing") ||
+                locationLower.Contains("amphib") ||
+                locationLower.Contains("shore") ||
+                locationLower.Contains("anzio") ||
+                locationLower.Contains("d-day") ||
+                locationLower.Contains("red 1") ||
+                locationLower.Contains("red 2") ||
+                locationLower.Contains("blue 1") ||
+                (isBeach && (mapLower.Contains("kos") || locationLower.Contains("invasion") || mapLower.Contains("normandy"))))
+            {
+                return BattleAtmosphereArchetype.AmphibiousBeachhead;
+            }
+
+            // 5b. Inland Pacific Bunker & Night Gyokusai fallback
+            if (pacificIsland && hasJapan)
+            {
+                return BattleAtmosphereArchetype.PacificBunkerAndNightGyokusai;
+            }
+
+            // 7. Mountain / Ridge Grind
+            if ((locationLower.Contains("cassino") && !locationLower.Contains("streets") && !locationLower.Contains("town")) ||
+                locationLower.Contains("snakeshead") ||
+                locationLower.Contains("castle hill") ||
+                locationLower.Contains("takrouna") ||
+                locationLower.Contains("longstop") ||
+                locationLower.Contains("monte") ||
+                locationLower.Contains("ridge") ||
+                locationLower.Contains("summit") ||
+                locationLower.Contains("monastery") ||
+                locationLower.Contains("abbey") ||
+                (isSteepRidge && !isUrban))
+            {
+                return BattleAtmosphereArchetype.MountainRidgeGrind;
+            }
+
+            // 8. Blitzkrieg / Schwerpunkt
+            if (mapLower.Contains("stonne") ||
+                mapLower.Contains("balaton") ||
+                locationLower.Contains("sedan") ||
+                locationLower.Contains("stonne") ||
+                locationLower.Contains("kasserine") ||
+                locationLower.Contains("sidi-bou-zid") ||
+                locationLower.Contains("sidi bou zid") ||
+                locationLower.Contains("frühlingswind") ||
+                locationLower.Contains("fruhlingswind") ||
+                locationLower.Contains("wiking") ||
+                locationLower.Contains("blitz") ||
+                locationLower.Contains("spearhead") ||
+                locationLower.Contains("breakthrough"))
+            {
+                return BattleAtmosphereArchetype.BlitzkriegSchwerpunkt;
+            }
+
+            // 9. Urban Fortress / House-to-House
+            if (isUrban ||
+                locationLower.Contains("sihang") ||
+                locationLower.Contains("warehouse") ||
+                locationLower.Contains("guanghua") ||
+                locationLower.Contains("house to house") ||
+                locationLower.Contains("house-to-house") ||
+                locationLower.Contains("streets") ||
+                locationLower.Contains("block by block") ||
+                locationLower.Contains("factory") ||
+                locationLower.Contains("citadel") ||
+                locationLower.Contains("fortress"))
+            {
+                return BattleAtmosphereArchetype.UrbanFortress;
+            }
+
+            return BattleAtmosphereArchetype.None;
+        }
+
+        public static string GetBattleAtmosphereDispatchText(BattleAtmosphereArchetype arch)
+        {
+            switch (arch)
+            {
+                case BattleAtmosphereArchetype.Order227NotOneStepBack:
+                    return "[HQ Dispatch] ORDER NO. 227: 'Not one step back!' - Soviet squads hold firm around officers; storm-group CQB active.";
+                case BattleAtmosphereArchetype.KesselEncircledPocket:
+                    return "[HQ Dispatch] ENCIRCLED POCKET: Supply lines severed - defenders scavenge aggressively and hold fortified strongpoints.";
+                case BattleAtmosphereArchetype.UrbanFortress:
+                    return "[HQ Dispatch] URBAN FORTRESS: House-to-house doctrine - heavy grenade clearing and dogged strongpoint defense.";
+                case BattleAtmosphereArchetype.AmphibiousBeachhead:
+                    return "[HQ Dispatch] AMPHIBIOUS ASSAULT: Push off the beach under smoke - coastal strongpoints heavily manned.";
+                case BattleAtmosphereArchetype.SiegeOfBastogne:
+                    return "[HQ Dispatch] SIEGE OF BASTOGNE ('NUTS!'): Perimeter hold - defenders dig in tight with heightened squad cohesion.";
+                case BattleAtmosphereArchetype.PacificBunkerAndNightGyokusai:
+                    return "[HQ Dispatch] ISLAND GARRISON: Defenders dug deep into bunkers - stay alert for close-quarters night counterattacks.";
+                case BattleAtmosphereArchetype.MountainRidgeGrind:
+                    return "[HQ Dispatch] RIDGE ASSAULT: Uphill fire lanes covered - smoke screens and fire-base suppression emphasized.";
+                case BattleAtmosphereArchetype.BlitzkriegSchwerpunkt:
+                    return "[HQ Dispatch] SCHWERPUNKT: Rapid armored spearhead - attackers press aggressive breakthroughs; AT strongpoints on alert.";
+                case BattleAtmosphereArchetype.NightAirborneCoupDeMain:
+                    return "[HQ Dispatch] NIGHT AIRBORNE OP: Low visibility - autonomous small-unit flanking and close-quarters shock active.";
+                default:
+                    return string.Empty;
+            }
+        }
 
         public static BattleTheaterSnapshot GetBattleTheaterSnapshot()
         {
@@ -2530,6 +2835,11 @@ namespace EasyRed2HumanAI
                 string defFac = InternFaction(bd.defendersFaction_id ?? string.Empty);
                 string invBat = ((bd.invadersBatalion_id ?? string.Empty) + " " + (bd.invadersBatalion ?? string.Empty)).Trim().ToLowerInvariant();
                 string defBat = ((bd.defendersBatalion_id ?? string.Empty) + " " + (bd.defendersBatalion ?? string.Empty)).Trim().ToLowerInvariant();
+                string locDisplay = string.Empty;
+                try { locDisplay = bd.GetLocationName() ?? string.Empty; } catch { }
+                string locLower = (locDisplay + " " + (bd.location_name ?? string.Empty) + " " + (bd.location_name_id ?? string.Empty) + " " + (bd.battle_id ?? string.Empty)).Trim().ToLowerInvariant();
+                string mapLower = map.ToString().ToLowerInvariant();
+                bool isNightStart = bd.TimeHH >= 20 || bd.TimeHH <= 5;
 
                 bool isBeach = map == Gamemap.Normandy ||
                                map == Gamemap.Kwajalein ||
@@ -2554,6 +2864,27 @@ namespace EasyRed2HumanAI
                                      map == Gamemap.RoiNamur ||
                                      map == Gamemap.Makin;
 
+                bool isSteepRidge = map == Gamemap.Cassino ||
+                                    locLower.Contains("ridge") ||
+                                    locLower.Contains("summit") ||
+                                    locLower.Contains("hill") ||
+                                    locLower.Contains("takrouna") ||
+                                    locLower.Contains("snakeshead");
+
+                BattleAtmosphereArchetype atmosphere = ResolveBattleAtmosphere(
+                    mapLower,
+                    locLower,
+                    invFac,
+                    defFac,
+                    invBat,
+                    defBat,
+                    year,
+                    isNightStart,
+                    isBeach,
+                    isUrban,
+                    isJungleAtoll,
+                    isSteepRidge);
+
                 _cachedTheaterSnapshot = new BattleTheaterSnapshot
                 {
                     BattleDataPtr = bdPtr,
@@ -2563,6 +2894,9 @@ namespace EasyRed2HumanAI
                     DefendersFactionId = defFac,
                     InvadersBattalionLower = invBat,
                     DefendersBattalionLower = defBat,
+                    LocationLower = locLower,
+                    IsNightStart = isNightStart,
+                    Atmosphere = atmosphere,
                     IsAmphibiousBeachMap = isBeach,
                     IsOpenDesertOrSteppeMap = isDesert,
                     IsDenseUrbanMap = isUrban,
@@ -3748,6 +4082,28 @@ namespace EasyRed2HumanAI
         // each soldier waits 2.0-2.5+ seconds between SoldierAI.SequentialUpdate brain ticks,
         // and any frame that lands on a Vehicle, dead soldier, or seated passenger wastes
         // the entire frame's AI budget.
+        private static readonly SoldierFastHandles[] _urgentUnderFireWakeQueue = new SoldierFastHandles[24];
+        private static int _urgentUnderFireWakeCount;
+
+        public static void EnqueueUrgentUnderFireWake(SoldierFastHandles h, float wakeAt)
+        {
+            if (h == null || h.Ref == null || h.Ptr == IntPtr.Zero)
+                return;
+
+            if (h.Vision.UnderFireWakeAt > 0f && h.Vision.UnderFireWakeAt <= wakeAt)
+                return;
+
+            h.Vision.UnderFireWakeAt = wakeAt;
+            for (int i = 0; i < _urgentUnderFireWakeCount; i++)
+            {
+                if (ReferenceEquals(_urgentUnderFireWakeQueue[i], h))
+                    return;
+            }
+
+            if (_urgentUnderFireWakeCount < _urgentUnderFireWakeQueue.Length)
+                _urgentUnderFireWakeQueue[_urgentUnderFireWakeCount++] = h;
+        }
+
         [HarmonyPatch(typeof(Creature), nameof(Creature.ProcessSequentialUpdates))]
         public static class Creature_ProcessSequentialUpdates_Patch
         {
@@ -3821,8 +4177,8 @@ namespace EasyRed2HumanAI
                     }
                     else if (players > 1)
                     {
-                        // Small Co-op session (2-3 players): at most 2 ticks and only when frame time < 14.5ms
-                        targetFootTicks = (count > 60 && dt < 0.0145f) ? 2 : 1;
+                        // Small Co-op session (2-3 players): allow 2 ticks on VSync/smooth 60fps frames (< 18.5ms)
+                        targetFootTicks = (count > 60 && dt < 0.0185f) ? 2 : 1;
                         maxScanSteps = Mathf.Min(count - 1, 4);
                     }
                     else
@@ -3833,6 +4189,10 @@ namespace EasyRed2HumanAI
                         maxScanSteps = Mathf.Min(count - 1, 6);
                     }
 
+                    bool hasUrgentWake = _urgentUnderFireWakeCount > 0 && players < 4 && dt < 0.020f;
+                    if (hasUrgentWake && targetFootTicks < 2)
+                        targetFootTicks = 2;
+
                     if (activeFootSoldiersTicked >= targetFootTicks)
                         return;
 
@@ -3840,6 +4200,47 @@ namespace EasyRed2HumanAI
                     int scanned = 0;
                     long startStamp = Stopwatch.GetTimestamp();
                     long budgetTicks = (long)(Stopwatch.Frequency * 0.00045); // Strict 0.45ms ceiling for extra AI ticks
+
+                    float nowWake = Time.time;
+                    for (int wi = _urgentUnderFireWakeCount - 1; wi >= 0; wi--)
+                    {
+                        SoldierFastHandles uh = _urgentUnderFireWakeQueue[wi];
+                        if (uh == null || uh.Ref == null || uh.Ptr == IntPtr.Zero || !uh.Ref.IsAlive || uh.Ref.IsOnVehicle() ||
+                            uh.Vision.UnderFireWakeAt <= 0f ||
+                            nowWake < uh.Vision.UnderFireWakeAt - 10.0f ||
+                            nowWake > uh.Vision.UnderFireWakeAt + 4.0f)
+                        {
+                            if (uh != null)
+                                uh.Vision.UnderFireWakeAt = 0f;
+                            int last = --_urgentUnderFireWakeCount;
+                            _urgentUnderFireWakeQueue[wi] = _urgentUnderFireWakeQueue[last];
+                            _urgentUnderFireWakeQueue[last] = null;
+                            continue;
+                        }
+
+                        if (nowWake < uh.Vision.UnderFireWakeAt || !uh.Ref.isActiveAndEnabled)
+                            continue;
+
+                        bool isUrgentLeader = uh.Ref.IsSquadLeader();
+                        if (isUrgentLeader && squadLeaderTicked)
+                            continue;
+
+                        uh.Vision.UnderFireWakeAt = 0f;
+                        int lastIdxWake = --_urgentUnderFireWakeCount;
+                        _urgentUnderFireWakeQueue[wi] = _urgentUnderFireWakeQueue[lastIdxWake];
+                        _urgentUnderFireWakeQueue[lastIdxWake] = null;
+
+                        uh.Ref.SequentialUpdate();
+                        SoldierAI uAi = uh.Ai;
+                        if (!ReferenceEquals(uAi, null) && uAi != null && uAi.enabled)
+                            uAi.SequentialUpdate();
+
+                        activeFootSoldiersTicked++;
+                        TotalAdaptiveAiExtraTicks++;
+                        if (isUrgentLeader)
+                            squadLeaderTicked = true;
+                        break;
+                    }
 
                     while (activeFootSoldiersTicked < targetFootTicks && scanned < maxScanSteps)
                     {

@@ -1019,7 +1019,9 @@ namespace EasyRed2HumanAI
             return false;
         }
 
-        public static bool IsDirectSegmentBlockedByWall(Vector3 fromFeetPos, Vector3 toFeetPos, out float flatDist)
+        private static readonly Collider[] _stepOffCapsuleHits = new Collider[8];
+
+        public static bool IsDirectSegmentBlockedByWall(Vector3 fromFeetPos, Vector3 toFeetPos, out float flatDist, bool ignoreVehicleObstacles = false)
         {
             Vector3 flatDelta = toFeetPos - fromFeetPos;
             flatDelta.y = 0f;
@@ -1035,8 +1037,10 @@ namespace EasyRed2HumanAI
             Vector3 startLift = fromFeetPos + Vector3.up * 0.34f;
             Vector3 endLift = toFeetPos + Vector3.up * 0.34f;
             if ((Physics.Linecast(startLift, endLift, out RaycastHit fwdSlabHit, solidMask, QueryTriggerInteraction.Ignore) &&
+                 (!ignoreVehicleObstacles || !IsVehicleCollider(fwdSlabHit.collider)) &&
                  (!IsTerrainCollider(fwdSlabHit.collider) || Mathf.Abs(fwdSlabHit.normal.y) < 0.62f)) ||
                 (Physics.Linecast(endLift, startLift, out RaycastHit revSlabHit, solidMask, QueryTriggerInteraction.Ignore) &&
+                 (!ignoreVehicleObstacles || !IsVehicleCollider(revSlabHit.collider)) &&
                  (!IsTerrainCollider(revSlabHit.collider) || Mathf.Abs(revSlabHit.normal.y) < 0.62f)))
             {
                 return true;
@@ -1046,6 +1050,12 @@ namespace EasyRed2HumanAI
                 return false;
 
             Vector3 dir = flatDelta / flatDist;
+            if (ignoreVehicleObstacles)
+            {
+                return Physics.Raycast(fromFeetPos + Vector3.up * 0.48f, dir, out RaycastHit obsHit, flatDist, GetMovementObstacleMask(), QueryTriggerInteraction.Ignore) &&
+                       Mathf.Abs(obsHit.normal.y) < 0.68f &&
+                       !IsVehicleCollider(obsHit.collider);
+            }
             return IsMovementBlockedByObstacle(fromFeetPos + Vector3.up * 0.48f, dir, flatDist);
         }
 
@@ -1062,7 +1072,8 @@ namespace EasyRed2HumanAI
             out float flatDist,
             float maxFlatDist = 2.8f,
             float maxStepDeltaY = 0.75f,
-            float maxStepDownDeltaY = -1f)
+            float maxStepDownDeltaY = -1f,
+            bool ignoreVehicleObstacles = false)
         {
             snappedTargetPos = rawTargetPos;
             Vector3 flatDelta = rawTargetPos - fromFeetPos;
@@ -1071,9 +1082,10 @@ namespace EasyRed2HumanAI
             flatDist = flatSq > 1e-8f ? Mathf.Sqrt(flatSq) : 0f;
 
             bool steppingOffVehicleHull = IsFootBotStandingOnVehicleHull(fromFeetPos);
+            bool ignoreVeh = steppingOffVehicleHull || ignoreVehicleObstacles;
             float effectiveMaxUpY = steppingOffVehicleHull ? Mathf.Max(maxStepDeltaY, 2.85f) : maxStepDeltaY;
             float requestedDownY = maxStepDownDeltaY > maxStepDeltaY ? maxStepDownDeltaY : maxStepDeltaY;
-            float effectiveMaxDownY = steppingOffVehicleHull ? Mathf.Max(requestedDownY, 2.85f) : requestedDownY;
+            float effectiveMaxDownY = steppingOffVehicleHull ? Mathf.Max(requestedDownY, 4.2f) : requestedDownY;
             float maxRawUpY = Mathf.Max(1.05f, effectiveMaxUpY + 0.35f);
             float maxRawDownY = Mathf.Max(1.05f, effectiveMaxDownY + 0.35f);
 
@@ -1130,10 +1142,10 @@ namespace EasyRed2HumanAI
                 if (flatDist > 0.12f)
                 {
                     if ((Physics.Linecast(chestStart, chestEnd, out RaycastHit chestFwdHit, solidMask, QueryTriggerInteraction.Ignore) &&
-                         (!steppingOffVehicleHull || !IsVehicleCollider(chestFwdHit.collider))) ||
+                         (!ignoreVeh || !IsVehicleCollider(chestFwdHit.collider))) ||
                         (Physics.Linecast(chestEnd, chestStart, out RaycastHit chestRevHit, solidMask, QueryTriggerInteraction.Ignore) &&
-                         (!steppingOffVehicleHull || !IsVehicleCollider(chestRevHit.collider))) ||
-                        (!steppingOffVehicleHull && IsMovementBlockedByObstacle(chestStart, dir, Mathf.Min(flatDist, 2.2f))))
+                         (!ignoreVeh || !IsVehicleCollider(chestRevHit.collider))) ||
+                        (!ignoreVeh && IsMovementBlockedByObstacle(chestStart, dir, Mathf.Min(flatDist, 2.2f))))
                     {
                         return false;
                     }
@@ -1142,14 +1154,30 @@ namespace EasyRed2HumanAI
                 // Bidirectional vertical shaft check above the landing spot: guarantees bots on a 2nd-floor building slab
                 // never step downward through an intermediate floor/ceiling mesh (regardless of mesh winding order).
                 if ((Physics.Linecast(chestEnd, dropShaftBottom, out RaycastHit shaftDownHit, solidMask, QueryTriggerInteraction.Ignore) &&
-                     (!steppingOffVehicleHull || !IsVehicleCollider(shaftDownHit.collider))) ||
+                     (!ignoreVeh || !IsVehicleCollider(shaftDownHit.collider))) ||
                     (Physics.Linecast(dropShaftBottom, chestEnd, out RaycastHit shaftUpHit, solidMask, QueryTriggerInteraction.Ignore) &&
-                     (!steppingOffVehicleHull || !IsVehicleCollider(shaftUpHit.collider))))
+                     (!ignoreVeh || !IsVehicleCollider(shaftUpHit.collider))))
                 {
                     return false;
                 }
 
-                if (Physics.CheckCapsule(
+                if (ignoreVeh)
+                {
+                    int hitCount = Physics.OverlapCapsuleNonAlloc(
+                        snappedTargetPos + Vector3.up * 0.54f,
+                        snappedTargetPos + Vector3.up * 1.45f,
+                        0.24f,
+                        _stepOffCapsuleHits,
+                        GetMovementObstacleMask(),
+                        QueryTriggerInteraction.Ignore);
+                    for (int hi = 0; hi < hitCount; hi++)
+                    {
+                        Collider c = _stepOffCapsuleHits[hi];
+                        if (c != null && !IsVehicleCollider(c))
+                            return false;
+                    }
+                }
+                else if (Physics.CheckCapsule(
                         snappedTargetPos + Vector3.up * 0.54f,
                         snappedTargetPos + Vector3.up * 1.45f,
                         0.24f,
@@ -1169,15 +1197,15 @@ namespace EasyRed2HumanAI
             Vector3 endLift = snappedTargetPos + Vector3.up * 0.34f;
             if ((Physics.Linecast(startLift, endLift, out RaycastHit fwdHit, solidMask, QueryTriggerInteraction.Ignore) &&
                  (!IsTerrainCollider(fwdHit.collider) || Mathf.Abs(fwdHit.normal.y) < 0.62f) &&
-                 (!steppingOffVehicleHull || !IsVehicleCollider(fwdHit.collider))) ||
+                 (!ignoreVeh || !IsVehicleCollider(fwdHit.collider))) ||
                 (Physics.Linecast(endLift, startLift, out RaycastHit revHit, solidMask, QueryTriggerInteraction.Ignore) &&
                  (!IsTerrainCollider(revHit.collider) || Mathf.Abs(revHit.normal.y) < 0.62f) &&
-                 (!steppingOffVehicleHull || !IsVehicleCollider(revHit.collider))))
+                 (!ignoreVeh || !IsVehicleCollider(revHit.collider))))
             {
                 return false;
             }
 
-            if (flatDist > 0.12f && !steppingOffVehicleHull && IsMovementBlockedByObstacle(fromFeetPos + Vector3.up * 0.48f, dir, flatDist))
+            if (flatDist > 0.12f && !ignoreVeh && IsMovementBlockedByObstacle(fromFeetPos + Vector3.up * 0.48f, dir, flatDist))
                 return false;
 
             return true;
@@ -1274,7 +1302,8 @@ namespace EasyRed2HumanAI
             if (distSq > 0.25f)
             {
                 if (Physics.Linecast(camPos, impactPos, lineMask, QueryTriggerInteraction.Collide) ||
-                    Physics.Linecast(camPos, impactPos + Vector3.up * 0.75f, lineMask, QueryTriggerInteraction.Collide))
+                    Physics.Linecast(camPos, impactPos + Vector3.up * 0.75f, lineMask, QueryTriggerInteraction.Collide) ||
+                    Physics.Linecast(camPos, impactPos + Vector3.up * 1.35f, lineMask, QueryTriggerInteraction.Collide))
                 {
                     return true;
                 }
@@ -1282,7 +1311,7 @@ namespace EasyRed2HumanAI
 
             // PhysX Linecast starting inside a SphereCollider skips its own shell; CheckSphere catches inside-smoke hits
             // as well as low-body hits whose 1.5m blood mist cloud blooms into an adjacent smoke volume.
-            if (distSq > 2.25f && Physics.CheckSphere(impactPos + Vector3.up * 0.35f, 1.15f, smokeMask, QueryTriggerInteraction.Collide))
+            if (distSq > 2.25f && Physics.CheckSphere(impactPos + Vector3.up * 0.45f, 1.65f, smokeMask, QueryTriggerInteraction.Collide))
                 return true;
 
             if (distSq > 4.0f && Physics.CheckSphere(camPos, 0.35f, smokeMask, QueryTriggerInteraction.Collide))
@@ -1828,36 +1857,34 @@ namespace EasyRed2HumanAI
                         if (tr == null)
                             continue;
 
+                        Vector3 vWorldPos = tr.position;
+                        if (vh.LastTrackedWorldPosTime > 0f && now > vh.LastTrackedWorldPosTime)
+                        {
+                            float dt = now - vh.LastTrackedWorldPosTime;
+                            if (dt >= 0.04f && dt <= 0.60f)
+                            {
+                                Vector3 instVel = new Vector3((vWorldPos.x - vh.LastTrackedWorldPos.x) / dt, 0f, (vWorldPos.z - vh.LastTrackedWorldPos.z) / dt);
+                                if (instVel.sqrMagnitude > 45.0f * 45.0f)
+                                    vh.EstimatedFlatVel = Vector3.zero;
+                                else
+                                    vh.EstimatedFlatVel = vh.EstimatedFlatVel.sqrMagnitude < 0.04f
+                                        ? instVel
+                                        : Vector3.Lerp(vh.EstimatedFlatVel, instVel, 0.65f);
+                            }
+                            else if (dt > 0.60f)
+                            {
+                                vh.EstimatedFlatVel = Vector3.zero;
+                            }
+                        }
+                        else if (vh.LastTrackedWorldPosTime <= 0f || now < vh.LastTrackedWorldPosTime)
+                        {
+                            vh.EstimatedFlatVel = Vector3.zero;
+                        }
+                        vh.LastTrackedWorldPos = vWorldPos;
+                        vh.LastTrackedWorldPosTime = now;
+
                         string vehFaction = VeteranAndTacticsPatches.GetVehicleCrewFaction(v);
                         if (string.IsNullOrEmpty(vehFaction))
-                            continue;
-
-                        MovableVehicle mv = v.TryCast<MovableVehicle>();
-                        float speedMs = mv != null ? Mathf.Abs(mv.GetCurrentSpeed()) : 0f;
-                        Rigidbody rb = mv != null ? mv.rb : null;
-                        Vector3 rbVel = (rb != null && rb.Pointer != IntPtr.Zero) ? rb.velocity : Vector3.zero;
-                        float rbFlatSpeed = Mathf.Sqrt(rbVel.x * rbVel.x + rbVel.z * rbVel.z);
-
-                        bool isPlayerDriven = v.PlayerIsDriving();
-                        AIVehicle aiVeh = vh.AiVeh;
-                        bool isReversing = aiVeh != null && aiVeh.going_in_retro;
-                        bool aiMovingIntent = aiVeh != null &&
-                                              !aiVeh.placingInUnstuck &&
-                                              (isReversing ||
-                                               (!aiVeh.stopToShoot &&
-                                                aiVeh.path != null &&
-                                                aiVeh.path.NodesCount > 0 &&
-                                                now >= aiVeh.resumeDriveTime - 0.50f));
-
-                        bool hullPivoting = false;
-                        if (vh.IsTank && speedMs < 0.45f && rbFlatSpeed < 0.45f)
-                        {
-                            VehicleTank tank = v.TryCast<VehicleTank>();
-                            if (tank != null && Mathf.Abs(tank.curRotationSpeed) >= 0.15f)
-                                hullPivoting = true;
-                        }
-
-                        if (speedMs < 0.45f && rbFlatSpeed < 0.45f && !isPlayerDriven && !aiMovingIntent && !hullPivoting)
                             continue;
 
                         Vector3 fwd = tr.forward;
@@ -1868,22 +1895,63 @@ namespace EasyRed2HumanAI
                         right.y = 0f;
                         right = right.sqrMagnitude > 0.001f ? right.normalized : new Vector3(fwd.z, 0f, -fwd.x);
 
-                        Vector3 travelDir = rbFlatSpeed >= 1.15f
-                            ? new Vector3(rbVel.x / rbFlatSpeed, 0f, rbVel.z / rbFlatSpeed)
+                        MovableVehicle mv = v.TryCast<MovableVehicle>();
+                        float speedMs = mv != null ? Mathf.Abs(mv.GetCurrentSpeed()) : 0f;
+                        Rigidbody rb = mv != null ? mv.rb : null;
+                        Vector3 rbVel = (rb != null && rb.Pointer != IntPtr.Zero) ? rb.velocity : Vector3.zero;
+                        float rbFlatSpeed = Mathf.Sqrt(rbVel.x * rbVel.x + rbVel.z * rbVel.z);
+
+                        Vector3 estVel = vh.EstimatedFlatVel;
+                        float estFlatSpeed = Mathf.Sqrt(estVel.x * estVel.x + estVel.z * estVel.z);
+                        Vector3 bestVel = rbFlatSpeed >= 0.50f ? rbVel : estVel;
+                        float bestVelSpeed = rbFlatSpeed >= 0.50f ? rbFlatSpeed : estFlatSpeed;
+                        float effSpeed = Mathf.Max(speedMs, bestVelSpeed);
+
+                        bool isPlayerDriven = IsAnyHumanPlayerDriving(v);
+                        bool isHumanControlled = isPlayerDriven ||
+                            (IsInMultiplayerRoom() && !IsLocallyOwnedVehicle(v) && v.HasDriver() && IsAnyHumanPlayerInsideVehicle(v));
+                        AIVehicle aiVeh = vh.AiVeh;
+                        bool isReversing = (aiVeh != null && aiVeh.going_in_retro) ||
+                                           (bestVelSpeed >= 0.35f && Vector3.Dot(new Vector3(bestVel.x / bestVelSpeed, 0f, bestVel.z / bestVelSpeed), fwd) < -0.35f) ||
+                                           (isPlayerDriven && v.movingDir.y < -0.10f);
+                        bool aiMovingIntent = aiVeh != null &&
+                                              !aiVeh.placingInUnstuck &&
+                                              (isReversing ||
+                                               (!aiVeh.stopToShoot &&
+                                                aiVeh.path != null &&
+                                                aiVeh.path.NodesCount > 0 &&
+                                                now >= aiVeh.resumeDriveTime - 0.50f));
+
+                        bool hullPivoting = false;
+                        if (vh.IsTank && effSpeed < 0.45f)
+                        {
+                            VehicleTank tank = v.TryCast<VehicleTank>();
+                            if (tank != null && Mathf.Abs(tank.curRotationSpeed) >= 0.15f)
+                                hullPivoting = true;
+                        }
+
+                        if (effSpeed < 0.45f && !isHumanControlled && !aiMovingIntent && !hullPivoting)
+                            continue;
+
+                        Vector3 travelDir = bestVelSpeed >= 0.45f
+                            ? new Vector3(bestVel.x / bestVelSpeed, 0f, bestVel.z / bestVelSpeed)
                             : (isReversing ? -fwd : fwd);
                         Vector3 travelRight = new Vector3(travelDir.z, 0f, -travelDir.x);
 
                         Vector4 obb = VeteranAndTacticsPatches.GetCachedVehicleLocalHullObb(v);
                         float halfWidth = obb.x;
                         float halfLength = obb.y;
-                        Vector3 hullCenter = tr.position + right * obb.z + fwd * obb.w;
+                        Vector3 hullCenter = vWorldPos + right * obb.z + fwd * obb.w;
 
-                        float effSpeed = Mathf.Max(speedMs, rbFlatSpeed);
-                        bool pivotOnly = !isPlayerDriven && effSpeed < 0.45f && !aiMovingIntent && hullPivoting;
-                        float minFwd = pivotOnly ? (-halfLength - 1.2f) : (-halfLength * 0.40f);
-                        float maxFwd = pivotOnly
-                            ? (halfLength + 2.6f)
-                            : Mathf.Clamp(halfLength + (vh.IsTank ? 6.5f : 5.5f) + effSpeed * 1.15f, 6.5f, 18.5f);
+                        bool stationaryHuman = isHumanControlled && effSpeed < 0.35f && Mathf.Abs(v.movingDir.y) < 0.08f && !hullPivoting;
+                        bool pivotOnly = !isHumanControlled && effSpeed < 0.45f && !aiMovingIntent && hullPivoting;
+                        float minFwd = stationaryHuman ? (-halfLength - 0.8f) : (pivotOnly ? (-halfLength - 1.2f) : (-halfLength * 0.40f));
+                        float maxFwd = stationaryHuman
+                            ? (halfLength + 4.5f)
+                            : (pivotOnly ? (halfLength + 2.6f) : Mathf.Clamp(halfLength + (vh.IsTank ? 6.5f : 5.5f) + effSpeed * 1.15f, 6.5f, 18.5f));
+                        float corridorHalfWidth = stationaryHuman
+                            ? (halfWidth + 1.15f)
+                            : (halfWidth + (vh.IsTank ? 1.85f : 1.45f));
 
                         ActiveVehicleDangerCorridors[ActiveVehicleDangerCorridorCount++] = new VehicleDangerCorridor
                         {
@@ -1898,9 +1966,9 @@ namespace EasyRed2HumanAI
                             SpeedMs = effSpeed,
                             MinFwd = minFwd,
                             MaxFwd = maxFwd,
-                            CorridorHalfWidth = halfWidth + (vh.IsTank ? 1.85f : 1.45f),
+                            CorridorHalfWidth = corridorHalfWidth,
                             IsTank = vh.IsTank,
-                            IsPlayerDriven = isPlayerDriven,
+                            IsPlayerDriven = isHumanControlled,
                             IsReversing = isReversing
                         };
                     }

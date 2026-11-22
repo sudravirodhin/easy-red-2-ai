@@ -1212,6 +1212,44 @@ namespace EasyRed2HumanAI
                    heldObj.missionTask.IsInsideTaskArea(sq.moveOrderPosition, 0.95f);
         }
 
+        private static Vector3 ComputeSquadOrderFacingDirection(
+            Squad sq,
+            Soldier leader,
+            Vector3 orderPos,
+            bool isAttackObjective)
+        {
+            if (isAttackObjective && leader != null && leader.transform != null)
+            {
+                Vector3 approach = orderPos - leader.transform.position;
+                approach.y = 0f;
+                if (approach.sqrMagnitude >= 12.0f * 12.0f)
+                    return approach.normalized;
+            }
+
+            IntPtr sqPtr = sq != null ? sq.Pointer : IntPtr.Zero;
+            string fac = leader != null ? AiCore.GetCachedFaction(leader) : null;
+            Vector3 facingDir = Vector3.zero;
+            if (sqPtr != IntPtr.Zero && _squadBlackboards.TryGetValue(sqPtr, out SquadBlackboard gb))
+            {
+                if (gb.HasActiveThreat)
+                    facingDir = gb.ThreatDirection;
+                else if (gb.LastKnownThreatTime > 0f && (Time.time - gb.LastKnownThreatTime) <= 20.0f)
+                    facingDir = gb.LastKnownThreatPos - orderPos;
+            }
+            facingDir.y = 0f;
+            if (facingDir.sqrMagnitude < 0.01f && !string.IsNullOrEmpty(fac))
+            {
+                if (VisionPatches.TryGetDominantEnemyGunfireDirection(orderPos, fac, 185.0f, 7.0f, out Vector3 gfDir, out _))
+                    facingDir = gfDir;
+                else if (AiCore.TryGetNearestEnemyOrContestedObjectiveDirection(fac, orderPos, out Vector3 objDir))
+                    facingDir = objDir;
+                else if (AiCore.TryGetEnemySpawnDirection(fac, orderPos, out Vector3 spDir))
+                    facingDir = spDir;
+            }
+            facingDir.y = 0f;
+            return facingDir.sqrMagnitude > 0.01f ? facingDir.normalized : Vector3.zero;
+        }
+
         private static void ExecuteMacroSquadTaskOrder(
             Squad sq,
             Soldier leader,
@@ -1232,7 +1270,6 @@ namespace EasyRed2HumanAI
                 // Native Squad.Leader_OrderAttackCurrentTask (0x180806F70) checks BattleData.IsDefenderFaction, which
                 // returns FALSE for the invader-slot team on Dynamic Conquest even on their own held flags—rolling
                 // 68% AttackFromSide wide arcs and 20-40% SetHoldFireOrder(true)! Issue explicit HoldArea + fire-at-will.
-                IntPtr sqPtr = sq.Pointer;
                 if (sq.HoldFire)
                 {
                     try { sq.SetHoldFireOrder(false, false, false, Photon.Pun.PhotonNetwork.InRoom); } catch { }
@@ -1243,29 +1280,10 @@ namespace EasyRed2HumanAI
 
                 // Native Squad.HoldArea (0x180805E60) calls SendUnitsToCovers WITHOUT updating sq.formationDirection (+0x44)!
                 // Orient formationDirection toward the active threat / enemy objective / enemy spawn BEFORE HoldArea runs.
-                string fac = leader != null ? AiCore.GetCachedFaction(leader) : null;
-                Vector3 garrisonDir = Vector3.zero;
-                if (_squadBlackboards.TryGetValue(sqPtr, out SquadBlackboard gb))
-                {
-                    if (gb.HasActiveThreat)
-                        garrisonDir = gb.ThreatDirection;
-                    else if (gb.LastKnownThreatTime > 0f && (Time.time - gb.LastKnownThreatTime) <= 20.0f)
-                        garrisonDir = gb.LastKnownThreatPos - holdPos;
-                }
-                garrisonDir.y = 0f;
-                if (garrisonDir.sqrMagnitude < 0.01f && !string.IsNullOrEmpty(fac))
-                {
-                    if (VisionPatches.TryGetDominantEnemyGunfireDirection(holdPos, fac, 185.0f, 7.0f, out Vector3 gfDir, out _))
-                        garrisonDir = gfDir;
-                    else if (AiCore.TryGetNearestEnemyOrContestedObjectiveDirection(fac, holdPos, out Vector3 objDir))
-                        garrisonDir = objDir;
-                    else if (AiCore.TryGetEnemySpawnDirection(fac, holdPos, out Vector3 spDir))
-                        garrisonDir = spDir;
-                }
-                garrisonDir.y = 0f;
+                Vector3 garrisonDir = ComputeSquadOrderFacingDirection(sq, leader, holdPos, isAttackObjective: false);
                 if (garrisonDir.sqrMagnitude > 0.01f)
                 {
-                    sq.formationDirection = garrisonDir.normalized;
+                    sq.formationDirection = garrisonDir;
                 }
 
                 sq.HoldArea(holdPos, holdRadius, false);
@@ -1362,6 +1380,7 @@ namespace EasyRed2HumanAI
                     sq.currentTask.Pointer != p.ExpectedTaskPtr ||
                     IsSquadActivelyRetreating(p.SquadPtr, now) ||
                     IsSquadVehicleSeekingRepairStation(sq) ||
+                    IsSquadVehicleAnsweringTankSupport(sq) ||
                     sq.InChargeTime() ||
                     _squadOrderedToVehicle.ContainsKey(p.SquadPtr))
                 {
@@ -1408,10 +1427,10 @@ namespace EasyRed2HumanAI
                 _squadBlackboards[sq.Pointer] = clrBoard;
             }
 
-            bool seekingRepair = IsSquadVehicleSeekingRepairStation(sq);
+            bool vehicleMissionBusy = IsSquadVehicleSeekingRepairStation(sq) || IsSquadVehicleAnsweringTankSupport(sq);
 
             if ((changed || needsGarrisonHold) &&
-                !seekingRepair &&
+                !vehicleMissionBusy &&
                 sq.timed_order_end > now &&
                 !sq.InChargeTime() &&
                 !IsSquadActivelyRetreating(sq.Pointer, now))
@@ -1424,7 +1443,7 @@ namespace EasyRed2HumanAI
             // so every pivoted/garrisoned squad executes on the next non-heavy frames!
             int frame = Time.frameCount;
             if ((changed || needsGarrisonHold) &&
-                !seekingRepair &&
+                !vehicleMissionBusy &&
                 sq.Leader != null &&
                 sq.Leader.IsAlive &&
                 !sq.Leader.IsPlayer() &&
@@ -1673,7 +1692,9 @@ namespace EasyRed2HumanAI
                 $"HQ Radio: Order available \u2014 {hintSubject} [Radial]",
                 requireLeader: true,
                 minInterval: 8.0f,
-                notifyRemoteVanillaSquadmates: false);
+                notifyRemoteVanillaSquadmates: false,
+                bypassCooldown: true);
+            RefreshSquadHeaderLabel();
 
             // Play Radioman / NCO radio voice cue when available.
             if (playerSq.units != null)
@@ -1716,26 +1737,78 @@ namespace EasyRed2HumanAI
 
             try
             {
+                float now = Time.time;
                 if (state.Kind == PendingHqOrderKind.ObjectiveTask &&
                     state.TargetTask != null &&
                     state.TargetTask.Pointer != IntPtr.Zero)
                 {
                     playerSq.currentTask = state.TargetTask;
+                    _squadTaskCommittedUntil[playerSq.Pointer] = now + 75.0f;
+
+                    if (_squadBlackboards.TryGetValue(playerSq.Pointer, out SquadBlackboard clrBoard) && clrBoard.IsOuterScreenSquad)
+                    {
+                        clrBoard.IsOuterScreenSquad = false;
+                        clrBoard.OuterScreenUntil = 0f;
+                        _squadBlackboards[playerSq.Pointer] = clrBoard;
+                    }
+
+                    if (playerSq.timed_order_end > now && !playerSq.InChargeTime())
+                        playerSq.timed_order_end = 0f;
+
+                    if (playerSq.HoldFire)
+                    {
+                        try { playerSq.SetHoldFireOrder(false, false, false, Photon.Pun.PhotonNetwork.InRoom); } catch { }
+                    }
+
+                    AllowExplicitSquadUnstallRelease = true;
+                    try { playerSq.OrderLeaveAllVehiclesAndCovers(false, true, false); }
+                    catch { }
+                    finally { AllowExplicitSquadUnstallRelease = false; }
+
+                    Vector3 objPos = state.TargetTask.GetTaskDestination();
+                    if (objPos.sqrMagnitude < 0.01f)
+                        objPos = state.WorldPos;
+                    float objRadius = Mathf.Max(10.0f, state.TargetTask.GetTaskAreaRadius());
+
+                    Vector3 facingDir = ComputeSquadOrderFacingDirection(playerSq, localPlayer, objPos, state.IsAttackObjective);
+                    if (facingDir.sqrMagnitude > 0.01f)
+                        playerSq.formationDirection = facingDir;
+
+                    // Issue vanilla HoldArea order cleanly: sets moveOrderPosition/Radius, plays SL order anim & voice,
+                    // dispatches AI squadmates to tactical covers inside the objective area, updates GUI, and sends SyncSqOrder RPC.
+                    playerSq.HoldArea(objPos, objRadius, false);
+
                     RecordNotifiedPlayerSquadTask(state.TargetTask);
                     ConsumeInitialHqSpawnBriefingIfNoRadio(playerSq);
                     NotifyPlayerSquadTaskUpdated(playerSq);
-                    localPlayer.Say(VoiceManager.VoiceClip.yesSir, 0.05f);
+                    RefreshSquadHeaderLabel();
                 }
                 else if (state.Kind == PendingHqOrderKind.TacticalFlank)
                 {
+                    if (playerSq.HoldFire)
+                    {
+                        try { playerSq.SetHoldFireOrder(false, false, false, Photon.Pun.PhotonNetwork.InRoom); } catch { }
+                    }
+
+                    AllowExplicitSquadUnstallRelease = true;
+                    try { playerSq.OrderLeaveAllVehiclesAndCovers(false, true, false); }
+                    catch { }
+                    finally { AllowExplicitSquadUnstallRelease = false; }
+
                     Vector3 flankDir = state.FlankDirection.sqrMagnitude > 0.01f
                         ? state.FlankDirection.normalized
                         : Vector3.forward;
+                    playerSq.formationDirection = flankDir;
                     playerSq.AttackFromSide(flankDir, state.WorldPos, 24.0f);
                     localPlayer.Say(VoiceManager.VoiceClip.attackThere, 0.05f);
+                    if (Photon.Pun.PhotonNetwork.InRoom)
+                    {
+                        try { localPlayer.SyncSay(VoiceManager.VoiceClip.attackThere, -1); } catch { }
+                    }
+                    RefreshSquadHeaderLabel();
                 }
 
-                PlayerController.HintToPlayer($"HQ Radio: Copy — {state.ShortActionLabel}", false);
+                PlayerController.HintToPlayer($"HQ Radio: Copy — {state.ShortActionLabel} (squad ordered)", false);
             }
             catch { }
         }
@@ -1892,6 +1965,7 @@ namespace EasyRed2HumanAI
                     MissionObjective currentAttackObj = FindObjectiveWithTaskPtr(unheldObjectives, curTaskPtr);
                     if (currentAttackObj != null)
                     {
+                        bool postedPivot = false;
                         var key = new ObjectiveAttritionKey { Faction = faction, TaskPtr = curTaskPtr };
                         if (_objectiveAttrition.TryGetValue(key, out ObjectiveAttritionState attState))
                         {
@@ -1939,8 +2013,74 @@ namespace EasyRed2HumanAI
                                             mapBadgeText: "[HQ]",
                                             durationSeconds: 60.0f);
                                     }
+                                    postedPivot = true;
                                 }
                                 candidates.Clear();
+                            }
+                        }
+
+                        // 2B. Check for Oversaturated Sector Spread if current attack objective is crowded.
+                        if (!postedPivot &&
+                            (leaderPos - currentAttackObj.GetTaskPosition()).sqrMagnitude > 55.0f * 55.0f &&
+                            !IsSquadLockedInCloseFirefight(playerSq) &&
+                            (!isLocalSl || !TryGetActivePendingPlayerHqOrder(out _)))
+                        {
+                            FactionForceSnapshot force = GetFactionForceSnapshot(faction);
+                            float idealUnitsPerObj = Mathf.Max(8.0f, force.FriendlyAliveGround / (float)unheldObjectives.Count);
+                            int curUnits = CountAlliedGroundUnitsOnObjective(faction, curTaskPtr, currentAttackObj.GetTaskPosition(), out int curSqCnt, true);
+                            if (curSqCnt >= 2 && curUnits >= 14 && curUnits >= idealUnitsPerObj * 1.45f)
+                            {
+                                MissionObjective lightObj = null;
+                                float bestLightUnits = float.MaxValue;
+                                for (int i = 0; i < unheldObjectives.Count; i++)
+                                {
+                                    MissionObjective cand = unheldObjectives[i];
+                                    if (cand == null || cand.missionTask == null || cand.missionTask.Pointer == IntPtr.Zero)
+                                        continue;
+                                    IntPtr candTaskPtr = cand.missionTask.Pointer;
+                                    if (candTaskPtr == curTaskPtr || (isLocalSl && IsTaskBalkedByPlayer(candTaskPtr, now)))
+                                        continue;
+                                    bool avoidLight = _objectiveAttrition.TryGetValue(new ObjectiveAttritionKey { Faction = faction, TaskPtr = candTaskPtr }, out ObjectiveAttritionState lAttr) &&
+                                                      now < lAttr.AvoidUntil;
+                                    if (avoidLight)
+                                        continue;
+
+                                    int candUnits = CountAlliedGroundUnitsOnObjective(faction, candTaskPtr, cand.GetTaskPosition(), out _, true);
+                                    if (candUnits <= idealUnitsPerObj * 0.65f && candUnits + 6 <= curUnits && candUnits < bestLightUnits)
+                                    {
+                                        bestLightUnits = candUnits;
+                                        lightObj = cand;
+                                    }
+                                }
+
+                                if (lightObj != null)
+                                {
+                                    string fullLabel = AiCore.GetVanillaObjectiveDisplayName(lightObj, leaderPos, out string shortLetter);
+                                    if (remoteVanillaSl != null)
+                                    {
+                                        string bearing = AiCore.FormatRelativeBearingAndDistance(leaderPos, lightObj.GetTaskPosition());
+                                        AiCore.SendTargetedVanillaChatMessage(
+                                            remoteVanillaSl,
+                                            $"HQ Radio ({AiCore.FormatSquadPhoneticCallsign(playerSq)}): Sector crowded \u2014 consider shifting to {fullLabel} ({bearing})",
+                                            minPlayerInterval: 45.0f);
+                                    }
+                                    else
+                                    {
+                                        string shortPoint = !string.IsNullOrEmpty(shortLetter) ? shortLetter : fullLabel;
+                                        PostPendingPlayerHqOrder(
+                                            playerSq,
+                                            PendingHqOrderKind.ObjectiveTask,
+                                            lightObj,
+                                            lightObj.missionTask.Cast<SquadTask>(),
+                                            lightObj.GetTaskPosition(),
+                                            Vector3.zero,
+                                            isAttackObjective: true,
+                                            shortActionLabel: $"Spread {shortPoint}",
+                                            toastLabel: $"Sector Crowded \u2014 Attack {fullLabel}",
+                                            mapBadgeText: "[HQ]",
+                                            durationSeconds: 55.0f);
+                                    }
+                                }
                             }
                         }
                     }

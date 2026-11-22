@@ -1613,6 +1613,46 @@ namespace EasyRed2HumanAI
             }
         }
 
+        private static bool IsRemotePilotedPlane(VehiclePlane vp)
+        {
+            return vp != null &&
+                   vp.Pointer != IntPtr.Zero &&
+                   Photon.Pun.PhotonNetwork.InRoom &&
+                   !vp.IsDisabled() &&
+                   vp.HasNeverExploded() &&
+                   vp.IsPhysicsEnabled &&
+                   vp.HasDriverAlive &&
+                   !vp.OwnDriverOrVehicle();
+        }
+
+        private static void RestoreRemotePlaneGravityIfNeeded(VehiclePlane vp, AiCore.VehicleFastHandles vh)
+        {
+            if (vh == null || !vh.RemotePlaneGravitySuppressed)
+                return;
+
+            vh.RemotePlaneGravitySuppressed = false;
+            vh.HasRemotePlaneSync = false;
+            if (!vh.AirborneSpawnHoldActive && vp != null && vp.rb != null && !vp.rb.useGravity)
+            {
+                vp.rb.useGravity = true;
+            }
+        }
+
+        private static bool IsFiniteFloat(float v)
+        {
+            return !float.IsNaN(v) && !float.IsInfinity(v);
+        }
+
+        private static bool IsFiniteVector3(Vector3 v)
+        {
+            return IsFiniteFloat(v.x) && IsFiniteFloat(v.y) && IsFiniteFloat(v.z);
+        }
+
+        private static bool IsFiniteQuaternion(Quaternion q)
+        {
+            return IsFiniteFloat(q.x) && IsFiniteFloat(q.y) && IsFiniteFloat(q.z) && IsFiniteFloat(q.w);
+        }
+
         [HarmonyPatch(typeof(VehiclePlane), nameof(VehiclePlane.FixedUpdate))]
         public static class VehiclePlane_FixedUpdate_Patch
         {
@@ -1659,6 +1699,7 @@ namespace EasyRed2HumanAI
                     {
                         if (vh.AirborneSpawnHoldActive)
                             ReleaseAirborneSpawnHold(__instance, vh);
+                        RestoreRemotePlaneGravityIfNeeded(__instance, vh);
                         return;
                     }
 
@@ -1702,6 +1743,34 @@ namespace EasyRed2HumanAI
                             return;
                         }
                     }
+
+                    bool remotePiloted =
+                        !ownNow &&
+                        Photon.Pun.PhotonNetwork.InRoom &&
+                        __instance.HasDriverAlive &&
+                        __instance.IsPhysicsEnabled &&
+                        !__instance.IsDisabled() &&
+                        __instance.HasNeverExploded();
+                    if (remotePiloted)
+                    {
+                        Rigidbody remoteRb = __instance.rb;
+                        if (remoteRb != null)
+                        {
+                            if (remoteRb.useGravity)
+                                remoteRb.useGravity = false;
+                            vh.RemotePlaneGravitySuppressed = true;
+                            if (!remoteRb.isKinematic)
+                            {
+                                if (remoteRb.angularVelocity.sqrMagnitude > 0.0001f)
+                                    remoteRb.angularVelocity = Vector3.zero;
+                                if (vh.HasRemotePlaneSync && (now - vh.RemotePlaneSyncReceivedAt) <= 1.0f)
+                                    remoteRb.velocity = vh.RemotePlaneSyncVel;
+                            }
+                        }
+                        return;
+                    }
+
+                    RestoreRemotePlaneGravityIfNeeded(__instance, vh);
 
                     if (!ownNow)
                         return;
@@ -1760,6 +1829,260 @@ namespace EasyRed2HumanAI
                     }
                 }
                 catch { }
+            }
+        }
+
+        [HarmonyPatch(typeof(SyncSoldier), nameof(SyncSoldier.OnPhotonSerializeView))]
+        public static class SyncSoldier_OnPhotonSerializeView_Patch
+        {
+            public static void Postfix(SyncSoldier __instance, Photon.Pun.PhotonStream __0)
+            {
+                try
+                {
+                    if (!VisionConfig.EnableMod.Value ||
+                        !VisionConfig.EnableCoopAirborneSpawnFix.Value ||
+                        !Photon.Pun.PhotonNetwork.InRoom ||
+                        __instance == null ||
+                        __instance.Pointer == IntPtr.Zero ||
+                        __0 == null ||
+                        !__0.IsWriting)
+                    {
+                        return;
+                    }
+
+                    float now = Time.time;
+                    if (__instance.next_position_sync <= now + 0.14f)
+                        return;
+
+                    Soldier s = __instance.soldier;
+                    if (s == null || !s.IsAlive || !s.IsOnVehicle())
+                        return;
+
+                    Vehicle veh = s.GetCurrentVehicle();
+                    if (veh == null || !veh.IsAirVehicle())
+                        return;
+
+                    Soldier drv = veh.GetDriver();
+                    if (drv != null && drv.Pointer == s.Pointer)
+                    {
+                        __instance.next_position_sync = now + 0.12f;
+                    }
+                }
+                catch { }
+            }
+        }
+
+        [HarmonyPatch(typeof(SyncVehiclePlane), nameof(SyncVehiclePlane.SyncVehiclePosition))]
+        public static class SyncVehiclePlane_SyncVehiclePosition_Patch
+        {
+            public static bool Prefix(SyncVehiclePlane __instance, Vector3 __0, Quaternion __1, float __2, Vector2 __3, bool __4)
+            {
+                try
+                {
+                    if (!VisionConfig.EnableMod.Value ||
+                        !VisionConfig.EnableCoopAirborneSpawnFix.Value ||
+                        !Photon.Pun.PhotonNetwork.InRoom ||
+                        __instance == null ||
+                        __instance.Pointer == IntPtr.Zero)
+                    {
+                        return true;
+                    }
+
+                    if (!IsFiniteVector3(__0) || !IsFiniteQuaternion(__1) || !IsFiniteFloat(__2))
+                        return false;
+
+                    Vehicle veh = __instance.vehicle;
+                    VehiclePlane vp = veh != null ? veh.TryCast<VehiclePlane>() : null;
+                    if (vp == null)
+                        return true;
+
+                    vp.CheckDriverAndOwnership();
+                    if (!IsRemotePilotedPlane(vp))
+                        return true;
+
+                    AiCore.VehicleFastHandles vh = AiCore.GetOrCreateVehicleHandles(vp);
+                    if (vh == null)
+                        return true;
+
+                    float now = Time.time;
+                    float maxSpeedMs = Mathf.Max(160f, (vp.maxKmhSpeed / 3.6f) * 1.45f);
+                    float clampedSpeed = Mathf.Clamp(__2, -40f, maxSpeedMs);
+                    Vector3 syncVel;
+                    if (Mathf.Abs(clampedSpeed) >= 4.0f)
+                    {
+                        syncVel = (__1 * Vector3.forward) * clampedSpeed;
+                    }
+                    else if (vh.HasRemotePlaneSync)
+                    {
+                        float packetDt = now - vh.RemotePlaneSyncReceivedAt;
+                        syncVel = (packetDt >= 0.05f && packetDt <= 0.65f)
+                            ? Vector3.ClampMagnitude((__0 - vh.RemotePlaneSyncPos) / packetDt, maxSpeedMs)
+                            : Vector3.zero;
+                    }
+                    else
+                    {
+                        syncVel = Vector3.zero;
+                    }
+
+                    bool hadSync = vh.HasRemotePlaneSync;
+                    vh.RemotePlaneSyncPos = __0;
+                    vh.RemotePlaneSyncRot = __1;
+                    vh.RemotePlaneSyncVel = syncVel;
+                    vh.RemotePlaneSyncReceivedAt = now;
+                    vh.HasRemotePlaneSync = true;
+
+                    __instance.syncDestPos = new Il2CppSystem.Nullable<Vector3>(__0);
+                    __instance.syncDestRot = new Il2CppSystem.Nullable<Quaternion>(__1);
+                    __instance.syncBraking = __4;
+                    __instance.synchedSpeed = syncVel;
+                    vp.SetMoveDir(__3);
+
+                    Rigidbody rb = vp.rb;
+                    if (rb != null)
+                    {
+                        if (rb.useGravity)
+                            rb.useGravity = false;
+                        vh.RemotePlaneGravitySuppressed = true;
+                        if (!rb.isKinematic)
+                        {
+                            rb.velocity = syncVel;
+                            rb.angularVelocity = Vector3.zero;
+                        }
+                    }
+
+                    Transform tr = vp.transform;
+                    if (tr != null && (!hadSync || (__0 - tr.position).sqrMagnitude > 85f * 85f))
+                    {
+                        tr.SetPositionAndRotation(__0, __1);
+                    }
+
+                    return false;
+                }
+                catch
+                {
+                    return true;
+                }
+            }
+        }
+
+        [HarmonyPatch(typeof(SyncVehiclePlane), nameof(SyncVehiclePlane.UpdatePosAndRot))]
+        public static class SyncVehiclePlane_UpdatePosAndRot_Patch
+        {
+            public static bool Prefix(SyncVehiclePlane __instance)
+            {
+                try
+                {
+                    if (!VisionConfig.EnableMod.Value ||
+                        !VisionConfig.EnableCoopAirborneSpawnFix.Value ||
+                        !Photon.Pun.PhotonNetwork.InRoom ||
+                        __instance == null ||
+                        __instance.Pointer == IntPtr.Zero)
+                    {
+                        return true;
+                    }
+
+                    Vehicle veh = __instance.vehicle;
+                    VehiclePlane vp = veh != null ? veh.TryCast<VehiclePlane>() : null;
+                    if (!IsRemotePilotedPlane(vp))
+                        return true;
+
+                    AiCore.VehicleFastHandles vh = AiCore.GetOrCreateVehicleHandles(vp);
+                    if (vh == null || !vh.HasRemotePlaneSync)
+                        return false;
+
+                    float dt = Time.deltaTime;
+                    if (dt <= 0f)
+                        return false;
+
+                    float age = Mathf.Clamp(Time.time - vh.RemotePlaneSyncReceivedAt, 0f, 0.35f);
+                    Vector3 vel = vh.RemotePlaneSyncVel;
+                    Vector3 extrap = vel * age;
+                    if (vel.y < -2.0f)
+                        extrap.y = vel.y * Mathf.Min(age, 0.20f);
+
+                    Vector3 targetPos = vh.RemotePlaneSyncPos + extrap;
+                    Quaternion targetRot = vh.RemotePlaneSyncRot;
+
+                    Transform tr = vp.transform;
+                    if (tr != null)
+                    {
+                        if ((targetPos - tr.position).sqrMagnitude > 85f * 85f)
+                        {
+                            tr.SetPositionAndRotation(targetPos, targetRot);
+                        }
+                        else
+                        {
+                            tr.position = Vector3.Lerp(tr.position, targetPos, 1f - Mathf.Exp(-12f * dt));
+                            tr.rotation = Quaternion.Slerp(tr.rotation, targetRot, 1f - Mathf.Exp(-14f * dt));
+                        }
+                    }
+
+                    Rigidbody rb = vp.rb;
+                    if (rb != null)
+                    {
+                        if (rb.useGravity)
+                            rb.useGravity = false;
+                        vh.RemotePlaneGravitySuppressed = true;
+                        if (!rb.isKinematic)
+                        {
+                            rb.velocity = vel;
+                            if (rb.angularVelocity.sqrMagnitude > 0.0001f)
+                                rb.angularVelocity = Vector3.zero;
+                        }
+                    }
+
+                    return false;
+                }
+                catch
+                {
+                    return true;
+                }
+            }
+        }
+
+        [HarmonyPatch(typeof(VehiclePlane), nameof(VehiclePlane.OnCollisionEnter))]
+        public static class VehiclePlane_OnCollisionEnter_Patch
+        {
+            public static bool Prefix(VehiclePlane __instance)
+            {
+                try
+                {
+                    if (VisionConfig.EnableMod.Value &&
+                        VisionConfig.EnableCoopAirborneSpawnFix.Value &&
+                        Photon.Pun.PhotonNetwork.InRoom &&
+                        __instance != null &&
+                        __instance.Pointer != IntPtr.Zero &&
+                        __instance.HasDriverAlive &&
+                        !__instance.OwnDriverOrVehicle())
+                    {
+                        return false;
+                    }
+                }
+                catch { }
+                return true;
+            }
+        }
+
+        [HarmonyPatch(typeof(VehiclePlane), nameof(VehiclePlane.Explode))]
+        public static class VehiclePlane_Explode_Patch
+        {
+            public static bool Prefix(VehiclePlane __instance)
+            {
+                try
+                {
+                    if (VisionConfig.EnableMod.Value &&
+                        VisionConfig.EnableCoopAirborneSpawnFix.Value &&
+                        Photon.Pun.PhotonNetwork.InRoom &&
+                        __instance != null &&
+                        __instance.Pointer != IntPtr.Zero &&
+                        __instance.HasDriverAlive &&
+                        !__instance.OwnDriverOrVehicle())
+                    {
+                        return false;
+                    }
+                }
+                catch { }
+                return true;
             }
         }
     }
