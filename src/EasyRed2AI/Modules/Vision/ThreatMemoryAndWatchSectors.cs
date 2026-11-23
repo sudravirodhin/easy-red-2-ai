@@ -12,6 +12,8 @@ namespace EasyRed2HumanAI
             public Vector3 Pos;
             public float BaseAngleDeg;
             public Vector3 ResultDir;
+            public Vector3 SecondaryDir;
+            public bool IsWideOpen;
             public float ExpireTime;
         }
 
@@ -1051,6 +1053,31 @@ namespace EasyRed2HumanAI
             return (Quaternion.Euler(0f, centerDeg + safeFan, 0f) * dir).normalized;
         }
 
+        private static Vector3 ResolveScannedWatchDirection(IntPtr ptr, in WatchWindowCache wCache, float maxFanDeg)
+        {
+            if (wCache.ResultDir.sqrMagnitude < 0.01f)
+                return wCache.ResultDir;
+
+            int h = AiCore.GetDeterministicHash(ptr, 97);
+            int scanSlot = (int)(Time.time * 0.40f) + (h & 7);
+
+            if (wCache.SecondaryDir.sqrMagnitude > 0.01f && (scanSlot % 5 == 1 || scanSlot % 5 == 3))
+                return wCache.SecondaryDir;
+
+            if (wCache.IsWideOpen)
+            {
+                int phase = scanSlot % 3;
+                if (phase == 1 || phase == 2)
+                {
+                    float sweepDeg = Mathf.Min(22f, maxFanDeg + 8f);
+                    float yaw = phase == 1 ? -sweepDeg : sweepDeg;
+                    return (Quaternion.Euler(0f, yaw, 0f) * wCache.ResultDir).normalized;
+                }
+            }
+
+            return wCache.ResultDir;
+        }
+
         private static Vector3 PickClearWatchDirection(Soldier soldier, Vector3 myPos, Vector3 baseDir, float maxFanDeg)
         {
             baseDir.y = 0f;
@@ -1069,7 +1096,7 @@ namespace EasyRed2HumanAI
                 (myPos - wCache.Pos).sqrMagnitude < 0.25f &&
                 Mathf.Abs(Mathf.DeltaAngle(baseAngleDeg, wCache.BaseAngleDeg)) < 10.0f)
             {
-                return wCache.ResultDir;
+                return ResolveScannedWatchDirection(ptr, in wCache, maxFanDeg);
             }
 
             int h = AiCore.GetDeterministicHash(ptr, 97);
@@ -1085,7 +1112,7 @@ namespace EasyRed2HumanAI
             Vector3 standOrigin = myPos + Vector3.up * 1.28f;
             Vector3 sillOrigin = myPos + Vector3.up * 0.52f;
 
-            bool fannedBlocked = AiCore.RaycastEnvironment(upperOrigin, fannedDir, 4.5f, root, out _);
+            bool fannedBlocked = AiCore.RaycastEnvironment(upperOrigin, fannedDir, 6.5f, root, out _);
             bool fannedHasWindowSill = !fannedBlocked &&
                                        soldier.m_pose != SoldierPose.Prone &&
                                        !AiCore.RaycastEnvironment(standOrigin, fannedDir, 7.5f, root, out _) &&
@@ -1100,6 +1127,8 @@ namespace EasyRed2HumanAI
                     Pos = myPos,
                     BaseAngleDeg = baseAngleDeg,
                     ResultDir = finalDir,
+                    SecondaryDir = Vector3.zero,
+                    IsWideOpen = false,
                     ExpireTime = Time.time + 8.0f
                 };
                 return finalDir;
@@ -1132,9 +1161,11 @@ namespace EasyRed2HumanAI
                     Pos = myPos,
                     BaseAngleDeg = baseAngleDeg,
                     ResultDir = fannedDir,
-                    ExpireTime = Time.time + 8.0f
+                    SecondaryDir = Vector3.zero,
+                    IsWideOpen = true,
+                    ExpireTime = Time.time + 6.0f
                 };
-                return fannedDir;
+                return ResolveScannedWatchDirection(ptr, in sh.Vision.WatchWindow, maxFanDeg);
             }
 
             Vector3 bestDir = fannedDir;
@@ -1171,7 +1202,7 @@ namespace EasyRed2HumanAI
 
                 if (score > bestScore)
                 {
-                    if (bestScore > -900f && Vector3.Dot(cand, bestDir) < -0.25f)
+                    if (bestScore > -900f && Vector3.Dot(cand, bestDir) < 0.50f)
                     {
                         secondApproachDir = bestDir;
                         secondApproachScore = bestScore;
@@ -1180,35 +1211,28 @@ namespace EasyRed2HumanAI
                     bestDir = cand;
                     bestIsWindow = isWindowAperture;
                 }
-                else if (clearDist >= 5.5f && Vector3.Dot(cand, bestDir) < -0.25f && score > secondApproachScore)
+                else if (clearDist >= 5.5f && Vector3.Dot(cand, bestDir) < 0.50f && score > secondApproachScore)
                 {
                     secondApproachScore = score;
                     secondApproachDir = cand;
                 }
             }
 
-            // Trench & Corridor Vigilance: when walled in on both sides (trench/hallway) with two open approaches,
-            // briefly check the secondary trench bend/rear approach ~20% of the time so flankers can't walk up unopposed!
-            bool checkSecondaryTrenchApproach =
-                (fannedBlocked || inNarrowTrenchOrHall) &&
-                !bestIsWindow &&
-                secondApproachDir.sqrMagnitude > 0.01f &&
-                (((int)(Time.time * 0.24f) + (h & 7)) % 5 == 0);
+            finalDir = (bestIsWindow || fannedBlocked)
+                ? CenterGazeInWindowAperture(upperOrigin, bestDir, root, t, maxFanDeg)
+                : bestDir;
 
-            Vector3 chosenWatch = checkSecondaryTrenchApproach ? secondApproachDir : bestDir;
-            finalDir = (!checkSecondaryTrenchApproach && (bestIsWindow || fannedBlocked))
-                ? CenterGazeInWindowAperture(upperOrigin, chosenWatch, root, t, maxFanDeg)
-                : chosenWatch;
-
-            float cacheDur = (fannedBlocked || inNarrowTrenchOrHall) ? 3.8f : 8.0f;
+            float cacheDur = (fannedBlocked || inNarrowTrenchOrHall) ? 3.8f : 6.0f;
             sh.Vision.WatchWindow = new WatchWindowCache
             {
                 Pos = myPos,
                 BaseAngleDeg = baseAngleDeg,
                 ResultDir = finalDir,
+                SecondaryDir = (!bestIsWindow && secondApproachDir.sqrMagnitude > 0.01f) ? secondApproachDir : Vector3.zero,
+                IsWideOpen = !fannedBlocked && !bestIsWindow && !inNarrowTrenchOrHall && secondApproachDir.sqrMagnitude < 0.01f,
                 ExpireTime = Time.time + cacheDur
             };
-            return finalDir;
+            return ResolveScannedWatchDirection(ptr, in sh.Vision.WatchWindow, maxFanDeg);
         }
 
         private static void InsertClosestContact(
@@ -1288,8 +1312,10 @@ namespace EasyRed2HumanAI
             bool hadPrevCache = cached.ExpireTime > 0f;
             if (now < cached.ExpireTime)
             {
-                watchDir = cached.WatchDir;
                 hasActiveContact = cached.HasActiveContact;
+                watchDir = (sh.Vision.WatchWindow.ExpireTime > now && sh.Vision.WatchWindow.ResultDir.sqrMagnitude > 0.01f)
+                    ? ResolveScannedWatchDirection(ptr, in sh.Vision.WatchWindow, hasActiveContact ? 14f : 24f)
+                    : cached.WatchDir;
                 return watchDir.sqrMagnitude > 0.01f;
             }
 
@@ -1499,6 +1525,14 @@ namespace EasyRed2HumanAI
                         }
                     }
                 }
+            }
+
+            long sqId = (mySquad != null && mySquad.Pointer != IntPtr.Zero) ? mySquad.Pointer.ToInt64() : 0L;
+            bool radioConn = (mySquad != null && mySquad.Pointer != IntPtr.Zero && _squadBlackboards.TryGetValue(mySquad.Pointer, out SquadBlackboard dsBoard)) &&
+                             dsBoard.IsConnectedToRadioNet;
+            if (EmergentRuntimeBridge.TryGetNearestDangerStampDirection(myFaction, myPos, sqId, radioConn, now, out Vector3 toStamp, out float stampDistSq))
+            {
+                InsertClosestContact(toStamp, stampDistSq * 1.25f, ref contactCount, ref c0, ref d0, ref c1, ref d1, ref c2, ref d2, ref c3, ref d3);
             }
 
             if (contactCount > 0)
@@ -1755,6 +1789,12 @@ namespace EasyRed2HumanAI
                                 __instance.MoveFPSOptimized(0.88f, __0);
                                 soldier.RotateToward(h.Vision.CornerPie.PieLookDir, __0);
                                 return false;
+                            case 4:
+                                __state.PieHandled = true;
+                                __instance.MoveFPSOptimized(1.0f, __0);
+                                if (h.Combat.PointBlankFaceDir.sqrMagnitude > 0.01f)
+                                    soldier.RotateToward(h.Combat.PointBlankFaceDir, __0 * 2.5f);
+                                return false;
                             default:
                                 return true;
                         }
@@ -1905,6 +1945,38 @@ namespace EasyRed2HumanAI
 
                     if (__instance.moveDirectlyToward_end > now || __instance.knifeCharge)
                     {
+                        if (VisionConfig.EnablePointBlankMelee.Value &&
+                            (now < h.Combat.PointBlankFaceUntil || __instance.knifeCharge) &&
+                            !soldier.IsOnVehicle() &&
+                            soldier.m_pose != SoldierPose.Prone &&
+                            h.Tr != null)
+                        {
+                            Soldier pbEnemy = h.Combat.CachedMeleeEnemy;
+                            if (pbEnemy == null || AiCore.IsSoldierNonCombatantOrSurrendered(pbEnemy))
+                                pbEnemy = __instance.visibleTarget != null ? __instance.visibleTarget.TryCast<Soldier>() : null;
+
+                            if (pbEnemy != null && !AiCore.IsSoldierNonCombatantOrSurrendered(pbEnemy))
+                            {
+                                AiCore.SoldierFastHandles pbH = AiCore.GetOrCreateSoldierHandles(pbEnemy);
+                                Vector3 pbEnemyPos = (pbH != null && pbH.Tr != null) ? pbH.Tr.position : pbEnemy.transform.position;
+                                Vector3 toPb = pbEnemyPos - myPos;
+                                toPb.y = 0f;
+                                float pbDistSq = toPb.sqrMagnitude;
+                                if (pbDistSq > 0.01f && pbDistSq <= 5.2f * 5.2f)
+                                {
+                                    Vector3 faceDir = toPb / Mathf.Sqrt(pbDistSq);
+                                    __state.PieHandled = true;
+                                    h.Vision.LastMovementRoutineCatchUpMode = 4;
+                                    h.Combat.PointBlankFaceDir = faceDir;
+                                    __instance.MoveFPSOptimized(1.0f, __0);
+                                    if (__instance.HasEnemyAndCanFireAtHim && __instance.visibleTarget != null)
+                                        __instance.RotateAndFireToward(pbEnemyPos, __0);
+                                    else
+                                        soldier.RotateToward(faceDir, __0 * 2.5f);
+                                    return false;
+                                }
+                            }
+                        }
                         return true;
                     }
 
@@ -2007,9 +2079,99 @@ namespace EasyRed2HumanAI
                     IntPtr ptr = h.Ptr;
 
                     float now = Time.time;
+                    if (now < h.Combat.PendingThrowFaceUntil &&
+                        h.Combat.PendingThrowFaceDir.sqrMagnitude > 0.01f &&
+                        !AiCore.IsSoldierInVehicleOrTransition(soldier) &&
+                        !soldier.HasSurrended() &&
+                        !soldier.IsCarried())
+                    {
+                        AiCore.RotateBodyWithoutRaisingGun(soldier, h.Combat.PendingThrowFaceDir, __0 * 1.65f);
+                        if (soldier.isInHandsAnimation)
+                        {
+                            h.Vision.IsTurningToWatchSector = false;
+                            return;
+                        }
+                    }
+
+                    bool isMovingNow = __instance.IsMoving();
+                    if (isMovingNow)
+                    {
+                        h.Vision.WasMovingLastWatchTick = true;
+                        if (__state.DestKind != AiCore.CachedDestKind.VehicleRepair &&
+                            __state.DestKind != AiCore.CachedDestKind.MedicHeal &&
+                            !__instance.HasEnemyAndCanFireAtHim &&
+                            !AiCore.HasHeldMortarCached(h, __instance, now) &&
+                            !AiCore.IsSoldierInVehicleOrTransition(soldier) &&
+                            !soldier.UsingBipod() &&
+                            !soldier.IsBipodTransitioning() &&
+                            !soldier.isInBodyAnimation &&
+                            !soldier.isInHandsAnimation &&
+                            !soldier.HasSurrended() &&
+                            !soldier.IsCarried() &&
+                            !soldier.IsCarryingBody())
+                        {
+                            Vector3 reflexDir = Vector3.zero;
+                            bool hasReflexDir = false;
+                            Vector3 obsPos = h.Tr != null ? h.Tr.position : Vector3.zero;
+                            if (now < h.Vision.UnderFireUntil)
+                            {
+                                Vector3 ufPos = AiCore.TryGetSpottableCenter(h.Vision.UnderFireAttacker, out Vector3 liveUfPos)
+                                    ? liveUfPos
+                                    : h.Vision.UnderFireFromPos;
+                                Vector3 toUf = ufPos - obsPos;
+                                toUf.y = 0f;
+                                if (toUf.sqrMagnitude > 0.04f)
+                                {
+                                    reflexDir = toUf.normalized;
+                                    hasReflexDir = true;
+                                }
+                            }
+                            else if (now >= h.Vision.StationaryWatch.NextEvalTime)
+                            {
+                                h.Vision.StationaryWatch.NextEvalTime = now + 0.15f;
+                                string obsFac = AiCore.GetCachedFaction(h, now);
+                                if (!string.IsNullOrEmpty(obsFac) &&
+                                    VisionPatches.TryGetNearestCloseAcousticThreat(obsPos, obsFac, now, out Vector3 mAcousticPos, out float mAcousticDist, out _) &&
+                                    mAcousticDist <= 16.0f)
+                                {
+                                    Vector3 toSound = mAcousticPos - obsPos;
+                                    toSound.y = 0f;
+                                    if (toSound.sqrMagnitude > 0.04f)
+                                    {
+                                        h.Vision.StationaryWatch.HasWatchDir = true;
+                                        h.Vision.StationaryWatch.WatchDir = toSound.normalized;
+                                    }
+                                    else
+                                    {
+                                        h.Vision.StationaryWatch.HasWatchDir = false;
+                                    }
+                                }
+                                else
+                                {
+                                    h.Vision.StationaryWatch.HasWatchDir = false;
+                                }
+                            }
+
+                            if (!hasReflexDir && h.Vision.StationaryWatch.HasWatchDir && h.Vision.StationaryWatch.WatchDir.sqrMagnitude > 0.01f)
+                            {
+                                reflexDir = h.Vision.StationaryWatch.WatchDir;
+                                hasReflexDir = true;
+                            }
+
+                            if (hasReflexDir)
+                            {
+                                float reflexTurnDt = now < h.Vision.UnderFireUntil ? (__0 * 1.55f) : (__0 * 1.25f);
+                                AiCore.RotateBodyWithoutRaisingGun(soldier, reflexDir, reflexTurnDt);
+                                __instance.moveLookingTarget = true;
+                                if (now >= soldier.alertEndTime - 1.0f)
+                                    soldier.SetAlertedFor(4.0f);
+                            }
+                        }
+                    }
+
                     if (__state.DestKind == AiCore.CachedDestKind.VehicleRepair ||
                         __state.DestKind == AiCore.CachedDestKind.MedicHeal ||
-                        __instance.IsMoving() ||
+                        isMovingNow ||
                         __instance.HasEnemyAndCanFireAtHim ||
                         AiCore.HasHeldMortarCached(h, __instance, now) ||
                         AiCore.IsSoldierInVehicleOrTransition(soldier) ||
@@ -2021,6 +2183,14 @@ namespace EasyRed2HumanAI
                     {
                         h.Vision.IsTurningToWatchSector = false;
                         return;
+                    }
+
+                    if (h.Vision.WasMovingLastWatchTick)
+                    {
+                        h.Vision.WasMovingLastWatchTick = false;
+                        h.Vision.ThreatSector.ExpireTime = 0f;
+                        h.Vision.StationaryWatch.NextEvalTime = 0f;
+                        h.Vision.WatchWindow.ExpireTime = 0f;
                     }
 
                     // Last-Known Position Suppressive Fire for stationary gunners / automatic weapons
@@ -2063,7 +2233,17 @@ namespace EasyRed2HumanAI
                             toUf.y = 0f;
                             if (toUf.sqrMagnitude > 0.04f)
                             {
-                                watchDir = toUf.normalized;
+                                Vector3 rawDir = toUf.normalized;
+                                float eyeH = soldier.m_pose == SoldierPose.Prone ? 0.34f : (soldier.m_pose == SoldierPose.Crouch ? 0.80f : 1.28f);
+                                if (obsPos != Vector3.zero && AiCore.IsDirectionBlockedByEnvironment(obsPos + Vector3.up * eyeH, rawDir, 3.8f, h.RootTr))
+                                {
+                                    Vector3 clearDir = PickClearWatchDirection(soldier, obsPos, rawDir, 14f);
+                                    watchDir = clearDir.sqrMagnitude > 0.01f ? clearDir : rawDir;
+                                }
+                                else
+                                {
+                                    watchDir = rawDir;
+                                }
                                 hasWatchDir = true;
                                 hasActiveWatchContact = true;
                                 if (now >= soldier.alertEndTime - 1.0f)
@@ -2082,7 +2262,17 @@ namespace EasyRed2HumanAI
                                 toSound.y = 0f;
                                 if (toSound.sqrMagnitude > 0.04f)
                                 {
-                                    watchDir = toSound.normalized;
+                                    Vector3 rawDir = toSound.normalized;
+                                    float eyeH = soldier.m_pose == SoldierPose.Prone ? 0.34f : (soldier.m_pose == SoldierPose.Crouch ? 0.80f : 1.28f);
+                                    if (obsPos != Vector3.zero && AiCore.IsDirectionBlockedByEnvironment(obsPos + Vector3.up * eyeH, rawDir, 3.8f, h.RootTr))
+                                    {
+                                        Vector3 clearDir = PickClearWatchDirection(soldier, obsPos, rawDir, 14f);
+                                        watchDir = clearDir.sqrMagnitude > 0.01f ? clearDir : rawDir;
+                                    }
+                                    else
+                                    {
+                                        watchDir = rawDir;
+                                    }
                                     hasWatchDir = true;
                                     hasActiveWatchContact = true;
                                     if (now >= soldier.alertEndTime - 1.0f)
@@ -2138,7 +2328,7 @@ namespace EasyRed2HumanAI
                                             coverFwdBlockedAtEye = h.Tr != null && AiCore.IsDirectionBlockedByEnvironment(
                                                 h.Tr.position + Vector3.up * eyeH,
                                                 coverFwd,
-                                                1.85f,
+                                                4.2f,
                                                 h.RootTr);
                                             h.Vision.CoverEyeBlock = new CoverEyeBlockState
                                             {

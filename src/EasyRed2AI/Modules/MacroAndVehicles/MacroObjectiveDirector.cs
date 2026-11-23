@@ -657,8 +657,10 @@ namespace EasyRed2HumanAI
                     if (force.SprawlFactor01 >= 0.25f)
                     {
                         TryDeploySurplusDefenseScreen(faction, heldObjectives, eligibleSquads, force, allEnemyLeaderPositions, now);
-                        if (unheldObjectives.Count >= 2 && eligibleSquads.Count >= 3)
-                            TrySpreadOversaturatedAttackers(faction, unheldObjectives, eligibleSquads, assignedGarrisonSquads, force, now);
+                    }
+                    if (unheldObjectives.Count >= 2 && eligibleSquads.Count >= 3)
+                    {
+                        TrySpreadOversaturatedAttackers(faction, unheldObjectives, eligibleSquads, assignedGarrisonSquads, force, now);
                     }
 
                     if (unheldObjectives.Count >= 2 && eligibleSquads.Count >= 2)

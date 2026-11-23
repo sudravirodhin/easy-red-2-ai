@@ -789,7 +789,8 @@ namespace EasyRed2HumanAI
 
                         yL += 10f;
                         DrawSectionHeaderWithBundle(colLeftX, ref yL, colW, "Multiplayer Gameplay Enhancements (Default OFF)",
-                            VisionConfig.EnableObjectiveTeamplayScoring);
+                            VisionConfig.EnableObjectiveTeamplayScoring,
+                            VisionConfig.EnableVanillaPvpMode);
                         string ptfoLabel = "Objective & Teamplay Scoring (PTFO, Host-Synced)";
                         if (VeteranAndTacticsPatches.IsPtfoControlledByRemoteHost(out bool ptfoHostOn, out bool ptfoHostKnown))
                         {
@@ -798,6 +799,15 @@ namespace EasyRed2HumanAI
                                 : "Objective & Teamplay Scoring (PTFO) [Host: Vanilla/OFF]";
                         }
                         DrawToggleButton(colLeftX, ref yL, colW, rowH, ptfoLabel, VisionConfig.EnableObjectiveTeamplayScoring);
+                        bool prevPvpMode = VisionConfig.EnableVanillaPvpMode.Value;
+                        DrawToggleButton(colLeftX, ref yL, colW, rowH, "Vanilla PvP Mode (Disable Local/Ballistics/HUD Advantages)", VisionConfig.EnableVanillaPvpMode);
+                        if (VisionConfig.EnableVanillaPvpMode.Value != prevPvpMode)
+                        {
+                            VisionConfig.ApplyVanillaPvpMode(VisionConfig.EnableVanillaPvpMode.Value);
+                            ShowToast(VisionConfig.EnableVanillaPvpMode.Value
+                                ? "Vanilla PvP Mode ON: local ballistics/HUD advantages disabled."
+                                : "Vanilla PvP Mode OFF: previous settings restored.");
+                        }
 
                         yL += 10f;
                         DrawSectionHeaderWithBundle(colLeftX, ref yL, colW, "Squad Roster, Map & Overhead Names",
@@ -817,7 +827,8 @@ namespace EasyRed2HumanAI
                             VisionConfig.EnableSpectatorBotInspector,
                             VisionConfig.EnableExtendedRoomNames,
                             VisionConfig.EnableLobbyJoinMotd,
-                            VisionConfig.EnableTacticalReloadAndBipodCancel);
+                            VisionConfig.EnableTacticalReloadAndBipodCancel,
+                            VisionConfig.EnableFriendlyBlastWarnings);
                         DrawToggleButton(colRightX, ref yR, colW, rowH, "Master Mod Toggle (F8)", VisionConfig.EnableMod);
                         DrawToggleButton(colRightX, ref yR, colW, rowH, "Short-Press Orders Key to Spot", VisionConfig.EnableQuickTapSpot);
                         DrawToggleButton(colRightX, ref yR, colW, rowH, "Death Screen Kill Attribution + Age", VisionConfig.EnableDeathScreenAttribution);
@@ -828,6 +839,7 @@ namespace EasyRed2HumanAI
                         DrawToggleButton(colRightX, ref yR, colW, rowH, "64-Char Multiplayer Room Names", VisionConfig.EnableExtendedRoomNames);
                         DrawToggleButton(colRightX, ref yR, colW, rowH, "Host Lobby Welcome MOTD (Joiners)", VisionConfig.EnableLobbyJoinMotd);
                         DrawToggleButton(colRightX, ref yR, colW, rowH, "Tactical Reload & Bipod Animation Cancel", VisionConfig.EnableTacticalReloadAndBipodCancel);
+                        DrawToggleButton(colRightX, ref yR, colW, rowH, "Friendly Blast Warnings (Toast + Co-op Chat)", VisionConfig.EnableFriendlyBlastWarnings);
 
                         yR += 6f;
                         float curMult = VisionConfig.UiScaleMultiplier != null
@@ -1090,6 +1102,7 @@ namespace EasyRed2HumanAI
         private static bool _specHasValidTarget;
         private static bool _specIsFreeCamera;
         private static bool _specTargetInDistress;
+        private static bool _specTargetIsFriendly = true;
         private static string _specHeaderLine = "";
         private static string _specGoapLine = "";
         private static string _specVitalsLine = "";
@@ -1114,7 +1127,7 @@ namespace EasyRed2HumanAI
                 virtualW * 0.5f,
                 virtualH * 0.5f,
                 _specHasValidTarget
-                    ? new Color(1.0f, 0.88f, 0.32f, 0.90f)
+                    ? new Color(1.0f, 0.22f, 0.88f, 0.92f)
                     : new Color(0.92f, 0.96f, 1.0f, 0.45f),
                 _specHasValidTarget);
 
@@ -1133,6 +1146,11 @@ namespace EasyRed2HumanAI
             GUI.color = new Color(0.04f, 0.05f, 0.07f, 0.90f);
             GUI.Box(new Rect(cardX, cardY, cardW, cardH), "");
             GUI.Box(new Rect(cardX + 2f, cardY + 2f, cardW - 4f, cardH - 4f), "");
+
+            Color specTeamCol = _specTargetIsFriendly ? MissionTask.BLUE_MISSION_TEXT : MissionTask.RED_MISSION_TEXT;
+            specTeamCol.a = 1.0f;
+            GUI.color = specTeamCol;
+            GUI.DrawTexture(new Rect(cardX + 2f, cardY + 2f, cardW - 4f, 3f), Texture2D.whiteTexture);
 
             GUIStyle lbl = GUI.skin != null ? GUI.skin.label : null;
             int oldSize = 0;
@@ -1154,9 +1172,9 @@ namespace EasyRed2HumanAI
                 lbl.fontSize = 14;
                 lbl.fontStyle = FontStyle.Bold;
             }
-            GUI.color = _specTargetInDistress
-                ? new Color(1.0f, 0.62f, 0.42f, 1.0f)
-                : new Color(1.0f, 0.88f, 0.38f, 1.0f);
+            Color specHdrCol = Color.Lerp(specTeamCol, Color.white, 0.25f);
+            specHdrCol.a = 1.0f;
+            GUI.color = specHdrCol;
             GUI.Label(new Rect(cardX + 14f, cardY + 5f, cardW - 28f, 21f), _specHeaderLine);
 
             if (lbl != null)
@@ -1164,10 +1182,12 @@ namespace EasyRed2HumanAI
                 lbl.fontSize = 13;
                 lbl.fontStyle = FontStyle.Normal;
             }
-            GUI.color = new Color(0.62f, 0.92f, 1.0f, 1.0f);
+            GUI.color = new Color(1.0f, 0.90f, 0.42f, 1.0f);
             GUI.Label(new Rect(cardX + 14f, cardY + 27f, cardW - 28f, 20f), _specGoapLine);
 
-            GUI.color = new Color(0.88f, 0.91f, 0.95f, 0.98f);
+            GUI.color = _specTargetInDistress
+                ? new Color(1.0f, 0.78f, 0.56f, 0.98f)
+                : new Color(0.88f, 0.91f, 0.95f, 0.98f);
             GUI.Label(new Rect(cardX + 14f, cardY + 48f, cardW - 28f, 20f), _specVitalsLine);
 
             if (lbl != null)
@@ -1449,6 +1469,9 @@ namespace EasyRed2HumanAI
             float supp = s.GetSuppressionValue();
             bool bleeding = s.isBleeding || s.GetBleedValue() > 0.01f;
             _specTargetInDistress = bleeding || supp >= 35f;
+            BattleData specBd = BattleManager.GetCurrentBattleData();
+            string specRefFac = ResolveYellowSideFaction(specBd, out _);
+            _specTargetIsFriendly = string.IsNullOrEmpty(specRefFac) || AiCore.AreSameSideFactions(fac, specRefFac);
             bool hasBandage = s.inventory != null && s.inventory.FindItemOfType<VirtualBandages>() != null;
 
             GenericGun heldGun = s.GetHeldGun();

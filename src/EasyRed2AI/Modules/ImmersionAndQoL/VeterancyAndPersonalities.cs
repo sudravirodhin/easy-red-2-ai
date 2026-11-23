@@ -1161,7 +1161,28 @@ namespace EasyRed2HumanAI
                         return true;
 
                     if (__0.TryCast<VirtualSmokeGrenade>() != null)
-                        return TryHandleBotSmokeThrowAim(__instance, __0, ref __1);
+                    {
+                        bool allowSmoke = TryHandleBotSmokeThrowAim(__instance, __0, ref __1);
+                        if (allowSmoke)
+                        {
+                            Vector3 smokeTarget = Time.time <= h.Combat.PendingSmokeAimUntil
+                                ? h.Combat.PendingSmokeAimPoint
+                                : ((__1 != null && __1.Pointer != IntPtr.Zero) ? __1.GetCenterOfUnit() : Vector3.zero);
+                            if (smokeTarget.sqrMagnitude > 0.01f)
+                            {
+                                Vector3 throwDir = smokeTarget - h.Tr.position;
+                                throwDir.y = 0f;
+                                if (throwDir.sqrMagnitude > 0.04f)
+                                {
+                                    throwDir.Normalize();
+                                    h.Combat.PendingThrowFaceDir = throwDir;
+                                    h.Combat.PendingThrowFaceUntil = Time.time + 0.90f;
+                                    AiCore.RotateBodyWithoutRaisingGun(__instance, throwDir, Mathf.Min(Time.deltaTime * 2.5f, 0.06f));
+                                }
+                            }
+                        }
+                        return allowSmoke;
+                    }
 
                     // AT/AP pressure mines are planted onto the ground (target == null), never thrown as hand grenades at targets
                     if (AiCore.IsPressureMineItem(__0, out bool isAtMine))
@@ -1222,6 +1243,16 @@ namespace EasyRed2HumanAI
                             }
                             return false;
                         }
+                    }
+
+                    Vector3 fragDir = __1.GetCenterOfUnit() - h.Tr.position;
+                    fragDir.y = 0f;
+                    if (fragDir.sqrMagnitude > 0.04f)
+                    {
+                        fragDir.Normalize();
+                        h.Combat.PendingThrowFaceDir = fragDir;
+                        h.Combat.PendingThrowFaceUntil = Time.time + 0.90f;
+                        AiCore.RotateBodyWithoutRaisingGun(__instance, fragDir, Mathf.Min(Time.deltaTime * 2.5f, 0.06f));
                     }
                 }
                 catch { }

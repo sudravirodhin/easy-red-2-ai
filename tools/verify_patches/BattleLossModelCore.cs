@@ -1830,6 +1830,23 @@ namespace EasyRed2HumanAI
                             sol.IsInVehicle && sol.IsButtonedArmorCrew, false,
                             EmergentEngine.EmergentTier.Individual, now,
                             out int activeStamps, out float enemyRelief, out bool doorwayCas);
+                        if (!sol.IsInVehicle && !sol.InCover && sq.Board.HasActiveObjectiveTask)
+                        {
+                            var toObj = sq.Board.ObjectivePosition - sol.Pos;
+                            toObj.y = 0f;
+                            if (toObj.sqrMagnitude > 36f)
+                            {
+                                var aheadPos = sol.Pos + toObj.normalized * 5.5f;
+                                float aheadHarm = rings[sol.Side].EvaluateSpotProjectedHarm(
+                                    aheadPos, sol.Pos, sqId, sq.Board.IsConnectedToRadioNet,
+                                    false, false, EmergentEngine.EmergentTier.Individual, now,
+                                    out int aheadStamps, out float aheadRelief, out bool aheadDoorCas);
+                                if (aheadHarm > projHarm) projHarm = aheadHarm;
+                                if (aheadStamps > activeStamps) activeStamps = aheadStamps;
+                                if (aheadRelief > enemyRelief) enemyRelief = aheadRelief;
+                                if (aheadDoorCas) doorwayCas = true;
+                            }
+                        }
 
                         bool needSupply = sol.AmmoShotsRemaining <= 0 || sol.NearAmmoBox || sol.NearDroppedRadio || sol.NearAtMinePickup || (!sol.HasBandage && sol.IsBleeding);
                         bool hasInjuredAlly = false;
@@ -1874,6 +1891,7 @@ namespace EasyRed2HumanAI
                             EnemyRelief = enemyRelief,
                             ActiveDangerStamps = activeStamps,
                             DoorwayFreshCasualtyAhead = doorwayCas,
+                            CloseAcousticThreat = !sol.HasTarget && sol.AmmoShotsRemaining > 0 && !sol.IsBleeding && threatDist <= 16.0f,
                             InCover = sol.InCover,
                             ExposedSideOfWall = sol.TowardExposedWall,
                             IsBleeding = sol.IsBleeding,
@@ -1896,6 +1914,7 @@ namespace EasyRed2HumanAI
                             UncounterableArmorClose = sq.Board.ThreatIsArmor && threatDist <= 32f && !sol.HasAtWeapon,
                             HasObjectiveTask = sq.Board.HasActiveObjectiveTask,
                             InsideObjectiveZone = objDist <= 18f,
+                            IsHomeGroundDefender = sol.Side == 1 && sc.Mode.ToString() != "DynamicConquest",
                             ObjectiveDist = objDist,
                             ObjectiveUrgency = Mathf.Clamp01(0.45f + sq.Board.ObjectiveCaptureProgress * 0.55f),
                             NearbyAmmoSource = needSupply && (sol.NearAmmoBox || sol.NearDroppedRadio || sol.NearAtMinePickup || sc.HasSupplyCrates || sq.Board.DecayedRecentDeaths >= 0.25f || sq.Board.AliveMemberCount >= 2),
@@ -2839,7 +2858,7 @@ namespace EasyRed2HumanAI
                 Console.WriteLine(" [EMERGENT ENGINE TELEMETRY]");
                 Console.WriteLine($"   * T1 Actions    : SeekCover={emActions[(int)EmergentEngine.EmergentActionId.SeekCover]:N0} | Engage={emActions[(int)EmergentEngine.EmergentActionId.HoldAndFight]:N0} | Advance={emActions[(int)EmergentEngine.EmergentActionId.AdvanceObjective]:N0} | Flank={emActions[(int)EmergentEngine.EmergentActionId.FlankManeuver]:N0} | Suppress={emActions[(int)EmergentEngine.EmergentActionId.SuppressPin]:N0} | Smoke={emActions[(int)EmergentEngine.EmergentActionId.PopSmoke]:N0}");
                 Console.WriteLine($"   * T1 Support/CQB: Bandage={emActions[(int)EmergentEngine.EmergentActionId.SelfBandage]:N0} | Frag={emActions[(int)EmergentEngine.EmergentActionId.FragFlush]:N0} | Resupply={emActions[(int)EmergentEngine.EmergentActionId.ResupplyAmmo]:N0} | Fallback={emActions[(int)EmergentEngine.EmergentActionId.FallbackRegroup]:N0} | CQB={emActions[(int)EmergentEngine.EmergentActionId.CloseBreach]:N0} | Medic={emActions[(int)EmergentEngine.EmergentActionId.MedicHeal]:N0} | Vehicle={vehTotal:N0}");
-                Console.WriteLine($"   * Fast Reflexes : DoorCas={emReflex[(int)EmergentEngine.EmergentReflexKind.DoorwayFreshCasualty]:N0} | HeavyFire={emReflex[(int)EmergentEngine.EmergentReflexKind.SuddenPenetratingFire]:N0} | CQB={emReflex[(int)EmergentEngine.EmergentReflexKind.PointBlankAmbush]:N0} | BleedCov={emReflex[(int)EmergentEngine.EmergentReflexKind.LethalBleedExposed]:N0} | Prereqs={emPrereqChains:N0} (UnsafeRej:{emUnsafeRejects:N0})");
+                Console.WriteLine($"   * Fast Reflexes : DoorCas={emReflex[(int)EmergentEngine.EmergentReflexKind.DoorwayFreshCasualty]:N0} | HeavyFire={emReflex[(int)EmergentEngine.EmergentReflexKind.SuddenPenetratingFire]:N0} | CQB={emReflex[(int)EmergentEngine.EmergentReflexKind.PointBlankAmbush]:N0} | BleedCov={emReflex[(int)EmergentEngine.EmergentReflexKind.LethalBleedExposed]:N0} | Acoust={emReflex[(int)EmergentEngine.EmergentReflexKind.CloseAcousticAlert]:N0} | Prereqs={emPrereqChains:N0} (UnsafeRej:{emUnsafeRejects:N0})");
                 Console.WriteLine($"   * Shared Net    : DangerStamps={emDangerStamps:N0} | EnemyRelief={emReliefStamps:N0} | MIA_Timeouts={emMiaTimeouts:N0} | T3_LeverSwitches={emT3Levers:N0}");
             }
 

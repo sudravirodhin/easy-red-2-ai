@@ -53,7 +53,13 @@ namespace EasyRed2HumanAI
         }
 
         // RotateAndFireFrameState / InfantrySightReactionState / LastBayonetCheckedGunPtr live in AiCore.SoldierFastHandles.Combat.
-        private static readonly Dictionary<long, bool> _coverExposureCache = new Dictionary<long, bool>(1024);
+        private struct CoverExposureCacheEntry
+        {
+            public float ExpireTime;
+            public bool IsInvalid;
+        }
+
+        private static readonly Dictionary<long, CoverExposureCacheEntry> _coverExposureCache = new Dictionary<long, CoverExposureCacheEntry>(1024);
         private static readonly Dictionary<IntPtr, Vector3> _staticCoverPosCache = new Dictionary<IntPtr, Vector3>(1024);
         private static float _nextPlayerCrosshairYieldPassTime;
 

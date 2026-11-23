@@ -42,12 +42,12 @@ function Extract-CqbFloat {
 }
 $cqbBayonetStandoff   = Extract-CqbFloat $cqbText 'HasBayonetReady\)\s*\{\s*standoffDist\s*=\s*([0-9]+\.[0-9]+)f;' 'bayonetStandoff'
 $cqbKnifeStandoff     = Extract-CqbFloat $cqbText 'HoldsMeleeWeapon\)\s*\{\s*standoffDist\s*=\s*([0-9]+\.[0-9]+)f;' 'knifeStandoff'
-$cqbUnbayStandoff     = Extract-CqbFloat $cqbText 'standoffDist\s*=\s*([0-9]+\.[0-9]+)f;\s*minPersonalSpace\s*=\s*0\.68f;' 'unbayonetedStandoff'
+$cqbUnbayStandoff     = Extract-CqbFloat $cqbText 'standoffDist\s*=\s*([0-9]+\.[0-9]+)f;\s*minPersonalSpace\s*=\s*0\.58f;' 'unbayonetedStandoff'
 $cqbUnbayStrike       = Extract-CqbFloat $cqbText 'const float unbayonetedStrikeRange\s*=\s*([0-9]+\.[0-9]+)f;' 'unbayonetedStrikeRange'
 $cqbKnifeStrike       = Extract-CqbFloat $cqbText 'const float meleeWeaponStrikeRange\s*=\s*([0-9]+\.[0-9]+)f;' 'meleeWeaponStrikeRange'
 $cqbPistolCeaseFire   = Extract-CqbFloat $cqbText 'isPistol && !gunEmptyOrReloading && !hasBayonet\)\s*\{[^}]*?ceaseFireRange\s*=\s*([0-9]+\.[0-9]+)f;' 'pistolCeaseFireRange'
-$cqbPatchedCapsule    = Extract-CqbFloat $cqbText 'mountedBlade\s*==\s*null[\s\S]*?float minReach\s*=\s*([0-9]+\.[0-9]+)f' 'patchedAiCapsuleDist'
-$cqbBayonetStrike     = Extract-CqbFloat $cqbText 'strikeRange\s*=\s*hasBayonet\s*\?\s*([0-9]+\.[0-9]+)f\s*:\s*unbayonetedStrikeRange;' 'bayonetStrikeRange'
+$cqbPatchedCapsule    = Extract-CqbFloat $cqbText 'mountedBlade\s*==\s*null[\s\S]*?isEmpGunner\s*\?\s*[0-9]+\.[0-9]+f\s*:\s*([0-9]+\.[0-9]+)f' 'patchedAiCapsuleDist'
+$cqbBayonetStrike     = Extract-CqbFloat $cqbText 'const float bayonetStrikeRange\s*=\s*([0-9]+\.[0-9]+)f;' 'bayonetStrikeRange'
 
 $harnessCs = @"
 #pragma warning disable 0649, 0414

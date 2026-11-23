@@ -5,6 +5,25 @@ For pre-compiled downloads, see **[GitHub Releases](https://github.com/sudraviro
 
 ---
 
+## `v0.10.4` — Defender Vantage Overwatch & Patrol, Destroyed Cover Fix, CQB Facing, Weapon Range Weighting, CAS Lock & Vanilla PvP Mode
+* **Defender Vantage/Window Overwatch, Perimeter Patrol & Bipod Pre-Deploy (`StanceAndCoverTactics.cs`, `EmergentDecisionCore.cs`, `EmergentRuntimeBridge.cs`, `AiCore.cs`)**:
+  * Added role- and squad-capped Vantage & Window Overwatch scoring (`2–3` bots per defending squad prioritizing MGs/Marksmen/Riflemen; `1–2` MGs/Marksmen on attack), `default_take_cover` fallback for exposed defenders inside objectives, `26.0m` threat-shifted forward cover search, non-halting destination resume in `HoldAndFight`, staggered `15–22s` perimeter sentry patrols (`EmergentTryDefenderPerimeterPatrol`), and stationary MG overwatch bipod pre-deployment (`HandleGunnerBipodAndWallMounting`).
+* **Destroyed / Blown-Away Cover Rejection & Evacuation (`AiCore.WorldQuery.cs`, `FriendlyFireAndYield.cs`, `StanceAndCoverTactics.cs`)**:
+  * Added `AiCore.IsCombatCoverIntact`, converted `_coverExposureCache` to a `12.0s` TTL cache with outdoor physical front-barrier validation so blown-away sandbags/walls are rejected, and added a `1.5s` occupied-cover integrity evacuation check in `SoldierAI_SequentialUpdate_Patch`.
+* **Weighted Weapon/Ammo Range in H.A.R.M. & Anti-Zombie Self-Healing (`EmergentRuntimeBridge.cs`, `EmergentDecisionCore.cs`, `StanceAndCoverTactics.cs`, `AiCore.WorldQuery.cs`)**:
+  * Wrapped smooth weapon/ammo effective range and AT armor-penetration falloff (`ComputeWeaponEffectiveRangeWeight` / `ComputeAtWeaponArmorWeight`, smooth `0.18x` floor) into `CanHarmTarget` without hard-disallowing distant shots.
+  * Added honest `CoverAvailable` (`NoLocalCoverUntil` `8.0s` cooldown with immediate Crouch/Prone drop), self-healing `idle_in_open_zombie` path recovery + emergency hit-the-dirt under heavy fire, and a `0.08f` `3.0s` post-commit soft stickiness tail with `2.0s` dwell for `AdvanceObjective`/`SuppressPin`.
+* **Point-Blank CQB Facing, Water Transport Bailout Guard & 12s CAS Target Lock (`ThreatMemoryAndWatchSectors.cs`, `CloseCombatAndSupport.cs`, `GroundVehicleTactics.cs`, `TurretAmmoAndBailout.cs`, `AircraftTactics.cs`, `AiCore.cs`)**:
+  * Kept point-blank CQB/melee bots facing their opponent via `MoveFPSOptimized` + `RotateAndFireToward`/`RotateToward` during melee spacing and close `knifeCharge` (`CasLockedTarget`/`PointBlankFaceUntil`).
+  * Prevented bots from bailing out of amphibious/waterborne transports (`IsVehicleInWater`), and added a `12.0s` CAS ground-target commitment lock (`CasLockedTargetUntil`) so aircraft complete dives instead of resetting orbit mid-bank.
+* **Acoustics, Vision, Throw Facing, Door Discipline, Back-Capture & `[HQ] DANGER CLOSE` Warnings (`VisionRangeAndCamo.cs`, `VeterancyAndPersonalities.cs`, `LocomotionAndVaulting.cs`, `MacroObjectiveDirector.cs`, `TeamNetAndSquadCommand.cs`)**:
+  * Added crouched footstep acoustic radius (`5.5m`), tuned defender FOV and combat footstep masking, added grenade/smoke body facing (`PendingThrowFaceDir`/`PendingThrowFaceUntil`), tightened door/shutter discipline, enabled attacker spread across multiple unheld objectives, and added `[HQ] DANGER CLOSE` friendly artillery warnings (local toast + Co-op Host chat).
+* **Vanilla PvP Mode, Spectator Color Fixes & Unified Blue/Red/Magenta Palette (`VisionConfig.cs`, `ConfigMenuAndHud.cs`, `SpectatorCommandNetOverlay.cs`, `PlayerVisualsAndReloadQoL.cs`, `Plugin.cs`)**:
+  * Added **Vanilla PvP Mode** (`F6 -> Multiplayer Gameplay Enhancements`) toggling off 11 local-player ballistics/reload/HUD/spectator advantages with snapshot restore while preserving Host AI upgrades.
+  * Fixed Spectator Mode objective bar & 3D marker colors for both `MissionTaskScripted` and `MissionTaskConquerArea` using `BattleManager.PlayerFaction`, and unified Command Net & Spectator Bot Debugger colors to exact game `MissionTask.BLUE_MISSION_TEXT` / `RED_MISSION_TEXT` with high-contrast **Electric Magenta** hovered squad/route highlights.
+* **Trace Perception Fields & Qualitative Behavioral Intentions Tests (`BotActionTrace.cs`, `VerifyEmergentEngine.ps1`, `VerifyPhysicsAndAcoustics.ps1`, `BattleLossModelCore.cs`)**:
+  * Logged `acoustDist`, `yaw`, and `targetId` in `BotActionTrace.jsonl` and expanded `VerifyEmergentEngine.ps1` (`Group 20`: `58/58`) and `VerifyPhysicsAndAcoustics.ps1` (`41/41`).
+
 ## `v0.10.3` — Anti-Wall-Shooting Discipline, `[PVM]` Difficulty Crash Fix, Corpse Blood Smoke Occlusion, Emergent Survival & Qualitative Simulation Scorecard
 * **Anti-Wall-Shooting & Occlusion Discipline (`VisionRangeAndCamo.cs`, `FriendlyFireAndYield.cs`, `StanceAndCoverTactics.cs`, `ThreatMemoryAndWatchSectors.cs`, `CombinedArmsAndTurrets.cs`)**:
   * Tightened LOS/muzzle-obstruction checks and blind-suppression gating against solid cover and walls.

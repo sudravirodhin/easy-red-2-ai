@@ -766,6 +766,20 @@ $partB
                     bleedFarDec.Step0 == EmergentEngine.EmergentActionId.SeekCover,
                     $"got={gotBleedFar} {bleedFarDec.Reflex}/{bleedFarDec.Step0}");
 
+                var acoustAdvInp = new EmergentEngine.EmergentInput
+                {
+                    Now = 95.5f, CloseAcousticThreat = true, HasVisibleEnemy = false, AmmoEmpty = false,
+                    CurrentStep0 = EmergentEngine.EmergentActionId.AdvanceObjective
+                };
+                bool gotAcoust = EmergentEngine.EvaluateFastReflex(in acoustAdvInp, in wDefault, 95.5f, out var acoustDec);
+                var acoustCovInp = acoustAdvInp;
+                acoustCovInp.CurrentStep0 = EmergentEngine.EmergentActionId.SeekCover;
+                bool gotAcoustInCov = EmergentEngine.EvaluateFastReflex(in acoustCovInp, in wDefault, 95.5f, out _);
+                Check("CloseAcousticThreat triggers CloseAcousticAlert HoldAndFight while advancing, but not over SeekCover",
+                    gotAcoust && acoustDec.Reflex == EmergentEngine.EmergentReflexKind.CloseAcousticAlert &&
+                    acoustDec.Step0 == EmergentEngine.EmergentActionId.HoldAndFight && !gotAcoustInCov,
+                    $"got={gotAcoust} {acoustDec.Reflex}/{acoustDec.Step0} inCov={gotAcoustInCov}");
+
                 var covBleedHighHarmInp = new EmergentEngine.EmergentInput
                 {
                     Now = 96f, InCover = true, IsBleeding = true, HasBandage = true,
@@ -837,6 +851,70 @@ $partB
                 Check("Urgent ObjectiveTickingAgainstUs skips non-urgent scavenge_gear for AdvanceObjective",
                     urgentCapDec.Step0 == EmergentEngine.EmergentActionId.AdvanceObjective,
                     $"{urgentCapDec.Step0} ({urgentCapDec.Reason})");
+            }
+
+            // 20. Qualitative Behavioral Intentions (/grill-me & Live Playtest Invariants)
+            Console.WriteLine("[Group 20] Qualitative Behavioral Intentions");
+            {
+                var defSymInp = new EmergentEngine.EmergentInput
+                {
+                    Now = 110f, InCover = true, InsideObjectiveZone = true, HasLastKnownThreat = true, LastKnownThreatDist = 35f,
+                    ObjectiveTickingAgainstUs = false, IsHomeGroundDefender = false, SmoothedHarmNow = 0.05f
+                };
+                var defHomeInp = defSymInp;
+                defHomeInp.IsHomeGroundDefender = true;
+                var decSym = EmergentEngine.EvaluateDeliberative(in defSymInp, in wDefault, default, 110f);
+                var decHome = EmergentEngine.EvaluateDeliberative(in defHomeInp, in wDefault, default, 110f);
+                Check("Home-ground defender digs in on hold_angle_overwatch and outscores Conquest defender",
+                    decHome.Step0 == EmergentEngine.EmergentActionId.HoldAndFight &&
+                    decHome.Reason == "hold_angle_overwatch" &&
+                    decHome.Score > decSym.Score,
+                    $"home={decHome.Step0}({decHome.Reason},{decHome.Score:F2}) sym={decSym.Score:F2}");
+
+                var doorFragInp = new EmergentEngine.EmergentInput
+                {
+                    Now = 111f, InCover = true, DoorwayFreshCasualtyAhead = true, HasFragGrenade = true,
+                    HasLastKnownThreat = true, LastKnownThreatDist = 7.5f, SmoothedHarmNow = 0.25f
+                };
+                var decDoorFrag = EmergentEngine.EvaluateDeliberative(in doorFragInp, in wDefault, default, 111f);
+                Check("Covered bot at hot doorway clears room with FragFlush (frag_doorway_clear)",
+                    decDoorFrag.Step0 == EmergentEngine.EmergentActionId.FragFlush &&
+                    decDoorFrag.Reason == "frag_doorway_clear",
+                    $"{decDoorFrag.Step0} ({decDoorFrag.Reason})");
+
+                var bot172Inp = new EmergentEngine.EmergentInput
+                {
+                    Now = 112f, InCover = false, SmoothedHarmNow = 0f, HasVisibleEnemy = true, VisibleEnemyDist = 22f,
+                    CanHarmTarget = 0.90f, HasObjectiveTask = true, ObjectiveDist = 45f, ObjectiveUrgency = 0.45f
+                };
+                var dec172 = EmergentEngine.EvaluateDeliberative(in bot172Inp, in wDefault, default, 112f);
+                var bot172SmkInp = bot172Inp;
+                bot172SmkInp.SmokeActive = true;
+                var dec172Smk = EmergentEngine.EvaluateDeliberative(in bot172SmkInp, in wDefault, default, 112f);
+                Check("Exposed bot fights unpinned 22m enemy instead of blind-sprinting, but surges under smoke",
+                    dec172.Step0 == EmergentEngine.EmergentActionId.HoldAndFight &&
+                    dec172Smk.Step0 == EmergentEngine.EmergentActionId.AdvanceObjective,
+                    $"unsmoked={dec172.Step0} smoked={dec172Smk.Step0}");
+
+                var radCqbInp = new EmergentEngine.EmergentInput
+                {
+                    Now = 113f, IsRadioman = true, RadioLinkDrifting = true,
+                    HasVisibleEnemy = true, VisibleEnemyDist = 13f, CanHarmTarget = 0.90f
+                };
+                var decRadCqb = EmergentEngine.EvaluateDeliberative(in radCqbInp, in wDefault, default, 113f);
+                Check("Drifting Radioman defends himself against 13m visible enemy instead of jogging back to SL",
+                    decRadCqb.Step0 == EmergentEngine.EmergentActionId.HoldAndFight,
+                    $"{decRadCqb.Step0} ({decRadCqb.Reason})");
+
+                var aheadRing = new EmergentEngine.DangerStampRing();
+                var myP = new Vector3(0f, 0f, 0f);
+                var doorP = new Vector3(0f, 0f, 7.0f);
+                aheadRing.StampFriendlyHarm(doorP, new Vector3(0f, 0f, 15f), 1L, true, EmergentEngine.DangerWeaponClass.SmallArms, 0.75f, 8.0f, 10.0f, 114f);
+                float hereH = aheadRing.EvaluateSpotProjectedHarm(myP, myP, 2L, true, false, false, EmergentEngine.EmergentTier.Individual, 114.2f, out _, out _, out bool hereDoor);
+                float aheadH = aheadRing.EvaluateSpotProjectedHarm(new Vector3(0f, 0f, 5.5f), myP, 2L, true, false, false, EmergentEngine.EmergentTier.Individual, 114.2f, out _, out _, out bool aheadDoor);
+                Check("5.5m path-ahead probe detects doorway casualty before bot steps into threshold",
+                    aheadDoor && aheadH > hereH,
+                    $"here=(H={hereH:F2},door={hereDoor}) ahead=(H={aheadH:F2},door={aheadDoor})");
             }
 
             Console.WriteLine("============================================================");

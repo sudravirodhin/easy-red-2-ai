@@ -937,6 +937,7 @@ namespace EasyRed2HumanAI
                 veh.IsAirVehicle() ||
                 veh.IsTransportVehicle() ||
                 veh.IsDisabled() ||
+                AiCore.IsVehicleInWater(veh) ||
                 !vh.IsWheeledOrTank)
             {
                 return;

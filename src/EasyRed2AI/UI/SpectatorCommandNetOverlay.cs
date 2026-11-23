@@ -10,7 +10,7 @@ namespace EasyRed2HumanAI
     {
         // =====================================================================
         // Spectator Mode 4: Command Net Overhead View + Vanilla A/B Observer
-        //  - Bright Yellow = Your Team (or Invaders if no controlled side yet)
+        //  - Bright Blue   = Your Team (or Invaders if no controlled side yet)
         //  - Bright Red    = Enemy Team
         //  - Bright Cyan   = Squad Objective/Flank Routes + Hovered A* Paths
         //  - Works both with BH AI ON (Team Net) and F8 OFF (Vanilla A/B)
@@ -56,13 +56,37 @@ namespace EasyRed2HumanAI
         private static readonly Vector2[] _cmdNetRingPts = new Vector2[16];
         private static readonly bool[] _cmdNetRingOk = new bool[16];
 
-        private static readonly Color CmdNetColorYellow = new Color(1.00f, 0.88f, 0.20f, 0.96f);
-        private static readonly Color CmdNetColorYellowSl = new Color(1.00f, 0.96f, 0.52f, 1.00f);
-        private static readonly Color CmdNetColorRed = new Color(1.00f, 0.23f, 0.19f, 0.96f);
-        private static readonly Color CmdNetColorRedSl = new Color(1.00f, 0.48f, 0.34f, 1.00f);
-        private static readonly Color CmdNetColorCyan = new Color(0.17f, 0.91f, 1.00f, 0.96f);
+        private static readonly Color CmdNetColorCyan = new Color(1.00f, 0.18f, 0.86f, 0.98f);
         private static readonly Color CmdNetColorHoverMember = new Color(0.26f, 1.00f, 0.62f, 0.98f);
         private static readonly Color CmdNetColorAmber = new Color(1.00f, 0.60f, 0.15f, 0.85f);
+
+        private static Color GetGameFriendlyBlue()
+        {
+            Color c = MissionTask.BLUE_MISSION_TEXT;
+            c.a = 0.96f;
+            return c;
+        }
+
+        private static Color GetGameFriendlyBlueSl()
+        {
+            Color c = Color.Lerp(MissionTask.BLUE_MISSION_TEXT, Color.white, 0.25f);
+            c.a = 1.00f;
+            return c;
+        }
+
+        private static Color GetGameEnemyRed()
+        {
+            Color c = MissionTask.RED_MISSION_TEXT;
+            c.a = 0.96f;
+            return c;
+        }
+
+        private static Color GetGameEnemyRedSl()
+        {
+            Color c = Color.Lerp(MissionTask.RED_MISSION_TEXT, Color.white, 0.25f);
+            c.a = 1.00f;
+            return c;
+        }
 
         private static void EnsureCommandNetRenderAssets()
         {
@@ -96,13 +120,13 @@ namespace EasyRed2HumanAI
                 if (sh != null)
                 {
                     if (_cmdNetMatYellow == null)
-                        _cmdNetMatYellow = CreateCommandNetMaterial(sh, CmdNetColorYellow);
+                        _cmdNetMatYellow = CreateCommandNetMaterial(sh, GetGameFriendlyBlue());
                     if (_cmdNetMatRed == null)
-                        _cmdNetMatRed = CreateCommandNetMaterial(sh, CmdNetColorRed);
+                        _cmdNetMatRed = CreateCommandNetMaterial(sh, GetGameEnemyRed());
                     if (_cmdNetMatYellowLeader == null)
-                        _cmdNetMatYellowLeader = CreateCommandNetMaterial(sh, CmdNetColorYellowSl);
+                        _cmdNetMatYellowLeader = CreateCommandNetMaterial(sh, GetGameFriendlyBlueSl());
                     if (_cmdNetMatRedLeader == null)
-                        _cmdNetMatRedLeader = CreateCommandNetMaterial(sh, CmdNetColorRedSl);
+                        _cmdNetMatRedLeader = CreateCommandNetMaterial(sh, GetGameEnemyRedSl());
                     if (_cmdNetMatCyan == null)
                         _cmdNetMatCyan = CreateCommandNetMaterial(sh, CmdNetColorCyan);
                     if (_cmdNetMatHoverMember == null)
@@ -207,6 +231,12 @@ namespace EasyRed2HumanAI
             }
 
             string yellowFac = _specLastLocalPlayerFaction;
+            if (string.IsNullOrEmpty(yellowFac))
+            {
+                string playerFac = BattleManager.PlayerFaction;
+                if (!string.IsNullOrEmpty(playerFac))
+                    yellowFac = playerFac;
+            }
             if (string.IsNullOrEmpty(yellowFac) && bd != null)
             {
                 try { yellowFac = bd.GetInvadersFaction(); } catch { }
@@ -520,7 +550,7 @@ namespace EasyRed2HumanAI
             float now = Time.time;
 
             string modeTag = modEnabled ? $"BH v{Plugin.PluginVersion} NET" : "VANILLA A/B (F8 OFF)";
-            string sideTag = isYellow ? "YELLOW" : "RED";
+            string sideTag = isYellow ? "BLUE" : "RED";
             string sqName = !string.IsNullOrEmpty(sq.squadName) ? sq.squadName : $"Squad #{AiCore.GetSquadDiagId(sqPtr)}";
             if (sqName.Length > 26)
                 sqName = sqName.Substring(0, 26);
@@ -720,13 +750,13 @@ namespace EasyRed2HumanAI
 
             _cmdNetSb.Length = 0;
             _cmdNetSb.Append(modEnabled ? $"[BATTLE HARDENED v{Plugin.PluginVersion}  |  COMMAND NET]" : "[VANILLA ER2 AI  |  A/B OBSERVER (F8 OFF)]")
-                     .Append("   \u2022   [YELLOW] ").Append(yName)
+                     .Append("   \u2022   [BLUE] ").Append(yName)
                      .Append("   vs   [RED] ").Append(rName)
-                     .Append("   \u2022   [CYAN] Routes");
+                     .Append("   \u2022   [MAGENTA] Hover/Flank");
             _cmdNetCardLine0 = _cmdNetSb.ToString();
 
             _cmdNetSb.Length = 0;
-            _cmdNetSb.Append("[YELLOW] ").Append(yTotal).Append(" sq (").Append(yHq).Append(" HQ, ").Append(yCut).Append(" Cut)  |  Flags:");
+            _cmdNetSb.Append("[BLUE] ").Append(yTotal).Append(" sq (").Append(yHq).Append(" HQ, ").Append(yCut).Append(" Cut)  |  Flags:");
             AppendFlagTally(_cmdNetSb, tallyCount, countYellow: true);
             _cmdNetSb.Append("  |  Gar:").Append(yGar).Append("  Flank:").Append(yFlank);
             if (modEnabled)
@@ -956,7 +986,7 @@ namespace EasyRed2HumanAI
                     Vector3 destPos = Vector3.zero;
                     bool hasDest = false;
                     float lineWidth = 1.4f;
-                    Color routeCol = new Color(0.17f, 0.82f, 1.0f, 0.44f);
+                    Color routeCol = new Color(1.00f, 0.84f, 0.22f, 0.44f);
 
                     if (modEnabled &&
                         _squadBlackboards.TryGetValue(sqSnap.Ptr, out SquadBlackboard b) &&
@@ -967,7 +997,7 @@ namespace EasyRed2HumanAI
                         destPos = b.NetDirectiveTargetPos + new Vector3(0f, 1.4f, 0f);
                         hasDest = true;
                         lineWidth = 2.4f;
-                        routeCol = new Color(0.20f, 0.96f, 1.0f, 0.90f);
+                        routeCol = new Color(1.00f, 0.18f, 0.86f, 0.92f);
                     }
                     else if (sqSnap.Ref.moveOrderPosition.sqrMagnitude > 1f &&
                              (sqSnap.Ref.moveOrderPosition - sqSnap.RefPos).sqrMagnitude > 36f)
@@ -975,7 +1005,7 @@ namespace EasyRed2HumanAI
                         destPos = sqSnap.Ref.moveOrderPosition + new Vector3(0f, 1.4f, 0f);
                         hasDest = true;
                         lineWidth = 1.8f;
-                        routeCol = new Color(0.17f, 0.88f, 1.0f, 0.72f);
+                        routeCol = new Color(1.00f, 0.86f, 0.22f, 0.74f);
                     }
                     else if (sqSnap.Ref.currentTask != null && sqSnap.Ref.currentTask.Pointer != IntPtr.Zero)
                     {
@@ -1004,7 +1034,7 @@ namespace EasyRed2HumanAI
                 if (_cmdNetHasHoveredSquad && _cmdNetHoveredSquadPtr != IntPtr.Zero)
                 {
                     Color tetherCol = new Color(0.32f, 1.00f, 0.68f, 0.68f);
-                    Color pathCol = new Color(0.35f, 0.98f, 1.00f, 0.96f);
+                    Color pathCol = new Color(1.00f, 0.22f, 0.88f, 0.98f);
 
                     for (int i = 0; i < wCount; i++)
                     {
@@ -1057,7 +1087,7 @@ namespace EasyRed2HumanAI
                             if ((mdW - myWPos).sqrMagnitude > 4.0f &&
                                 TryProjectSegmentToGui(cam, camPos, camFwd, myWPos, mdW, out Vector2 gm0, out Vector2 gm1))
                             {
-                                DrawScreenArrow(gm0, gm1, 1.8f, new Color(0.28f, 0.90f, 1.00f, 0.72f));
+                                DrawScreenArrow(gm0, gm1, 1.8f, new Color(1.00f, 0.22f, 0.88f, 0.78f));
                             }
                         }
                     }
@@ -1105,7 +1135,7 @@ namespace EasyRed2HumanAI
                     GUI.color = (isHovSl || isHovMember) ? Color.white : borderCol;
                     GUI.DrawTexture(new Rect(gx - half - 1f, gy - half - 1f, sz + 2f, sz + 2f), Texture2D.whiteTexture);
 
-                    GUI.color = isHovSl ? CmdNetColorCyan : (isHovMember ? CmdNetColorHoverMember : (isY ? CmdNetColorYellow : CmdNetColorRed));
+                    GUI.color = isHovSl ? CmdNetColorCyan : (isHovMember ? CmdNetColorHoverMember : (isY ? GetGameFriendlyBlue() : GetGameEnemyRed()));
                     GUI.DrawTexture(new Rect(gx - half, gy - half, sz, sz), Texture2D.whiteTexture);
                 }
 
@@ -1178,7 +1208,7 @@ namespace EasyRed2HumanAI
                 bool modEnabled = VisionConfig.EnableMod.Value;
                 GUI.color = !modEnabled
                     ? CmdNetColorAmber
-                    : (_cmdNetHasHoveredSquad ? CmdNetColorCyan : CmdNetColorYellow);
+                    : (_cmdNetHasHoveredSquad ? CmdNetColorCyan : GetGameFriendlyBlue());
                 GUI.DrawTexture(new Rect(cardX + 2f, cardY + 2f, cardW - 4f, 3f), Texture2D.whiteTexture);
 
                 GUIStyle lbl = GUI.skin != null ? GUI.skin.label : null;
@@ -1203,7 +1233,7 @@ namespace EasyRed2HumanAI
                 }
                 GUI.color = !modEnabled
                     ? new Color(1.0f, 0.74f, 0.30f, 1.0f)
-                    : (_cmdNetHasHoveredSquad ? (_cmdNetHoverIsYellow ? CmdNetColorYellowSl : CmdNetColorRedSl) : CmdNetColorYellow);
+                    : (_cmdNetHasHoveredSquad ? (_cmdNetHoverIsYellow ? GetGameFriendlyBlueSl() : GetGameEnemyRedSl()) : GetGameFriendlyBlue());
                 GUI.Label(new Rect(cardX + 14f, cardY + 7f, cardW - 28f, 22f), _cmdNetCardLine0);
 
                 if (lbl != null)
@@ -1211,10 +1241,10 @@ namespace EasyRed2HumanAI
                     lbl.fontSize = 13;
                     lbl.fontStyle = FontStyle.Normal;
                 }
-                GUI.color = new Color(0.45f, 0.94f, 1.0f, 1.0f);
+                GUI.color = new Color(0.62f, 0.84f, 1.0f, 1.0f);
                 GUI.Label(new Rect(cardX + 14f, cardY + 31f, cardW - 28f, 21f), _cmdNetCardLine1);
 
-                GUI.color = new Color(0.90f, 0.93f, 0.97f, 0.98f);
+                GUI.color = !_cmdNetHasHoveredSquad ? new Color(1.0f, 0.70f, 0.66f, 0.98f) : new Color(0.90f, 0.93f, 0.97f, 0.98f);
                 GUI.Label(new Rect(cardX + 14f, cardY + 54f, cardW - 28f, 21f), _cmdNetCardLine2);
 
                 if (lbl != null)

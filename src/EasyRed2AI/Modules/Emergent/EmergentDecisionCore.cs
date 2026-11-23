@@ -34,7 +34,8 @@ namespace EasyRed2HumanAI
             DoorwayFreshCasualty = 3,
             SuddenPenetratingFire = 4,
             PointBlankAmbush = 5,
-            LethalBleedExposed = 6
+            LethalBleedExposed = 6,
+            CloseAcousticAlert = 7
         }
 
         public enum EmergentActionId : byte
@@ -708,6 +709,7 @@ namespace EasyRed2HumanAI
             public int ActiveDangerStamps;
             public bool DoorwayFreshCasualtyAhead;
             public bool LiveGrenadeClose;
+            public bool CloseAcousticThreat;
             public bool HullBurningOrDoomed;
 
             public bool InCover;
@@ -735,6 +737,7 @@ namespace EasyRed2HumanAI
 
             public bool HasObjectiveTask;
             public bool InsideObjectiveZone;
+            public bool IsHomeGroundDefender;
             public float ObjectiveDist;
             public float ObjectiveUrgency; // [0..1]
             public int ClusteredEnemiesAtThreat;
@@ -1153,6 +1156,21 @@ namespace EasyRed2HumanAI
                 return true;
             }
 
+            if (inp.CloseAcousticThreat && !inp.HasVisibleEnemy && !inp.AmmoEmpty &&
+                inp.CurrentStep0 != EmergentActionId.HoldAndFight &&
+                inp.CurrentStep0 != EmergentActionId.SeekCover &&
+                inp.CurrentStep0 != EmergentActionId.EvadeGrenade &&
+                inp.CurrentStep0 != EmergentActionId.PopSmoke &&
+                inp.CurrentStep0 != EmergentActionId.SelfBandage &&
+                inp.CurrentStep0 != EmergentActionId.MedicHeal &&
+                inp.CurrentStep0 != EmergentActionId.DragCasualty &&
+                inp.CurrentStep0 != EmergentActionId.FallbackRegroup &&
+                (inp.LastReflexTime <= 0f || (now - inp.LastReflexTime) >= 2.5f))
+            {
+                decision = MakeReflexDecision(EmergentActionId.HoldAndFight, EmergentReflexKind.CloseAcousticAlert, harmTotal, 0.74f, inp, now, 0.85f, "reflex_close_acoustic");
+                return true;
+            }
+
             return false;
         }
 
@@ -1196,6 +1214,7 @@ namespace EasyRed2HumanAI
             float curHarm = Mathf.Clamp01(inp.SmoothedHarmNow + effProjHarm - inp.EnemyRelief * 0.20f);
             bool hasCommit = prev.Step0 != EmergentActionId.None && now < prev.CommitUntil;
             EmergentActionId prevStep0 = prev.Step0;
+            bool hasSoftTail = !hasCommit && prevStep0 != EmergentActionId.None && now < prev.CommitUntil + 3.0f;
             float wSurv = w.WSurvive;
             float wWin = w.WWin;
             float wAid = w.WAid;
@@ -1221,7 +1240,9 @@ namespace EasyRed2HumanAI
                 string reason)
             {
                 float deltaSurvive = curHarm - afterHarm;
-                float swCost = (hasCommit && prevStep0 != act0) ? 0.30f : 0.0f;
+                float swCost = (hasCommit && prevStep0 != act0)
+                    ? 0.30f
+                    : ((hasSoftTail && prevStep0 != act0) ? 0.08f : 0.0f);
                 float score = wSurv * deltaSurvive + wWin * winDelta + wAid * aidDelta + extraBonus - swCost;
 
                 if (score > bestScore)
@@ -1548,7 +1569,30 @@ namespace EasyRed2HumanAI
                             cqbImmediate ? "cqb_snap_engage" : "direct_engage");
                     }
                 }
-                else if ((inp.AmmoEmpty || (!inp.HasVisibleEnemy && curHarm < 0.20f && !inp.ObjectiveTickingAgainstUs)) && inp.NearbyAmmoSource && !prereqResupplyBlocked)
+                else
+                {
+                    if (!inp.HasVisibleEnemy && safeInCover && !inp.AmmoEmpty && !inp.ObjectiveTickingAgainstUs &&
+                        (inp.InsideObjectiveZone || (inp.HasLastKnownThreat && inp.LastKnownThreatDist <= 65.0f)))
+                    {
+                        float overwatchWin = (inp.InsideObjectiveZone ? 0.42f : 0.24f) * w.BiasStandoff * (inp.IsMachineGunnerOrBipod ? 1.25f : 1.0f);
+                        float overwatchBonus = (inp.HasLastKnownThreat ? 0.14f : 0.06f) + 0.10f * Mathf.Clamp01(1.10f - w.Individualism);
+                        if (inp.IsHomeGroundDefender && inp.InsideObjectiveZone)
+                        {
+                            overwatchWin *= 1.18f;
+                            overwatchBonus += 0.08f;
+                        }
+                        ConsiderCandidate(
+                            EmergentActionId.HoldAndFight,
+                            EmergentActionId.None,
+                            curHarm * 0.65f,
+                            overwatchWin,
+                            0f,
+                            curHarm * 0.65f,
+                            overwatchBonus,
+                            "hold_angle_overwatch");
+                    }
+
+                    if ((inp.AmmoEmpty || (!inp.HasVisibleEnemy && curHarm < 0.20f && !inp.ObjectiveTickingAgainstUs)) && inp.NearbyAmmoSource && !prereqResupplyBlocked)
                 {
                     float resupHarm2 = safeInCover ? curHarm * 0.45f : curHarm;
                     if (IsSafeForDuration(resupHarm2, 1.5f, w.RiskThreshold))
@@ -1568,6 +1612,7 @@ namespace EasyRed2HumanAI
                         unsafePrereqRejected = true;
                         rejectedPrereqAction = EmergentActionId.ResupplyAmmo;
                     }
+                }
                 }
 
                 // 4. PushAmmoDrop (Ammo Bearer Push)
@@ -1625,18 +1670,20 @@ namespace EasyRed2HumanAI
                         "pop_smoke");
                 }
 
-                // 7. FragFlush (Entrenched OR clustered enemies blocking advance)
+                // 7. FragFlush (Entrenched, doorway killzones, OR clustered enemies blocking advance)
                 float fragRangeDist = inp.HasVisibleEnemy ? inp.VisibleEnemyDist : inp.LastKnownThreatDist;
+                bool roomOrCluster = inp.ClusteredEnemiesAtThreat >= 2 || inp.DoorwayFreshCasualtyAhead;
+                float minFragDist = safeInCover ? 6.5f : 8.5f;
                 if (inp.HasFragGrenade &&
-                    (inp.TargetBehindCover || inp.ClusteredEnemiesAtThreat >= 2) &&
-                    fragRangeDist >= 8.5f &&
+                    (inp.TargetBehindCover || roomOrCluster) &&
+                    fragRangeDist >= minFragDist &&
                     fragRangeDist <= 31.0f &&
                     IsSafeForDuration(curHarm * 0.78f, 1.5f, w.RiskThreshold))
                 {
                     float clusterWin = inp.ClusteredEnemiesAtThreat >= 2
                         ? (0.26f + 0.08f * Mathf.Min(2, inp.ClusteredEnemiesAtThreat - 2))
-                        : 0f;
-                    float clusterBonus = inp.ClusteredEnemiesAtThreat >= 2 ? 0.16f : 0.08f;
+                        : (inp.DoorwayFreshCasualtyAhead ? 0.24f : 0f);
+                    float clusterBonus = roomOrCluster ? 0.18f : 0.08f;
                     ConsiderCandidate(
                         EmergentActionId.FragFlush,
                         EmergentActionId.None,
@@ -1645,7 +1692,7 @@ namespace EasyRed2HumanAI
                         0.10f,
                         curHarm * 0.78f,
                         clusterBonus,
-                        inp.ClusteredEnemiesAtThreat >= 2 ? "frag_cluster" : "frag_flush");
+                        inp.ClusteredEnemiesAtThreat >= 2 ? "frag_cluster" : (inp.DoorwayFreshCasualtyAhead ? "frag_doorway_clear" : "frag_flush"));
                 }
 
                 // 8. FlankManeuver (Low Harm approach when enemy pinned/smoked or High Individualism)
@@ -1759,7 +1806,8 @@ namespace EasyRed2HumanAI
                 }
 
                 // 11. MaintainRadioLink
-                if (inp.IsRadioman && inp.RadioLinkDrifting)
+                if (inp.IsRadioman && inp.RadioLinkDrifting &&
+                    !(inp.HasVisibleEnemy && !inp.AmmoEmpty && inp.CanHarmTarget > 0.20f && inp.VisibleEnemyDist <= 16.0f))
                 {
                     ConsiderCandidate(
                         EmergentActionId.MaintainRadioLink,
@@ -1799,7 +1847,9 @@ namespace EasyRed2HumanAI
                     {
                         float visPen = cqbImmediate
                             ? 0.36f
-                            : ((inp.HasVisibleEnemy && !inp.SmokeActive && !inp.AllyPinningThreat) ? 0.08f : 0f);
+                            : ((inp.HasVisibleEnemy && !inp.SmokeActive && !inp.AllyPinningThreat)
+                                ? Mathf.Lerp(0.28f, 0.08f, Mathf.Clamp01((inp.VisibleEnemyDist - 12.0f) / 38.0f))
+                                : 0f);
                         float openAdvHarmPen = (!safeInCover && curHarm >= 0.52f && !inp.SmokeActive && !inp.AllyPinningThreat && inp.SectorDesperationBias < 0.20f)
                             ? 0.10f
                             : 0f;
@@ -1843,11 +1893,23 @@ namespace EasyRed2HumanAI
             if (bestStep0 == EmergentActionId.None)
             {
                 bool unsafeToMove = curHarm >= w.RiskThreshold * 0.65f || inp.InCover || inp.SquadDirective == Tier2SquadDirective.BalkNeedSupport;
-                bestStep0 = (inp.HasObjectiveTask && !inp.InsideObjectiveZone && !unsafeToMove)
-                    ? EmergentActionId.AdvanceObjective
-                    : EmergentActionId.HoldAndFight;
+                if (inp.HasObjectiveTask && !inp.InsideObjectiveZone && !unsafeToMove)
+                {
+                    bestStep0 = EmergentActionId.AdvanceObjective;
+                    bestReason = "default_advance";
+                }
+                else if (!inp.InCover && inp.CoverAvailable && !inp.HasVisibleEnemy &&
+                         (inp.InsideObjectiveZone || inp.IsHomeGroundDefender || !inp.HasObjectiveTask))
+                {
+                    bestStep0 = EmergentActionId.SeekCover;
+                    bestReason = "default_take_cover";
+                }
+                else
+                {
+                    bestStep0 = EmergentActionId.HoldAndFight;
+                    bestReason = "default_hold_cover";
+                }
                 bestScore = 0.05f;
-                bestReason = bestStep0 == EmergentActionId.AdvanceObjective ? "default_advance" : "default_hold_cover";
             }
 
             float dwell = (bestStep0 == EmergentActionId.SeekCover ||
@@ -1856,7 +1918,9 @@ namespace EasyRed2HumanAI
                            bestStep0 == EmergentActionId.DragCasualty ||
                            bestStep0 == EmergentActionId.FallbackRegroup)
                 ? 2.2f
-                : (bestStep0 == EmergentActionId.SelfBandage || bestStep0 == EmergentActionId.VehicleFieldRepair ? 3.5f : 1.5f);
+                : ((bestStep0 == EmergentActionId.AdvanceObjective || bestStep0 == EmergentActionId.SuppressPin)
+                    ? 2.0f
+                    : (bestStep0 == EmergentActionId.SelfBandage || bestStep0 == EmergentActionId.VehicleFieldRepair ? 3.5f : 1.5f));
 
             return new EmergentDecision
             {
@@ -2135,6 +2199,7 @@ namespace EasyRed2HumanAI
                 case EmergentReflexKind.SuddenPenetratingFire: return "HeavyFire";
                 case EmergentReflexKind.PointBlankAmbush: return "CQB";
                 case EmergentReflexKind.LethalBleedExposed: return "BleedCov";
+                case EmergentReflexKind.CloseAcousticAlert: return "Acoustic";
                 default: return "None";
             }
         }

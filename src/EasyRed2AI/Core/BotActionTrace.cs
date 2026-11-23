@@ -68,6 +68,9 @@ namespace EasyRed2HumanAI
             public short Ammo;
             public float EnemyDist;
             public float GunfireDist;
+            public float AcoustDist;
+            public short Yaw;
+            public int TargetId;
             public Vector3 Pos;
             public Vector3 Dest;
             public string Faction;
@@ -232,6 +235,16 @@ namespace EasyRed2HumanAI
             _wakeSignal?.Set();
         }
 
+        private static int ResolveTargetDiagId(SoldierAI ai)
+        {
+            if (ai == null || ai.visibleTarget == null)
+                return 0;
+            Soldier ts = ai.visibleTarget.TryCast<Soldier>();
+            if (ts != null && AiCore.TryGetSoldierHandles(ts.Pointer, out AiCore.SoldierFastHandles th))
+                return th.DiagId;
+            return 0;
+        }
+
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         public static void RecordEvent(
             Soldier soldier,
@@ -352,6 +365,9 @@ namespace EasyRed2HumanAI
                 Ammo = ammo,
                 EnemyDist = enemyDist,
                 GunfireDist = gunfireDist,
+                AcoustDist = VisionPatches.TryGetNearestCloseAcousticThreat(pos, fac, now, out _, out float ad, out _) ? ad : -1f,
+                Yaw = (short)(((int)Mathf.Round(h.Tr.eulerAngles.y) % 360 + 360) % 360),
+                TargetId = ResolveTargetDiagId(ai),
                 Pos = pos,
                 Dest = dest,
                 Faction = fac,
@@ -438,6 +454,9 @@ namespace EasyRed2HumanAI
                 Ammo = ammo,
                 EnemyDist = (ai != null && ai.visibleTarget != null) ? enemyDist : -1f,
                 GunfireDist = gfDist,
+                AcoustDist = VisionPatches.TryGetNearestCloseAcousticThreat(pos, fac, now, out _, out float ad, out _) ? ad : -1f,
+                Yaw = (short)(((int)Mathf.Round(h.Tr.eulerAngles.y) % 360 + 360) % 360),
+                TargetId = ResolveTargetDiagId(ai),
                 Pos = pos,
                 Dest = dest,
                 Faction = fac,
@@ -956,6 +975,12 @@ namespace EasyRed2HumanAI
             AppendFloat1(sb, r.EnemyDist);
             sb.Append(",\"gunfireDist\":");
             AppendFloat1(sb, r.GunfireDist);
+            sb.Append(",\"acoustDist\":");
+            AppendFloat1(sb, r.AcoustDist);
+            sb.Append(",\"yaw\":");
+            AppendInt(sb, r.Yaw);
+            sb.Append(",\"targetId\":");
+            AppendInt(sb, r.TargetId);
             sb.Append(",\"pos\":[");
             AppendFloat1(sb, r.Pos.x);
             sb.Append(',');

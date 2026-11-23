@@ -418,6 +418,9 @@ namespace EasyRed2HumanAI
         private static float _nextFriendlyArtilleryRefreshTime;
         private static readonly ActiveBarragePocket[] _activeShellingPockets = new ActiveBarragePocket[8];
         private static int _shellingPocketRingHead;
+        private static float _nextLocalArtyWarnToastTime;
+        private static float _nextCoopArtyWarnChatTime;
+        private static Vector3 _lastCoopArtyWarnPos;
 
         internal static ActiveBarragePocket[] FriendlyArtilleryZones => _friendlyArtilleryZones;
         internal static int FriendlyArtilleryZoneCount => _friendlyArtilleryZoneCount;
@@ -428,6 +431,9 @@ namespace EasyRed2HumanAI
             _friendlyArtilleryZoneCount = 0;
             _nextFriendlyArtilleryRefreshTime = 0f;
             _shellingPocketRingHead = 0;
+            _nextLocalArtyWarnToastTime = 0f;
+            _nextCoopArtyWarnChatTime = 0f;
+            _lastCoopArtyWarnPos = Vector3.zero;
             Array.Clear(_friendlyArtilleryZones, 0, _friendlyArtilleryZones.Length);
             Array.Clear(_activeShellingPockets, 0, _activeShellingPockets.Length);
         }
@@ -465,6 +471,105 @@ namespace EasyRed2HumanAI
                     }
                 }
                 catch { }
+            }
+
+            if (VisionConfig.EnableMod.Value && VisionConfig.EnableFriendlyBlastWarnings.Value && _friendlyArtilleryZoneCount > 0)
+            {
+                NotifyPlayersInFriendlyArtilleryZones(now);
+            }
+        }
+
+        private static void NotifyPlayersInFriendlyArtilleryZones(float now)
+        {
+            Soldier localPlayer = PlayerController.currentController != null ? PlayerController.currentController.ControlledCharacter : null;
+            if (localPlayer != null && localPlayer.IsAlive && localPlayer.transform != null)
+            {
+                Vector3 pPos = localPlayer.transform.position;
+                string pFac = AiCore.GetCachedFaction(localPlayer);
+                for (int i = 0; i < _friendlyArtilleryZoneCount; i++)
+                {
+                    ref ActiveBarragePocket z = ref _friendlyArtilleryZones[i];
+                    if (now >= z.ExpireTime || !AiCore.AreSameSideFactions(pFac, z.Faction))
+                        continue;
+
+                    float dx = pPos.x - z.Position.x;
+                    float dz = pPos.z - z.Position.z;
+                    float warnR = z.Radius + 6.0f;
+                    float dSq = dx * dx + dz * dz;
+                    if (dSq <= warnR * warnR && now >= _nextLocalArtyWarnToastTime)
+                    {
+                        _nextLocalArtyWarnToastTime = now + 10.0f;
+                        VisionPatches.ShowToast($"[HQ] DANGER CLOSE: Friendly artillery inbound ({Mathf.RoundToInt(Mathf.Sqrt(dSq))}m) — clear area!", 4.5f);
+                        break;
+                    }
+                }
+            }
+
+            if (!AiCore.IsInMultiplayerRoom() || !Photon.Pun.PhotonNetwork.IsMasterClient)
+                return;
+
+            AiCore.EnsureWorldSnapshot();
+            int solCount = AiCore.WorldSoldierCount;
+            var soldiers = AiCore.WorldSoldiers;
+            for (int i = 0; i < _friendlyArtilleryZoneCount; i++)
+            {
+                ref ActiveBarragePocket z = ref _friendlyArtilleryZones[i];
+                if (now >= z.ExpireTime || string.IsNullOrEmpty(z.Faction))
+                    continue;
+
+                float warnR = z.Radius + 6.0f;
+                float warnRSq = warnR * warnR;
+                Soldier threatenedHuman = null;
+                for (int s = 0; s < solCount; s++)
+                {
+                    Soldier sol = soldiers[s].Ref;
+                    if (sol == null || !sol.IsAlive || !AiCore.IsAnyHumanPlayerSoldier(sol))
+                        continue;
+                    if (!AiCore.AreSameSideFactions(soldiers[s].Faction, z.Faction))
+                        continue;
+
+                    Vector3 sp = soldiers[s].Pos;
+                    float dx = sp.x - z.Position.x;
+                    float dz = sp.z - z.Position.z;
+                    if (dx * dx + dz * dz <= warnRSq)
+                    {
+                        threatenedHuman = sol;
+                        break;
+                    }
+                }
+
+                if (threatenedHuman == null)
+                    continue;
+
+                if (now >= _nextCoopArtyWarnChatTime || (z.Position - _lastCoopArtyWarnPos).sqrMagnitude > 25f * 25f)
+                {
+                    _nextCoopArtyWarnChatTime = now + 14.0f;
+                    _lastCoopArtyWarnPos = z.Position;
+                    if (BattleLoader.instance != null && BattleLoader.instance.photonView != null && Photon.Pun.PhotonNetwork.LocalPlayer != null)
+                    {
+                        var rpcArgs = new Il2CppInterop.Runtime.InteropTypes.Arrays.Il2CppReferenceArray<Il2CppSystem.Object>(3);
+                        rpcArgs[0] = Photon.Pun.PhotonNetwork.LocalPlayer;
+                        rpcArgs[1] = (Il2CppSystem.String)z.Faction;
+                        rpcArgs[2] = (Il2CppSystem.String)"[HQ] DANGER CLOSE: Friendly artillery inbound near your position — clear area!";
+                        BattleLoader.instance.photonView.RPC("Chat_NewMessageFaction", Photon.Pun.RpcTarget.All, rpcArgs);
+                    }
+
+                    Vector3 hp = threatenedHuman.transform.position;
+                    for (int s = 0; s < solCount; s++)
+                    {
+                        Soldier ally = soldiers[s].Ref;
+                        if (ally == null || !ally.IsAlive || !ally.IsAI() || AiCore.IsAnyHumanPlayerSoldier(ally))
+                            continue;
+                        if (!AiCore.AreSameSideFactions(soldiers[s].Faction, z.Faction))
+                            continue;
+                        if ((soldiers[s].Pos - hp).sqrMagnitude <= 22f * 22f)
+                        {
+                            TrySayTacticalVoice(ally, ally.joinedSquad, VoiceManager.VoiceClip.keepYourHeadDown, 0.15f);
+                            break;
+                        }
+                    }
+                }
+                break;
             }
         }
 

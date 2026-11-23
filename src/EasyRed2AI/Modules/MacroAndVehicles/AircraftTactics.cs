@@ -770,7 +770,16 @@ namespace EasyRed2HumanAI
                 }
             }
 
-            if (bestCandidate != null && (groundBase == null || bestCandidate.Pointer != groundBase.Pointer))
+            float casNow = Time.time;
+            if (planeVh != null &&
+                casNow < planeVh.CasLockedTargetUntil &&
+                AiCore.IsValidAliveSpottable(planeVh.CasLockedTarget) &&
+                !IsAircraftTargetDangerCloseToFriendlySquad(myFaction, planeVh.CasLockedTarget.GetCenterOfUnit(), hasLiveBombsNow))
+            {
+                groundBase = planeVh.CasLockedTarget;
+                bestScore = curScore;
+            }
+            else if (bestCandidate != null && (groundBase == null || bestCandidate.Pointer != groundBase.Pointer))
                 groundBase = bestCandidate;
             else if (groundBase != null)
                 bestScore = curScore;
@@ -791,6 +800,11 @@ namespace EasyRed2HumanAI
                 {
                     if (airDec.Action == EmergentEngine.AirActionId.InterceptAir && bestEnemyAir != null)
                     {
+                        if (planeVh != null)
+                        {
+                            planeVh.CasLockedTarget = null;
+                            planeVh.CasLockedTargetUntil = 0f;
+                        }
                         if (AIPlane.fighterDogfightExtraLeash < 1800.0f)
                             AIPlane.fighterDogfightExtraLeash = 1800.0f;
                         currentResult = bestEnemyAir;
@@ -802,6 +816,11 @@ namespace EasyRed2HumanAI
                     }
                     if (airDec.Action == EmergentEngine.AirActionId.AttackGround && groundBase != null)
                     {
+                        if (planeVh != null && (planeVh.CasLockedTarget == null || planeVh.CasLockedTarget.Pointer != groundBase.Pointer || casNow >= planeVh.CasLockedTargetUntil))
+                        {
+                            planeVh.CasLockedTarget = groundBase;
+                            planeVh.CasLockedTargetUntil = casNow + 12.0f;
+                        }
                         if (currentResult == null || groundBase.Pointer != currentResult.Pointer)
                         {
                             currentResult = groundBase;
@@ -814,6 +833,11 @@ namespace EasyRed2HumanAI
                     }
                     if (airDec.Action == EmergentEngine.AirActionId.RefillOrEvade)
                     {
+                        if (planeVh != null)
+                        {
+                            planeVh.CasLockedTarget = null;
+                            planeVh.CasLockedTargetUntil = 0f;
+                        }
                         currentResult = (!hasLiveBombsNow && !plane.PilotGunHasAnyAmmo()) ? null : (groundBase ?? bestEnemyAir);
                         return;
                     }
@@ -822,6 +846,11 @@ namespace EasyRed2HumanAI
 
             if (groundBase != null && (currentResult == null || groundBase.Pointer != currentResult.Pointer))
             {
+                if (planeVh != null && (planeVh.CasLockedTarget == null || planeVh.CasLockedTarget.Pointer != groundBase.Pointer || casNow >= planeVh.CasLockedTargetUntil))
+                {
+                    planeVh.CasLockedTarget = groundBase;
+                    planeVh.CasLockedTargetUntil = casNow + 12.0f;
+                }
                 currentResult = groundBase;
                 if (TryRecordCombinedArmsAssist(plane.veh.Pointer, Time.time))
                 {

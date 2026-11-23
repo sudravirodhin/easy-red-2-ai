@@ -1339,7 +1339,7 @@ namespace EasyRed2HumanAI
             if (veh == null || veh.Pointer == IntPtr.Zero || veh.transform == null)
                 return;
 
-            if (!AiCore.IsLocallyOwnedVehicle(veh) || !veh.IsTransportVehicle() || veh.IsAirVehicle() || AiCore.IsAnyHumanPlayerDriving(veh))
+            if (!AiCore.IsLocallyOwnedVehicle(veh) || !veh.IsTransportVehicle() || veh.IsAirVehicle() || AiCore.IsAnyHumanPlayerDriving(veh) || AiCore.IsVehicleInWater(veh))
                 return;
 
             IntPtr vehPtr = veh.Pointer;

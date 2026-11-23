@@ -273,6 +273,11 @@ namespace EasyRed2HumanAI
             bool isPerFrameHook)
         {
             AiCore.SoldierFastHandles ch = h ?? AiCore.GetOrCreateSoldierHandles(soldier);
+            if (ch != null && meleeEnemy != null)
+            {
+                ch.Combat.PointBlankFaceUntil = now + 0.65f;
+                ch.Combat.CachedMeleeEnemy = meleeEnemy;
+            }
             SoldierPose desiredPose = GetDesiredMeleePose(meleeEnemy, dist);
             if (ch != null)
             {
@@ -302,18 +307,18 @@ namespace EasyRed2HumanAI
             float minPersonalSpace;
             if (soldier.HasBayonetReady)
             {
-                standoffDist = 1.30f;
-                minPersonalSpace = 0.92f;
+                standoffDist = 1.25f;
+                minPersonalSpace = 0.85f;
             }
             else if (soldier.HoldsMeleeWeapon)
             {
-                standoffDist = 0.96f;
-                minPersonalSpace = 0.74f;
+                standoffDist = 0.92f;
+                minPersonalSpace = 0.65f;
             }
             else
             {
-                standoffDist = 0.88f;
-                minPersonalSpace = 0.68f;
+                standoffDist = 0.82f;
+                minPersonalSpace = 0.58f;
             }
 
             if (!soldier.isInBodyAnimation)
@@ -699,8 +704,9 @@ namespace EasyRed2HumanAI
             bool hasCloseGunfire = VisionPatches.TryGetNearestEnemyGunfire(myPos, myFac, 15.0f, 2.5f, out float nearGunfireDist) ||
                                    VisionPatches.HasFiredRecently(enemySoldier, 2.5f);
 
-            const float unbayonetedStrikeRange = 1.22f;
-            const float meleeWeaponStrikeRange = 1.38f;
+            const float unbayonetedStrikeRange = 1.15f;
+            const float meleeWeaponStrikeRange = 1.28f;
+            const float bayonetStrikeRange = 1.68f;
 
             if (holdsMelee)
             {
@@ -719,13 +725,13 @@ namespace EasyRed2HumanAI
             {
                 lungeRange = hasBayonet ? 5.2f : 3.6f;
                 ceaseFireRange = (gunEmptyOrReloading || boltCyclingClose) ? 4.5f : 2.5f;
-                strikeRange = hasBayonet ? 2.25f : unbayonetedStrikeRange;
+                strikeRange = hasBayonet ? bayonetStrikeRange : unbayonetedStrikeRange;
             }
             else if (gunEmptyOrReloading)
             {
                 lungeRange = hasBayonet ? 4.2f : 3.2f;
                 ceaseFireRange = lungeRange;
-                strikeRange = hasBayonet ? 2.25f : unbayonetedStrikeRange;
+                strikeRange = hasBayonet ? bayonetStrikeRange : unbayonetedStrikeRange;
             }
             else if (hasCloseGunfire)
             {
@@ -734,7 +740,7 @@ namespace EasyRed2HumanAI
                 // enters immediate contact reach.
                 lungeRange = boltCyclingClose ? (hasBayonet ? 2.35f : 1.85f) : (hasBayonet ? 1.85f : 1.55f);
                 ceaseFireRange = boltCyclingClose ? lungeRange : 1.25f;
-                strikeRange = hasBayonet ? 2.20f : unbayonetedStrikeRange;
+                strikeRange = hasBayonet ? bayonetStrikeRange : unbayonetedStrikeRange;
 
                 if (dist > lungeRange && dist <= 4.2f)
                 {
@@ -753,17 +759,35 @@ namespace EasyRed2HumanAI
                 // Quiet CQB / indoor corner encounter with no surrounding gunfire
                 lungeRange = boltCyclingClose ? (hasBayonet ? 3.1f : 2.2f) : (hasBayonet ? 2.55f : 1.80f);
                 ceaseFireRange = boltCyclingClose ? lungeRange : (hasBayonet ? 1.85f : 1.40f);
-                strikeRange = hasBayonet ? 2.25f : unbayonetedStrikeRange;
+                strikeRange = hasBayonet ? bayonetStrikeRange : unbayonetedStrikeRange;
             }
 
             if (isExposedEmplacementGunner)
             {
-                strikeRange = Mathf.Max(strikeRange, 1.65f);
+                strikeRange = Mathf.Max(strikeRange, 1.55f);
                 lungeRange = Mathf.Max(lungeRange, strikeRange + 0.35f);
             }
 
             if (dist > lungeRange)
                 return false;
+
+            // 1-on-1 CQB melee discipline: never lunge into 1-vs-many melee when holding a loaded firearm.
+            if (!gunEmptyOrReloading && !holdsMelee && dist > 2.0f)
+            {
+                int nearbyEnemies = 0;
+                int wCount = AiCore.WorldSoldierCount;
+                var wSoldiers = AiCore.WorldSoldiers;
+                for (int i = 0; i < wCount; i++)
+                {
+                    Soldier ws = wSoldiers[i].Ref;
+                    if (ws == null || !ws.IsAlive || ws.HasSurrended())
+                        continue;
+                    if (!AiCore.AreEnemyFactions(myFac, wSoldiers[i].Faction))
+                        continue;
+                    if ((wSoldiers[i].Pos - enemyPos).sqrMagnitude <= 36.0f && ++nearbyEnemies >= 2)
+                        return false;
+                }
+            }
 
             // Anti-stacking cap: allow at most 2 friendly bots to actively melee the same target;
             // additional bots keep squad spacing and cover with firearms instead of dogpiling.
@@ -807,10 +831,14 @@ namespace EasyRed2HumanAI
 
             Vector3 toEnemy = enemy.transform.position - soldier.transform.position;
             toEnemy.y = 0f;
-            if (toEnemy.sqrMagnitude > 0.01f && AiCore.HorizontalAngleToDirection(soldier, toEnemy) > 42f)
-                return;
+            if (toEnemy.sqrMagnitude > 0.01f)
+            {
+                soldier.RotateToward(toEnemy, Time.deltaTime * 3.0f);
+                if (AiCore.HorizontalAngleToDirection(soldier, toEnemy) > 24f)
+                    return;
+            }
 
-            // Native Soldier+<MeleeDamageCR>d__489 (0x18077EB52) casts a horizontal 0.50m-radius OverlapCapsule
+            // Native Soldier+<MeleeDamageCR>d__489 (0x18077EDDA) casts a horizontal 0.30m-radius OverlapCapsule
             // forward from Soldier.FacePosition() (animated headBone.position @ [rdx+160h]). Standing FacePosition().y (~1.62m)
             // puts the capsule bottom at ~1.12m, passing completely over prone/crouched enemies or seated low tripod gunners!
             // Crouch first and wait briefly so the animated headBone drops within strike height.
@@ -848,6 +876,8 @@ namespace EasyRed2HumanAI
             }
 
             meleeH.Combat.NextMeleeAttemptTime = Time.time + 0.45f;
+            if (soldier.isSprinting)
+                soldier.isSprinting = false;
             soldier.SetGunTriggerPressed(false);
             soldier.Melee();
             MeleeAttacksTriggered++;
@@ -931,27 +961,43 @@ namespace EasyRed2HumanAI
             return true;
         }
 
-        [HarmonyPatch(typeof(Soldier), nameof(Soldier.MeleeDamageCR))]
+        [HarmonyPatch(typeof(Soldier._MeleeDamageCR_d__489), nameof(Soldier._MeleeDamageCR_d__489.MoveNext))]
         public static class Soldier_MeleeDamageCR_Patch
         {
-            public static void Prefix(Soldier __instance, ref float dist, Transform mountedBlade)
+            public static void Prefix(Soldier._MeleeDamageCR_d__489 __instance)
             {
                 try
                 {
-                    if (!VisionConfig.EnableMod.Value || !VisionConfig.EnablePointBlankMelee.Value || __instance == null)
+                    if (__instance == null || __instance.__1__state != 1)
                         return;
 
-                    if (mountedBlade == null && !__instance.IsPlayer())
+                    if (!VisionConfig.EnableMod.Value || !VisionConfig.EnablePointBlankMelee.Value)
+                        return;
+
+                    Soldier s = __instance.__4__this;
+                    if (s == null || s.IsPlayer())
+                        return;
+
+                    bool isEmpGunner = false;
+                    if (s.aiController != null &&
+                        TryResolvePointBlankTargetSoldier(s.aiController, out Soldier target, out isEmpGunner) &&
+                        target != null)
                     {
-                        float minReach = 0.95f;
-                        if (__instance.aiController != null &&
-                            TryResolvePointBlankTargetSoldier(__instance.aiController, out _, out bool isEmpGunner) &&
-                            isEmpGunner)
+                        Vector3 toTarget = target.transform.position - s.transform.position;
+                        toTarget.y = 0f;
+                        if (toTarget.sqrMagnitude > 0.01f &&
+                            toTarget.sqrMagnitude <= 2.6f * 2.6f &&
+                            AiCore.HorizontalAngleToDirection(s, toTarget) <= 55f)
                         {
-                            minReach = 1.45f;
+                            s.RotateToward(toTarget, 1.0f);
                         }
-                        if (dist < minReach)
-                            dist = minReach;
+                    }
+
+                    if (__instance.mountedBlade == null)
+                    {
+                        float minReach = isEmpGunner ? 1.50f : 1.15f;
+                        if (__instance.dist < minReach)
+                            __instance.dist = minReach;
                     }
                 }
                 catch { }
@@ -2302,6 +2348,7 @@ namespace EasyRed2HumanAI
         }
 
         private static readonly List<LiveGrenadeEntry> _activeLiveGrenades = new List<LiveGrenadeEntry>(16);
+        private static IntPtr _lastWarnedFriendlyGrenadePtr;
         private static float _nextLiveGrenadeRefreshTime;
 
         internal static void ClearActiveLiveGrenades()
@@ -2439,6 +2486,33 @@ namespace EasyRed2HumanAI
                 }
 
                 _activeLiveGrenades[i] = g;
+            }
+
+            if (VisionConfig.EnableMod.Value && VisionConfig.EnableFriendlyBlastWarnings.Value && _activeLiveGrenades.Count > 0)
+            {
+                Soldier localPlayer = PlayerController.currentController != null ? PlayerController.currentController.ControlledCharacter : null;
+                if (localPlayer != null && localPlayer.IsAlive && localPlayer.transform != null)
+                {
+                    Vector3 pPos = localPlayer.transform.position;
+                    string pFac = AiCore.GetCachedFaction(localPlayer);
+                    for (int i = 0; i < _activeLiveGrenades.Count; i++)
+                    {
+                        LiveGrenadeEntry g = _activeLiveGrenades[i];
+                        if (g.Ptr != _lastWarnedFriendlyGrenadePtr &&
+                            !string.IsNullOrEmpty(g.ThrowerFaction) &&
+                            AiCore.AreSameSideFactions(pFac, g.ThrowerFaction))
+                        {
+                            float warnR = Mathf.Max(g.BlastRadius + 2.0f, 8.5f);
+                            float dSq = (g.Pos - pPos).sqrMagnitude;
+                            if (dSq <= warnR * warnR)
+                            {
+                                _lastWarnedFriendlyGrenadePtr = g.Ptr;
+                                VisionPatches.ShowToast($"! Friendly grenade nearby ({Mathf.RoundToInt(Mathf.Sqrt(dSq))}m) — take cover!", 2.8f);
+                                break;
+                            }
+                        }
+                    }
+                }
             }
         }
 

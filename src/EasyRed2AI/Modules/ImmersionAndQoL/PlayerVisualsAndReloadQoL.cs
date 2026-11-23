@@ -35,6 +35,7 @@ namespace EasyRed2HumanAI
         private static float _nextSpectatorMissionRefreshTime;
 
         private static IntPtr _cachedMissionStatusGuiPtr;
+        private static bool _lastMissionStatusFlagsMirrored;
         private static GameObject _leftFactionTextGo;
         private static GameObject _rightFactionTextGo;
         private static Text _leftFactionText;
@@ -563,6 +564,8 @@ namespace EasyRed2HumanAI
                         return;
                     }
 
+                    _lastMissionStatusFlagsMirrored = __instance.flagsMirrored;
+
                     bool isSpectator = IsSpectatorCameraModeActive(out _, out bool canShowOverlays);
                     if (!modEnabled && !isSpectator)
                     {
@@ -709,6 +712,91 @@ namespace EasyRed2HumanAI
                 {
                     HitchProfiler.EndModScope(HitchBucket.UiMarkers, profStart);
                 }
+            }
+        }
+
+        private static string ResolveSpectatorRefFaction(BattleData bd)
+        {
+            string playerFaction = BattleManager.PlayerFaction;
+            if (!string.IsNullOrEmpty(playerFaction))
+                return playerFaction;
+
+            if (bd == null)
+                return null;
+
+            return _lastMissionStatusFlagsMirrored
+                ? bd.GetDefendersFaction()
+                : bd.GetInvadersFaction();
+        }
+
+        // Vanilla MissionTaskScripted.GetTaskCompletationColor (0x180583E60) only checks
+        // ResourcesManager.IsEnemyFaction when ControlledCharacter != null, so in Spectator Mode
+        // both Invader-held and Defender-held Conquest objectives fall through to BLUE_MISSION_TEXT.
+        [HarmonyPatch(typeof(MissionTaskScripted), nameof(MissionTaskScripted.GetTaskCompletationColor))]
+        public static class MissionTaskScripted_GetTaskCompletationColor_Patch
+        {
+            public static void Postfix(MissionTaskScripted __instance, ref Color __result)
+            {
+                if (__instance == null)
+                    return;
+
+                PlayerController pc = PlayerController.currentController;
+                if (pc != null && pc.ControlledCharacter != null)
+                    return;
+
+                string secured = __instance.securedFaction;
+                if (secured != null && secured.Length == 0)
+                {
+                    __result = MissionTask.GRAY_MISSION_TEXT;
+                    return;
+                }
+
+                BattleData bd = BattleManager.GetCurrentBattleData();
+                if (bd == null)
+                    return;
+
+                string refFaction = ResolveSpectatorRefFaction(bd);
+                if (string.IsNullOrEmpty(refFaction))
+                    return;
+
+                string ownerFaction = !string.IsNullOrEmpty(secured)
+                    ? secured
+                    : bd.GetInvadersFaction();
+                if (string.IsNullOrEmpty(ownerFaction))
+                    return;
+
+                __result = ResourcesManager.IsEnemyFaction(refFaction, ownerFaction)
+                    ? MissionTask.RED_MISSION_TEXT
+                    : MissionTask.BLUE_MISSION_TEXT;
+            }
+        }
+
+        // Standard Attack/Defend Operations use MissionTaskConquerArea.GetTaskCompletationColor,
+        // which also falls back to BLUE_MISSION_TEXT in Spectator Mode when ControlledCharacter == null.
+        [HarmonyPatch(typeof(MissionTaskConquerArea), nameof(MissionTaskConquerArea.GetTaskCompletationColor))]
+        public static class MissionTaskConquerArea_GetTaskCompletationColor_Patch
+        {
+            public static void Postfix(MissionTaskConquerArea __instance, ref Color __result)
+            {
+                if (__instance == null)
+                    return;
+
+                PlayerController pc = PlayerController.currentController;
+                if (pc != null && pc.ControlledCharacter != null)
+                    return;
+
+                BattleData bd = BattleManager.GetCurrentBattleData();
+                if (bd == null)
+                    return;
+
+                string refFaction = ResolveSpectatorRefFaction(bd);
+                string invaders = bd.GetInvadersFaction();
+                if (string.IsNullOrEmpty(refFaction) || string.IsNullOrEmpty(invaders))
+                    return;
+
+                __result = ResourcesManager.IsEnemyFaction(refFaction, invaders)
+                    ? MissionTask.RED_MISSION_TEXT
+                    : MissionTask.BLUE_MISSION_TEXT;
             }
         }
 

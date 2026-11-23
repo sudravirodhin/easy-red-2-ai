@@ -24,6 +24,128 @@ namespace EasyRed2HumanAI
             public EmergentEngine.Tier3NetLever LastT3Lever;
         }
 
+        private static float ComputeWeaponEffectiveRangeWeight(
+            Soldier soldier,
+            AiCore.SoldierFastHandles h,
+            GenericGun gun,
+            bool isGunner,
+            VeteranAndTacticsPatches.SoldierPersonality personality,
+            float dist,
+            float now)
+        {
+            if (gun == null || dist <= 1.0f)
+                return 1.0f;
+
+            float dmgRange = Mathf.Max(25f, gun.DamageRange());
+            AmmoItem ammo = gun.GetAmmoItem() ?? gun.usedAmmoItem;
+            BulletData bd = ammo != null ? ammo.GetBulletData() : null;
+
+            float optimal;
+            float taper;
+            if (gun.isFlamethrower || (bd != null && bd.IsFire()))
+            {
+                optimal = 22f;
+                taper = 42f;
+            }
+            else if (bd != null && bd.IsShotgun())
+            {
+                optimal = 24f;
+                taper = 65f;
+            }
+            else if (gun.IsPistol())
+            {
+                optimal = 22f;
+                taper = 65f;
+            }
+            else if (gun.IsAtWeapon())
+            {
+                if (dmgRange >= 150f && !gun.IsGrenadeLauncher())
+                {
+                    optimal = 110f;
+                    taper = 210f;
+                }
+                else
+                {
+                    optimal = 50f;
+                    taper = 105f;
+                }
+            }
+            else if (h != null && AiCore.GetCachedOpticZoom(h, now) >= 2.2f)
+            {
+                optimal = 260f;
+                taper = 420f;
+            }
+            else if (isGunner)
+            {
+                optimal = 210f;
+                taper = 360f;
+            }
+            else if (dmgRange <= 135f ||
+                     (personality >= VeteranAndTacticsPatches.SoldierPersonality.Assaulter_Shock &&
+                      personality <= VeteranAndTacticsPatches.SoldierPersonality.Assaulter_Skirmisher &&
+                      dmgRange <= 185f))
+            {
+                optimal = 55f;
+                taper = 130f;
+            }
+            else
+            {
+                optimal = Mathf.Clamp(dmgRange * 0.55f, 115f, 185f);
+                taper = Mathf.Max(optimal + 90f, dmgRange);
+            }
+
+            if (dist <= optimal)
+                return 1.0f;
+            if (dist <= taper)
+                return Mathf.Lerp(1.0f, 0.35f, (dist - optimal) / Mathf.Max(1f, taper - optimal));
+
+            return Mathf.Lerp(0.35f, 0.18f, Mathf.Clamp01((dist - taper) / Mathf.Max(30f, taper * 0.65f)));
+        }
+
+        private static float ComputeAtWeaponArmorWeight(
+            Soldier soldier,
+            GenericGun heldGun,
+            float hullArmorMm,
+            float dist)
+        {
+            GenericGun atGun = (heldGun != null && heldGun.IsAtWeapon()) ? heldGun : null;
+            if (atGun == null && soldier != null)
+            {
+                for (int slot = 0; slot <= 2; slot++)
+                {
+                    GenericGun g = soldier.GetHeldGun(slot);
+                    if (g != null && g.IsAtWeapon() && (g.GetCurrentAmmoCount() > 0 || !soldier.IsOutOfAmmosFor(g)))
+                    {
+                        atGun = g;
+                        break;
+                    }
+                }
+            }
+            if (atGun == null)
+                return 0.65f;
+
+            float dmgRange = Mathf.Max(25f, atGun.DamageRange());
+            float optimal = (dmgRange >= 150f && !atGun.IsGrenadeLauncher()) ? 110f : 50f;
+            float taper = (dmgRange >= 150f && !atGun.IsGrenadeLauncher()) ? 210f : 105f;
+
+            float rangeW = dist <= optimal
+                ? 1.0f
+                : (dist <= taper
+                    ? Mathf.Lerp(1.0f, 0.35f, (dist - optimal) / Mathf.Max(1f, taper - optimal))
+                    : Mathf.Lerp(0.35f, 0.18f, Mathf.Clamp01((dist - taper) / Mathf.Max(30f, taper * 0.65f))));
+
+            AmmoItem ammo = atGun.GetAmmoItem() ?? atGun.usedAmmoItem;
+            BulletData bd = ammo != null ? ammo.GetBulletData() : null;
+            if (bd != null && hullArmorMm > 15f)
+            {
+                float pen = bd.CalculateMmPenetrationWithFallof(dist);
+                if (pen > 0.1f && pen < hullArmorMm * 0.80f)
+                    rangeW *= 0.45f;
+            }
+
+            return rangeW;
+        }
+
         private static readonly EmergentEngine.DangerStampRing _side0Stamps = new EmergentEngine.DangerStampRing();
         private static readonly EmergentEngine.DangerStampRing _side1Stamps = new EmergentEngine.DangerStampRing();
         private static readonly EmergentEngine.IntentBoard _side0Intents = new EmergentEngine.IntentBoard();
@@ -146,6 +268,69 @@ namespace EasyRed2HumanAI
 
         private static EmergentEngine.DangerStampRing GetRing(int sideIdx) => sideIdx == 0 ? _side0Stamps : _side1Stamps;
         private static EmergentEngine.IntentBoard GetIntents(int sideIdx) => sideIdx == 0 ? _side0Intents : _side1Intents;
+
+        internal static bool TryGetNearestDangerStampDirection(
+            string faction,
+            Vector3 myPos,
+            long squadId,
+            bool isConnectedToRadioNet,
+            float now,
+            out Vector3 toConflict,
+            out float distSq)
+        {
+            toConflict = Vector3.zero;
+            distSq = float.MaxValue;
+            if (string.IsNullOrEmpty(faction))
+                return false;
+
+            int sideIdx = ResolveSideIndex(faction);
+            EmergentEngine.DangerStampRing ring = GetRing(sideIdx);
+            float bestEffSq = float.MaxValue;
+            bool found = false;
+
+            for (int i = 0; i < EmergentEngine.DangerStampRing.Capacity; i++)
+            {
+                EmergentEngine.DangerStamp s = ring.GetSlotCopy(i);
+                if (!s.Active || s.IsEnemyRelief || s.Severity < 0.25f)
+                    continue;
+
+                float age = now - s.Time;
+                if (age < 0f || age > s.DecaySec)
+                    continue;
+
+                Vector3 toPos = s.Pos - myPos;
+                toPos.y = 0f;
+                float posDistSq = toPos.sqrMagnitude;
+                if (posDistSq > 165f * 165f)
+                    continue;
+
+                bool canPerceive = posDistSq <= 45f * 45f ||
+                                   (squadId != 0L && s.OriginSquadId == squadId) ||
+                                   (isConnectedToRadioNet && s.ReportedToNet);
+                if (!canPerceive)
+                    continue;
+
+                Vector3 targetPos = (s.SourcePos.sqrMagnitude > 0.01f && (s.SourcePos - myPos).sqrMagnitude > 4.0f)
+                    ? s.SourcePos
+                    : s.Pos;
+                Vector3 vec = targetPos - myPos;
+                vec.y = 0f;
+                float dSq = vec.sqrMagnitude;
+                if (dSq < 0.25f)
+                    continue;
+
+                float effSq = dSq * (1.0f + Mathf.Clamp01(age / Mathf.Max(1f, s.DecaySec)) * 0.50f);
+                if (effSq < bestEffSq)
+                {
+                    bestEffSq = effSq;
+                    toConflict = vec;
+                    distSq = dSq;
+                    found = true;
+                }
+            }
+
+            return found;
+        }
 
         private static long PtrToKey(IntPtr p) => p.ToInt64();
 
@@ -551,16 +736,32 @@ namespace EasyRed2HumanAI
                     Vehicle tv = ai.visibleTarget.TryCast<Vehicle>();
                     float mm = tv != null ? VeteranAndTacticsPatches.GetVehicleMaxHullArmorMm(tv) : 0f;
                     visTargetIsHeavyArmor = mm >= 20f;
-                    canHarm = hasAtCap ? 0.85f : (visTargetIsHeavyArmor ? 0.0f : 0.35f);
+                    if (hasAtCap)
+                        canHarm = 0.85f * ComputeAtWeaponArmorWeight(soldier, heldGun, mm, dist);
+                    else if (visTargetIsHeavyArmor)
+                        canHarm = 0.0f;
+                    else
+                        canHarm = 0.35f * ComputeWeaponEffectiveRangeWeight(soldier, h, heldGun, isGunner, personality, dist, now);
                 }
                 else
                 {
-                    canHarm = gunEmpty && !inPointBlankMelee ? 0.10f : (canFireAtVis ? 0.90f : 0.45f);
+                    float baseCanHarm = gunEmpty && !inPointBlankMelee ? 0.10f : (canFireAtVis ? 0.90f : 0.45f);
+                    canHarm = (gunEmpty && !inPointBlankMelee)
+                        ? 0.10f
+                        : (baseCanHarm * ComputeWeaponEffectiveRangeWeight(soldier, h, heldGun, isGunner, personality, dist, now));
                 }
             }
             else if (board.HasActiveThreat)
             {
-                canHarm = (board.ThreatIsArmor && !hasAtCap) ? 0.0f : 0.55f;
+                if (board.ThreatIsArmor && !hasAtCap)
+                {
+                    canHarm = 0.0f;
+                }
+                else
+                {
+                    float threatDist = Vector3.Distance(myPos, board.ThreatPosition);
+                    canHarm = 0.55f * ComputeWeaponEffectiveRangeWeight(soldier, h, heldGun, isGunner, personality, threatDist, now);
+                }
             }
 
             float rawHarmNow = Mathf.Clamp01(suppression / 68.0f);
@@ -578,6 +779,30 @@ namespace EasyRed2HumanAI
                 out int activeStamps,
                 out float enemyRelief,
                 out bool doorwayCas);
+
+            if (ai.IsMoving() && h.Tr != null)
+            {
+                Vector3 moveFwd = h.Tr.forward;
+                moveFwd.y = 0f;
+                if (moveFwd.sqrMagnitude > 0.01f)
+                {
+                    Vector3 aheadPos = myPos + moveFwd.normalized * 5.5f;
+                    float aheadHarm = ring.EvaluateSpotProjectedHarm(
+                        aheadPos, myPos, sqId,
+                        board.IsConnectedToRadioNet,
+                        isHeavyArmor: false,
+                        isLightArmor: false,
+                        EmergentEngine.EmergentTier.Individual,
+                        now,
+                        out int aheadStamps,
+                        out float aheadRelief,
+                        out bool aheadDoorwayCas);
+                    if (aheadHarm > projHarm) projHarm = aheadHarm;
+                    if (aheadStamps > activeStamps) activeStamps = aheadStamps;
+                    if (aheadRelief > enemyRelief) enemyRelief = aheadRelief;
+                    if (aheadDoorwayCas) doorwayCas = true;
+                }
+            }
 
             // Check lightweight world interactables from WorldSnapshots
             bool hasLiveGrenade = VeteranAndTacticsPatches.EmergentHasCloseLiveGrenade(myPos, fac);
@@ -813,6 +1038,17 @@ namespace EasyRed2HumanAI
                 cohesionBonus = Mathf.Clamp01(1.0f - Mathf.Max(0f, ldrDist - 24.0f) / 36.0f);
             }
 
+            bool closeAcousticReflex = false;
+            if (!hasVisible && hasUsableArms && !soldier.isBleeding && !soldier.isInHandsAnimation && !soldier.isInBodyAnimation)
+            {
+                closeAcousticReflex = now < h.Vision.UnderFireUntil;
+                if (!closeAcousticReflex && !string.IsNullOrEmpty(fac))
+                {
+                    closeAcousticReflex = VisionPatches.TryGetNearestCloseAcousticThreat(myPos, fac, now, out _, out float reflexSoundDist, out _) &&
+                                          reflexSoundDist <= 16.0f;
+                }
+            }
+
             var inp = new EmergentEngine.EmergentInput
             {
                 Now = now,
@@ -834,6 +1070,7 @@ namespace EasyRed2HumanAI
                 ActiveDangerStamps = activeStamps,
                 DoorwayFreshCasualtyAhead = doorwayCas,
                 LiveGrenadeClose = hasLiveGrenade,
+                CloseAcousticThreat = closeAcousticReflex,
                 InCover = soldier.IsOnCover(),
                 ExposedSideOfWall = exposedWall,
                 IsOnBridge = isOnBridge,
@@ -846,7 +1083,7 @@ namespace EasyRed2HumanAI
                 PointBlankThreat = inPointBlankMelee,
                 VisibleEnemyDist = dist,
                 CanHarmTarget = canHarm,
-                CoverAvailable = true,
+                CoverAvailable = now >= h.Stance.NoLocalCoverUntil,
                 FlankCoverAvailable = board.FlankLeftCover != null || board.FlankRightCover != null,
                 AllyPinningThreat = board.IsThreatBeingPinned(now),
                 SmokeActive = now < board.SmokeActiveUntil,
@@ -857,6 +1094,7 @@ namespace EasyRed2HumanAI
                 UncounterableArmorClose = isEvadingArmor || (visTargetIsHeavyArmor && !hasAtCap && dist <= 45f),
                 HasObjectiveTask = board.HasActiveObjectiveTask,
                 InsideObjectiveZone = insideObjZone,
+                IsHomeGroundDefender = AiCore.IsAsymmetricDefender(fac),
                 ObjectiveDist = objDist,
                 ObjectiveUrgency = board.HasActiveObjectiveTask ? Mathf.Clamp01((capTickingAgainst ? 0.85f : 0.45f) + board.ObjectiveCaptureProgress * 0.55f) : 0f,
                 ClusteredEnemiesAtThreat = clusteredEnemies,
@@ -892,13 +1130,41 @@ namespace EasyRed2HumanAI
                 h.Emergent.LastReflexKind = dec.Reflex;
                 h.Emergent.LastReflexTime = now;
                 h.Emergent.NextPlanTime = Mathf.Max(h.Emergent.NextPlanTime, dec.CommitUntil);
+                if (dec.Reflex == EmergentEngine.EmergentReflexKind.CloseAcousticAlert)
+                {
+                    h.Vision.StationaryWatch.NextEvalTime = 0f;
+                    h.Vision.ThreatSector.ExpireTime = 0f;
+                    soldier.SetAlertedFor(4.0f);
+                    if (ai.IsMoving() && !soldier.IsOnCover())
+                    {
+                        ai.moveDirectlyToward_end = 0f;
+                        ai.Stop(true);
+                    }
+                }
             }
             else
             {
-                // Layer 2: Deliberative Utility + 2-3 Ply Prereq Chaining (staggered ~3.3 Hz)
-                if (!h.Emergent.HasDecision || now >= h.Emergent.NextPlanTime)
+                // Layer 2: Deliberative Utility + 2-3 Ply Prereq Chaining (staggered ~3.3 Hz, or instant wake on close visible enemy)
+                bool closeContactWake = hasVisible &&
+                                        dist <= 16.0f &&
+                                        hasUsableArms &&
+                                        canHarm > 0.20f &&
+                                        (!h.Emergent.HasDecision ||
+                                         (h.Emergent.CurrentDecision.Step0 != EmergentEngine.EmergentActionId.HoldAndFight &&
+                                          h.Emergent.CurrentDecision.Step0 != EmergentEngine.EmergentActionId.CloseBreach &&
+                                          h.Emergent.CurrentDecision.Step0 != EmergentEngine.EmergentActionId.EvadeGrenade));
+                if (!h.Emergent.HasDecision || closeContactWake || now >= h.Emergent.NextPlanTime)
                 {
-                    dec = EmergentEngine.EvaluateDeliberative(in inp, in h.Emergent.Weights, in h.Emergent.CurrentDecision, now);
+                    EmergentEngine.EmergentDecision prevForDelib = h.Emergent.CurrentDecision;
+                    if (closeContactWake &&
+                        (prevForDelib.Step0 == EmergentEngine.EmergentActionId.AdvanceObjective ||
+                         prevForDelib.Step0 == EmergentEngine.EmergentActionId.FlankManeuver ||
+                         prevForDelib.Step0 == EmergentEngine.EmergentActionId.MaintainRadioLink ||
+                         prevForDelib.Step0 == EmergentEngine.EmergentActionId.SuppressPin))
+                    {
+                        prevForDelib.CommitUntil = 0f;
+                    }
+                    dec = EmergentEngine.EvaluateDeliberative(in inp, in h.Emergent.Weights, in prevForDelib, now);
                     h.Emergent.NextPlanTime = now + 0.28f + ((AiCore.GetDeterministicHash(h.Ptr, 17) & 7) * 0.02f);
                     if (dec.UnsafePrereqRejected)
                     {
@@ -1241,6 +1507,26 @@ namespace EasyRed2HumanAI
                         }
                     }
 
+                    if (!soldier.IsOnCover() &&
+                        ai.visibleTarget == null &&
+                        !ai.IsMoving() &&
+                        !ai.HasPath &&
+                        !ai.HasPathRequest &&
+                        !ai.PathCalculationLocked &&
+                        soldier.HasDestinationAssigned &&
+                        !soldier.isBleeding &&
+                        !soldier.isInHandsAnimation &&
+                        !soldier.isInBodyAnimation)
+                    {
+                        Vector3 assignedDest = VeteranAndTacticsPatches.GetCachedMoveEndpoint(h, ai, soldier, out _);
+                        if ((assignedDest - myPos).sqrMagnitude > 3.5f * 3.5f)
+                        {
+                            ai.moveDirectlyToward_end = 0f;
+                            ai.MoveDestination = assignedDest;
+                            ai.UpdatePath();
+                        }
+                    }
+
                     if (!acousticBusy && !soldier.isBleeding && rawHarmNow < 0.20f)
                     {
                         if (board.AliveMemberCount <= 1)
@@ -1256,6 +1542,11 @@ namespace EasyRed2HumanAI
                                 plan.MoveOverrideDest = h.MoveOverride.Dest;
                                 plan.PlanExpireTime = Mathf.Max(plan.PlanExpireTime, h.MoveOverride.ExpireTime);
                             }
+                        }
+                        else if (suppression < 15f && !isOnBridge &&
+                                 ai.visibleTarget == null)
+                        {
+                            VeteranAndTacticsPatches.EmergentTryDefenderPerimeterPatrol(ai, soldier, h, sq, myPos, now);
                         }
                     }
                     break;
@@ -1951,7 +2242,7 @@ namespace EasyRed2HumanAI
 
             AiCore.EnqueueAsyncLog(
                 false,
-                $"[HARMTelemetry:{tag}] T1Decs:{_totalT1Decisions} (Cover:{_actionCounts[(int)EmergentEngine.EmergentActionId.SeekCover]} Engage:{_actionCounts[(int)EmergentEngine.EmergentActionId.HoldAndFight]} Adv:{_actionCounts[(int)EmergentEngine.EmergentActionId.AdvanceObjective]} Flank:{_actionCounts[(int)EmergentEngine.EmergentActionId.FlankManeuver]} Smoke:{_actionCounts[(int)EmergentEngine.EmergentActionId.PopSmoke]} Bnd:{_actionCounts[(int)EmergentEngine.EmergentActionId.SelfBandage]} Med:{_actionCounts[(int)EmergentEngine.EmergentActionId.MedicHeal]} Drag:{_actionCounts[(int)EmergentEngine.EmergentActionId.DragCasualty]} Lib:{_actionCounts[(int)EmergentEngine.EmergentActionId.LiberatePrisoner]} Ammo:{_actionCounts[(int)EmergentEngine.EmergentActionId.ResupplyAmmo] + _actionCounts[(int)EmergentEngine.EmergentActionId.PushAmmoDrop]}) | Reflex[Gren:{_reflexCounts[(int)EmergentEngine.EmergentReflexKind.LiveGrenade]} DoorCas:{_reflexCounts[(int)EmergentEngine.EmergentReflexKind.DoorwayFreshCasualty]} HeavyFire:{_reflexCounts[(int)EmergentEngine.EmergentReflexKind.SuddenPenetratingFire]} CQB:{_reflexCounts[(int)EmergentEngine.EmergentReflexKind.PointBlankAmbush]} Doom:{_reflexCounts[(int)EmergentEngine.EmergentReflexKind.HullCookoffDoom]}] | Prereqs:{_prereqChainsCount}(UnsafeRej:{_unsafeChainsRejectedCount}) | TroopInt:{_troopInteractionsCount} | Air[CAS:{_airGroundRunsCount} Int:{_airInterceptsCount}] | Stamps[Danger:{_dangerStampsEmittedCount} Relief:{_enemyReliefStampsCount} MIA:{_miaTimeoutsCount}] | T2Balks:{_tier2BalksCount} T3Levers:{_tier3LeversCount} ({_lastSide0Lever}/{_lastSide1Lever}) | Thrash:{_thrashWatchdogCount}");
+                $"[HARMTelemetry:{tag}] T1Decs:{_totalT1Decisions} (Cover:{_actionCounts[(int)EmergentEngine.EmergentActionId.SeekCover]} Engage:{_actionCounts[(int)EmergentEngine.EmergentActionId.HoldAndFight]} Adv:{_actionCounts[(int)EmergentEngine.EmergentActionId.AdvanceObjective]} Flank:{_actionCounts[(int)EmergentEngine.EmergentActionId.FlankManeuver]} Smoke:{_actionCounts[(int)EmergentEngine.EmergentActionId.PopSmoke]} Bnd:{_actionCounts[(int)EmergentEngine.EmergentActionId.SelfBandage]} Med:{_actionCounts[(int)EmergentEngine.EmergentActionId.MedicHeal]} Drag:{_actionCounts[(int)EmergentEngine.EmergentActionId.DragCasualty]} Lib:{_actionCounts[(int)EmergentEngine.EmergentActionId.LiberatePrisoner]} Ammo:{_actionCounts[(int)EmergentEngine.EmergentActionId.ResupplyAmmo] + _actionCounts[(int)EmergentEngine.EmergentActionId.PushAmmoDrop]}) | Reflex[Gren:{_reflexCounts[(int)EmergentEngine.EmergentReflexKind.LiveGrenade]} DoorCas:{_reflexCounts[(int)EmergentEngine.EmergentReflexKind.DoorwayFreshCasualty]} HeavyFire:{_reflexCounts[(int)EmergentEngine.EmergentReflexKind.SuddenPenetratingFire]} CQB:{_reflexCounts[(int)EmergentEngine.EmergentReflexKind.PointBlankAmbush]} Doom:{_reflexCounts[(int)EmergentEngine.EmergentReflexKind.HullCookoffDoom]} Acoust:{_reflexCounts[(int)EmergentEngine.EmergentReflexKind.CloseAcousticAlert]}] | Prereqs:{_prereqChainsCount}(UnsafeRej:{_unsafeChainsRejectedCount}) | TroopInt:{_troopInteractionsCount} | Air[CAS:{_airGroundRunsCount} Int:{_airInterceptsCount}] | Stamps[Danger:{_dangerStampsEmittedCount} Relief:{_enemyReliefStampsCount} MIA:{_miaTimeoutsCount}] | T2Balks:{_tier2BalksCount} T3Levers:{_tier3LeversCount} ({_lastSide0Lever}/{_lastSide1Lever}) | Thrash:{_thrashWatchdogCount}");
         }
     }
 

@@ -204,6 +204,7 @@ namespace EasyRed2HumanAI
             public float LastAlertStartSeen;
             public float NextNearMissAlertTime;
             public float NextIncomingFireSuppressTime;
+            public bool WasMovingLastWatchTick;
         }
 
         internal struct SoldierStanceState
@@ -232,6 +233,10 @@ namespace EasyRed2HumanAI
             public Soldier.LeanDirection DesiredLean;
             public float LeanHoldUntil;
             public float NextLeanProbeTime;
+            public float NextCoverIntegrityCheckTime;
+            public float NextVantageSeekTime;
+            public float NoLocalCoverUntil;
+            public byte ZombieRecoveries;
         }
 
         internal struct SoldierCombatState
@@ -244,6 +249,7 @@ namespace EasyRed2HumanAI
             public float LiberateMoveCooldownUntil;
             public float NextBayonetCheckTime;
             public float NextMeleeAttemptTime;
+            public float PriorityTargetLockUntil;
             public float NextMeleeStepTime;
             public float NextBoundingHoldCountTime;
             public float NextBridgeAssistCountTime;
@@ -265,6 +271,7 @@ namespace EasyRed2HumanAI
             public float LastMeleeSwingTime;
             public byte ConsecutiveMeleeSwingsOnTarget;
             public byte ConsecutiveSlopeVaultRejects;
+            public byte ConsecutiveNoFloorVaultRejects;
             public float MeleeWhiffFallbackUntil;
             public float NextAtCapCheckTime;
             public bool CachedHasUsableAt;
@@ -279,6 +286,10 @@ namespace EasyRed2HumanAI
             public float PendingSmokeAimUntil;
             public IntPtr PendingSmokePrefabPtr;
             public float ThrowFireHoldUntil;
+            public Vector3 PendingThrowFaceDir;
+            public float PendingThrowFaceUntil;
+            public float PointBlankFaceUntil;
+            public Vector3 PointBlankFaceDir;
         }
 
         internal struct SoldierGoapState
@@ -427,6 +438,8 @@ namespace EasyRed2HumanAI
             public float PlaneHotStartPendingUntil;
             public float PlaneHotStartWindowUntil;
             public bool PlaneHotStartAllowAi;
+            public Spottable CasLockedTarget;
+            public float CasLockedTargetUntil;
             public bool WasOwnDriverOrVehicle;
             public bool HasObservedOwnershipState;
             public bool HasRemotePlaneSync;
@@ -487,6 +500,23 @@ namespace EasyRed2HumanAI
                 return canonical;
             _internedFactions[raw] = raw;
             return raw;
+        }
+
+        public static bool IsAsymmetricDefender(Soldier soldier)
+        {
+            if (soldier == null || soldier.Pointer == IntPtr.Zero)
+                return false;
+            return IsAsymmetricDefender(GetCachedFaction(soldier));
+        }
+
+        public static bool IsAsymmetricDefender(string faction)
+        {
+            if (string.IsNullOrEmpty(faction))
+                return false;
+            BattleData bd = BattleManager.GetCurrentBattleData();
+            return bd != null &&
+                   bd.invadersTickets > 0 &&
+                   !bd.IsInvaderFaction(faction);
         }
 
         public static bool AreSameSideFactions(string fA, string fB)

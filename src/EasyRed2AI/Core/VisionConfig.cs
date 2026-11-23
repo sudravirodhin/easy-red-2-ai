@@ -125,6 +125,7 @@ namespace EasyRed2HumanAI
         public static ConfigEntry<bool> EnableRealisticVehicleArmorAndTopAttack;
         public static ConfigEntry<bool> EnableParachuteWindDrift;
         public static ConfigEntry<bool> EnableSpectatorHudRetention;
+        public static ConfigEntry<bool> EnableFriendlyBlastWarnings;
         public static ConfigEntry<bool> EnableSpectatorBotInspector;
         public static ConfigEntry<bool> EnableObjectiveBarFactionNames;
         public static ConfigEntry<bool> EnableBloodSmokeWaterOcclusion;
@@ -132,6 +133,8 @@ namespace EasyRed2HumanAI
         public static ConfigEntry<bool> EnableAlwaysShowSquadNames;
         public static ConfigEntry<bool> EnableInWorldSquadMemberNames;
         public static ConfigEntry<bool> EnableMapSquadLabels;
+        public static ConfigEntry<bool> EnableVanillaPvpMode;
+        private static bool[] _prePvpSnapshot;
 
         public static void Init(ConfigFile config)
         {
@@ -140,6 +143,12 @@ namespace EasyRed2HumanAI
                 "EnableMod",
                 true,
                 "Master toggle for the Easy Red 2 Humanized AI Vision & Awareness mod.");
+
+            EnableVanillaPvpMode = config.Bind(
+                "0. General",
+                "EnableVanillaPvpMode",
+                false,
+                "Vanilla PvP Mode: disables local-player ballistics, reload-cancel, spotting, and HUD/spectator advantages for fair PvP with unmodded clients while keeping Host AI upgrades active.");
 
             DebugLogging = config.Bind(
                 "0. General",
@@ -767,6 +776,12 @@ namespace EasyRed2HumanAI
                 true,
                 "Keep the Mission Objectives/Tickets/Phase HUD (MissionStatusGUI) and 3D world objective/unit markers visible in Free Camera and Auto Battle Camera (press F in Spectator/Free Cam to cycle Full Tactical -> Objectives Only -> Clean Cinema).");
 
+            EnableFriendlyBlastWarnings = config.Bind(
+                "8. Ballistics & Immersion",
+                "EnableFriendlyBlastWarnings",
+                true,
+                "Warn human players when inside a friendly artillery barrage or close friendly grenade blast radius (HUD toast for modded players, plus team-only Co-op chat alert for vanilla clients).");
+
             EnableSpectatorBotInspector = config.Bind(
                 "8. Ballistics & Immersion",
                 "EnableSpectatorBotInspector",
@@ -808,6 +823,57 @@ namespace EasyRed2HumanAI
                 "EnableMapSquadLabels",
                 true,
                 "Player QoL: Label friendly squads on the tactical map (M) with their single-letter phonetic squad code (A, B, C, etc., matching Able, Baker, Charlie...).");
+            if (EnableVanillaPvpMode != null && EnableVanillaPvpMode.Value)
+                ApplyVanillaPvpMode(true);
+        }
+
+        private static ConfigEntry<bool>[] GetVanillaPvpEntries()
+        {
+            return new ConfigEntry<bool>[]
+            {
+                EnableThinCoverBulletPenetration,
+                EnableRealisticVehicleArmorAndTopAttack,
+                EnableTacticalReloadAndBipodCancel,
+                EnableQuickTapSpot,
+                EnableFriendlyBlastWarnings,
+                EnableSpectatorHudRetention,
+                EnableSpectatorBotInspector,
+                EnableBloodSmokeWaterOcclusion,
+                EnableAlwaysShowSquadNames,
+                EnableInWorldSquadMemberNames,
+                EnableMapSquadLabels
+            };
+        }
+
+        public static void ApplyVanillaPvpMode(bool enabled)
+        {
+            ConfigEntry<bool>[] entries = GetVanillaPvpEntries();
+            if (enabled)
+            {
+                if (_prePvpSnapshot == null || _prePvpSnapshot.Length != entries.Length)
+                {
+                    _prePvpSnapshot = new bool[entries.Length];
+                    for (int i = 0; i < entries.Length; i++)
+                        _prePvpSnapshot[i] = entries[i] != null && entries[i].Value;
+                }
+                for (int i = 0; i < entries.Length; i++)
+                {
+                    if (entries[i] != null)
+                        entries[i].Value = false;
+                }
+            }
+            else
+            {
+                for (int i = 0; i < entries.Length; i++)
+                {
+                    if (entries[i] == null)
+                        continue;
+                    entries[i].Value = (_prePvpSnapshot != null && i < _prePvpSnapshot.Length)
+                        ? _prePvpSnapshot[i]
+                        : (entries[i].DefaultValue is bool defVal && defVal);
+                }
+                _prePvpSnapshot = null;
+            }
         }
 
         public static void SetBundleEntries(bool state, params ConfigEntry<bool>[] entries)

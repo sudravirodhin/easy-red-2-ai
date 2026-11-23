@@ -1282,6 +1282,19 @@ namespace EasyRed2HumanAI
             return false;
         }
 
+        public static bool IsVehicleInWater(Vehicle veh)
+        {
+            if (veh == null || veh.Pointer == IntPtr.Zero || veh.transform == null)
+                return false;
+            if (!TryGetActiveWaterLevel(out float waterY))
+                return false;
+            Vector3 pos = veh.transform.position;
+            if (pos.y > waterY + 2.5f)
+                return false;
+            float terrY = ResourcesManager.GetTerrainAltitude(pos, pos.y);
+            return terrY < waterY - 0.25f;
+        }
+
         /// <summary>
         /// Checks whether an impact point is submerged below or across an active <see cref="FollowingWater"/>
         /// or Layer 4 (<c>Water</c>) surface, or occluded from <paramref name="camPos"/> by a tactical smoke volume
@@ -3106,6 +3119,7 @@ namespace EasyRed2HumanAI
                                 if (ai.HasEnemyAndCanFireAtHim || ai.IsMoving())
                                 {
                                     h.WatchdogStationarySince = now;
+                                    h.Stance.ZombieRecoveries = 0;
                                 }
                                 else
                                 {
@@ -3124,6 +3138,42 @@ namespace EasyRed2HumanAI
                                                 whyDetail,
                                                 Mathf.Sqrt(destDistSq),
                                                 now - h.WatchdogStationarySince);
+                                        }
+
+                                        if (IsLocallyOwnedBot(u) &&
+                                            !u.IsOnVehicle() &&
+                                            !u.isBleeding &&
+                                            !u.isInHandsAnimation &&
+                                            !u.isInBodyAnimation)
+                                        {
+                                            if (!ai.HasPath && !ai.HasPathRequest && !ai.PathCalculationLocked)
+                                            {
+                                                ai.moveDirectlyToward_end = 0f;
+                                                if (h.Stance.ZombieRecoveries >= 1 && u.HasDestinationAssigned)
+                                                {
+                                                    u.targetDestination = null;
+                                                    InvalidateTargetDestinationCache(u);
+                                                    h.Stance.ZombieRecoveries = 0;
+                                                    if (u.joinedSquad != null && u.joinedSquad.currentTask != null)
+                                                    {
+                                                        ai.MoveDestination = u.joinedSquad.currentTask.GetTaskDestination();
+                                                        ai.UpdatePath();
+                                                    }
+                                                }
+                                                else if (effDest.sqrMagnitude > 1f)
+                                                {
+                                                    h.Stance.ZombieRecoveries++;
+                                                    ai.MoveDestination = effDest;
+                                                    ai.UpdatePath();
+                                                }
+                                            }
+
+                                            if (!u.IsOnCover() && u.m_pose == SoldierPose.Idle && u.GetSuppressionValue() >= 45f)
+                                            {
+                                                ai.actualPose = (u.GetSuppressionValue() >= 65f && !HasLowCeilingOverhead(ws.Pos, 5.5f))
+                                                    ? SoldierPose.Prone
+                                                    : SoldierPose.Crouch;
+                                            }
                                         }
                                     }
                                     else
@@ -3676,6 +3726,14 @@ namespace EasyRed2HumanAI
             ai.mustTeleport = false;
             ai.pathCreationFails = 0;
             ai.UnlockPathCalculation();
+        }
+
+        public static bool IsCombatCoverIntact(CombatCover cc)
+        {
+            if (cc == null || cc.Pointer == IntPtr.Zero || cc.destroyed || !cc.enabled)
+                return false;
+            GameObject go = cc.gameObject;
+            return go != null && go.activeInHierarchy;
         }
 
         public static void AssignBotCoverOrDestination(

@@ -583,8 +583,16 @@ namespace EasyRed2HumanAI
                 return false;
             }
 
-            if (!HasClearVaultArcAndLanding(myPos, vaultPos, vaultMask, crestHeight, out vaultOrRejectReason, maxVaultDropY))
+            bool allowRooftopBailJump = vaultH != null && vaultH.Combat.ConsecutiveNoFloorVaultRejects >= 4;
+            float effectiveMaxDropY = allowRooftopBailJump ? Mathf.Max(maxVaultDropY, 7.5f) : maxVaultDropY;
+            if (!HasClearVaultArcAndLanding(myPos, vaultPos, vaultMask, crestHeight, out vaultOrRejectReason, effectiveMaxDropY))
+            {
+                if (vaultH != null && vaultOrRejectReason == "no_landing_floor" && vaultH.Combat.ConsecutiveNoFloorVaultRejects < 250)
+                    vaultH.Combat.ConsecutiveNoFloorVaultRejects++;
                 return false;
+            }
+            if (vaultH != null)
+                vaultH.Combat.ConsecutiveNoFloorVaultRejects = 0;
 
             // 4. Far-side grade & trench-lip level-off check:
             // Reject staircases or continuous hills/bluffs that keep rising beyond the lip, while allowing
@@ -1146,6 +1154,22 @@ namespace EasyRed2HumanAI
 
                                 Bounds b = col.bounds;
                                 isShutter = b.size.y > 0.05f && b.size.y < 1.42f;
+                                if (!isShutter)
+                                {
+                                    string dName = resolvedDoor.name;
+                                    string cName = col.name;
+                                    if ((!string.IsNullOrEmpty(dName) &&
+                                         (dName.IndexOf("window", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                                          dName.IndexOf("shutter", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                                          dName.IndexOf("finestra", StringComparison.OrdinalIgnoreCase) >= 0)) ||
+                                        (!string.IsNullOrEmpty(cName) &&
+                                         (cName.IndexOf("window", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                                          cName.IndexOf("shutter", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                                          cName.IndexOf("finestra", StringComparison.OrdinalIgnoreCase) >= 0)))
+                                    {
+                                        isShutter = true;
+                                    }
+                                }
                             }
 
                             info = new CachedDoorInfo
@@ -1179,9 +1203,15 @@ namespace EasyRed2HumanAI
 
                         if (!door.isOpen)
                         {
-                            if (info.IsWindowShutter)
+                            bool elevatedWindow = col.bounds.min.y > botPos.y + 0.50f;
+                            if (info.IsWindowShutter || elevatedWindow)
                             {
-                                if (!onCooldown && !isShutterVulnerable && distSq <= 6.76f)
+                                if (!isMoving &&
+                                    !onCooldown &&
+                                    !isShutterVulnerable &&
+                                    distSq <= 3.24f &&
+                                    (Vector3.Dot(botFwd, toDoorDir) > 0.35f ||
+                                     (threatDir.sqrMagnitude > 0.01f && Vector3.Dot(toDoorDir, threatDir) > 0.35f)))
                                 {
                                     if (AiCore.TryConsumeBotRpcBudget(0.25f, AiCore.BotRpcPriority.Low))
                                     {
@@ -1197,7 +1227,7 @@ namespace EasyRed2HumanAI
                             }
                             else
                             {
-                                bool walkingThrough = isMoving && Vector3.Dot(moveDir, toDoorDir) > 0.20f;
+                                bool walkingThrough = isMoving && ((distSq <= 2.25f && Vector3.Dot(moveDir, toDoorDir) > -0.15f) || Vector3.Dot(moveDir, toDoorDir) > 0.20f);
                                 bool facingClose = distSq <= 1.96f && Vector3.Dot(botFwd, toDoorDir) > 0.35f;
                                 bool openDoor = walkingThrough || facingClose;
                                 if (!openDoor &&

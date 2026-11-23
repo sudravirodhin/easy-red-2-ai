@@ -71,8 +71,8 @@ namespace EasyRed2HumanAI
             if (s == null || s.Pointer == IntPtr.Zero || s.transform == null)
                 return;
 
-            // Standing movement only: crouched and prone movement remain stealthy at close range.
-            if (s.m_pose != SoldierPose.Idle)
+            // Prone movement remains silent; crouched movement has a short 5.5m audible radius.
+            if (s.m_pose == SoldierPose.Prone)
                 return;
 
             float now = Time.time;
@@ -82,7 +82,9 @@ namespace EasyRed2HumanAI
             if (string.IsNullOrEmpty(fac))
                 return;
 
-            float radius = s.isSprinting ? 17.0f : 9.5f;
+            float radius = s.m_pose == SoldierPose.Crouch
+                ? 5.5f
+                : (s.isSprinting ? 18.0f : 11.5f);
             for (int i = 0; i < FootstepRingSize; i++)
             {
                 if (_footstepRing[i].SoldierPtr == ptr)
@@ -177,7 +179,7 @@ namespace EasyRed2HumanAI
 
             float rain01 = AiCore.RainIntensity01;
             float rainStepMult = rain01 > 0.05f ? Mathf.Lerp(1.0f, 0.55f, rain01) : 1.0f;
-            float combatStepMult = HasAnyLoudEventNear(observerPos, 35.0f, 3.0f, now) ? 0.50f : 1.0f;
+            float combatStepMult = HasAnyLoudEventNear(observerPos, 35.0f, 3.0f, now) ? 0.62f : 1.0f;
             float stepMaskMult = Mathf.Max(0.35f, rainStepMult * combatStepMult);
             for (int i = 0; i < FootstepRingSize; i++)
             {
@@ -1024,6 +1026,11 @@ namespace EasyRed2HumanAI
                             VisionConfig.MidRangeMaxDistance.Value,
                             VisionConfig.MidRangeHalfFOV.Value,
                             VisionConfig.LongRangeHalfFOV.Value);
+
+                        if (AiCore.IsAsymmetricDefender(AiCore.GetCachedFaction(obsH, now)))
+                        {
+                            allowedHalfFOV = Mathf.Min(110.0f, allowedHalfFOV + 8.0f);
+                        }
 
                         if (night01 > 0.05f)
                         {
