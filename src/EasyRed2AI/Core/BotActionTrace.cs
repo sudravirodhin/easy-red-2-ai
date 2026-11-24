@@ -42,7 +42,8 @@ namespace EasyRed2HumanAI
         TroopInteract = 28,
         BotProfile = 29,
         BotKilled = 30,
-        MatchPulse = 31
+        MatchPulse = 31,
+        HumanShadow = 32
     }
 
     /// <summary>
@@ -402,6 +403,75 @@ namespace EasyRed2HumanAI
             RecordEmergentDecisionInternal(ai, soldier, h, personality, squadDir, in dec, activeStamps, inputFlags, suppression, enemyDist, now);
         }
 
+        public static void RecordHumanShadow(
+            Soldier player,
+            AiCore.SoldierFastHandles h,
+            string weaponClass,
+            string humanAction,
+            string agreementTag,
+            in EmergentEngine.EmergentDecision harmDec,
+            int activeStamps,
+            uint inputFlags,
+            float suppression,
+            float enemyDist,
+            bool inCover,
+            Vector3 objPos,
+            float now)
+        {
+            if (!IsEnabled || player == null || player.transform == null)
+                return;
+
+            Vector3 pos = player.transform.position;
+            string fac = h != null ? AiCore.GetCachedFaction(h, now) : AiCore.GetCachedFaction(player);
+            if (!VisionPatches.TryGetNearestEnemyGunfire(pos, fac, 25.0f, 3.0f, out float gfDist))
+                gfDist = -1f;
+
+            GenericGun heldGun = player.GetHeldGun();
+            short ammo = (short)(heldGun != null ? Mathf.Clamp(heldGun.GetCurrentAmmoCount(), 0, 999) : -1);
+            Squad sq = player.joinedSquad;
+            int sqId = sq != null ? AiCore.GetSquadDiagId(sq.Pointer) : 0;
+
+            TraceRecord rec = new TraceRecord
+            {
+                Time = now,
+                BotId = h != null ? h.DiagId : 0,
+                SquadId = sqId,
+                Kind = BotTraceEventKind.HumanShadow,
+                Pose = (byte)player.m_pose,
+                Bleed = (byte)(player.isBleeding ? 1 : 0),
+                InCover = (byte)(inCover ? 1 : 0),
+                Suppression = (short)Mathf.Clamp(Mathf.RoundToInt(suppression), 0, 999),
+                Ammo = ammo,
+                EnemyDist = enemyDist,
+                GunfireDist = gfDist,
+                AcoustDist = VisionPatches.TryGetNearestCloseAcousticThreat(pos, fac, now, out _, out float ad, out _) ? ad : -1f,
+                Yaw = (short)(((int)Mathf.Round(player.transform.eulerAngles.y) % 360 + 360) % 360),
+                TargetId = 0,
+                Pos = pos,
+                Dest = objPos,
+                Faction = fac,
+                Name = "HUMAN",
+                Role = weaponClass ?? "Rifle",
+                Net = "HumanShadow",
+                Goal = agreementTag ?? "AGREE",
+                Act0 = humanAction ?? "Hold",
+                Act1 = EmergentEngine.GetActionShortName(harmDec.Step0),
+                Reason = harmDec.Reason ?? string.Empty,
+                IsEmergent = 1,
+                Stamps = activeStamps,
+                Flags = inputFlags,
+                HNow = harmDec.HarmNow,
+                HProj = harmDec.HarmProj,
+                Win = harmDec.WinUrgency,
+                CanH = harmDec.CanHarm,
+                Score = harmDec.Score,
+                RunnerUp = EmergentEngine.GetActionShortName(harmDec.RunnerUp),
+                RunnerScore = harmDec.RunnerUpScore
+            };
+
+            PushRecord(ref rec);
+        }
+
         private static void RecordEmergentDecisionInternal(
             SoldierAI ai,
             Soldier soldier,
@@ -424,7 +494,7 @@ namespace EasyRed2HumanAI
 
             bool changed = h.Emergent.LastTraceSig != sig;
             bool periodicDue = h.Emergent.LastTraceTime <= 0f || (now - h.Emergent.LastTraceTime) >= 3.25f || now < h.Emergent.LastTraceTime;
-            if (!changed && !periodicDue && dec.Reflex == EmergentEngine.EmergentReflexKind.None)
+            if (!changed && !periodicDue && (dec.Reflex == EmergentEngine.EmergentReflexKind.None || dec.DecideTime < now - 0.001f))
                 return;
 
             h.Emergent.LastTraceSig = sig;
@@ -1057,6 +1127,7 @@ namespace EasyRed2HumanAI
                 case BotTraceEventKind.BotProfile: return "bot_profile";
                 case BotTraceEventKind.BotKilled: return "bot_killed";
                 case BotTraceEventKind.MatchPulse: return "match_pulse";
+                case BotTraceEventKind.HumanShadow: return "human_shadow";
                 default: return "event";
             }
         }

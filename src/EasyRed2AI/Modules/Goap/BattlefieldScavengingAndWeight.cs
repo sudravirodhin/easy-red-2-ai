@@ -801,6 +801,11 @@ namespace EasyRed2HumanAI
             return false;
         }
 
+        internal static bool HasActiveRadioPackClaimForSquad(IntPtr sqPtr, float now)
+        {
+            return IsRadioPackAlreadyClaimedForSquad(IntPtr.Zero, sqPtr, now);
+        }
+
         private static bool CanSoldierAcceptExtraMass(Soldier soldier, float extraMass, float bufferKg = 0.20f)
         {
             if (soldier == null || soldier.Pointer == IntPtr.Zero || soldier.inventory == null)
@@ -1310,7 +1315,7 @@ namespace EasyRed2HumanAI
 
             Inventory rawInv = soldier.inventory != null ? soldier.inventory.inventory : null;
             bool canSwitchWeaponNow = allowWeaponPickup &&
-                                      !soldier.IsPlayer() &&
+                                      !AiCore.IsAnyHumanPlayerSoldier(soldier) &&
                                       !soldier.isInHandsAnimation &&
                                       !soldier.isInBodyAnimation &&
                                       soldier.CanSwitchHeldItem &&

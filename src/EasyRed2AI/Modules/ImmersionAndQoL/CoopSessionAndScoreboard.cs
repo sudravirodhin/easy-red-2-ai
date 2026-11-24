@@ -1341,8 +1341,8 @@ namespace EasyRed2HumanAI
                     return;
 
                 string vehFac = veh.GetVehicleFaction();
-                if (string.IsNullOrEmpty(vehFac) || vehFac == "Civilian")
-                    _lastKnownVehicleFaction.TryGetValue(vehPtr, out vehFac);
+                if ((string.IsNullOrEmpty(vehFac) || vehFac == "Civilian") && vh != null)
+                    vehFac = vh.LastKnownFaction;
 
                 Soldier curLocal = Soldier.CurrentControlledSoldierOrNull();
                 string localFac = curLocal != null && curLocal.Pointer != IntPtr.Zero

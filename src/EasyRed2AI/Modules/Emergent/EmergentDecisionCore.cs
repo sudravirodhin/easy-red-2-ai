@@ -1157,6 +1157,8 @@ namespace EasyRed2HumanAI
             }
 
             if (inp.CloseAcousticThreat && !inp.HasVisibleEnemy && !inp.AmmoEmpty &&
+                !inp.UncounterableArmorClose &&
+                !(harmTotal >= 0.70f && !inp.InCover) &&
                 inp.CurrentStep0 != EmergentActionId.HoldAndFight &&
                 inp.CurrentStep0 != EmergentActionId.SeekCover &&
                 inp.CurrentStep0 != EmergentActionId.EvadeGrenade &&
@@ -1242,7 +1244,7 @@ namespace EasyRed2HumanAI
                 float deltaSurvive = curHarm - afterHarm;
                 float swCost = (hasCommit && prevStep0 != act0)
                     ? 0.30f
-                    : ((hasSoftTail && prevStep0 != act0) ? 0.08f : 0.0f);
+                    : ((hasSoftTail && prevStep0 != act0) ? 0.13f : 0.0f);
                 float score = wSurv * deltaSurvive + wWin * winDelta + wAid * aidDelta + extraBonus - swCost;
 
                 if (score > bestScore)
@@ -1654,8 +1656,9 @@ namespace EasyRed2HumanAI
 
                 // 6. PopSmoke (Break high lane Harm / Enable Advance & Aid)
                 bool assaultSmoke = inp.HasObjectiveTask && !inp.InsideObjectiveZone && curHarm >= 0.24f;
+                bool exposedHighHarmSmoke = !safeInCover && curHarm >= 0.36f;
                 if (!cqbImmediate && inp.HasSmokeGrenade && !inp.SmokeActive &&
-                    (curHarm >= 0.36f || assaultSmoke || inp.SquadDirective == Tier2SquadDirective.SquadSmokePush || inp.InjuredAllyInOpen || inp.DoorwayFreshCasualtyAhead))
+                    (exposedHighHarmSmoke || assaultSmoke || inp.UncounterableArmorClose || inp.SquadDirective == Tier2SquadDirective.SquadSmokePush || inp.InjuredAllyInOpen || inp.DoorwayFreshCasualtyAhead))
                 {
                     float smokeHarm = curHarm * 0.32f;
                     float smokeAid = inp.InjuredAllyInOpen ? (inp.InjuredAllySameSquad ? 0.26f * sqAff : 0.26f) : 0.14f;
@@ -1829,18 +1832,23 @@ namespace EasyRed2HumanAI
                     float coverFactor = (inp.SmokeActive || inp.AllyPinningThreat) ? 0.45f : 0.92f;
                     if (inp.InsideObjectiveZone && inp.ObjectiveTickingAgainstUs)
                     {
-                        float sweepHarm = Mathf.Clamp01(curHarm * coverFactor - inp.EnemyRelief * 0.20f);
-                        if (sweepHarm <= w.RiskThreshold + 0.22f || inp.SmokeActive || inp.AllyPinningThreat || inp.SectorDesperationBias >= 0.15f)
+                        if (!inp.UncounterableArmorClose && inp.SmoothedHarmNow < 0.68f)
                         {
-                            ConsiderCandidate(
-                                EmergentActionId.AdvanceObjective,
-                                EmergentActionId.None,
-                                sweepHarm,
-                                0.56f + effObjUrgency * 0.36f,
-                                0.10f,
-                                sweepHarm,
-                                0.14f,
-                                "sweep_cap_contesters");
+                            bool smokeEffectiveForSweep = inp.SmokeActive && inp.SmoothedHarmNow < 0.45f;
+                            float sweepCoverFactor = (smokeEffectiveForSweep || inp.AllyPinningThreat) ? 0.45f : 0.92f;
+                            float sweepHarm = Mathf.Clamp01(curHarm * sweepCoverFactor - inp.EnemyRelief * 0.20f);
+                            if (sweepHarm <= w.RiskThreshold + 0.22f || smokeEffectiveForSweep || inp.AllyPinningThreat || inp.SectorDesperationBias >= 0.15f)
+                            {
+                                ConsiderCandidate(
+                                    EmergentActionId.AdvanceObjective,
+                                    EmergentActionId.None,
+                                    sweepHarm,
+                                    0.56f + effObjUrgency * 0.36f,
+                                    0.10f,
+                                    sweepHarm,
+                                    0.14f,
+                                    "sweep_cap_contesters");
+                            }
                         }
                     }
                     else

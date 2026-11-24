@@ -861,8 +861,8 @@ namespace EasyRed2HumanAI
                 return false;
 
             AiCore.AssignBotCoverOrDestination(ai, soldier, bestVantage.Cast<AiDestination>());
-            h.Stance.LocalCoverProtectedUntil = now + 12.0f;
-            h.Stance.NextVantageSeekTime = now + 16.0f;
+            h.Stance.LocalCoverProtectedUntil = now + 35.0f;
+            h.Stance.NextVantageSeekTime = now + 45.0f;
             return true;
         }
 
@@ -876,22 +876,22 @@ namespace EasyRed2HumanAI
         {
             if (ai == null || soldier == null || h == null || sq == null ||
                 soldier.IsOnVehicle() || soldier.isBleeding || soldier.IsCarryingBody() ||
-                ai.IsMoving() || ai.visibleTarget != null || soldier.GetSuppressionValue() >= 10f ||
+                soldier.IsOnCover() || ai.IsMoving() || ai.visibleTarget != null || soldier.GetSuppressionValue() >= 10f ||
                 !AiCore.CanBotMoveAutonomously(soldier))
             {
                 return false;
             }
 
-            // Skip MGs/Marksmen already in elevated/window overwatch; keep ~25% of squad as roaming perimeter sentries.
+            // Skip MGs/Marksmen already in elevated/window overwatch; keep ~12.5% of un-covered squad as roaming perimeter sentries.
             SoldierPersonality pers = GetPersonality(soldier);
             if (pers >= SoldierPersonality.Gunner_Anchor && pers <= SoldierPersonality.Marksman_Spotter)
                 return false;
-            if ((AiCore.GetDeterministicHash(h.Ptr, 503) & 3) != 0)
+            if ((AiCore.GetDeterministicHash(h.Ptr, 503) & 7) != 0)
                 return false;
 
             if (now < h.Stance.NextVantageSeekTime)
                 return false;
-            h.Stance.NextVantageSeekTime = now + 15.0f + (AiCore.GetDeterministicHash(h.Ptr, 509) & 7);
+            h.Stance.NextVantageSeekTime = now + 45.0f + (AiCore.GetDeterministicHash(h.Ptr, 509) & 15) * 1.5f;
 
             SquadTask task = sq.currentTask;
             if (task == null)
@@ -954,7 +954,7 @@ namespace EasyRed2HumanAI
                 return false;
 
             AiCore.AssignBotCoverOrDestination(ai, soldier, bestPatrolCover.Cast<AiDestination>(), requestImmediatePath: true);
-            h.Stance.LocalCoverProtectedUntil = now + 12.0f;
+            h.Stance.LocalCoverProtectedUntil = now + 35.0f;
             return true;
         }
 
@@ -1736,7 +1736,7 @@ namespace EasyRed2HumanAI
             return fallbackDir.sqrMagnitude > 0.001f ? fallbackDir.normalized : Vector3.forward;
         }
 
-        private static bool IsPositionShelteredByFrontCover(Vector3 pos, Vector3 threatDir, Transform ignoreRoot, float probeDist = 1.85f)
+        internal static bool IsPositionShelteredByFrontCover(Vector3 pos, Vector3 threatDir, Transform ignoreRoot, float probeDist = 1.85f)
         {
             if (threatDir.sqrMagnitude < 0.001f)
                 return false;
@@ -2257,7 +2257,7 @@ namespace EasyRed2HumanAI
                         soldier.isBleeding = true;
                     }
 
-                    if (!VisionConfig.EnableMod.Value || h == null || soldier == null || h.Tr == null || !soldier.IsAlive || soldier.IsPlayer())
+                    if (!VisionConfig.EnableMod.Value || h == null || soldier == null || h.Tr == null || !soldier.IsAlive || AiCore.IsAnyHumanPlayerSoldier(soldier))
                         return;
 
                     if (__state.SkippedForPing || AiCore.ShouldSkipBotCycleForNetworkPing())
@@ -2990,15 +2990,20 @@ namespace EasyRed2HumanAI
                                     !__instance.HasEnemyAndCanFireAtHim &&
                                     seqNow >= h.Stance.NextVantageSeekTime)
                                 {
-                                    h.Stance.NextVantageSeekTime = seqNow + 8.0f;
+                                    h.Stance.NextVantageSeekTime = seqNow + 20.0f;
                                     CombatCover curCov = soldier.targetDestination != null ? soldier.targetDestination.TryCast<CombatCover>() : null;
+                                    bool settledInIntactCover = soldier.IsOnCover() && curCov != null && AiCore.IsCombatCoverIntact(curCov);
+                                    SoldierPersonality vantagePers = GetPersonality(soldier);
+                                    bool isOverwatchRole = vantagePers >= SoldierPersonality.Gunner_Anchor && vantagePers <= SoldierPersonality.Marksman_Spotter;
                                     bool alreadyVantage = curCov != null &&
                                                           AiCore.IsCombatCoverIntact(curCov) &&
                                                           curCov.GetCoverPose() == SoldierPose.Idle &&
                                                           AiCore.HasLowCeilingOverhead(soldier.transform.position, 5.5f);
-                                    if (!alreadyVantage && !TryUpgradeToVantageOrWindowCover(__instance, soldier, h, seqNow))
+                                    if (!alreadyVantage &&
+                                        (!settledInIntactCover || isOverwatchRole) &&
+                                        !TryUpgradeToVantageOrWindowCover(__instance, soldier, h, seqNow))
                                     {
-                                        h.Stance.NextVantageSeekTime = seqNow + 16.0f;
+                                        h.Stance.NextVantageSeekTime = seqNow + 35.0f;
                                     }
                                 }
                             }
@@ -3412,9 +3417,11 @@ namespace EasyRed2HumanAI
                         };
                         if (!throwMoving)
                         {
-                            Vector3 toTarget = __0 - h.Tr.position;
-                            if (AiCore.HorizontalAngleToDirection(soldier, toTarget) > 8.0f)
-                                AiCore.RotateBodyWithoutRaisingGun(soldier, toTarget, __1);
+                            Vector3 faceDir = (now < h.Combat.PendingThrowFaceUntil && h.Combat.PendingThrowFaceDir.sqrMagnitude > 0.01f)
+                                ? h.Combat.PendingThrowFaceDir
+                                : (__0 - h.Tr.position);
+                            if (AiCore.HorizontalAngleToDirection(soldier, faceDir) > 8.0f)
+                                AiCore.RotateBodyWithoutRaisingGun(soldier, faceDir, __1);
                         }
                         return false;
                     }
@@ -4070,7 +4077,7 @@ namespace EasyRed2HumanAI
                             botSq.order == Order.follow &&
                             botSq.Leader != null &&
                             botSq.Leader.IsAlive &&
-                            botSq.Leader.IsPlayer() &&
+                            AiCore.IsAnyHumanPlayerSoldier(botSq.Leader) &&
                             AiCore.IsHumanSoldierAfk(botSq.Leader, now, 25.0f))
                         {
                             if (botSq.currentTask != null)

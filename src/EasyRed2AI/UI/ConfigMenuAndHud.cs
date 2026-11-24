@@ -2116,7 +2116,6 @@ namespace EasyRed2HumanAI
                 _lastTrackedLocalPlayerWasSl = false;
                 _coverExposureCache.Clear();
                 _medicPatientClaims.Clear();
-                _cachedVehiclePersonalities.Clear();
                 _barbedWireColliderCache.Clear();
                 VisionPatches.ClearVisionCaches();
                 AiCore.ClearSpatialCaches();
@@ -2202,9 +2201,7 @@ namespace EasyRed2HumanAI
                 }
 
                 AiCore.PruneFastHandleCaches(_reusableAlivePtrs, _reusableVehiclePtrs);
-                AiCore.PruneDict(_cachedVehiclePersonalities, _reusableVehiclePtrs);
                 AiCore.PruneDict(_cachedVehicleSolidColliders, _reusableVehiclePtrs);
-                AiCore.PruneDict(_cachedVehicleExtents, _reusableVehiclePtrs);
                 _reusableVehiclePtrs.Clear();
 
                 if (_cachedInventoryOwners.Count > 2048)

@@ -1,6 +1,7 @@
 param(
     [switch]$Deploy,
     [switch]$Test,
+    [switch]$VerboseTests,
     [switch]$RebuildCache,
     [string]$GameDir = $env:EASY_RED_2_DIR
 )
@@ -289,9 +290,25 @@ Write-Host "  -> Built $buildDir\EasyRed2HumanAI.dll" -ForegroundColor Green
 
 if ($Test) {
     Write-Host "[Test 1/3] Running Emergent 3-Tier Decision Engine Suite..." -ForegroundColor Cyan
-    & (Join-Path $workspace "tools\verify_patches\VerifyEmergentEngine.ps1")
-    if ($LASTEXITCODE -ne 0) {
-        throw "VerifyEmergentEngine.ps1 failed!"
+    $emergentScript = Join-Path $workspace "tools\verify_patches\VerifyEmergentEngine.ps1"
+    if ($VerboseTests) {
+        & $emergentScript
+        if ($LASTEXITCODE -ne 0) {
+            throw "VerifyEmergentEngine.ps1 failed!"
+        }
+    } else {
+        $emergentLines = & $emergentScript 2>&1
+        $emergentExit = $LASTEXITCODE
+        foreach ($line in $emergentLines) {
+            $s = "$line"
+            if ($s -match '^\s*\[PASS\]' -or $s -match '^\s*\[Group \d+\]') {
+                continue
+            }
+            Write-Host $s
+        }
+        if ($emergentExit -ne 0) {
+            throw "VerifyEmergentEngine.ps1 failed!"
+        }
     }
 
     Write-Host "[Test 2/3] Running Acoustic Ring, Ground Probe & CQB Physics Suite..." -ForegroundColor Cyan

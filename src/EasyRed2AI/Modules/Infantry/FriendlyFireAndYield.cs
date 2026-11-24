@@ -845,7 +845,7 @@ namespace EasyRed2HumanAI
             }
 
             Soldier player = Soldier.CurrentControlledSoldierOrNull();
-            if (player != null && player.IsAlive && player.Pointer != myPtr && player.faction == myFaction && !player.IsOnVehicle())
+            if (player != null && player.IsAlive && player.Pointer != myPtr && AiCore.AreSameSideFactions(myFaction, player.faction) && !player.IsOnVehicle())
             {
                 Vector3 diff = myPos - player.transform.position;
                 diff.y = 0f;

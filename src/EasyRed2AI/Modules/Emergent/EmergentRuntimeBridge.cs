@@ -373,7 +373,7 @@ namespace EasyRed2HumanAI
                     return;
                 vh.Emergent.DeathDangerStamped = true;
 
-                if (BotActionTrace.IsEnabled && !victim.IsPlayer())
+                if (BotActionTrace.IsEnabled && !AiCore.IsAnyHumanPlayerSoldier(victim))
                 {
                     float holdSec = (vh.Emergent.HasDecision && vh.Emergent.ActionStartedAt > 0f && now >= vh.Emergent.ActionStartedAt)
                         ? (now - vh.Emergent.ActionStartedAt)
@@ -1135,7 +1135,7 @@ namespace EasyRed2HumanAI
                     h.Vision.StationaryWatch.NextEvalTime = 0f;
                     h.Vision.ThreatSector.ExpireTime = 0f;
                     soldier.SetAlertedFor(4.0f);
-                    if (ai.IsMoving() && !soldier.IsOnCover())
+                    if (ai.IsMoving() && !soldier.IsOnCover() && rawHarmNow < 0.35f)
                     {
                         ai.moveDirectlyToward_end = 0f;
                         ai.Stop(true);
@@ -1586,7 +1586,7 @@ namespace EasyRed2HumanAI
             }
 
             // Single Tier 2 Human Authority Gate
-            if (AiCore.IsSquadOwnedOrOccupiedByRemoteHuman(crewSq) || veh.PlayerIsInside())
+            if (AiCore.IsSquadOwnedOrOccupiedByRemoteHuman(crewSq) || AiCore.IsAnyHumanPlayerInsideVehicle(veh))
                 return false;
 
             float now = Time.time;
@@ -2185,8 +2185,16 @@ namespace EasyRed2HumanAI
             }
         }
 
+        private static float _nextHumanShadowSampleTime;
+        private static Vector3 _lastHumanShadowPos;
+        private static float _lastHumanShadowPosTime;
+        private static float _humanSmoothedHarm;
+        private static EmergentEngine.EmergentDecision _lastHumanHarmDec;
+
         public static void TickPeriodicTelemetry(float now)
         {
+            TickHumanShadowSampler(now);
+
             if (VisionConfig.EnableEmergentDecisionEngine == null ||
                 !VisionConfig.EnableEmergentDecisionEngine.Value ||
                 VisionConfig.EnableEmergentDebugTelemetry == null ||
@@ -2201,6 +2209,270 @@ namespace EasyRed2HumanAI
                 if (_totalT1Decisions > 0)
                     EmitTelemetrySummary("30s");
             }
+        }
+
+        private static void TickHumanShadowSampler(float now)
+        {
+            if (VisionConfig.EnableMod == null || !VisionConfig.EnableMod.Value ||
+                VisionConfig.EnableBotActionTrace == null || !VisionConfig.EnableBotActionTrace.Value ||
+                VisionConfig.EnableEmergentDecisionEngine == null || !VisionConfig.EnableEmergentDecisionEngine.Value)
+            {
+                return;
+            }
+
+            if (now < _nextHumanShadowSampleTime)
+                return;
+            _nextHumanShadowSampleTime = now + 0.50f;
+
+            PlayerController pc = PlayerController.currentController;
+            Soldier p = pc != null ? pc.ControlledCharacter : null;
+            if (p == null || p.IsDead || p.IsOnVehicle() || p.transform == null)
+                return;
+
+            AiCore.SoldierFastHandles h = AiCore.GetOrCreateSoldierHandles(p);
+            Vector3 myPos = p.transform.position;
+            float dt = Mathf.Clamp(now - _lastHumanShadowPosTime, 0.1f, 2.0f);
+            Vector3 flatDelta = myPos - _lastHumanShadowPos;
+            flatDelta.y = 0f;
+            float flatSpeed = _lastHumanShadowPosTime > 0f ? (flatDelta.magnitude / dt) : 0f;
+            Vector3 moveDir = flatDelta.sqrMagnitude > 0.01f ? flatDelta.normalized : p.transform.forward;
+            _lastHumanShadowPos = myPos;
+            _lastHumanShadowPosTime = now;
+
+            string fac = AiCore.GetCachedFaction(p);
+            if (string.IsNullOrEmpty(fac))
+                return;
+
+            Vector3 lookFwd = p.transform.forward;
+            lookFwd.y = 0f;
+            if (lookFwd.sqrMagnitude < 0.001f) lookFwd = Vector3.forward;
+            else lookFwd.Normalize();
+
+            // Find nearest visible enemy in player's forward 78-deg cone (max 2 raycasts/0.5s; never assume un-raycasted LOS)
+            bool hasVisEnemy = false;
+            float visEnemyDist = -1f;
+            Vector3 visEnemyPos = myPos + lookFwd * 30f;
+            float best1Sq = 220f * 220f;
+            float best2Sq = 220f * 220f;
+            Vector3 best1Pos = Vector3.zero;
+            Vector3 best2Pos = Vector3.zero;
+            int wsCount = AiCore.WorldSoldierCount;
+            var ws = AiCore.WorldSoldiers;
+            for (int i = 0; i < wsCount; i++)
+            {
+                if (ws[i].Ptr == IntPtr.Zero || ws[i].Ptr == p.Pointer || string.IsNullOrEmpty(ws[i].Faction) || !AiCore.AreEnemyFactions(fac, ws[i].Faction))
+                    continue;
+                Vector3 toEn = ws[i].Pos - myPos;
+                float dSq = toEn.sqrMagnitude;
+                if (dSq >= best2Sq || dSq < 0.25f)
+                    continue;
+                Vector3 flatToEn = toEn;
+                flatToEn.y = 0f;
+                if (flatToEn.sqrMagnitude > 0.01f && Vector3.Angle(lookFwd, flatToEn) > 78f)
+                    continue;
+                if (dSq < best1Sq)
+                {
+                    best2Sq = best1Sq;
+                    best2Pos = best1Pos;
+                    best1Sq = dSq;
+                    best1Pos = ws[i].Pos;
+                }
+                else
+                {
+                    best2Sq = dSq;
+                    best2Pos = ws[i].Pos;
+                }
+            }
+
+            Vector3 eyeOrigin = myPos + Vector3.up * 1.45f;
+            if (best1Sq < 220f * 220f)
+            {
+                float d1 = Mathf.Sqrt(best1Sq);
+                if (!AiCore.IsDirectionBlockedByEnvironment(eyeOrigin, (best1Pos - eyeOrigin).normalized, d1 - 0.5f, p.transform.root))
+                {
+                    hasVisEnemy = true;
+                    visEnemyDist = d1;
+                    visEnemyPos = best1Pos;
+                }
+                else if (best2Sq < 220f * 220f)
+                {
+                    float d2 = Mathf.Sqrt(best2Sq);
+                    if (!AiCore.IsDirectionBlockedByEnvironment(eyeOrigin, (best2Pos - eyeOrigin).normalized, d2 - 0.5f, p.transform.root))
+                    {
+                        hasVisEnemy = true;
+                        visEnemyDist = d2;
+                        visEnemyPos = best2Pos;
+                    }
+                }
+            }
+
+            GenericGun heldGun = p.GetHeldGun();
+            string weaponClass = "Unarmed";
+            if (heldGun != null)
+            {
+                AmmoItem ammo = heldGun.GetAmmoItem() ?? heldGun.usedAmmoItem;
+                BulletData bd = ammo != null ? ammo.GetBulletData() : null;
+                float dmgRange = heldGun.DamageRange();
+                if (heldGun.isFlamethrower || (bd != null && bd.IsFire())) weaponClass = "Flame";
+                else if (bd != null && bd.IsShotgun()) weaponClass = "Shotgun";
+                else if (heldGun.IsPistol()) weaponClass = "Pistol";
+                else if (heldGun.IsAtWeapon()) weaponClass = "AT";
+                else if (h != null && AiCore.GetCachedOpticZoom(h, now) >= 2.2f) weaponClass = "Sniper";
+                else if (p.hasMg || p.IsGunner() || p.GetHeldFunctionalBipod() != null) weaponClass = "MG";
+                else if (dmgRange <= 135f) weaponClass = "SMG";
+                else weaponClass = "Rifle";
+            }
+
+            float suppression = p.GetSuppressionValue();
+            float rawHarmNow = Mathf.Clamp01(suppression / 68.0f);
+            _humanSmoothedHarm = EmergentEngine.SmoothHarmEnvelope(_humanSmoothedHarm, rawHarmNow, dt);
+            int side = ResolveSideIndex(fac);
+            float projHarm = GetRing(side).EvaluateSpotProjectedHarm(
+                myPos, myPos, 0L, true, false, false, EmergentEngine.EmergentTier.Individual, now,
+                out int activeStamps, out _, out _);
+
+            bool inCover = p.IsOnCover() || VeteranAndTacticsPatches.IsPositionShelteredByFrontCover(myPos, lookFwd, p.transform.root);
+            bool hasBandage = p.inventory != null && p.inventory.FindItemOfType<VirtualBandages>() != null;
+            bool hasSmoke = p.inventory != null && p.inventory.FindItemOfType<VirtualSmokeGrenade>() != null;
+            bool hasFrag = p.inventory != null && p.inventory.FindItemOfType<VirtualThrowable>() != null;
+            bool ammoEmpty = !AiCore.HasUsableSmallArmsAmmo(p);
+
+            Squad sq = p.joinedSquad;
+            SquadTask task = sq != null ? sq.currentTask : null;
+            bool hasObj = task != null;
+            Vector3 objPos = hasObj ? task.GetTaskDestination() : myPos;
+            float objDist = hasObj ? Vector3.Distance(myPos, objPos) : 0f;
+            bool insideObj = hasObj && task.IsInsideTaskArea(myPos, 1.0f);
+
+            float canHarm = 0f;
+            if (hasVisEnemy)
+            {
+                bool isGunner = weaponClass == "MG";
+                canHarm = (ammoEmpty ? 0.10f : 0.90f) * ComputeWeaponEffectiveRangeWeight(
+                    p, h, heldGun, isGunner, VeteranAndTacticsPatches.SoldierPersonality.Rifleman_Regular, visEnemyDist, now);
+            }
+
+            var inp = new EmergentEngine.EmergentInput
+            {
+                Now = now,
+                MyPos = myPos,
+                IsLeader = p.IsSquadLeader(),
+                HasRadioLink = true,
+                SmoothedHarmNow = _humanSmoothedHarm,
+                ProjectedHarm = projHarm,
+                RawHarmNow = rawHarmNow,
+                ActiveDangerStamps = activeStamps,
+                InCover = inCover,
+                IsBleeding = p.isBleeding,
+                HasBandage = hasBandage,
+                HasSmokeGrenade = hasSmoke,
+                HasFragGrenade = hasFrag,
+                AmmoEmpty = ammoEmpty,
+                HasVisibleEnemy = hasVisEnemy,
+                VisibleEnemyDist = visEnemyDist,
+                CanHarmTarget = canHarm,
+                CoverAvailable = true,
+                HasObjectiveTask = hasObj,
+                InsideObjectiveZone = insideObj,
+                ObjectiveDist = objDist,
+                IsHomeGroundDefender = AiCore.IsAsymmetricDefender(fac)
+            };
+
+            var neutralW = new EmergentEngine.EmergentWeights
+            {
+                WSurvive = 1.15f,
+                WWin = 1.00f,
+                WAid = 1.00f,
+                RiskThreshold = 0.50f,
+                HarmAccuracy = 0.75f,
+                BiasStandoff = 1.0f,
+                BiasFlank = 1.0f,
+                BiasSmoke = 1.0f,
+                BiasBayonet = 1.0f
+            };
+
+            EmergentEngine.EmergentDecision harmDec = EmergentEngine.EvaluateDeliberative(in inp, in neutralW, in _lastHumanHarmDec, now);
+            _lastHumanHarmDec = harmDec;
+
+            Vector3 toThreat = hasVisEnemy ? (visEnemyPos - myPos) : (hasObj ? (objPos - myPos) : lookFwd);
+            toThreat.y = 0f;
+            if (toThreat.sqrMagnitude > 0.01f) toThreat.Normalize();
+            float dotToThreat = Vector3.Dot(moveDir, toThreat);
+            Vector3 toObj = hasObj ? (objPos - myPos) : lookFwd;
+            toObj.y = 0f;
+            if (toObj.sqrMagnitude > 0.01f) toObj.Normalize();
+            float dotToObj = Vector3.Dot(moveDir, toObj);
+
+            string humanAction;
+            if (p.isBleeding && p.isInHandsAnimation)
+                humanAction = "Bandage";
+            else if (p.triggerState == Soldier.TriggerState.Firing || (p.IsAiming && hasVisEnemy))
+                humanAction = "Engage";
+            else if (flatSpeed >= 1.2f)
+            {
+                if ((suppression >= 30f || p.isBleeding) && dotToThreat < -0.25f)
+                    humanAction = "Fallback";
+                else if ((suppression >= 25f || p.isBleeding) && inCover)
+                    humanAction = "SeekCover";
+                else if (hasObj && dotToObj >= 0.45f)
+                    humanAction = "Advance";
+                else if ((hasObj || hasVisEnemy) && Mathf.Abs(dotToThreat) < 0.55f)
+                    humanAction = "Flank";
+                else
+                    humanAction = "Advance";
+            }
+            else
+            {
+                if ((suppression >= 30f || p.isBleeding) && (p.m_pose != SoldierPose.Idle || inCover))
+                    humanAction = "SeekCover";
+                else
+                    humanAction = "Hold";
+            }
+
+            bool agree = false;
+            switch (humanAction)
+            {
+                case "Bandage":
+                    agree = harmDec.Step0 == EmergentEngine.EmergentActionId.SelfBandage ||
+                            (harmDec.Step0 == EmergentEngine.EmergentActionId.SeekCover && harmDec.Step1 == EmergentEngine.EmergentActionId.SelfBandage);
+                    break;
+                case "Engage":
+                    agree = harmDec.Step0 == EmergentEngine.EmergentActionId.HoldAndFight ||
+                            harmDec.Step0 == EmergentEngine.EmergentActionId.SuppressPin ||
+                            harmDec.Step0 == EmergentEngine.EmergentActionId.CloseBreach ||
+                            harmDec.Step0 == EmergentEngine.EmergentActionId.FragFlush;
+                    break;
+                case "SeekCover":
+                    agree = harmDec.Step0 == EmergentEngine.EmergentActionId.SeekCover ||
+                            harmDec.Step0 == EmergentEngine.EmergentActionId.RepositionWallSide ||
+                            harmDec.Step0 == EmergentEngine.EmergentActionId.PopSmoke ||
+                            harmDec.Step0 == EmergentEngine.EmergentActionId.SelfBandage;
+                    break;
+                case "Advance":
+                    agree = harmDec.Step0 == EmergentEngine.EmergentActionId.AdvanceObjective ||
+                            harmDec.Step0 == EmergentEngine.EmergentActionId.FlankManeuver ||
+                            harmDec.Step0 == EmergentEngine.EmergentActionId.CloseBreach;
+                    break;
+                case "Flank":
+                    agree = harmDec.Step0 == EmergentEngine.EmergentActionId.FlankManeuver ||
+                            harmDec.Step0 == EmergentEngine.EmergentActionId.AdvanceObjective;
+                    break;
+                case "Fallback":
+                    agree = harmDec.Step0 == EmergentEngine.EmergentActionId.FallbackRegroup ||
+                            harmDec.Step0 == EmergentEngine.EmergentActionId.SeekCover ||
+                            harmDec.Step0 == EmergentEngine.EmergentActionId.PopSmoke;
+                    break;
+                default:
+                    agree = harmDec.Step0 == EmergentEngine.EmergentActionId.HoldAndFight ||
+                            harmDec.Step0 == EmergentEngine.EmergentActionId.SuppressPin ||
+                            harmDec.Step0 == EmergentEngine.EmergentActionId.SeekCover;
+                    break;
+            }
+
+            uint inputFlags = EmergentEngine.PackInputFlags(in inp, harmDec.UnsafePrereqRejected);
+            BotActionTrace.RecordHumanShadow(
+                p, h, weaponClass, humanAction, agree ? "AGREE" : "DISAGREE",
+                in harmDec, activeStamps, inputFlags, suppression, visEnemyDist, inCover, objPos, now);
         }
 
         public static void EmitTelemetrySummary(string tag)

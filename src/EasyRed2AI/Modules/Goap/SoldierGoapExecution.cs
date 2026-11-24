@@ -547,7 +547,7 @@ namespace EasyRed2HumanAI
                 toEndFlat.sqrMagnitude > 25.0f * 25.0f &&
                 !onVehicleHull &&
                 !isOnBridge &&
-                !soldier.IsPlayer() &&
+                !AiCore.IsAnyHumanPlayerSoldier(soldier) &&
                 !soldier.HasSurrended() &&
                 !AiCore.IsSoldierInVehicleOrTransition(soldier) &&
                 !ai.HasEnemyAndCanFireAtHim &&
@@ -974,7 +974,7 @@ namespace EasyRed2HumanAI
                 AiCore.HasAnyHumanPlayerInSquad(sq) &&
                 !AiCore.IsHumanSoldierAfk(sq.Leader, Time.time, 25.0f) &&
                 (!IsSquadOnRetreatTask(sq) ||
-                 (sq.Leader != null && sq.Leader.IsAlive && sq.Leader.IsPlayer())))
+                 (sq.Leader != null && sq.Leader.IsAlive && AiCore.IsAnyHumanPlayerSoldier(sq.Leader))))
             {
                 return false;
             }
@@ -1588,7 +1588,7 @@ namespace EasyRed2HumanAI
                         }
                         else if (floorGun != null)
                         {
-                            bool canSwitchWeaponNow = !soldier.IsPlayer() &&
+                            bool canSwitchWeaponNow = !AiCore.IsAnyHumanPlayerSoldier(soldier) &&
                                                       !soldier.isInHandsAnimation &&
                                                       !soldier.isInBodyAnimation &&
                                                       soldier.CanSwitchHeldItem &&
@@ -1720,7 +1720,7 @@ namespace EasyRed2HumanAI
                     {
                         InventoryManager targetInv = scavCache.TargetInventory;
                         bool canSwitchWeaponNow = ownerStillDeadOrCrate &&
-                                                  !soldier.IsPlayer() &&
+                                                  !AiCore.IsAnyHumanPlayerSoldier(soldier) &&
                                                   !soldier.isInHandsAnimation &&
                                                   !soldier.isInBodyAnimation &&
                                                   soldier.CanSwitchHeldItem &&
@@ -2981,18 +2981,19 @@ namespace EasyRed2HumanAI
                 if (veh == null || veh.Pointer == IntPtr.Zero || veh.transform == null)
                     continue;
 
+                AiCore.VehicleFastHandles candVh = AiCore.GetOrCreateVehicleHandles(veh);
                 if (veh.IsLocked() ||
                     veh.IsDisabled() ||
                     veh.IsCoverDestroyed() ||
                     veh.IsAirVehicle() ||
                     veh.IsTransportVehicle() ||
                     veh.TryCast<MovableVehicle>() == null ||
-                    _vehiclesCrewRetreatedFrom.Contains(veh.Pointer))
+                    (candVh != null && candVh.CrewRetreatedFrom))
                 {
                     continue;
                 }
 
-                if (!mySqIsPlayerSquad && veh.PlayerIsInside())
+                if (!mySqIsPlayerSquad && AiCore.IsAnyHumanPlayerInsideVehicle(veh))
                     continue;
 
                 Squad insideSq = veh.GetSquadInside();

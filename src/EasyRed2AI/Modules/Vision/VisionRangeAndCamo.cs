@@ -755,7 +755,7 @@ namespace EasyRed2HumanAI
                     if (!VisionConfig.EnableMod.Value || !VisionConfig.EnableWallShootingPrevention.Value || __instance == null)
                         return true;
 
-                    if (__instance.IsPlayer() || __instance.IsOnVehicle() || !AiCore.IsLocallyOwnedBot(__instance))
+                    if (AiCore.IsAnyHumanPlayerSoldier(__instance) || AiCore.IsSoldierInVehicleOrTransition(__instance) || !AiCore.IsLocallyOwnedBot(__instance))
                         return true;
 
                     if (VeteranAndTacticsPatches.IsBotGunClippedThroughWall(__instance))
@@ -793,7 +793,7 @@ namespace EasyRed2HumanAI
                         !VisionConfig.EnableMod.Value ||
                         __instance == null ||
                         !__instance.IsAlive ||
-                        __instance.IsOnVehicle() ||
+                        AiCore.IsSoldierInVehicleOrTransition(__instance) ||
                         __instance.HasSurrended() ||
                         __instance.transform == null)
                     {
@@ -991,8 +991,8 @@ namespace EasyRed2HumanAI
 
                     SoldierAI obsAi = obsH.Ai;
                     bool isStationaryOverwatch = VisionConfig.EnableThreatSectorConcentration.Value &&
-                                                 !observer.IsPlayer() &&
-                                                 !observer.IsOnVehicle() &&
+                                                 !AiCore.IsAnyHumanPlayerSoldier(observer) &&
+                                                 !AiCore.IsSoldierInVehicleOrTransition(observer) &&
                                                  !ReferenceEquals(obsAi, null) &&
                                                  obsAi != null &&
                                                  !obsAi.IsMoving();

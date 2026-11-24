@@ -77,9 +77,9 @@ namespace EasyRed2HumanAI
             if (veh == null || veh.Pointer == IntPtr.Zero)
                 return fallback;
 
-            IntPtr vehPtr = veh.Pointer;
-            if (_cachedVehicleExtents.TryGetValue(vehPtr, out Vector4 cachedObb))
-                return cachedObb;
+            AiCore.VehicleFastHandles vh = AiCore.GetOrCreateVehicleHandles(veh);
+            if (vh != null && vh.HasCachedExtents)
+                return vh.CachedExtents;
 
             bool hasBounds = false;
             float minX = 0f, maxX = 0f, minZ = 0f, maxZ = 0f;
@@ -170,7 +170,11 @@ namespace EasyRed2HumanAI
                     Mathf.Clamp((minZ + maxZ) * 0.5f, -2.20f, 2.20f))
                 : fallback;
 
-            _cachedVehicleExtents[vehPtr] = obb;
+            if (vh != null)
+            {
+                vh.HasCachedExtents = true;
+                vh.CachedExtents = obb;
+            }
             return obb;
         }
 
@@ -180,15 +184,15 @@ namespace EasyRed2HumanAI
             return new Vector2(obb.x, obb.y);
         }
 
-        private static bool TryRecordFriendlyYieldOrSave(IntPtr vehPtr, float now)
+        private static bool TryRecordFriendlyYieldOrSave(AiCore.VehicleFastHandles vh, float now)
         {
-            if (!_nextFriendlyYieldCountTime.TryGetValue(vehPtr, out float nextCount) || now >= nextCount)
-            {
-                _nextFriendlyYieldCountTime[vehPtr] = now + 4.5f;
-                FriendlyRoadkillsPreventedCount++;
-                return VisionConfig.DebugLogging.Value;
-            }
-            return false;
+            if (vh != null && now < vh.NextFriendlyYieldCountTime)
+                return false;
+
+            if (vh != null)
+                vh.NextFriendlyYieldCountTime = now + 4.5f;
+            FriendlyRoadkillsPreventedCount++;
+            return VisionConfig.DebugLogging.Value;
         }
 
         private static Collider[] GetCachedVehicleSolidColliders(Vehicle veh)
@@ -594,21 +598,23 @@ namespace EasyRed2HumanAI
             if (!AiCore.IsLocallyOwnedVehicle(veh) || AiCore.IsAnyHumanPlayerDriving(veh))
                 return false;
 
-            IntPtr vehPtr = veh.Pointer;
+            AiCore.VehicleFastHandles vehH = AiCore.GetOrCreateVehicleHandles(veh);
             float now = Time.time;
 
             // Fast cached path between 0.18s spatial checks
-            if (_nextVehiclePedestrianScanTime.TryGetValue(vehPtr, out float nextScan) && now < nextScan)
+            if (vehH != null && now < vehH.NextPedestrianScanTime)
             {
-                return _vehicleYieldUntilTime.TryGetValue(vehPtr, out float yieldUntil) && now < yieldUntil;
+                return now < vehH.YieldUntilTime;
             }
 
-            _nextVehiclePedestrianScanTime[vehPtr] = now + 0.18f;
+            if (vehH != null)
+                vehH.NextPedestrianScanTime = now + 0.18f;
 
             // Always hold brake if a squadmate is actively repairing the vehicle
             if (aiVeh != null && aiVeh.squadInside != null && aiVeh.squadInside.SomeoneIsRepairing())
             {
-                _vehicleYieldUntilTime[vehPtr] = now + 0.25f;
+                if (vehH != null)
+                    vehH.YieldUntilTime = now + 0.25f;
                 return true;
             }
 
@@ -708,17 +714,20 @@ namespace EasyRed2HumanAI
 
             if (playerInBrakeCorridor || aiInBrakeCorridor)
             {
-                if (!_vehicleContinuousYieldStart.TryGetValue(vehPtr, out float yieldStart))
+                float yieldStart = now;
+                if (vehH != null)
                 {
-                    yieldStart = now;
-                    _vehicleContinuousYieldStart[vehPtr] = yieldStart;
+                    if (vehH.ContinuousYieldStart <= 0f)
+                        vehH.ContinuousYieldStart = now;
+                    yieldStart = vehH.ContinuousYieldStart;
                 }
 
                 // Always yield for the human player; yield up to 3.5s for AI infantry while they step aside
                 if (playerInBrakeCorridor || (now - yieldStart) <= 3.5f)
                 {
-                    _vehicleYieldUntilTime[vehPtr] = now + 0.24f;
-                    if (TryRecordFriendlyYieldOrSave(vehPtr, now))
+                    if (vehH != null)
+                        vehH.YieldUntilTime = now + 0.24f;
+                    if (TryRecordFriendlyYieldOrSave(vehH, now))
                     {
                         AiCore.LogDebug(
                             "FriendlyRightOfWay",
@@ -727,10 +736,10 @@ namespace EasyRed2HumanAI
                     return true;
                 }
             }
-            else
+            else if (vehH != null)
             {
-                _vehicleContinuousYieldStart.Remove(vehPtr);
-                _vehicleYieldUntilTime.Remove(vehPtr);
+                vehH.ContinuousYieldStart = 0f;
+                vehH.YieldUntilTime = 0f;
             }
 
             return false;
@@ -765,8 +774,9 @@ namespace EasyRed2HumanAI
                         return;
                     }
 
-                    if (_vehiclesSeekingRepairStation.TryGetValue(veh.Pointer, out RepairStation st) &&
-                        st != null && st.Pointer != IntPtr.Zero && st.transform != null && veh.transform != null)
+                    AiCore.VehicleFastHandles bvh = AiCore.GetOrCreateVehicleHandles(veh);
+                    RepairStation st = bvh != null ? bvh.SeekingRepairStation : null;
+                    if (st != null && st.Pointer != IntPtr.Zero && st.transform != null && veh.transform != null)
                     {
                         float r = Mathf.Max(5.0f, st.radius) * 0.85f;
                         if ((veh.transform.position - st.transform.position).sqrMagnitude <= r * r)
@@ -777,8 +787,6 @@ namespace EasyRed2HumanAI
                             return;
                         }
                     }
-
-                    AiCore.VehicleFastHandles bvh = AiCore.GetOrCreateVehicleHandles(veh);
                     if (bvh != null && Time.time < bvh.BoardingWaitUntil)
                     {
                         bool waitForBoarders = false;
@@ -853,18 +861,20 @@ namespace EasyRed2HumanAI
 
                     if (VisionConfig.EnableSmartApcDismount.Value)
                     {
-                        if (!_nextApcCheckTime.TryGetValue(vehPtr, out float nextCheck) || now >= nextCheck)
+                        if (vehH == null || now >= vehH.NextApcCheckTime)
                         {
-                            _nextApcCheckTime[vehPtr] = now + 0.75f;
+                            if (vehH != null)
+                                vehH.NextApcCheckTime = now + 0.75f;
                             TryDismountTransportUnderThreat(veh, __instance, false);
                         }
                     }
 
                     if (VisionConfig.EnableCombinedArmsPrioritySupport.Value)
                     {
-                        if (!_nextVehicleSupportSteerTime.TryGetValue(vehPtr, out float nextSteer) || now >= nextSteer)
+                        if (vehH == null || now >= vehH.NextSupportSteerTime)
                         {
-                            _nextVehicleSupportSteerTime[vehPtr] = now + 2.5f;
+                            if (vehH != null)
+                                vehH.NextSupportSteerTime = now + 2.5f;
                             TrySteerVehicleTowardKnownThreat(__instance, veh, now);
                         }
                     }
@@ -927,7 +937,7 @@ namespace EasyRed2HumanAI
                             TryEvadeFriendlyVehicleCorridor(soldier, sHandles != null ? sHandles.Ai : null, sHandles, __instance, hullCenter, vehFwd, vehRight, obb.x, now, true);
                         }
 
-                        if ((AiCore.IsAnyHumanPlayerSoldier(soldier) || AiCore.IsAnyHumanPlayerInsideVehicle(__instance)) && TryRecordFriendlyYieldOrSave(__instance.Pointer, now))
+                        if ((AiCore.IsAnyHumanPlayerSoldier(soldier) || AiCore.IsAnyHumanPlayerInsideVehicle(__instance)) && TryRecordFriendlyYieldOrSave(AiCore.GetOrCreateVehicleHandles(__instance), now))
                         {
                             AiCore.LogDebug(
                                 "FriendlyRightOfWay",

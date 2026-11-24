@@ -47,7 +47,7 @@ namespace EasyRed2HumanAI
                 // Note: Vehicle.CanFight() (0x18085B7E0) returns false whenever a vehicle/emplacement is empty!
                 // Match vanilla Vehicle.IsCoverAvailable (0x18085F9A0) by also rejecting IsLocked() and out-of-ammo turrets
                 // so bots never walk toward Lua-locked/prop emplacements or dry guns.
-                if (!AiCore.IsLocallyOwnedVehicle(veh) || veh.IsLocked() || veh.IsDisabled() || veh.IsCoverDestroyed() || veh.IsAirVehicle() || veh.PlayerIsInside())
+                if (!AiCore.IsLocallyOwnedVehicle(veh) || veh.IsLocked() || veh.IsDisabled() || veh.IsCoverDestroyed() || veh.IsAirVehicle() || AiCore.IsAnyHumanPlayerInsideVehicle(veh))
                     continue;
 
                 AiCore.VehicleFastHandles vehH = AiCore.GetOrCreateVehicleHandles(veh);
@@ -64,7 +64,7 @@ namespace EasyRed2HumanAI
                     !veh.HasDriver() &&
                     veh.peopleInside <= 0 &&
                     !veh.CanBeRepaired() &&
-                    !_vehiclesCrewRetreatedFrom.Contains(vehPtr) &&
+                    (vehH == null || !vehH.CrewRetreatedFrom) &&
                     !IsAnyHumanPlayerWithinRadius(soldiers, AiCore.WorldSoldierCount, vehPos, 32.0f))
                 {
                     string vehFac = veh.GetVehicleFaction();
@@ -165,7 +165,7 @@ namespace EasyRed2HumanAI
                 //    and a bailed-out Vehicle Crew (`sq.IsVehicleCrew`) with >= 2 alive crewmen (driver + gunner) is within 85m,
                 //    order all alive members of that crew (including the Leader) to re-mount it!
                 //    Skip vehicles already abandoned via RetreatCrew or damaged without an equipped crew mechanic (prevents mount/eject loops).
-                if (isUnmannedCombatVehicle && !_vehiclesCrewRetreatedFrom.Contains(vehPtr))
+                if (isUnmannedCombatVehicle && (vehH == null || !vehH.CrewRetreatedFrom))
                 {
                     Squad bestBailedCrew = null;
                     float bestCrewDistSq = 85.0f * 85.0f;
@@ -180,7 +180,7 @@ namespace EasyRed2HumanAI
                         bool isPlayerSq = sqSnap.IsPlayerInSquad;
                         bool afkPlayerCrew = isPlayerSq &&
                                              sqSnap.Leader != null &&
-                                             sqSnap.Leader.IsPlayer() &&
+                                             AiCore.IsAnyHumanPlayerSoldier(sqSnap.Leader) &&
                                              AiCore.IsHumanSoldierAfk(sqSnap.Leader, now, 25.0f) &&
                                              !AiCore.IsVehicleReservedByNearbyActiveHuman(veh, now);
                         if (isPlayerSq && !afkPlayerCrew)
@@ -239,7 +239,7 @@ namespace EasyRed2HumanAI
                                 }
                             }
                             StaticGunsStaffedCount++;
-                            if (bestBailedCrew.Leader != null && !bestBailedCrew.Leader.IsPlayer())
+                            if (bestBailedCrew.Leader != null && !AiCore.IsAnyHumanPlayerSoldier(bestBailedCrew.Leader))
                                 TrySayTacticalVoice(bestBailedCrew.Leader, bestBailedCrew, VoiceManager.VoiceClip.illTakeHisSeat, 0.15f);
                         }
                         catch { }
@@ -308,7 +308,7 @@ namespace EasyRed2HumanAI
                          !isTransport &&
                          veh.HasDriver() &&
                          !AiCore.RequiresTrainedVehicleCrew(vehH, veh) &&
-                         !_vehiclesCrewRetreatedFrom.Contains(vehPtr) &&
+                         (vehH == null || !vehH.CrewRetreatedFrom) &&
                          !veh.CanBeRepaired() &&
                          veh.VehicleSlowEnoughtTogetOut() &&
                          TryGetAvailableTurretSeatIndex(veh, out _))
@@ -445,7 +445,7 @@ namespace EasyRed2HumanAI
                 float bestRealDistSq = 0f;
                 bool canShoot360 = mainTurret.CanShoot360;
                 Vector3 vehFwd = veh.transform.forward;
-                bool playerOnThisStaticGun = isStaticGun && veh.PlayerIsInside();
+                bool playerOnThisStaticGun = isStaticGun && AiCore.IsAnyHumanPlayerInsideVehicle(veh);
                 Squad staticSquadInside = playerOnThisStaticGun ? veh.GetSquadInside() : null;
 
                 for (int s = 0; s < sqCount; s++)
@@ -475,7 +475,7 @@ namespace EasyRed2HumanAI
                             for (int si = 0; si < sLen; si++)
                             {
                                 Soldier occ = seats[si] != null ? seats[si].unitSet : null;
-                                if (occ != null && occ.IsPlayer() && occ.joinedSquad != null && occ.joinedSquad.Pointer == sqSnap.Ptr)
+                                if (occ != null && AiCore.IsAnyHumanPlayerSoldier(occ) && occ.joinedSquad != null && occ.joinedSquad.Pointer == sqSnap.Ptr)
                                 {
                                     playerFromSqOnGun = true;
                                     break;
@@ -1009,7 +1009,7 @@ namespace EasyRed2HumanAI
 
             // If an unmodded Co-op client stands right next to a full bot-manned static gun facing it,
             // politely dismount one locally-owned bot so the vanilla client gets the [F] Enter prompt.
-            if (!veh.PlayerIsInside() && !veh.HasSpace() && AiCore.IsInMultiplayerRoom())
+            if (!AiCore.IsAnyHumanPlayerInsideVehicle(veh) && !veh.HasSpace() && AiCore.IsInMultiplayerRoom())
             {
                 var soldiers = AiCore.WorldSoldiers;
                 int solCount = AiCore.WorldSoldierCount;
@@ -1595,19 +1595,20 @@ namespace EasyRed2HumanAI
         {
             AiCore.VehicleFastHandles vh = AiCore.GetOrCreateVehicleHandles(veh);
             bool explicitOrder = IsVehicleExplicitlyOrderedByAnySquad(veh.Pointer);
-            if (vh != null && !explicitOrder && !veh.PlayerIsInside() && Time.time < vh.EmplacementHazardCooldownUntil)
+            bool humanInsideVeh = AiCore.IsAnyHumanPlayerInsideVehicle(veh);
+            if (vh != null && !explicitOrder && !humanInsideVeh && Time.time < vh.EmplacementHazardCooldownUntil)
                 return true;
 
             if (veh.TryCast<MovableVehicle>() != null)
             {
-                bool playerExplicitOrder = veh.PlayerIsInside() && explicitOrder;
+                bool playerExplicitOrder = humanInsideVeh && explicitOrder;
                 if (playerExplicitOrder)
                     return false;
 
                 if (AiCore.RequiresTrainedVehicleCrew(vh, veh))
                     return true;
 
-                if (!veh.HasDriver() || veh.PlayerIsInside())
+                if (!veh.HasDriver() || humanInsideVeh)
                     return true;
 
                 if (!TryGetAvailableTurretSeatIndex(veh, out _))
@@ -1735,7 +1736,7 @@ namespace EasyRed2HumanAI
                     }
 
                     // Prevent non-squad AI foot soldiers from climbing uninvited into a human player's movable vehicle!
-                    if (isMovable && __instance.PlayerIsInside() && !isExplicitBoardOrder)
+                    if (isMovable && AiCore.IsAnyHumanPlayerInsideVehicle(__instance) && !isExplicitBoardOrder)
                     {
                         ClearEmplacementAssignment(__0.Pointer, markUnreachable: true, 60.0f);
                         __0.CoverPosition(null);
@@ -1927,7 +1928,7 @@ namespace EasyRed2HumanAI
                         return;
 
                     Soldier occupant = targetSeat.unitSet;
-                    if (occupant == null || !occupant.IsAI() || occupant.IsPlayer())
+                    if (occupant == null || !occupant.IsAI() || AiCore.IsAnyHumanPlayerSoldier(occupant))
                         return;
 
                     __instance.selectedVehicleTurret = __0;
@@ -1985,7 +1986,7 @@ namespace EasyRed2HumanAI
                 mainSeat.hasUnitSet &&
                 mainSeat.unitSet != null &&
                 mainSeat.unitSet.IsAI() &&
-                !mainSeat.unitSet.IsPlayer())
+                !AiCore.IsAnyHumanPlayerSoldier(mainSeat.unitSet))
             {
                 for (int i = 0; i < seats.Length; i++)
                 {
@@ -2004,7 +2005,7 @@ namespace EasyRed2HumanAI
                     s.hasUnitSet &&
                     s.unitSet != null &&
                     s.unitSet.IsAI() &&
-                    !s.unitSet.IsPlayer())
+                    !AiCore.IsAnyHumanPlayerSoldier(s.unitSet))
                 {
                     takeSeatIdx = i;
                     return true;
@@ -2170,7 +2171,9 @@ namespace EasyRed2HumanAI
                     if (__instance != null && __instance.Pointer != IntPtr.Zero &&
                         __1 != null && !string.IsNullOrEmpty(__1.faction) && __1.faction != "Civilian")
                     {
-                        _lastKnownVehicleFaction[__instance.Pointer] = __1.faction;
+                        AiCore.VehicleFastHandles fvh = AiCore.GetOrCreateVehicleHandles(__instance);
+                        if (fvh != null)
+                            fvh.LastKnownFaction = __1.faction;
                         RegisterVehicleCrewSquad(__instance, __1);
                     }
 

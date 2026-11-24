@@ -20,8 +20,6 @@ namespace EasyRed2HumanAI
         private static readonly HashSet<IntPtr> _countedRepairTasks = new HashSet<IntPtr>();
         private static readonly Dictionary<IntPtr, float> _unreachableEmplacementUntil = new Dictionary<IntPtr, float>(128);
         private static readonly List<RepairStation> _activeRepairStations = new List<RepairStation>(16);
-        private static readonly Dictionary<IntPtr, RepairStation> _vehiclesSeekingRepairStation = new Dictionary<IntPtr, RepairStation>(32);
-        private static readonly HashSet<IntPtr> _vehiclesAnsweringTankSupport = new HashSet<IntPtr>();
         private static readonly Dictionary<IntPtr, IntPtr> _squadOrderedToVehicle = new Dictionary<IntPtr, IntPtr>(32);
         private static readonly Dictionary<IntPtr, float> _squadTaskCommittedUntil = new Dictionary<IntPtr, float>(64);
         private static readonly Dictionary<IntPtr, float> _nextTurretFFCheckTime = new Dictionary<IntPtr, float>(64);
@@ -873,11 +871,9 @@ namespace EasyRed2HumanAI
                 return false;
 
             Vehicle v = sq.Leader.GetCurrentVehicle();
-            return v != null &&
-                   v.Pointer != IntPtr.Zero &&
-                   _vehiclesSeekingRepairStation.TryGetValue(v.Pointer, out RepairStation st) &&
-                   st != null &&
-                   st.Pointer != IntPtr.Zero;
+            AiCore.VehicleFastHandles vh = v != null ? AiCore.GetOrCreateVehicleHandles(v) : null;
+            RepairStation st = vh != null ? vh.SeekingRepairStation : null;
+            return st != null && st.Pointer != IntPtr.Zero;
         }
 
         internal static bool IsSquadVehicleAnsweringTankSupport(Squad sq)
@@ -886,7 +882,9 @@ namespace EasyRed2HumanAI
                 return false;
 
             Vehicle v = sq.Leader.GetCurrentVehicle();
-            return v != null && v.Pointer != IntPtr.Zero && _vehiclesAnsweringTankSupport.Contains(v.Pointer);
+            return v != null &&
+                   AiCore.TryGetVehicleHandles(v.Pointer, out AiCore.VehicleFastHandles vh) &&
+                   vh.AnsweringTankSupport;
         }
 
         private static bool TryRouteVehicleToRepairStation(AIVehicle aiVeh, Vehicle veh, float now)
@@ -894,6 +892,8 @@ namespace EasyRed2HumanAI
             if (aiVeh == null || veh == null || veh.Pointer == IntPtr.Zero || veh.transform == null)
                 return false;
 
+            IntPtr vehPtr = veh.Pointer;
+            AiCore.VehicleFastHandles vh = AiCore.GetOrCreateVehicleHandles(veh);
             if (!AiCore.IsLocallyOwnedVehicle(veh) ||
                 veh.IsDisabled() ||
                 veh.IsAirVehicle() ||
@@ -901,7 +901,8 @@ namespace EasyRed2HumanAI
                 AiCore.IsAnyHumanPlayerDriving(veh) ||
                 !veh.HasDriver())
             {
-                _vehiclesSeekingRepairStation.Remove(veh.Pointer);
+                if (vh != null)
+                    vh.SeekingRepairStation = null;
                 return false;
             }
 
@@ -915,14 +916,16 @@ namespace EasyRed2HumanAI
             float engineHealth = Mathf.Clamp01(mov.GetPercentageDamageFor(VehicleInternalPart.engine));
             if (tracksHealth <= 0.05f || engineHealth <= 0.05f)
             {
-                _vehiclesSeekingRepairStation.Remove(veh.Pointer);
+                if (vh != null)
+                    vh.SeekingRepairStation = null;
                 return false;
             }
 
             RefreshCombinedArmsIntelIfNeeded();
             if (_activeRepairStations.Count == 0)
             {
-                _vehiclesSeekingRepairStation.Remove(veh.Pointer);
+                if (vh != null)
+                    vh.SeekingRepairStation = null;
                 return false;
             }
 
@@ -940,11 +943,11 @@ namespace EasyRed2HumanAI
                 outOfTurretAmmo = !hasHe && !hasAp && !hasFire && !hasFlak;
             }
 
-            IntPtr vehPtr = veh.Pointer;
-            AiCore.VehicleFastHandles vh = AiCore.GetOrCreateVehicleHandles(veh);
-            bool alreadySeeking = _vehiclesSeekingRepairStation.TryGetValue(vehPtr, out RepairStation activeStation) &&
-                                  activeStation != null && activeStation.Pointer != IntPtr.Zero &&
-                                  activeStation.gameObject != null && activeStation.gameObject.activeInHierarchy &&
+            RepairStation activeStation = vh != null ? vh.SeekingRepairStation : null;
+            bool alreadySeeking = activeStation != null &&
+                                  activeStation.Pointer != IntPtr.Zero &&
+                                  activeStation.gameObject != null &&
+                                  activeStation.gameObject.activeInHierarchy &&
                                   activeStation.transform != null;
 
             if (!alreadySeeking && vh != null && now < vh.NextRepairStationAttemptTime)
@@ -962,9 +965,9 @@ namespace EasyRed2HumanAI
             {
                 if (alreadySeeking)
                 {
-                    _vehiclesSeekingRepairStation.Remove(vehPtr);
                     if (vh != null)
                     {
+                        vh.SeekingRepairStation = null;
                         vh.RepairStationRouteStartedAt = 0f;
                         vh.RepairStationBestDist = 0f;
                     }
@@ -989,7 +992,8 @@ namespace EasyRed2HumanAI
 
             if (bestStation != null && (bestStation.transform.position - vehPos).sqrMagnitude > 420.0f * 420.0f)
             {
-                _vehiclesSeekingRepairStation.Remove(vehPtr);
+                if (vh != null)
+                    vh.SeekingRepairStation = null;
                 bestStation = null;
             }
 
@@ -1035,7 +1039,8 @@ namespace EasyRed2HumanAI
                 return false;
 
             bool startedNewRoute = !alreadySeeking || activeStation.Pointer != bestStation.Pointer;
-            _vehiclesSeekingRepairStation[vehPtr] = bestStation;
+            if (vh != null)
+                vh.SeekingRepairStation = bestStation;
             Vector3 stationPos = bestStation.transform.position;
             float stationRadius = Mathf.Max(5.0f, bestStation.radius);
             float distToStation = Vector3.Distance(vehPos, stationPos);
@@ -1056,7 +1061,7 @@ namespace EasyRed2HumanAI
                     }
                     else if ((now - vh.RepairStationRouteStartedAt) >= 24.0f)
                     {
-                        _vehiclesSeekingRepairStation.Remove(vehPtr);
+                        vh.SeekingRepairStation = null;
                         vh.RepairStationRouteStartedAt = 0f;
                         vh.RepairStationBestDist = 0f;
                         vh.NextRepairStationAttemptTime = now + 45.0f;
@@ -1233,18 +1238,17 @@ namespace EasyRed2HumanAI
             bool answeringFarTankSupport = hasMissionFocus && Vector3.Distance(squadDest, bestFocusPos) > maxAllowedOffset;
             if (!answeringFarTankSupport)
             {
-                if (_vehiclesAnsweringTankSupport.Contains(vehPtr))
+                if (vh != null && vh.AnsweringTankSupport)
                 {
-                    if (vh != null && now < vh.TankSupportHoldUntil)
+                    if (now < vh.TankSupportHoldUntil)
                     {
                         if (crewSq != null && !AiCore.HasAnyHumanPlayerInSquad(crewSq))
                             crewSq.timed_order_end = Mathf.Max(crewSq.timed_order_end, vh.TankSupportHoldUntil);
                         return;
                     }
 
-                    _vehiclesAnsweringTankSupport.Remove(vehPtr);
-                    if (vh != null)
-                        vh.TankSupportHoldUntil = 0f;
+                    vh.AnsweringTankSupport = false;
+                    vh.TankSupportHoldUntil = 0f;
                     if (crewSq != null && !AiCore.HasAnyHumanPlayerInSquad(crewSq))
                     {
                         crewSq.timed_order_end = 0f;
@@ -1280,7 +1284,7 @@ namespace EasyRed2HumanAI
                 desiredDest.y = bestFocusPos.y;
             }
 
-            bool alreadyAnswering = _vehiclesAnsweringTankSupport.Contains(vehPtr);
+            bool alreadyAnswering = vh != null && vh.AnsweringTankSupport;
             Vector3 currentAnchor = (crewSq != null && crewSq.moveOrderPosition.sqrMagnitude > 0.01f)
                 ? crewSq.moveOrderPosition
                 : aiVeh.setVehicleDestination;
@@ -1293,7 +1297,8 @@ namespace EasyRed2HumanAI
 
             if (destChanged)
             {
-                _vehiclesAnsweringTankSupport.Add(vehPtr);
+                if (vh != null)
+                    vh.AnsweringTankSupport = true;
                 if (crewSq != null && !AiCore.HasAnyHumanPlayerInSquad(crewSq))
                 {
                     bool isTank = veh.TryCast<VehicleTank>() != null;
@@ -1342,9 +1347,9 @@ namespace EasyRed2HumanAI
             if (!AiCore.IsLocallyOwnedVehicle(veh) || !veh.IsTransportVehicle() || veh.IsAirVehicle() || AiCore.IsAnyHumanPlayerDriving(veh) || AiCore.IsVehicleInWater(veh))
                 return;
 
-            IntPtr vehPtr = veh.Pointer;
+            AiCore.VehicleFastHandles vh = AiCore.GetOrCreateVehicleHandles(veh);
             float now = Time.time;
-            if (_nextApcDismountCooldown.TryGetValue(vehPtr, out float cooldownUntil) && now < cooldownUntil)
+            if (vh != null && now < vh.NextApcDismountCooldown)
                 return;
 
             var seats = veh.seats;
@@ -1360,7 +1365,7 @@ namespace EasyRed2HumanAI
                     continue;
 
                 Soldier passenger = s.unitSet;
-                if (passenger != null && passenger.IsAlive && !passenger.IsPlayer())
+                if (passenger != null && passenger.IsAlive && !AiCore.IsAnyHumanPlayerSoldier(passenger))
                 {
                     if (passenger.dontLeaveVehicle || (passenger.Params != null && passenger.Params.neverLeaveVehicle))
                         continue;
@@ -1422,7 +1427,8 @@ namespace EasyRed2HumanAI
 
             if (shouldDismount)
             {
-                _nextApcDismountCooldown[vehPtr] = now + 8.0f;
+                if (vh != null)
+                    vh.NextApcDismountCooldown = now + 8.0f;
                 VehicleWithWheels wheeled = veh.TryCast<VehicleWithWheels>();
                 if (wheeled != null)
                 {

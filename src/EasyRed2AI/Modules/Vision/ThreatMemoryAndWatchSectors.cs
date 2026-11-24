@@ -459,7 +459,7 @@ namespace EasyRed2HumanAI
                 for (int i = 0; i < c; i++)
                 {
                     Soldier ally = units[i];
-                    if (ReferenceEquals(ally, null) || ally == null || !ally.IsAlive || ally.Pointer == spotterPtr || ally.IsPlayer() || ally.IsOnVehicle())
+                    if (ReferenceEquals(ally, null) || ally == null || !ally.IsAlive || ally.Pointer == spotterPtr || AiCore.IsAnyHumanPlayerSoldier(ally) || ally.IsOnVehicle())
                         continue;
 
                     AiCore.SoldierFastHandles allyH = AiCore.GetOrCreateSoldierHandles(ally);
@@ -591,7 +591,7 @@ namespace EasyRed2HumanAI
             Vector3 throwDir = (targetPos - myPos) / Mathf.Max(dist, 0.1f);
 
             Soldier player = Soldier.CurrentControlledSoldierOrNull();
-            if (player != null && player.IsAlive && player.faction == myFaction && player.transform != null)
+            if (player != null && player.IsAlive && AiCore.AreSameSideFactions(myFaction, player.faction) && player.transform != null)
             {
                 Vector3 playerPos = player.transform.position;
                 if ((playerPos - targetPos).sqrMagnitude <= playerSafeRadiusSq)
@@ -721,7 +721,7 @@ namespace EasyRed2HumanAI
 
             if (ai.visibleTarget != null ||
                 (!allowWhileMoving && ai.IsMoving()) ||
-                soldier.IsOnVehicle() ||
+                AiCore.IsSoldierInVehicleOrTransition(soldier) ||
                 soldier.isInHandsAnimation ||
                 soldier.isInBodyAnimation ||
                 soldier.IsReloading ||
@@ -1947,7 +1947,7 @@ namespace EasyRed2HumanAI
                     {
                         if (VisionConfig.EnablePointBlankMelee.Value &&
                             (now < h.Combat.PointBlankFaceUntil || __instance.knifeCharge) &&
-                            !soldier.IsOnVehicle() &&
+                            !AiCore.IsSoldierInVehicleOrTransition(soldier) &&
                             soldier.m_pose != SoldierPose.Prone &&
                             h.Tr != null)
                         {

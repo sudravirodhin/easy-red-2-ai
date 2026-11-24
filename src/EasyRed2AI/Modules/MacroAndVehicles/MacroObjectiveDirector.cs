@@ -439,14 +439,13 @@ namespace EasyRed2HumanAI
                 // so if the player's squad has no active objective (or their previous objective was captured/lost)
                 // and is connected to the Team Radio Net, let the Team Net suggest the next priority objective
                 // (strictly on the local player's machine so Host never overwrites remote clients)!
-                if (leader.IsPlayer())
+                if (AiCore.IsAnyHumanPlayerSoldier(leader))
                 {
                     _garrisonAssignedObjectiveBySquad.Remove(sqSnap.Ptr);
                     bool isLocalSl = AiCore.IsLocalPlayerInSquad(sq, out bool isLocalLeader) && isLocalLeader;
                     bool isRemoteCoopSl = !isLocalSl &&
                                           AiCore.IsInMultiplayerRoom() &&
-                                          AiCore.IsMasterClient() &&
-                                          leader.IsPlayer();
+                                          AiCore.IsMasterClient();
                     if ((isLocalSl || isRemoteCoopSl) &&
                         !sqSnap.IsVehicleCrew &&
                         IsSquadConnectedToRadioNet(sq))
@@ -1376,7 +1375,7 @@ namespace EasyRed2HumanAI
                 if (leader == null ||
                     leader.Pointer == IntPtr.Zero ||
                     !leader.IsAlive ||
-                    leader.IsPlayer() ||
+                    AiCore.IsAnyHumanPlayerSoldier(leader) ||
                     !AiCore.IsLocallyOwnedBot(leader) ||
                     sq.currentTask == null ||
                     sq.currentTask.Pointer != p.ExpectedTaskPtr ||
@@ -1448,7 +1447,7 @@ namespace EasyRed2HumanAI
                 !vehicleMissionBusy &&
                 sq.Leader != null &&
                 sq.Leader.IsAlive &&
-                !sq.Leader.IsPlayer() &&
+                !AiCore.IsAnyHumanPlayerSoldier(sq.Leader) &&
                 AiCore.IsLocallyOwnedBot(sq.Leader) &&
                 !IsSquadActivelyRetreating(sq.Pointer, now) &&
                 !sq.InChargeTime())
@@ -1706,7 +1705,7 @@ namespace EasyRed2HumanAI
                 for (int i = 0; i < count; i++)
                 {
                     Soldier u = units[i];
-                    if (u != null && u.IsAlive && !u.IsPlayer() && u.IsRadioman())
+                    if (u != null && u.IsAlive && !AiCore.IsAnyHumanPlayerSoldier(u) && u.IsRadioman())
                     {
                         TrySayTacticalVoice(u, playerSq, VoiceManager.VoiceClip.attackThere, 0.25f);
                         break;
@@ -1875,7 +1874,7 @@ namespace EasyRed2HumanAI
             Photon.Realtime.Player remoteVanillaSl = null;
             if (!isLocalSl)
             {
-                if (!AiCore.IsInMultiplayerRoom() || !AiCore.IsMasterClient() || !playerSq.Leader.IsPlayer())
+                if (!AiCore.IsInMultiplayerRoom() || !AiCore.IsMasterClient() || !AiCore.IsAnyHumanPlayerSoldier(playerSq.Leader))
                     return;
 
                 SyncSoldier syn = playerSq.Leader.soldierSyncher;
@@ -3027,8 +3026,7 @@ namespace EasyRed2HumanAI
                     return false;
                 }
 
-                Transform tr = envHit.transform;
-                if (tr == null || (tr.GetComponentInParent<Vehicle>() == null && tr.GetComponentInParent<Creature>() == null))
+                if (!AiCore.IsVehicleCollider(envHit.collider))
                     return true;
 
                 float consumed = (probe.y - envHit.point.y) + 0.08f;

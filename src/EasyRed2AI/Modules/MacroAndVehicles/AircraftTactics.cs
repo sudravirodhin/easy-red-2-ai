@@ -75,7 +75,7 @@ namespace EasyRed2HumanAI
             if (plane == null || plane.veh == null || plane.veh.Pointer == IntPtr.Zero || plane.transform == null)
                 return;
 
-            if (!AiCore.IsLocallyOwnedVehicle(plane.veh) || plane.veh.PlayerIsInside())
+            if (!AiCore.IsLocallyOwnedVehicle(plane.veh) || AiCore.IsAnyHumanPlayerInsideVehicle(plane.veh))
                 return;
 
             IntPtr vehPtr = plane.veh.Pointer;
@@ -231,10 +231,11 @@ namespace EasyRed2HumanAI
                 }
             }
 
-            if (_nextPlaneOrbitSteerTime.TryGetValue(vehPtr, out float nextSteer) && now < nextSteer)
+            if (planeVh != null && now < planeVh.NextPlaneOrbitSteerTime)
                 return;
 
-            _nextPlaneOrbitSteerTime[vehPtr] = now + 2.0f;
+            if (planeVh != null)
+                planeVh.NextPlaneOrbitSteerTime = now + 2.0f;
 
             string myFaction = GetVehicleCrewFaction(plane.veh);
             if (string.IsNullOrEmpty(myFaction))
@@ -523,6 +524,7 @@ namespace EasyRed2HumanAI
 
             RefreshCombinedArmsIntelIfNeeded();
 
+            AiCore.VehicleFastHandles planeVh = AiCore.GetOrCreateVehicleHandles(plane.veh);
             Vector3 planePos = plane.transform.position;
 
             Spottable bestEnemyAir = FindBestAirborneEnemyAircraft(plane, myFaction, planePos, out bool anyEnemyAirborne, out float nearestAirDist, out bool bestAirIsBomber);
@@ -586,7 +588,6 @@ namespace EasyRed2HumanAI
             bool hasLiveBombsNow = plane.HasBombsToDeliver();
             bool hasAntiArmorCannons = HasAircraftAntiArmorCannons(plane, out float bestPlanePenMm);
 
-            AiCore.VehicleFastHandles planeVh = AiCore.GetOrCreateVehicleHandles(plane.veh);
             float now = Time.time;
             if (planeVh != null &&
                 now < planeVh.UnderFireUntil &&
@@ -886,7 +887,8 @@ namespace EasyRed2HumanAI
                    plane.veh != null &&
                    plane.veh.Pointer != IntPtr.Zero &&
                    !plane.veh.isGrounded &&
-                   _activeKamikazePlanes.Contains(plane.veh.Pointer);
+                   AiCore.TryGetVehicleHandles(plane.veh.Pointer, out AiCore.VehicleFastHandles vh) &&
+                   vh.IsActiveKamikaze;
         }
 
         private static bool IsJapaneseKamikazeCandidate(AIPlane plane, out string myFaction)
@@ -902,13 +904,15 @@ namespace EasyRed2HumanAI
                 return false;
             }
 
+            AiCore.VehicleFastHandles vh = AiCore.GetOrCreateVehicleHandles(plane.veh);
             if (plane.veh.isGrounded ||
                 !plane.veh.CanFight() ||
                 !plane.HasAIDriver ||
-                plane.veh.PlayerIsInside() ||
+                AiCore.IsAnyHumanPlayerInsideVehicle(plane.veh) ||
                 !AiCore.IsLocallyOwnedVehicle(plane.veh))
             {
-                _activeKamikazePlanes.Remove(plane.veh.Pointer);
+                if (vh != null)
+                    vh.IsActiveKamikaze = false;
                 return false;
             }
 
@@ -927,7 +931,7 @@ namespace EasyRed2HumanAI
                 return false;
             }
 
-            if (_activeKamikazePlanes.Contains(plane.veh.Pointer))
+            if (vh != null && vh.IsActiveKamikaze)
                 return true;
 
             // Kamikaze is strictly a last-resort sacrifice for severely crippled Japanese aircraft:
@@ -941,16 +945,19 @@ namespace EasyRed2HumanAI
             if (!severelyDamaged)
                 return false;
 
-            IntPtr vehPtr = plane.veh.Pointer;
-            if (_kamikazeDecisionByPlane.TryGetValue(vehPtr, out bool committed))
-                return committed;
+            if (vh != null && vh.KamikazeDecisionMade)
+                return vh.KamikazeCommitted;
 
             SoldierPersonality pilotPers = GetVehicleCrewPersonality(plane.veh);
             float chance = pilotPers == SoldierPersonality.Pilot_Disciplined
                 ? 0f
                 : (pilotPers == SoldierPersonality.Pilot_Daredevil ? 0.55f : 0.30f);
-            committed = chance > 0f && UnityEngine.Random.value < chance;
-            _kamikazeDecisionByPlane[vehPtr] = committed;
+            bool committed = chance > 0f && UnityEngine.Random.value < chance;
+            if (vh != null)
+            {
+                vh.KamikazeDecisionMade = true;
+                vh.KamikazeCommitted = committed;
+            }
             return committed;
         }
 
@@ -1116,11 +1123,12 @@ namespace EasyRed2HumanAI
             if (!IsJapaneseKamikazeCandidate(plane, out string myFaction))
                 return;
 
-            IntPtr vehPtr = plane.veh.Pointer;
+            AiCore.VehicleFastHandles vh = AiCore.GetOrCreateVehicleHandles(plane.veh);
             float now = Time.time;
 
-            if (_activeKamikazePlanes.Add(vehPtr))
+            if (vh != null && !vh.IsActiveKamikaze)
             {
+                vh.IsActiveKamikaze = true;
                 KamikazeDivesTriggeredCount++;
                 if (VisionConfig.DebugLogging.Value)
                 {
@@ -1135,9 +1143,10 @@ namespace EasyRed2HumanAI
 
             if (needNewTarget ||
                 (plane.planeState != AIPlane.PlaneAIState.doingDive &&
-                 (!_nextKamikazeTargetSearchTime.TryGetValue(vehPtr, out float nextSearch) || now >= nextSearch)))
+                 (vh == null || now >= vh.NextKamikazeTargetSearchTime)))
             {
-                _nextKamikazeTargetSearchTime[vehPtr] = now + 1.5f;
+                if (vh != null)
+                    vh.NextKamikazeTargetSearchTime = now + 1.5f;
                 Spottable bestTarget = FindBestKamikazeTarget(plane, myFaction);
                 if (bestTarget != null && bestTarget.Pointer != IntPtr.Zero)
                 {
@@ -1233,7 +1242,7 @@ namespace EasyRed2HumanAI
                 plane.veh.Pointer == IntPtr.Zero ||
                 plane.transform == null ||
                 !AiCore.IsLocallyOwnedVehicle(plane.veh) ||
-                plane.veh.PlayerIsInside() ||
+                AiCore.IsAnyHumanPlayerInsideVehicle(plane.veh) ||
                 !plane.HasAIDriver ||
                 plane.veh.isGrounded ||
                 !plane.veh.CanFight() ||
@@ -1595,7 +1604,7 @@ namespace EasyRed2HumanAI
                 return;
             }
 
-            if (!allowAiPilot && !vp.PlayerIsInside())
+            if (!allowAiPilot && !AiCore.IsAnyHumanPlayerInsideVehicle(vp))
                 return;
 
             if (vh.PlaneGroundSpawnChecked)

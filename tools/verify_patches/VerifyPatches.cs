@@ -216,7 +216,7 @@ internal static class VerifyPatches
 
         try
         {
-            GenerateModIndex(workspaceDir);
+            GenerateModIndex(workspaceDir, verifiedPatches);
             GenerateModStateAndConfigIndex(modAsm, workspaceDir, verifiedPatches);
         }
         catch (Exception ex)
@@ -489,7 +489,9 @@ internal static class VerifyPatches
         return completed;
     }
 
-    private static void GenerateModIndex(string workspaceDir)
+    private static void GenerateModIndex(
+        string workspaceDir,
+        List<(string TargetType, string TargetMethod, string PatchClass, string Hooks)> verifiedPatches)
     {
         string srcRoot = Path.Combine(workspaceDir, @"src\EasyRed2AI");
         string cacheDir = Path.Combine(workspaceDir, @"tools\er2_cache");
@@ -498,14 +500,33 @@ internal static class VerifyPatches
 
         Directory.CreateDirectory(cacheDir);
         string indexPath = Path.Combine(cacheDir, "mod_index.md");
+        string summaryPath = Path.Combine(cacheDir, "mod_summary.md");
         string[] files = Directory.GetFiles(srcRoot, "*.cs", SearchOption.AllDirectories)
             .OrderBy(p => p, StringComparer.OrdinalIgnoreCase)
             .ToArray();
 
-        var loadedFiles = new List<(string RelPath, string[] Lines)>(files.Length);
+        var loadedFiles = new List<(string RelPath, string[] Lines, List<ModOutlineEntry> Entries, int PatchCount)>(files.Length);
+        int totalLines = 0;
+        var allLongMethods = new List<(string RelPath, string Name, int StartLine, int EndLine, int Span)>(256);
+
         foreach (string filePath in files)
         {
-            loadedFiles.Add((Path.GetRelativePath(workspaceDir, filePath).Replace('\\', '/'), File.ReadAllLines(filePath)));
+            string relPath = Path.GetRelativePath(workspaceDir, filePath).Replace('\\', '/');
+            string[] lines = File.ReadAllLines(filePath);
+            totalLines += lines.Length;
+            var entries = ScanCSharpOutline(lines);
+            int patchCount = 0;
+            foreach (var e in entries)
+            {
+                if (e.Kind == "patch")
+                    patchCount++;
+                else if (e.Kind != "type")
+                {
+                    int span = e.EndLine - e.StartLine + 1;
+                    allLongMethods.Add((relPath, e.Name, e.StartLine, e.EndLine, span));
+                }
+            }
+            loadedFiles.Add((relPath, lines, entries, patchCount));
         }
 
         var sb = new System.Text.StringBuilder(32768);
@@ -522,9 +543,8 @@ internal static class VerifyPatches
 
         foreach (var lf in loadedFiles)
         {
-            var entries = ScanCSharpOutline(lf.Lines);
             sb.AppendLine($"## `{lf.RelPath}` ({lf.Lines.Length} lines)");
-            foreach (var e in entries)
+            foreach (var e in lf.Entries)
             {
                 if (e.Kind == "patch")
                     sb.AppendLine($"- `{e.Tag}` `{e.Name}` (L{e.StartLine}-{e.EndLine})");
@@ -537,6 +557,53 @@ internal static class VerifyPatches
         }
 
         File.WriteAllText(indexPath, sb.ToString(), System.Text.Encoding.UTF8);
+
+        int uniqueTargets = verifiedPatches.Select(x => x.TargetType).Distinct(StringComparer.Ordinal).Count();
+        var sum = new System.Text.StringBuilder(8192);
+        sum.AppendLine("# EasyRed2AI — Compact Codebase Summary");
+        sum.AppendLine();
+        sum.AppendLine($"- **Files**: `{files.Length}` | **Total Lines**: `{totalLines:N0}` | **Verified Patches**: `{verifiedPatches.Count}` | **Vanilla Target Types**: `{uniqueTargets}`");
+        sum.AppendLine("- Prefer `InspectInterop.dll --mod <query> [--body]` and `--review-map` over reading full index files.");
+        sum.AppendLine();
+
+        sum.AppendLine("## File Map (Sorted by Size)");
+        sum.AppendLine("| File | Lines | Patches |");
+        sum.AppendLine("|---|---:|---:|");
+        foreach (var lf in loadedFiles.OrderByDescending(x => x.Lines.Length))
+            sum.AppendLine($"| `{lf.RelPath}` | {lf.Lines.Length} | {lf.PatchCount} |");
+        sum.AppendLine();
+
+        sum.AppendLine("## Multi-Patch Hotspots");
+        var sharedMethods = verifiedPatches
+            .GroupBy(x => (x.TargetType, x.TargetMethod))
+            .Where(g => g.Count() >= 2)
+            .OrderByDescending(g => g.Count())
+            .ThenBy(g => g.Key.TargetType, StringComparer.Ordinal)
+            .ToList();
+        foreach (var g in sharedMethods)
+        {
+            string classes = string.Join(", ", g.Select(x => $"{x.PatchClass}[{x.Hooks}]"));
+            sum.AppendLine($"- **Shared Method** `{g.Key.TargetType}.{g.Key.TargetMethod}` ({g.Count()}x): {classes}");
+        }
+
+        var busyTypes = verifiedPatches
+            .GroupBy(x => x.TargetType, StringComparer.Ordinal)
+            .Where(g => g.Count() >= 4)
+            .OrderByDescending(g => g.Count())
+            .ThenBy(g => g.Key, StringComparer.Ordinal)
+            .ToList();
+        foreach (var g in busyTypes)
+        {
+            string methods = string.Join(", ", g.Select(x => x.TargetMethod).Distinct(StringComparer.Ordinal).OrderBy(m => m, StringComparer.Ordinal));
+            sum.AppendLine($"- **Hot Class** `{g.Key}` ({g.Count()} patches): {methods}");
+        }
+        sum.AppendLine();
+
+        sum.AppendLine("## Top 15 Largest Methods");
+        foreach (var m in allLongMethods.OrderByDescending(x => x.Span).Take(15))
+            sum.AppendLine($"- `{m.RelPath}:L{m.StartLine}-{m.EndLine}` ({m.Span} lines) `{m.Name}`");
+
+        File.WriteAllText(summaryPath, sum.ToString(), System.Text.Encoding.UTF8);
     }
 
     private static string FormatShortTypeName(Type t)

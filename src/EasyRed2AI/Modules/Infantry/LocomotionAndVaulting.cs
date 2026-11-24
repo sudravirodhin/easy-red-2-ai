@@ -893,7 +893,7 @@ namespace EasyRed2HumanAI
                         return;
 
                     AiCore.SoldierFastHandles h = AiCore.GetOrCreateSoldierHandlesByAi(__instance);
-                    if (!AiCore.IsLocallyOwnedBot(h) || h.Tr == null || h.Ref.IsOnVehicle())
+                    if (!AiCore.IsLocallyOwnedBot(h) || h.Tr == null || AiCore.IsSoldierInVehicleOrTransition(h.Ref))
                         return;
 
                     float now = Time.time;
@@ -1457,7 +1457,7 @@ namespace EasyRed2HumanAI
                 return true;
 
             Soldier s = h.Ref;
-            if (s.IsOnVehicle() || s.FallingWithParachute())
+            if (AiCore.IsSoldierInVehicleOrTransition(s) || s.FallingWithParachute())
                 return true;
 
             Vector3 myPos = h.Tr.position;
@@ -1611,7 +1611,7 @@ namespace EasyRed2HumanAI
                         return;
 
                     Soldier s = h.Ref;
-                    if (s.IsOnVehicle() || s.FallingWithParachute())
+                    if (AiCore.IsSoldierInVehicleOrTransition(s) || s.FallingWithParachute())
                         return;
 
                     Vector3 myPos = h.Tr.position;
@@ -1680,7 +1680,7 @@ namespace EasyRed2HumanAI
 
                     AiCore.ResetBotPathLockout(__instance);
                     Soldier s = h.Ref;
-                    if (s != null && !s.IsOnVehicle() && !s.FallingWithParachute())
+                    if (s != null && !AiCore.IsSoldierInVehicleOrTransition(s) && !s.FallingWithParachute())
                     {
                         s.TryChangeCombatCoverIfNotReachable();
                         AiCore.InvalidateTargetDestinationCache(s);

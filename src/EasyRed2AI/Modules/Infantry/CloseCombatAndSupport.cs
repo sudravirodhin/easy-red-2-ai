@@ -538,7 +538,7 @@ namespace EasyRed2HumanAI
                 try
                 {
                     if (!VisionConfig.EnableMod.Value || __instance == null || __0 == null ||
-                        !__instance.IsAI() || __instance.IsPlayer() || !__instance.isBleeding || !__instance.IsAlive)
+                        !__instance.IsAI() || AiCore.IsAnyHumanPlayerSoldier(__instance) || !__instance.isBleeding || !__instance.IsAlive)
                         return;
 
                     if (!AiCore.IsLocallyOwnedBot(__instance) || AiCore.IsSoldierInVehicleOrTransition(__instance))
@@ -633,7 +633,7 @@ namespace EasyRed2HumanAI
                 dist > 6.0f ||
                 AiCore.GetRawVisibleTargetPtr(ai) == IntPtr.Zero ||
                 ai.HeldMortar != null ||
-                soldier.IsOnVehicle() ||
+                AiCore.IsSoldierInVehicleOrTransition(soldier) ||
                 soldier.UsingBipod() ||
                 soldier.IsBipodTransitioning() ||
                 soldier.HasSurrended() ||
@@ -975,7 +975,7 @@ namespace EasyRed2HumanAI
                         return;
 
                     Soldier s = __instance.__4__this;
-                    if (s == null || s.IsPlayer())
+                    if (s == null || AiCore.IsAnyHumanPlayerSoldier(s))
                         return;
 
                     bool isEmpGunner = false;
@@ -1243,7 +1243,7 @@ namespace EasyRed2HumanAI
             if (player != null && player.IsAlive && player.Pointer != ptr && !player.HasSurrended() && player.transform != null)
             {
                 float pDistSq = (player.transform.position - myPos).sqrMagnitude;
-                if (player.faction == myFaction)
+                if (AiCore.AreSameSideFactions(myFaction, player.faction))
                 {
                     if (pDistSq <= 18f * 18f)
                         return false;
@@ -1748,7 +1748,7 @@ namespace EasyRed2HumanAI
 
                     if (VisionConfig.EnableMod.Value &&
                         AiCore.IsInMultiplayerRoom() &&
-                        !__instance.IsPlayer() &&
+                        !AiCore.IsAnyHumanPlayerSoldier(__instance) &&
                         (!AiCore.IsLocallyOwnedSoldier(__instance) ||
                          (__instance.joinedSquad != null && AiCore.IsSquadOwnedOrOccupiedByRemoteHuman(__instance.joinedSquad))))
                     {
@@ -1950,7 +1950,7 @@ namespace EasyRed2HumanAI
                 !medic.IsAlive ||
                 medic.IsInjured ||
                 medic.HasSurrended() ||
-                medic.IsOnVehicle() ||
+                AiCore.IsSoldierInVehicleOrTransition(medic) ||
                 medic.IsCarried())
             {
                 return false;
@@ -2050,7 +2050,7 @@ namespace EasyRed2HumanAI
                         character.isInBodyAnimation ||
                         now < mh.Goap.ActiveSyringeHealUntil ||
                         character.HasSurrended() ||
-                        character.IsOnVehicle() ||
+                        AiCore.IsSoldierInVehicleOrTransition(character) ||
                         character.IsCarryingBody() ||
                         mh.Tr == null)
                     {
@@ -2348,7 +2348,6 @@ namespace EasyRed2HumanAI
         }
 
         private static readonly List<LiveGrenadeEntry> _activeLiveGrenades = new List<LiveGrenadeEntry>(16);
-        private static IntPtr _lastWarnedFriendlyGrenadePtr;
         private static float _nextLiveGrenadeRefreshTime;
 
         internal static void ClearActiveLiveGrenades()
@@ -2486,33 +2485,6 @@ namespace EasyRed2HumanAI
                 }
 
                 _activeLiveGrenades[i] = g;
-            }
-
-            if (VisionConfig.EnableMod.Value && VisionConfig.EnableFriendlyBlastWarnings.Value && _activeLiveGrenades.Count > 0)
-            {
-                Soldier localPlayer = PlayerController.currentController != null ? PlayerController.currentController.ControlledCharacter : null;
-                if (localPlayer != null && localPlayer.IsAlive && localPlayer.transform != null)
-                {
-                    Vector3 pPos = localPlayer.transform.position;
-                    string pFac = AiCore.GetCachedFaction(localPlayer);
-                    for (int i = 0; i < _activeLiveGrenades.Count; i++)
-                    {
-                        LiveGrenadeEntry g = _activeLiveGrenades[i];
-                        if (g.Ptr != _lastWarnedFriendlyGrenadePtr &&
-                            !string.IsNullOrEmpty(g.ThrowerFaction) &&
-                            AiCore.AreSameSideFactions(pFac, g.ThrowerFaction))
-                        {
-                            float warnR = Mathf.Max(g.BlastRadius + 2.0f, 8.5f);
-                            float dSq = (g.Pos - pPos).sqrMagnitude;
-                            if (dSq <= warnR * warnR)
-                            {
-                                _lastWarnedFriendlyGrenadePtr = g.Ptr;
-                                VisionPatches.ShowToast($"! Friendly grenade nearby ({Mathf.RoundToInt(Mathf.Sqrt(dSq))}m) — take cover!", 2.8f);
-                                break;
-                            }
-                        }
-                    }
-                }
             }
         }
 

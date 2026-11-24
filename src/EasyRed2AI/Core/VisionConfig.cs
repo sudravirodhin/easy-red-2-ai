@@ -54,6 +54,7 @@ namespace EasyRed2HumanAI
         // 5. Phase 2: Veteran Progression (15-Minute Linear Scale & Realistic Caps)
         public static ConfigEntry<bool> EnableVeteranSystem;
         public static ConfigEntry<float> VeteranFullMaturitySeconds;
+        public static ConfigEntry<bool> EnableStartingTourVeterans;
         public static ConfigEntry<float> VeteranMaxSpreadReduction;
         public static ConfigEntry<bool> PromoteVeteranRanks;
         public static ConfigEntry<bool> ShowVeteran3DIcons;
@@ -382,6 +383,12 @@ namespace EasyRed2HumanAI
                 "VeteranFullMaturitySeconds",
                 900f,
                 "Survival time in seconds (900s = 15 minutes) required for a soldier to linearly reach 100% Veteran status.");
+
+            EnableStartingTourVeterans = config.Bind(
+                "5. Veteran Progression",
+                "EnableStartingTourVeterans",
+                true,
+                "Allow soldiers to occasionally spawn with prior-tour veterancy (role-weighted for NCOs/specialists/crew, plus a rare chance for an entire squad to spawn as a seasoned or A-Team veteran unit).");
 
             VeteranMaxSpreadReduction = config.Bind(
                 "5. Veteran Progression",
@@ -780,7 +787,7 @@ namespace EasyRed2HumanAI
                 "8. Ballistics & Immersion",
                 "EnableFriendlyBlastWarnings",
                 true,
-                "Warn human players when inside a friendly artillery barrage or close friendly grenade blast radius (HUD toast for modded players, plus team-only Co-op chat alert for vanilla clients).");
+                "Warn human players when inside a friendly artillery barrage blast radius (HUD toast for modded players, plus team-only Co-op chat alert for vanilla clients).");
 
             EnableSpectatorBotInspector = config.Bind(
                 "8. Ballistics & Immersion",

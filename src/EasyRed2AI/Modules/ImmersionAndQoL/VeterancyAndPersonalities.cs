@@ -57,6 +57,7 @@ namespace EasyRed2HumanAI
             public bool Initialized;
             public float SpawnTime;
             public float BonusSeconds;
+            public float StartingTourSeconds;
             public float NextRoleCheckTime;
             public int PromotedTier;
             public Rank BaseRank;
@@ -67,9 +68,6 @@ namespace EasyRed2HumanAI
             public bool LeaderPromotionEvaluated;
             public bool RoseToTheOccasion;
         }
-
-        internal static readonly Dictionary<IntPtr, (SoldierPersonality Pers, float ExpireTime)> _cachedVehiclePersonalities =
-            new Dictionary<IntPtr, (SoldierPersonality Pers, float ExpireTime)>(64);
 
         // Telemetry counters for debug / toast feedback
         public static int ActiveVeteransCount;
@@ -120,10 +118,18 @@ namespace EasyRed2HumanAI
             if (s == null)
                 return 0;
 
-            if (s.IsOnVehicle())
-                return DetermineVehicleRoleCategory(s.GetCurrentVehicle());
-
             Squad sq = s.joinedSquad;
+            if (s.IsOnVehicle())
+            {
+                Vehicle curVeh = s.GetCurrentVehicle();
+                if (curVeh != null &&
+                    curVeh.Pointer != IntPtr.Zero &&
+                    !curVeh.IsTransportVehicle() &&
+                    (sq == null || AiCore.IsTrueVehicleCrewSquad(sq)))
+                {
+                    return DetermineVehicleRoleCategory(curVeh);
+                }
+            }
             if (sq != null && !sq.isOpenForJoiners)
             {
                 Vehicle opVeh = s.VehicleToOperate();
@@ -227,6 +233,48 @@ namespace EasyRed2HumanAI
             }
         }
 
+        private static float RollStartingTourVet01(Soldier s, byte roleCat, bool isSquadLeader)
+        {
+            if (!VisionConfig.EnableVeteranSystem.Value ||
+                !VisionConfig.EnableStartingTourVeterans.Value ||
+                s == null ||
+                s.Pointer == IntPtr.Zero)
+            {
+                return 0f;
+            }
+
+            int sub = AiCore.GetDeterministicHash(s.Pointer, s._randomSeed_k__BackingField ^ 0x51A7) % 100;
+            float sub01 = sub * 0.01f;
+
+            float squadFloor01 = 0f;
+            Squad sq = s.joinedSquad;
+            if (sq != null && sq.Pointer != IntPtr.Zero)
+            {
+                int sqRoll = AiCore.GetDeterministicHash(sq.Pointer, 977) % 1000;
+                if (sqRoll < 25) // 2.5% Rare "A-Team" / Spearhead Squad
+                    squadFloor01 = isSquadLeader ? (0.82f + sub01 * 0.10f) : (0.52f + sub01 * 0.13f);
+                else if (sqRoll < 110) // 8.5% Seasoned Squad
+                    squadFloor01 = isSquadLeader ? (0.52f + sub01 * 0.10f) : (0.24f + sub01 * 0.14f);
+            }
+
+            int roll1000 = AiCore.GetDeterministicHash(s.Pointer, s._randomSeed_k__BackingField ^ 0x3C6EF372) % 1000;
+            float indivVet01 = 0f;
+            bool isSpecialistOrNco = isSquadLeader || roleCat == 1 || roleCat == 5 || roleCat == 8 || roleCat == 9 || roleCat == 10;
+            if (isSpecialistOrNco)
+            {
+                if (roll1000 < 25) indivVet01 = 0.81f + sub01 * 0.08f;       // 2.5% Vet III ★
+                else if (roll1000 < 125) indivVet01 = 0.52f + sub01 * 0.12f; // 10.0% Vet II
+                else if (roll1000 < 400) indivVet01 = 0.22f + sub01 * 0.16f; // 27.5% Vet I
+            }
+            else
+            {
+                if (roll1000 < 40) indivVet01 = 0.52f + sub01 * 0.10f;       // 4.0% Vet II
+                else if (roll1000 < 220) indivVet01 = 0.22f + sub01 * 0.15f; // 18.0% Vet I
+            }
+
+            return Mathf.Max(squadFloor01, indivVet01);
+        }
+
         private static SoldierRecord GetOrCreateRecord(Soldier s)
         {
             AiCore.SoldierFastHandles h = AiCore.GetOrCreateSoldierHandles(s);
@@ -247,14 +295,19 @@ namespace EasyRed2HumanAI
                 bool spawnedAsLeader = roleCat == 1 ||
                                        s.IsSquadLeader() ||
                                        (s.joinedSquad != null && s.joinedSquad.Leader != null && s.joinedSquad.Leader.Pointer == s.Pointer);
+                float startVet01 = RollStartingTourVet01(s, roleCat, spawnedAsLeader);
+                float fullSeconds = Mathf.Max(60f, VisionConfig.VeteranFullMaturitySeconds.Value);
+                float startTourSec = startVet01 * fullSeconds;
+                int initialTier = startVet01 >= 0.80f ? 3 : (startVet01 >= 0.50f ? 2 : (startVet01 >= 0.20f ? 1 : 0));
                 float jitter = (AiCore.GetDeterministicHash(h.Ptr, 43) & 63) * 0.04f;
                 rec = new SoldierRecord
                 {
                     Initialized = true,
                     SpawnTime = now,
                     BonusSeconds = 0f,
+                    StartingTourSeconds = startTourSec,
                     NextRoleCheckTime = now + 4.0f + jitter,
-                    PromotedTier = 0,
+                    PromotedTier = initialTier,
                     BaseRank = s.rank,
                     BaseName = rawName,
                     RoleCategory = roleCat,
@@ -492,8 +545,9 @@ namespace EasyRed2HumanAI
 
             IntPtr vPtr = v.Pointer;
             float now = Time.time;
-            if (_cachedVehiclePersonalities.TryGetValue(vPtr, out var cached) && now < cached.ExpireTime)
-                return cached.Pers;
+            AiCore.VehicleFastHandles vh = AiCore.GetOrCreateVehicleHandles(v);
+            if (vh != null && vh.CachedPersonality != 0 && now < vh.CachedPersonalityExpireTime)
+                return (SoldierPersonality)vh.CachedPersonality;
 
             SoldierPersonality resolved = SoldierPersonality.None;
             var seats = v.seats;
@@ -518,7 +572,6 @@ namespace EasyRed2HumanAI
             if (resolved == SoldierPersonality.None)
             {
                 int roll100 = AiCore.GetDeterministicHash(vPtr, 73) % 100;
-                AiCore.VehicleFastHandles vh = AiCore.GetOrCreateVehicleHandles(v);
                 if (vh != null && vh.IsPlane)
                 {
                     resolved = roll100 < 35 ? SoldierPersonality.Pilot_Ace : (roll100 < 70 ? SoldierPersonality.Pilot_Daredevil : SoldierPersonality.Pilot_Disciplined);
@@ -533,7 +586,11 @@ namespace EasyRed2HumanAI
                 }
             }
 
-            _cachedVehiclePersonalities[vPtr] = (resolved, now + 3.0f);
+            if (vh != null)
+            {
+                vh.CachedPersonality = (byte)resolved;
+                vh.CachedPersonalityExpireTime = now + 3.0f;
+            }
             return resolved;
         }
 
@@ -645,7 +702,7 @@ namespace EasyRed2HumanAI
 
             SoldierRecord rec = GetOrCreateRecord(s);
             float fullSeconds = Mathf.Max(60f, VisionConfig.VeteranFullMaturitySeconds.Value);
-            float effectiveAlive = Mathf.Max(0f, Time.time - rec.SpawnTime) + rec.BonusSeconds;
+            float effectiveAlive = Mathf.Max(0f, Time.time - rec.SpawnTime) + rec.StartingTourSeconds + rec.BonusSeconds;
             return Mathf.Clamp01(effectiveAlive / fullSeconds);
         }
 
@@ -667,7 +724,7 @@ namespace EasyRed2HumanAI
 
             SoldierRecord rec = h.Veterancy.Record;
             float fullSeconds = Mathf.Max(60f, VisionConfig.VeteranFullMaturitySeconds.Value);
-            float effectiveAlive = Mathf.Max(0f, Time.time - rec.SpawnTime) + rec.BonusSeconds;
+            float effectiveAlive = Mathf.Max(0f, Time.time - rec.SpawnTime) + rec.StartingTourSeconds + rec.BonusSeconds;
             float v = Mathf.Clamp01(effectiveAlive / fullSeconds);
             if (v >= 0.80f) return 3;
             if (v >= 0.50f) return 2;
@@ -1176,7 +1233,7 @@ namespace EasyRed2HumanAI
                                 {
                                     throwDir.Normalize();
                                     h.Combat.PendingThrowFaceDir = throwDir;
-                                    h.Combat.PendingThrowFaceUntil = Time.time + 0.90f;
+                                    h.Combat.PendingThrowFaceUntil = Time.time + 1.85f;
                                     AiCore.RotateBodyWithoutRaisingGun(__instance, throwDir, Mathf.Min(Time.deltaTime * 2.5f, 0.06f));
                                 }
                             }
@@ -1251,7 +1308,7 @@ namespace EasyRed2HumanAI
                     {
                         fragDir.Normalize();
                         h.Combat.PendingThrowFaceDir = fragDir;
-                        h.Combat.PendingThrowFaceUntil = Time.time + 0.90f;
+                        h.Combat.PendingThrowFaceUntil = Time.time + 1.85f;
                         AiCore.RotateBodyWithoutRaisingGun(__instance, fragDir, Mathf.Min(Time.deltaTime * 2.5f, 0.06f));
                     }
                 }

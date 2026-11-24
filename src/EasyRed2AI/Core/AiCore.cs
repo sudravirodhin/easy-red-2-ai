@@ -453,6 +453,29 @@ namespace EasyRed2HumanAI
             public float LastTrackedWorldPosTime;
             public Vector3 EstimatedFlatVel;
             public float NextPlayerPedestrianSweepTime;
+            public float NextApcCheckTime;
+            public float NextApcDismountCooldown;
+            public bool HasCachedExtents;
+            public Vector4 CachedExtents;
+            public float NextPedestrianScanTime;
+            public float YieldUntilTime;
+            public float ContinuousYieldStart;
+            public float NextFriendlyYieldCountTime;
+            public float NextSupportSteerTime;
+            public float NextPlaneOrbitSteerTime;
+            public float NextCombinedArmsAssistCountTime;
+            public bool IsActiveKamikaze;
+            public bool KamikazeDecisionMade;
+            public bool KamikazeCommitted;
+            public float NextKamikazeTargetSearchTime;
+            public Squad LastKnownCrewSquad;
+            public string LastKnownFaction;
+            public bool CrewRetreatedFrom;
+            public bool CreditedDestroyed;
+            public RepairStation SeekingRepairStation;
+            public bool AnsweringTankSupport;
+            public byte CachedPersonality;
+            public float CachedPersonalityExpireTime;
             internal EmergentEngine.VehicleEmergentState Emergent;
         }
 
@@ -1247,6 +1270,11 @@ namespace EasyRed2HumanAI
 
             _vehicleHandlesByPtr[ptr] = h;
             return h;
+        }
+
+        public static bool TryGetVehicleHandles(IntPtr ptr, out VehicleFastHandles h)
+        {
+            return _vehicleHandlesByPtr.TryGetValue(ptr, out h) && h != null;
         }
 
         public static bool IsSoldierNonCombatantOrSurrendered(Soldier s, SoldierFastHandles sh = null)

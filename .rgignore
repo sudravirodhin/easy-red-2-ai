@@ -1,0 +1,9 @@
+tools/er2_cache/
+tools/bepinex/
+tools/roslyn/
+backups/
+build/
+releases/
+scratch/
+NOTES.md
+CHANGELOG.md

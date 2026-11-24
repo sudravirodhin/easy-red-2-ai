@@ -220,7 +220,7 @@ namespace EasyRed2HumanAI
             if (!VisionConfig.EnableTacticalVoiceCallouts.Value ||
                 soldier == null ||
                 !soldier.IsAlive ||
-                soldier.IsPlayer() ||
+                AiCore.IsAnyHumanPlayerSoldier(soldier) ||
                 soldier.HasSurrended() ||
                 soldier.IsVoiceLocked ||
                 soldier.IsTalking())
@@ -933,7 +933,7 @@ namespace EasyRed2HumanAI
             for (int i = -1; i < count; i++)
             {
                 Soldier cand = (i < 0) ? leader : units[i];
-                if (cand == null || !cand.IsAlive || cand.IsPlayer() || cand.HasSurrended() ||
+                if (cand == null || !cand.IsAlive || AiCore.IsAnyHumanPlayerSoldier(cand) || cand.HasSurrended() ||
                     AiCore.IsSoldierInVehicleOrTransition(cand) || cand.inventory == null || cand.transform == null)
                 {
                     continue;
@@ -2192,7 +2192,7 @@ namespace EasyRed2HumanAI
                     continue;
 
                 Soldier candLeader = candSq.Leader;
-                if (candLeader == null || !candLeader.IsAlive || candLeader.faction != faction || candLeader.transform == null)
+                if (candLeader == null || !candLeader.IsAlive || !AiCore.AreSameSideFactions(faction, candLeader.faction) || candLeader.transform == null)
                     continue;
 
                 if (!AiCore.IsLocallyOwnedBot(candLeader))
@@ -2259,7 +2259,7 @@ namespace EasyRed2HumanAI
 
                     Soldier remLeader = snap.Leader;
                     Squad remSq = snap.Ref;
-                    if (remLeader == null || !remLeader.IsPlayer() || remLeader.transform == null || remSq == null || !HasLiveRadioOrRelayLink(remSq))
+                    if (remLeader == null || !AiCore.IsAnyHumanPlayerSoldier(remLeader) || remLeader.transform == null || remSq == null || !HasLiveRadioOrRelayLink(remSq))
                         continue;
 
                     SyncSoldier syn = remLeader.soldierSyncher;
@@ -2529,6 +2529,70 @@ namespace EasyRed2HumanAI
                 }
             }
 
+            // B3b. Radio Relay Cohesion & Reconnect:
+            //      Squads without an alive intrinsic Radioman proactively stay within friendly relay range
+            //      (or shift back into range when disconnected), unless recovering a radio pack, contesting
+            //      an objective, fighting in CQB, or pinned/retreating.
+            if (VisionConfig.EnableRadiomanIntelNet.Value &&
+                !issuedSquadCoverOrderThisTick &&
+                !board.PreviouslyHadAliveRadioman &&
+                now >= board.NextRelayCohesionOrderTime &&
+                !AiCore.IsSoldierInVehicleOrTransition(leader) &&
+                !leader.HasSurrended() &&
+                !leader.IsInjured &&
+                !AiCore.HasAnyHumanPlayerInSquad(sq) &&
+                leaderSupp < 35.0f &&
+                !IsSquadOnRetreatTask(sq) &&
+                !_squadOrderedToVehicle.ContainsKey(sqPtr) &&
+                !(board.HasActiveObjectiveTask && distToObj <= 26.0f) &&
+                !(board.HasActiveThreat && (board.ThreatPosition - leaderPos).sqrMagnitude <= 28.0f * 28.0f))
+            {
+                bool recoveringRadioPack =
+                    (board.LastRadiomanLostTime > 0f && (now - board.LastRadiomanLostTime) < 6.0f) ||
+                    HasActiveRadioPackClaimForSquad(sqPtr, now);
+
+                if (!recoveringRadioPack)
+                {
+                    FactionCommandProfile relayProfile = GetFactionCommandProfile(leader.faction);
+                    float relayR = relayProfile.RadioRelayRadius;
+                    if (relayR > 1.0f &&
+                        !(relayProfile.PreferAmbushWhenAlone && board.HasActiveThreat) &&
+                        TryFindNearestFriendlyRelaySquad(sqPtr, leader.faction, leaderPos, relayR * 2.5f, out Vector3 relayPos, out float relayDist) &&
+                        relayDist > relayR * 0.78f)
+                    {
+                        Vector3 axis = board.HasActiveObjectiveTask ? (board.ObjectivePosition - relayPos) : (leaderPos - relayPos);
+                        axis.y = 0f;
+                        Vector3 linkSpot;
+                        if (axis.sqrMagnitude > 1.0f)
+                        {
+                            float axisDist = Mathf.Sqrt(axis.sqrMagnitude);
+                            float offset = Mathf.Min(relayR * 0.65f, board.HasActiveObjectiveTask ? axisDist * 0.60f : relayR * 0.65f);
+                            linkSpot = relayPos + (axis / axisDist) * offset;
+                        }
+                        else
+                        {
+                            linkSpot = relayPos;
+                        }
+
+                        if (AiCore.TrySnapWalkableGroundProbe(leaderPos, linkSpot, 8.0f, 16.0f, 0.55f, 3.0f, false, 0f, out Vector3 snappedLink))
+                            linkSpot = snappedLink;
+
+                        if ((sq.moveOrderPosition - linkSpot).sqrMagnitude > 10.0f * 10.0f &&
+                            (!syncOnline || AiCore.TryConsumeBotRpcBudget(0.45f)))
+                        {
+                            try
+                            {
+                                sq.HoldArea(linkSpot, 12.0f, false);
+                                board.NextRelayCohesionOrderTime = now + 10.0f;
+                                issuedSquadCoverOrderThisTick = true;
+                                AiCore.LogDebug("RadioNet", $"[RadioRelay] {leader.name} {(board.IsConnectedToRadioNet ? "leashing" : "reconnecting")} to relay ({relayDist:F0}m / {relayR:F0}m)");
+                            }
+                            catch { }
+                        }
+                    }
+                }
+            }
+
             // B4. Attacking Squad Stall Watchdog: if an attacking AI foot squad makes < 3.5m progress for >= 8.5s
             //     while > 32m from its objective and not pinned, release stale cover locks and either re-issue attack
             //     or contour around blocking cliffs/hillsides via a temporary lateral HoldArea waypoint!
@@ -2537,7 +2601,7 @@ namespace EasyRed2HumanAI
                 board.HasActiveObjectiveTask &&
                 distToObj > 32.0f &&
                 leaderSupp < 35.0f &&
-                !leader.IsOnVehicle() &&
+                !AiCore.IsSoldierInVehicleOrTransition(leader) &&
                 !leader.HasSurrended() &&
                 !leader.IsInjured &&
                 !IsSquadOnRetreatTask(sq) &&
@@ -2591,7 +2655,7 @@ namespace EasyRed2HumanAI
             if (!issuedSquadCoverOrderThisTick &&
                 sq.order == Order.defend &&
                 !sq.InChargeTime() &&
-                !leader.IsOnVehicle() &&
+                !AiCore.IsSoldierInVehicleOrTransition(leader) &&
                 !leader.HasSurrended() &&
                 !leader.IsInjured &&
                 !IsSquadOnRetreatTask(sq) &&
@@ -3340,6 +3404,46 @@ namespace EasyRed2HumanAI
                     GoapPinAndFlankCount++;
                 }
             }
+        }
+
+        private static bool TryFindNearestFriendlyRelaySquad(
+            IntPtr selfSqPtr,
+            string faction,
+            Vector3 fromPos,
+            float maxDist,
+            out Vector3 relayPos,
+            out float relayDist)
+        {
+            relayPos = Vector3.zero;
+            relayDist = float.MaxValue;
+            AiCore.EnsureWorldSnapshot();
+
+            float bestSq = maxDist * maxDist;
+            bool found = false;
+            var squads = AiCore.WorldSquads;
+            int count = AiCore.WorldSquadCount;
+            for (int i = 0; i < count; i++)
+            {
+                ref AiCore.SquadSnapshot snap = ref squads[i];
+                if (snap.Ptr == IntPtr.Zero || snap.Ptr == selfSqPtr || !snap.LeaderIsAlive || snap.RefOnPlane)
+                    continue;
+                if (!(snap.HasIntrinsicRadio || snap.LeaderOnGroundVehicle))
+                    continue;
+                if (!AiCore.AreSameSideFactions(faction, snap.Faction))
+                    continue;
+
+                float dSq = (snap.RefPos - fromPos).sqrMagnitude;
+                if (dSq <= bestSq)
+                {
+                    bestSq = dSq;
+                    relayPos = snap.RefPos;
+                    found = true;
+                }
+            }
+
+            if (found)
+                relayDist = Mathf.Sqrt(bestSq);
+            return found;
         }
     }
 }

@@ -15,20 +15,6 @@ namespace EasyRed2HumanAI
         internal static readonly Dictionary<IntPtr, IntPtr> _garrisonAssignedObjectiveBySquad = new Dictionary<IntPtr, IntPtr>(64);
         internal static readonly Dictionary<IntPtr, float> _assignedEmplacementUntil = new Dictionary<IntPtr, float>(128);
         internal static readonly Dictionary<IntPtr, IntPtr> _assignedEmplacementVehicle = new Dictionary<IntPtr, IntPtr>(128);
-        internal static readonly Dictionary<IntPtr, float> _nextApcCheckTime = new Dictionary<IntPtr, float>(64);
-        internal static readonly Dictionary<IntPtr, float> _nextApcDismountCooldown = new Dictionary<IntPtr, float>(64);
-        internal static readonly Dictionary<IntPtr, Vector4> _cachedVehicleExtents = new Dictionary<IntPtr, Vector4>(64);
-        internal static readonly Dictionary<IntPtr, float> _nextVehiclePedestrianScanTime = new Dictionary<IntPtr, float>(64);
-        internal static readonly Dictionary<IntPtr, float> _vehicleYieldUntilTime = new Dictionary<IntPtr, float>(64);
-        internal static readonly Dictionary<IntPtr, float> _vehicleContinuousYieldStart = new Dictionary<IntPtr, float>(64);
-        internal static readonly Dictionary<IntPtr, float> _nextFriendlyYieldCountTime = new Dictionary<IntPtr, float>(64);
-        internal static readonly Dictionary<IntPtr, float> _nextVehicleSupportSteerTime = new Dictionary<IntPtr, float>(64);
-        internal static readonly Dictionary<IntPtr, float> _nextPlaneOrbitSteerTime = new Dictionary<IntPtr, float>(32);
-        internal static readonly Dictionary<IntPtr, float> _nextCombinedArmsAssistCountTime = new Dictionary<IntPtr, float>(64);
-        internal static readonly HashSet<IntPtr> _activeKamikazePlanes = new HashSet<IntPtr>();
-        internal static readonly Dictionary<IntPtr, bool> _kamikazeDecisionByPlane = new Dictionary<IntPtr, bool>(16);
-        internal static readonly Dictionary<IntPtr, float> _nextKamikazeTargetSearchTime = new Dictionary<IntPtr, float>(16);
-        internal static readonly Dictionary<IntPtr, Squad> _lastKnownVehicleCrewSquad = new Dictionary<IntPtr, Squad>(32);
         private static float _nextGroundedCrewRetreatCheckTime;
         public static int CombinedArmsPriorityAssistsCount;
         public static int KamikazeDivesTriggeredCount;
@@ -36,9 +22,6 @@ namespace EasyRed2HumanAI
         public static int SmartAmmoSwitchesCount;
 
         internal static readonly Dictionary<IntPtr, TurretAI> _turretAiByTurretPtr = new Dictionary<IntPtr, TurretAI>(64);
-        internal static readonly Dictionary<IntPtr, string> _lastKnownVehicleFaction = new Dictionary<IntPtr, string>(64);
-        internal static readonly HashSet<IntPtr> _creditedDestroyedVehicles = new HashSet<IntPtr>();
-        internal static readonly HashSet<IntPtr> _vehiclesCrewRetreatedFrom = new HashSet<IntPtr>();
         private static readonly Dictionary<IntPtr, bool> _lastTurretTargetWasVehicle = new Dictionary<IntPtr, bool>(64);
 
         private struct ActiveRadioSupportInfo
@@ -111,23 +94,14 @@ namespace EasyRed2HumanAI
             _nextArmorDispersionCountTime.Clear();
             _reusableExpiredEmplacementBots.Clear();
             _activeRepairStations.Clear();
-            _vehiclesSeekingRepairStation.Clear();
-            _vehiclesAnsweringTankSupport.Clear();
             _squadOrderedToVehicle.Clear();
             _unreachableEmplacementUntil.Clear();
             _cachedRepairStationsPhasePtr = IntPtr.Zero;
             _currentDirectorBattleData = null;
             _emplacementScanCursor = 0;
-            _activeKamikazePlanes.Clear();
-            _kamikazeDecisionByPlane.Clear();
-            _nextKamikazeTargetSearchTime.Clear();
-            _lastKnownVehicleCrewSquad.Clear();
             ResetSpawnerReservations();
             _nextGroundedCrewRetreatCheckTime = 0f;
             _turretAiByTurretPtr.Clear();
-            _lastKnownVehicleFaction.Clear();
-            _creditedDestroyedVehicles.Clear();
-            _vehiclesCrewRetreatedFrom.Clear();
             _lastTurretTargetWasVehicle.Clear();
             _nextCombinedArmsIntelRefreshTime = 0f;
             _nextMacroDirectorTime = 0f;
@@ -135,16 +109,6 @@ namespace EasyRed2HumanAI
             _garrisonAssignedObjectiveBySquad.Clear();
             _assignedEmplacementUntil.Clear();
             _assignedEmplacementVehicle.Clear();
-            _nextApcCheckTime.Clear();
-            _nextApcDismountCooldown.Clear();
-            _cachedVehicleExtents.Clear();
-            _nextVehiclePedestrianScanTime.Clear();
-            _vehicleYieldUntilTime.Clear();
-            _vehicleContinuousYieldStart.Clear();
-            _nextFriendlyYieldCountTime.Clear();
-            _nextVehicleSupportSteerTime.Clear();
-            _nextPlaneOrbitSteerTime.Clear();
-            _nextCombinedArmsAssistCountTime.Clear();
             _squadTaskCommittedUntil.Clear();
             _nextSquadAttritionPivotTime.Clear();
             _pendingMacroSquadOrders.Clear();
@@ -222,15 +186,16 @@ namespace EasyRed2HumanAI
         private static float _nextIgnoredVehicleCollisionSweepTime;
         public static int TankIntercomHandoffsCount;
 
-        private static bool TryRecordCombinedArmsAssist(IntPtr unitPtr, float now)
+        private static bool TryRecordCombinedArmsAssist(IntPtr vehPtr, float now)
         {
-            if (!_nextCombinedArmsAssistCountTime.TryGetValue(unitPtr, out float nextCount) || now >= nextCount)
+            if (AiCore.TryGetVehicleHandles(vehPtr, out AiCore.VehicleFastHandles vh))
             {
-                _nextCombinedArmsAssistCountTime[unitPtr] = now + 6.0f;
-                CombinedArmsPriorityAssistsCount++;
-                return VisionConfig.DebugLogging.Value;
+                if (now < vh.NextCombinedArmsAssistCountTime)
+                    return false;
+                vh.NextCombinedArmsAssistCountTime = now + 6.0f;
             }
-            return false;
+            CombinedArmsPriorityAssistsCount++;
+            return VisionConfig.DebugLogging.Value;
         }
 
         internal static string GetVehicleCrewFaction(Vehicle veh, Turret turret = null)
@@ -281,14 +246,15 @@ namespace EasyRed2HumanAI
                     resolved = vf;
             }
 
-            if (resolved == null && veh.Pointer != IntPtr.Zero && _lastKnownVehicleFaction.TryGetValue(veh.Pointer, out string cachedFac) && !string.IsNullOrEmpty(cachedFac))
+            AiCore.VehicleFastHandles vh = AiCore.GetOrCreateVehicleHandles(veh);
+            if (resolved == null && vh != null && !string.IsNullOrEmpty(vh.LastKnownFaction))
             {
-                resolved = cachedFac;
+                resolved = vh.LastKnownFaction;
             }
 
-            if (resolved != null && veh.Pointer != IntPtr.Zero)
+            if (resolved != null && vh != null)
             {
-                _lastKnownVehicleFaction[veh.Pointer] = resolved;
+                vh.LastKnownFaction = resolved;
             }
 
             return resolved;
@@ -443,7 +409,7 @@ namespace EasyRed2HumanAI
                                 HalfLength = ext.y,
                                 SpeedMs = spd,
                                 IsTank = v.TryCast<VehicleTank>() != null,
-                                IsPlayerInsideOrDriving = v.PlayerIsInside() || v.PlayerIsDriving(),
+                                IsPlayerInsideOrDriving = AiCore.IsAnyHumanPlayerInsideVehicle(v) || AiCore.IsAnyHumanPlayerDriving(v),
                                 IsStoppedOrShooting = spd < 1.15f
                             });
                         }
@@ -728,10 +694,10 @@ namespace EasyRed2HumanAI
                 return;
 
             Soldier gunner = turret.GetSittedUnit(veh);
-            if (gunner != null && gunner.IsPlayer())
+            if (gunner != null && AiCore.IsAnyHumanPlayerSoldier(gunner))
                 return;
 
-            bool playerInVeh = veh.PlayerIsInside();
+            bool playerInVeh = AiCore.IsAnyHumanPlayerInsideVehicle(veh);
             if (playerInVeh && gunner == null)
                 return;
 
@@ -1411,7 +1377,7 @@ namespace EasyRed2HumanAI
             if (gunner == null && rootVeh != null)
                 gunner = turret.GetSittedUnit(rootVeh);
 
-            if (gunner != null && gunner.IsPlayer())
+            if (gunner != null && AiCore.IsAnyHumanPlayerSoldier(gunner))
                 return false;
 
             bool ownedGunnerOrVeh =
@@ -1629,7 +1595,7 @@ namespace EasyRed2HumanAI
                     return false;
             }
 
-            bool isPlayer = friend.IsPlayer();
+            bool isPlayer = AiCore.IsAnyHumanPlayerSoldier(friend);
             Vector3 chestPos = friend.GetCenterOfUnit();
             Vector3 feetPos = friend.transform.position + Vector3.up * 0.45f;
 

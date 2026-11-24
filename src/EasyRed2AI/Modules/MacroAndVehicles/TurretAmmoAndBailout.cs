@@ -24,15 +24,16 @@ namespace EasyRed2HumanAI
                 return;
             }
 
-            // Always mark destroyed movable vehicles as seen so subsequent hits on a burning wreck never double-count
-            if (!_creditedDestroyedVehicles.Add(veh.Pointer))
+            AiCore.VehicleFastHandles vh = AiCore.GetOrCreateVehicleHandles(veh);
+            if (vh == null || vh.CreditedDestroyed)
                 return;
+            vh.CreditedDestroyed = true;
 
             if (!hadNoLiveCrewFaction)
                 return;
 
-            if (_lastKnownVehicleFaction.TryGetValue(veh.Pointer, out string lastFaction) &&
-                !string.IsNullOrEmpty(lastFaction) &&
+            string lastFaction = vh.LastKnownFaction;
+            if (!string.IsNullOrEmpty(lastFaction) &&
                 lastFaction != "Civilian")
             {
                 BattleManager.OnTankKilled(lastFaction);
@@ -135,8 +136,12 @@ namespace EasyRed2HumanAI
                 {
                     if (__instance != null && __instance.Pointer != IntPtr.Zero)
                     {
-                        _creditedDestroyedVehicles.Remove(__instance.Pointer);
-                        _vehiclesCrewRetreatedFrom.Remove(__instance.Pointer);
+                        AiCore.VehicleFastHandles vh = AiCore.GetOrCreateVehicleHandles(__instance);
+                        if (vh != null)
+                        {
+                            vh.CreditedDestroyed = false;
+                            vh.CrewRetreatedFrom = false;
+                        }
                         NotifyVehicleRepairedForPtfo(__instance.Pointer);
                     }
                 }
@@ -177,7 +182,7 @@ namespace EasyRed2HumanAI
                 }
 
                 AiCore.MarkConfirmedPlaneCrewSquad(sq);
-                _lastKnownVehicleCrewSquad[veh.Pointer] = sq;
+                vh.LastKnownCrewSquad = sq;
                 return;
             }
 
@@ -187,7 +192,7 @@ namespace EasyRed2HumanAI
             if (vh.IsTank)
             {
                 AiCore.MarkConfirmedVehicleCrewSquad(sq);
-                _lastKnownVehicleCrewSquad[veh.Pointer] = sq;
+                vh.LastKnownCrewSquad = sq;
                 return;
             }
 
@@ -195,7 +200,7 @@ namespace EasyRed2HumanAI
             if (wheeled != null && wheeled.RetreatCrewOnDestroy() && !wheeled.IsTransportVehicle())
             {
                 AiCore.MarkConfirmedVehicleCrewSquad(sq);
-                _lastKnownVehicleCrewSquad[veh.Pointer] = sq;
+                vh.LastKnownCrewSquad = sq;
             }
         }
 
@@ -204,6 +209,7 @@ namespace EasyRed2HumanAI
             if (vp == null || vp.Pointer == IntPtr.Zero || vp.IsTransportVehicle() || vp.seats == null)
                 return;
 
+            AiCore.VehicleFastHandles pvh = AiCore.GetOrCreateVehicleHandles(vp);
             var seats = vp.seats;
             int len = seats.Length;
             for (int i = 0; i < len; i++)
@@ -212,8 +218,8 @@ namespace EasyRed2HumanAI
                 Soldier u = s != null ? s.unitSet : null;
                 if (u != null && u.Pointer != IntPtr.Zero)
                 {
-                    if (!string.IsNullOrEmpty(u.faction) && u.faction != "Civilian")
-                        _lastKnownVehicleFaction[vp.Pointer] = u.faction;
+                    if (!string.IsNullOrEmpty(u.faction) && u.faction != "Civilian" && pvh != null)
+                        pvh.LastKnownFaction = u.faction;
                     RegisterVehicleCrewSquad(vp, u);
                 }
             }
@@ -323,7 +329,9 @@ namespace EasyRed2HumanAI
             //   1) Crashes with NullReferenceException on all sp_ME_ / V2 maps where BattleManager.instance.currentPhase == null,
             //   2) Silently skips MissionTaskRetreat over water/ocean or outside Terrain bounds, and
             //   3) Computes the retreat point mid-air before parachutes drift 200m-500m away!
-            _vehiclesCrewRetreatedFrom.Add(veh.Pointer);
+            AiCore.VehicleFastHandles vh = AiCore.GetOrCreateVehicleHandles(veh);
+            if (vh != null)
+                vh.CrewRetreatedFrom = true;
 
             Soldier sampleCrew = null;
             var seats = veh.seats;
@@ -364,11 +372,11 @@ namespace EasyRed2HumanAI
 
             Squad crewSq = sampleCrew != null ? sampleCrew.joinedSquad : null;
             if ((crewSq == null || crewSq.Pointer == IntPtr.Zero) &&
-                _lastKnownVehicleCrewSquad.TryGetValue(veh.Pointer, out Squad cachedSq) &&
-                cachedSq != null &&
-                cachedSq.Pointer != IntPtr.Zero)
+                vh != null &&
+                vh.LastKnownCrewSquad != null &&
+                vh.LastKnownCrewSquad.Pointer != IntPtr.Zero)
             {
-                crewSq = cachedSq;
+                crewSq = vh.LastKnownCrewSquad;
             }
 
             if (crewSq != null)
@@ -380,8 +388,8 @@ namespace EasyRed2HumanAI
                 if (veh.isGrounded && veh.transform != null)
                 {
                     string fac = sampleCrew != null ? sampleCrew.faction : null;
-                    if (string.IsNullOrEmpty(fac))
-                        _lastKnownVehicleFaction.TryGetValue(veh.Pointer, out fac);
+                    if (string.IsNullOrEmpty(fac) && vh != null)
+                        fac = vh.LastKnownFaction;
                     AssignCrewSquadRetreatTask(crewSq, fac, veh.transform.position, allowWaterSurface: true, replaceExistingIfFar: true);
                 }
             }
@@ -400,11 +408,11 @@ namespace EasyRed2HumanAI
             for (int i = 0; i < vCount; i++)
             {
                 Vehicle veh = allVehicles[i];
-                if (veh == null || veh.Pointer == IntPtr.Zero || veh.transform == null || veh.IsDisabled() || _vehiclesCrewRetreatedFrom.Contains(veh.Pointer))
+                if (veh == null || veh.Pointer == IntPtr.Zero || veh.transform == null || veh.IsDisabled())
                     continue;
 
                 AiCore.VehicleFastHandles vh = AiCore.GetOrCreateVehicleHandles(veh);
-                if (vh == null || (!vh.IsPlane && !vh.IsAir) || vh.IsParachute || veh.IsTransportVehicle())
+                if (vh == null || vh.CrewRetreatedFrom || (!vh.IsPlane && !vh.IsAir) || vh.IsParachute || veh.IsTransportVehicle())
                     continue;
 
                 if (!veh.CanFight())
@@ -483,7 +491,7 @@ namespace EasyRed2HumanAI
                         continue;
                     }
 
-                    if (curVeh != null && !curVeh.IsDisabled() && !_vehiclesCrewRetreatedFrom.Contains(curVeh.Pointer))
+                    if (curVeh != null && !curVeh.IsDisabled() && (cvh == null || !cvh.CrewRetreatedFrom))
                     {
                         anyAliveInActivePlane = true;
                         if (isLocalPlayer)
@@ -558,12 +566,13 @@ namespace EasyRed2HumanAI
                 if (dSq > 65.0f * 65.0f)
                     continue;
 
-                if (_vehiclesCrewRetreatedFrom.Contains(veh.Pointer) ||
+                AiCore.VehicleFastHandles vh = AiCore.GetOrCreateVehicleHandles(veh);
+                if ((vh != null && vh.CrewRetreatedFrom) ||
                     (veh.IsDisabled() && (!veh.CanBeRepaired() || !squadHasMechanic)))
                 {
-                    if (_lastKnownVehicleCrewSquad.TryGetValue(veh.Pointer, out Squad knownSq) &&
-                        knownSq != null &&
-                        knownSq.Pointer == sq.Pointer)
+                    if (vh != null &&
+                        vh.LastKnownCrewSquad != null &&
+                        vh.LastKnownCrewSquad.Pointer == sq.Pointer)
                     {
                         hasDisabledCrewVehNearby = true;
                     }
@@ -576,7 +585,7 @@ namespace EasyRed2HumanAI
                     (!veh.IsDisabled() || (veh.CanBeRepaired() && squadHasMechanic)))
                 {
                     string vf = GetVehicleCrewFaction(veh);
-                    if (string.IsNullOrEmpty(vf) || vf == "Civilian" || vf == localPlayer.faction)
+                    if (string.IsNullOrEmpty(vf) || vf == "Civilian" || AiCore.AreSameSideFactions(localPlayer.faction, vf))
                         return;
                 }
             }
@@ -726,7 +735,8 @@ namespace EasyRed2HumanAI
                     if (veh == null || veh.Pointer == IntPtr.Zero || veh.transform == null || veh.IsAirVehicle() || veh.IsTransportVehicle())
                         continue;
 
-                    if (_vehiclesCrewRetreatedFrom.Contains(veh.Pointer) || veh.IsLocked() || veh.IsCoverDestroyed())
+                    AiCore.VehicleFastHandles vh = AiCore.GetOrCreateVehicleHandles(veh);
+                    if ((vh != null && vh.CrewRetreatedFrom) || veh.IsLocked() || veh.IsCoverDestroyed())
                         continue;
 
                     if (veh.IsDisabled() && (!veh.CanBeRepaired() || !squadHasMechanic))
@@ -933,7 +943,7 @@ namespace EasyRed2HumanAI
                 return;
 
             if (!AiCore.IsLocallyOwnedVehicle(veh) ||
-                veh.PlayerIsInside() ||
+                AiCore.IsAnyHumanPlayerInsideVehicle(veh) ||
                 veh.IsAirVehicle() ||
                 veh.IsTransportVehicle() ||
                 veh.IsDisabled() ||
@@ -984,7 +994,7 @@ namespace EasyRed2HumanAI
 
             if (sole == null ||
                 !sole.IsAlive ||
-                sole.IsPlayer() ||
+                AiCore.IsAnyHumanPlayerSoldier(sole) ||
                 !AiCore.IsLocallyOwnedBot(sole) ||
                 sole.dontLeaveVehicle ||
                 (sole.Params != null && sole.Params.neverLeaveVehicle))
@@ -1092,7 +1102,10 @@ namespace EasyRed2HumanAI
 
                     // Replace vanilla AIVehicle.RetreatCrew (0x18057B980), which crashes/fails on V2 & water spawns.
                     // Short-circuit once all crew have already exited an empty burning hulk so destroyed tanks stop thrashing!
-                    bool alreadyRetreated = !_vehiclesCrewRetreatedFrom.Add(veh.Pointer);
+                    AiCore.VehicleFastHandles bailVh = AiCore.GetOrCreateVehicleHandles(veh);
+                    bool alreadyRetreated = bailVh != null && bailVh.CrewRetreatedFrom;
+                    if (bailVh != null)
+                        bailVh.CrewRetreatedFrom = true;
 
                     float now = Time.time;
                     Vector3 wreckPos = veh.transform != null ? veh.transform.position : Vector3.zero;
@@ -1168,11 +1181,11 @@ namespace EasyRed2HumanAI
 
                     Squad crewSq = sampleCrew != null ? sampleCrew.joinedSquad : null;
                     if ((crewSq == null || crewSq.Pointer == IntPtr.Zero) &&
-                        _lastKnownVehicleCrewSquad.TryGetValue(veh.Pointer, out Squad cachedSq) &&
-                        cachedSq != null &&
-                        cachedSq.Pointer != IntPtr.Zero)
+                        bailVh != null &&
+                        bailVh.LastKnownCrewSquad != null &&
+                        bailVh.LastKnownCrewSquad.Pointer != IntPtr.Zero)
                     {
-                        crewSq = cachedSq;
+                        crewSq = bailVh.LastKnownCrewSquad;
                     }
 
                     if (crewSq != null && !crewSq.isOpenForJoiners)
@@ -1183,8 +1196,8 @@ namespace EasyRed2HumanAI
                     if (crewSq != null && AiCore.IsTrueVehicleCrewSquad(crewSq) && !AiCore.IsSquadOwnedOrOccupiedByRemoteHuman(crewSq))
                     {
                         string fac = sampleCrew != null ? sampleCrew.faction : null;
-                        if (string.IsNullOrEmpty(fac))
-                            _lastKnownVehicleFaction.TryGetValue(veh.Pointer, out fac);
+                        if (string.IsNullOrEmpty(fac) && bailVh != null)
+                            fac = bailVh.LastKnownFaction;
 
                         Vector3 originPos = veh.transform != null
                             ? veh.transform.position
@@ -1795,7 +1808,7 @@ namespace EasyRed2HumanAI
                         return;
                     }
 
-                    if (__1 != null && __1.IsPlayer())
+                    if (__1 != null && AiCore.IsAnyHumanPlayerSoldier(__1))
                         return;
 
                     if (ShouldBlockTurretFriendlyFire(null, __instance, __1, true))
@@ -1830,7 +1843,7 @@ namespace EasyRed2HumanAI
 
                     // Final safety gate right before a shell/mortar leaves the barrel (catches delayed FireOnReloadDone coroutines!)
                     if (VisionConfig.FriendlyFireConeDegrees.Value > 0.1f &&
-                        (gunner == null || !gunner.IsPlayer()) &&
+                        (gunner == null || !AiCore.IsAnyHumanPlayerSoldier(gunner)) &&
                         ShouldBlockTurretFriendlyFire(null, __instance, gunner, true))
                     {
                         __instance.triggerPressed = false;

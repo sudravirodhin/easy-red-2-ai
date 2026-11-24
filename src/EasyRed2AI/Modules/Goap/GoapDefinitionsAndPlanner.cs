@@ -93,6 +93,7 @@ namespace EasyRed2HumanAI
             public Vector3 StallAnchorCenter;
             public float StallAnchorTime;
             public int ConsecutiveStallCount;
+            public float NextRelayCohesionOrderTime;
             public float NextSquadUnstallTime;
             public float NextCoverSectorReorientTime;
             public bool IsAiCovertHoldFireActive;
