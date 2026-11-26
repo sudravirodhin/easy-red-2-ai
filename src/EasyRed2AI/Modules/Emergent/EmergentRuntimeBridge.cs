@@ -1132,6 +1132,51 @@ namespace EasyRed2HumanAI
                 }
             }
 
+            bool hasSmokeProbe = false;
+            Vector3 smokeProbeTarget = Vector3.zero;
+            if (board.HasActiveObjectiveTask && !insideObjZone && objDist > 1.5f)
+            {
+                Vector3 toObjFlat = objPos - myPos;
+                toObjFlat.y = 0f;
+                float toObjMag = toObjFlat.magnitude;
+                if (toObjMag > 1.5f)
+                {
+                    hasSmokeProbe = true;
+                    smokeProbeTarget = myPos + (toObjFlat / toObjMag) * Mathf.Min(14.0f, toObjMag);
+                    smokeProbeTarget.y = myPos.y;
+                }
+            }
+            else if (ai.IsMoving() && h.Tr != null)
+            {
+                Vector3 fwdProbe = ai.dir;
+                fwdProbe.y = 0f;
+                if (fwdProbe.sqrMagnitude < 0.01f)
+                {
+                    fwdProbe = h.Tr.forward;
+                    fwdProbe.y = 0f;
+                }
+                if (fwdProbe.sqrMagnitude >= 0.01f)
+                {
+                    hasSmokeProbe = true;
+                    smokeProbeTarget = myPos + fwdProbe.normalized * 12.0f;
+                }
+            }
+
+            bool isEscapingSmokePath = hasLiveGrenade || isEvadingArmor || VeteranAndTacticsPatches.IsInIndividualOrGoapFallback(h.Ptr, now);
+            float smokeCheckedHarm = projHarm;
+            bool blindSmokeAhead = hasSmokeProbe &&
+                AiCore.IsBlindSmokePathHighRisk(
+                    h,
+                    myPos,
+                    smokeProbeTarget,
+                    now,
+                    isEscapingHazardOrRetreating: isEscapingSmokePath,
+                    isDesperateOvertimeOrGyokusai: desp >= 0.30f,
+                    currentKnownHarm: projHarm,
+                    out smokeCheckedHarm);
+            if (hasSmokeProbe && smokeCheckedHarm > projHarm)
+                projHarm = smokeCheckedHarm;
+
             var inp = new EmergentEngine.EmergentInput
             {
                 Now = now,
@@ -1169,7 +1214,7 @@ namespace EasyRed2HumanAI
                 CoverAvailable = now >= h.Stance.NoLocalCoverUntil,
                 FlankCoverAvailable = now >= h.Goap.NextFlankCoverAssignTime && VeteranAndTacticsPatches.HasClaimableFlankCover(soldier, h.Ptr, in board),
                 AllyPinningThreat = board.IsThreatBeingPinned(now),
-                SmokeActive = smokeActiveNow,
+                SmokeActive = smokeActiveNow && !blindSmokeAhead,
                 HasLastKnownThreat = board.HasActiveThreat,
                 LastKnownThreatDist = fragDist,
                 TargetBehindCover = board.HasActiveThreat && !canFireAtVis,
@@ -1579,6 +1624,8 @@ namespace EasyRed2HumanAI
                                             continue;
                                         if (!curTask.IsInsideTaskArea(snapped, 0.90f))
                                             continue;
+                                        if (AiCore.IsBlindSmokePathHighRisk(h, myPos, snapped, now, false, h.Emergent.CachedDesperation >= 0.30f, rawHarmNow, out _))
+                                            continue;
                                         sweepTarget = snapped;
                                         hasSweepTarget = true;
                                         break;
@@ -1629,7 +1676,8 @@ namespace EasyRed2HumanAI
                                 ai.moveDirectlyToward_end = 0f;
                                 ai.UpdatePath();
                             }
-                            else if (!inCapNow && !board.HasActiveThreat)
+                            else if (!inCapNow && !board.HasActiveThreat &&
+                                     !AiCore.IsBlindSmokePathHighRisk(h, myPos, board.ObjectivePosition, now, false, h.Emergent.CachedDesperation >= 0.30f, rawHarmNow, out _))
                             {
                                 AiCore.MoveBotTowardPosition(ai, soldier, board.ObjectivePosition, 1.5f, 3.0f);
                             }

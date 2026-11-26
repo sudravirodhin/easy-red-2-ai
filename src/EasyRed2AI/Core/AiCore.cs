@@ -73,7 +73,8 @@ namespace EasyRed2HumanAI
             Other = 1,
             CombatCover = 2,
             VehicleRepair = 3,
-            MedicHeal = 4
+            MedicHeal = 4,
+            DestinationWithoutCover = 5
         }
 
         public sealed class SoldierFastHandles
@@ -107,6 +108,8 @@ namespace EasyRed2HumanAI
             public CombatCover CachedCover;
             public VehicleRepairTask CachedRepairTask;
             public MedicHealingDestination CachedHealDest;
+            public AiDestination CachedDest;
+            public DestinationWithoutCover CachedNoCoverDest;
 
             public float NextMortarCheckTime;
             public bool CachedHasHeldMortar;
@@ -196,6 +199,7 @@ namespace EasyRed2HumanAI
             public float NextSuppressiveBurstCountTime;
             public float NextCornerPieCountTime;
             public int LastMovementRoutineRenderFrame;
+            public int LastUpdateMoveDirRenderFrame;
             public byte LastMovementRoutineCatchUpMode; // 0 = VanillaFallthrough, 1 = CommittedMoveSprint, 2 = CommittedMoveWalk, 3 = CornerPie
             public VeteranAndTacticsPatches.WatchWindowCache WatchWindow;
             public VeteranAndTacticsPatches.ThreatSectorCache ThreatSector;
@@ -248,6 +252,7 @@ namespace EasyRed2HumanAI
             public float ExposedAimYOffset;
             public float ExposedAimUntil;
             public byte ZombieRecoveries;
+            public float StealthCrouchUntil;
         }
 
         internal struct SoldierCombatState
@@ -388,6 +393,7 @@ namespace EasyRed2HumanAI
             public float ActiveSmokeShellFireUntil;
             public SyncVehicle Syncher;
             public bool SyncherChecked;
+            public float CreatedAtTime;
             public bool IsAir;
             public bool IsWheeledOrTank;
             public bool IsTank;
@@ -767,6 +773,8 @@ namespace EasyRed2HumanAI
             IntPtr aiPtr = (!ReferenceEquals(ai, null) && ai != null) ? ai.Pointer : IntPtr.Zero;
             float now = Time.time;
             float jitter = (GetDeterministicHash(ptr, 31) & 63) * 0.05f;
+            bool inMp = IsInMultiplayerRoom();
+            SyncSoldier syn = inMp ? s.soldierSyncher : null;
 
             h = new SoldierFastHandles
             {
@@ -778,8 +786,8 @@ namespace EasyRed2HumanAI
                 Ai = ai,
                 Tr = tr,
                 RootTr = tr != null ? tr.root : null,
-                Syncher = s.soldierSyncher,
-                SyncherChecked = true,
+                Syncher = syn,
+                SyncherChecked = !inMp || !ReferenceEquals(syn, null),
                 Faction = InternFaction(s.faction),
                 NextFactionRefreshTime = now + 5.0f + jitter,
                 CreatedAtTime = now
@@ -1006,6 +1014,13 @@ namespace EasyRed2HumanAI
                 return;
             if (_soldierHandlesByPtr.TryGetValue(s.Pointer, out SoldierFastHandles h) && h != null)
             {
+                h.CachedDestPtr = IntPtr.Zero;
+                h.DestKind = CachedDestKind.None;
+                h.CachedDest = null;
+                h.CachedCover = null;
+                h.CachedRepairTask = null;
+                h.CachedHealDest = null;
+                h.CachedNoCoverDest = null;
                 h.NextDestCheckTime = 0f;
                 h.NextEndpointCheckTime = 0f;
                 h.LastEndpointFrame = -1;
@@ -1104,13 +1119,15 @@ namespace EasyRed2HumanAI
             Soldier s = h.Ref;
             if (!s.HasDestinationAssigned)
             {
-                if (h.CachedDestPtr != IntPtr.Zero)
+                if (h.CachedDestPtr != IntPtr.Zero || !ReferenceEquals(h.CachedDest, null))
                 {
                     h.CachedDestPtr = IntPtr.Zero;
                     h.DestKind = CachedDestKind.None;
+                    h.CachedDest = null;
                     h.CachedCover = null;
                     h.CachedRepairTask = null;
                     h.CachedHealDest = null;
+                    h.CachedNoCoverDest = null;
                 }
                 return CachedDestKind.None;
             }
@@ -1123,18 +1140,20 @@ namespace EasyRed2HumanAI
             IntPtr destPtr = GetRawTargetDestinationPtr(s);
             if (destPtr == IntPtr.Zero)
             {
-                if (h.CachedDestPtr != IntPtr.Zero)
+                if (h.CachedDestPtr != IntPtr.Zero || !ReferenceEquals(h.CachedDest, null))
                 {
                     h.CachedDestPtr = IntPtr.Zero;
                     h.DestKind = CachedDestKind.None;
+                    h.CachedDest = null;
                     h.CachedCover = null;
                     h.CachedRepairTask = null;
                     h.CachedHealDest = null;
+                    h.CachedNoCoverDest = null;
                 }
                 return CachedDestKind.None;
             }
 
-            if (destPtr == h.CachedDestPtr)
+            if (destPtr == h.CachedDestPtr && !ReferenceEquals(h.CachedDest, null))
                 return h.DestKind;
 
             AiDestination dest = s.targetDestination;
@@ -1142,16 +1161,20 @@ namespace EasyRed2HumanAI
             {
                 h.CachedDestPtr = IntPtr.Zero;
                 h.DestKind = CachedDestKind.None;
+                h.CachedDest = null;
                 h.CachedCover = null;
                 h.CachedRepairTask = null;
                 h.CachedHealDest = null;
+                h.CachedNoCoverDest = null;
                 return CachedDestKind.None;
             }
 
             h.CachedDestPtr = destPtr;
+            h.CachedDest = dest;
             h.CachedCover = null;
             h.CachedRepairTask = null;
             h.CachedHealDest = null;
+            h.CachedNoCoverDest = null;
 
             CombatCover cc = dest.TryCast<CombatCover>();
             if (cc != null)
@@ -1175,6 +1198,14 @@ namespace EasyRed2HumanAI
                 h.CachedHealDest = heal;
                 h.DestKind = CachedDestKind.MedicHeal;
                 return CachedDestKind.MedicHeal;
+            }
+
+            DestinationWithoutCover noCov = dest.TryCast<DestinationWithoutCover>();
+            if (noCov != null)
+            {
+                h.CachedNoCoverDest = noCov;
+                h.DestKind = CachedDestKind.DestinationWithoutCover;
+                return CachedDestKind.DestinationWithoutCover;
             }
 
             h.DestKind = CachedDestKind.Other;
@@ -1381,14 +1412,17 @@ namespace EasyRed2HumanAI
             bool isPlane = isAir && v.TryCast<VehiclePlane>() != null;
             bool isTank = isWheeledOrTank && v.TryCast<VehicleTank>() != null;
             bool isPara = !isPlane && !isTank && v.TryCast<VehicleParachute>() != null;
+            bool inMp = IsInMultiplayerRoom();
+            SyncVehicle syn = inMp ? v.vehicleSyncher : null;
             h = new VehicleFastHandles
             {
                 Ptr = ptr,
                 Ref = v,
                 Tr = tr,
                 RootTr = tr != null ? tr.root : null,
-                Syncher = v.vehicleSyncher,
-                SyncherChecked = true,
+                Syncher = syn,
+                SyncherChecked = !inMp || !ReferenceEquals(syn, null),
+                CreatedAtTime = Time.time,
                 IsAir = isAir,
                 IsWheeledOrTank = isWheeledOrTank,
                 IsPlane = isPlane,
@@ -2021,6 +2055,26 @@ namespace EasyRed2HumanAI
         }
 
         /// <summary>
+        /// Co-op-safe check for whether <paramref name="h"/> is currently controlled by ANY human player
+        /// using cached <see cref="SyncSoldier"/> handles with zero IL2CPP wrapper allocations.
+        /// </summary>
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        public static bool IsAnyHumanPlayerSoldier(SoldierFastHandles h)
+        {
+            if (h == null || ReferenceEquals(h.Ref, null) || h.Ref == null || h.Ptr == IntPtr.Zero)
+                return false;
+
+            if (h.Ref.IsPlayer())
+                return true;
+
+            if (!IsInMultiplayerRoom())
+                return false;
+
+            SyncSoldier syn = GetCachedSoldierSyncher(h);
+            return syn != null && syn.controlled_by_player;
+        }
+
+        /// <summary>
         /// Co-op-safe check for whether <paramref name="s"/> is currently controlled by ANY human player
         /// (local <c>PlayerController</c> OR remote Photon client via <c>SyncSoldier.controlled_by_player</c>).
         /// </summary>
@@ -2034,6 +2088,12 @@ namespace EasyRed2HumanAI
 
             if (!IsInMultiplayerRoom())
                 return false;
+
+            if (TryGetSoldierHandles(s.Pointer, out SoldierFastHandles h))
+            {
+                SyncSoldier cachedSyn = GetCachedSoldierSyncher(h);
+                return cachedSyn != null && cachedSyn.controlled_by_player;
+            }
 
             SyncSoldier syn = s.soldierSyncher;
             return syn != null && syn.controlled_by_player;
@@ -2092,7 +2152,9 @@ namespace EasyRed2HumanAI
                         if (ReferenceEquals(u, null) || u == null || u.Pointer == IntPtr.Zero || u.IsDead || (!u.IsAlive && !u.IsInjured))
                             continue;
 
-                        SyncSoldier syn = u.soldierSyncher;
+                        SyncSoldier syn = TryGetSoldierHandles(u.Pointer, out SoldierFastHandles uh)
+                            ? GetCachedSoldierSyncher(uh)
+                            : u.soldierSyncher;
                         if (syn != null && (!syn.OwnSyncher || (!u.IsPlayer() && syn.controlled_by_player)))
                             return true;
                     }
@@ -3223,6 +3285,56 @@ namespace EasyRed2HumanAI
         }
 
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        public static SyncSoldier GetCachedSoldierSyncher(SoldierFastHandles h)
+        {
+            if (h == null || ReferenceEquals(h.Ref, null))
+                return null;
+
+            SyncSoldier syn = h.Syncher;
+            if (!ReferenceEquals(syn, null))
+                return syn != null ? syn : null;
+
+            if (!h.SyncherChecked)
+            {
+                syn = h.Ref.soldierSyncher;
+                if (!ReferenceEquals(syn, null) && syn != null)
+                {
+                    h.Syncher = syn;
+                    h.SyncherChecked = true;
+                    return syn;
+                }
+                if (Time.time - h.CreatedAtTime >= 1.5f)
+                    h.SyncherChecked = true;
+            }
+            return null;
+        }
+
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        public static SyncVehicle GetCachedVehicleSyncher(VehicleFastHandles vh)
+        {
+            if (vh == null || ReferenceEquals(vh.Ref, null))
+                return null;
+
+            SyncVehicle syn = vh.Syncher;
+            if (!ReferenceEquals(syn, null))
+                return syn != null ? syn : null;
+
+            if (!vh.SyncherChecked)
+            {
+                syn = vh.Ref.vehicleSyncher;
+                if (!ReferenceEquals(syn, null) && syn != null)
+                {
+                    vh.Syncher = syn;
+                    vh.SyncherChecked = true;
+                    return syn;
+                }
+                if (Time.time - vh.CreatedAtTime >= 1.5f)
+                    vh.SyncherChecked = true;
+            }
+            return null;
+        }
+
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
         public static bool IsLocallyOwnedBot(SoldierFastHandles h)
         {
             if (h == null || h.Ref == null || !h.Ref.IsAlive || h.Ref.IsPlayer())
@@ -3231,10 +3343,8 @@ namespace EasyRed2HumanAI
             if (!IsInMultiplayerRoom())
                 return true;
 
-            if (h.Syncher == null)
-                h.Syncher = h.Ref.soldierSyncher;
-
-            return h.Syncher == null || (h.Syncher.OwnSyncher && !h.Syncher.controlled_by_player);
+            SyncSoldier syn = GetCachedSoldierSyncher(h);
+            return syn == null || (syn.OwnSyncher && !syn.controlled_by_player);
         }
 
         public static bool IsLocallyOwnedBot(Soldier s)
@@ -3255,10 +3365,8 @@ namespace EasyRed2HumanAI
             if (!IsInMultiplayerRoom())
                 return true;
 
-            if (h.Syncher == null)
-                h.Syncher = h.Ref.soldierSyncher;
-
-            return h.Syncher == null || h.Syncher.OwnSyncher;
+            SyncSoldier syn = GetCachedSoldierSyncher(h);
+            return syn == null || syn.OwnSyncher;
         }
 
         public static bool IsLocallyOwnedVehicleSyncher(Vehicle v)
@@ -3272,9 +3380,8 @@ namespace EasyRed2HumanAI
             VehicleFastHandles vh = GetOrCreateVehicleHandles(v);
             if (vh == null)
                 return false;
-            if (vh.Syncher == null)
-                vh.Syncher = v.vehicleSyncher;
-            return vh.Syncher == null || vh.Syncher.OwnSyncher;
+            SyncVehicle syn = GetCachedVehicleSyncher(vh);
+            return syn == null || syn.OwnSyncher;
         }
 
         public static bool IsLocallyOwnedVehicle(Vehicle v)
@@ -3292,9 +3399,8 @@ namespace EasyRed2HumanAI
             if (v.HasDriverAlive)
                 return v.OwnDriverOrVehicle();
 
-            if (vh.Syncher == null)
-                vh.Syncher = v.vehicleSyncher;
-            return vh.Syncher == null || vh.Syncher.OwnSyncher;
+            SyncVehicle syn = GetCachedVehicleSyncher(vh);
+            return syn == null || syn.OwnSyncher;
         }
 
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
@@ -3335,7 +3441,9 @@ namespace EasyRed2HumanAI
 
             try
             {
-                SyncSoldier syncher = s.soldierSyncher;
+                SyncSoldier syncher = TryGetSoldierHandles(s.Pointer, out SoldierFastHandles ph)
+                    ? GetCachedSoldierSyncher(ph)
+                    : s.soldierSyncher;
                 if (syncher == null || syncher.OwnSyncher)
                     return true;
 
@@ -4102,13 +4210,18 @@ namespace EasyRed2HumanAI
                                 continue;
 
                             Soldier s = c.TryCast<Soldier>();
-                            if (s == null || s.transform == null)
+                            if (s == null || s.Pointer == IntPtr.Zero)
                                 continue;
 
-                            SyncSoldier syncher = s.soldierSyncher;
+                            SoldierFastHandles rh = TryGetSoldierHandles(s.Pointer, out SoldierFastHandles cachedRh) ? cachedRh : null;
+                            Transform sTr = (rh != null && rh.Tr != null) ? rh.Tr : s.transform;
+                            if (sTr == null)
+                                continue;
+
+                            SyncSoldier syncher = rh != null ? GetCachedSoldierSyncher(rh) : s.soldierSyncher;
                             if (syncher != null && !syncher.OwnSyncher && (syncher.controlled_by_player || s.IsPlayer()))
                             {
-                                _cachedRemotePlayerPositions.Add(s.transform.position);
+                                _cachedRemotePlayerPositions.Add(sTr.position);
                             }
                         }
                     }

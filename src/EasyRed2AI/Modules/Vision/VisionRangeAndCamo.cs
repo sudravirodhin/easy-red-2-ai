@@ -66,12 +66,21 @@ namespace EasyRed2HumanAI
         private static readonly FootstepEntry[] _footstepRing = new FootstepEntry[FootstepRingSize];
         private static int _footstepRingHead;
 
+        internal static float ComputeFootstepAudibleRadius(SoldierPose pose, bool isSprinting)
+        {
+            if (pose == SoldierPose.Prone)
+                return 0f;
+            if (pose == SoldierPose.Crouch)
+                return isSprinting ? 7.0f : 4.5f;
+            return isSprinting ? 18.0f : 11.5f;
+        }
+
         private static void RecordSoldierFootstep(Soldier s)
         {
             if (s == null || s.Pointer == IntPtr.Zero || s.transform == null)
                 return;
 
-            // Prone movement remains silent; crouched movement has a short 5.5m audible radius.
+            // Prone = silent; quiet crouch-walk = 4.5m; crouch-sprint = 7.0m; standing = 11.5m/18.0m.
             if (s.m_pose == SoldierPose.Prone)
                 return;
 
@@ -82,9 +91,7 @@ namespace EasyRed2HumanAI
             if (string.IsNullOrEmpty(fac))
                 return;
 
-            float radius = s.m_pose == SoldierPose.Crouch
-                ? 5.5f
-                : (s.isSprinting ? 18.0f : 11.5f);
+            float radius = ComputeFootstepAudibleRadius(s.m_pose, s.isSprinting);
             for (int i = 0; i < FootstepRingSize; i++)
             {
                 if (_footstepRing[i].SoldierPtr == ptr)
@@ -1032,21 +1039,19 @@ namespace EasyRed2HumanAI
                         angle = Vector3.Angle(toTarget, bodyFwd);
                     }
 
-                    SoldierAI obsAi = obsH.Ai;
-                    bool isStationaryOverwatch = VisionConfig.EnableThreatSectorConcentration.Value &&
-                                                 !AiCore.IsAnyHumanPlayerSoldier(observer) &&
-                                                 !AiCore.IsSoldierInVehicleOrTransition(observer) &&
-                                                 !ReferenceEquals(obsAi, null) &&
-                                                 obsAi != null &&
-                                                 !obsAi.IsMoving();
-                    bool hasActiveThreatSector = isStationaryOverwatch &&
-                                                 VeteranAndTacticsPatches.HasActiveThreatSectorContact(observer);
+                    bool targetFiredRecently = targetSolH != null
+                        ? (targetSolH.Vision.LastFiredTime > 0f && (now - targetSolH.Vision.LastFiredTime) <= 4.0f)
+                        : HasFiredRecently(targetSoldier, 4.0f);
                     bool isQuietFlanker = targetSoldier != null &&
                                           !targetSoldier.IsSpotted &&
-                                          !HasFiredRecently(targetSoldier, 4.0f);
+                                          !targetFiredRecently;
                     bool isActiveUnderFireAttacker = now < obsH.Vision.UnderFireUntil &&
                                                      obsH.Vision.UnderFireAttackerPtr != IntPtr.Zero &&
                                                      __0.Pointer == obsH.Vision.UnderFireAttackerPtr;
+                    bool overwatchEnabled = VisionConfig.EnableThreatSectorConcentration.Value;
+                    bool overwatchEvaluated = false;
+                    bool isStationaryOverwatch = false;
+                    bool hasActiveThreatSector = false;
 
                     if (VisionConfig.EnforceHumanFOVWhenAlerted.Value)
                     {
@@ -1085,10 +1090,22 @@ namespace EasyRed2HumanAI
 
                         // Only narrow peripheral awareness for stationary overwatch beyond 34m so close-quarters
                         // flankers (12m-34m) never hit an artificial 60-degree blind-spot wall!
-                        if (!isActiveUnderFireAttacker && hasActiveThreatSector && isQuietFlanker && dist > 34.0f)
+                        if (!isActiveUnderFireAttacker && isQuietFlanker && dist > 34.0f && overwatchEnabled)
                         {
-                            float focusCap = Mathf.Lerp(76.0f, 52.0f, Mathf.InverseLerp(34.0f, 95.0f, dist));
-                            allowedHalfFOV = Mathf.Min(allowedHalfFOV, focusCap);
+                            SoldierAI obsAi = obsH.Ai;
+                            isStationaryOverwatch = !AiCore.IsAnyHumanPlayerSoldier(obsH) &&
+                                                    !AiCore.IsSoldierInVehicleOrTransition(observer) &&
+                                                    !ReferenceEquals(obsAi, null) &&
+                                                    obsAi != null &&
+                                                    !obsAi.IsMoving();
+                            hasActiveThreatSector = isStationaryOverwatch &&
+                                                    VeteranAndTacticsPatches.HasActiveThreatSectorContact(obsH, now);
+                            overwatchEvaluated = true;
+                            if (hasActiveThreatSector)
+                            {
+                                float focusCap = Mathf.Lerp(76.0f, 52.0f, Mathf.InverseLerp(34.0f, 95.0f, dist));
+                                allowedHalfFOV = Mathf.Min(allowedHalfFOV, focusCap);
+                            }
                         }
 
                         if (isActiveUnderFireAttacker)
@@ -1111,7 +1128,9 @@ namespace EasyRed2HumanAI
                         : 1.0f;
 
                     float allowedOpticHalfFOV = VisionConfig.OpticLongRangeHalfFOV.Value;
-                    VeteranAndTacticsPatches.SoldierPersonality observerPers = VeteranAndTacticsPatches.GetPersonality(observer);
+                    VeteranAndTacticsPatches.SoldierPersonality observerPers = obsH.Veterancy.Record.Initialized
+                        ? obsH.Veterancy.Record.Personality
+                        : VeteranAndTacticsPatches.GetPersonality(observer);
                     if (observerPers == VeteranAndTacticsPatches.SoldierPersonality.Marksman_Spotter)
                     {
                         allowedOpticHalfFOV += 5.0f;
@@ -1121,6 +1140,18 @@ namespace EasyRed2HumanAI
                     {
                         _currentObserverOpticMultiplier = opticZoom;
                         BoostedByScope++;
+                    }
+
+                    if (!overwatchEvaluated && overwatchEnabled)
+                    {
+                        SoldierAI obsAi = obsH.Ai;
+                        isStationaryOverwatch = !AiCore.IsAnyHumanPlayerSoldier(obsH) &&
+                                                !AiCore.IsSoldierInVehicleOrTransition(observer) &&
+                                                !ReferenceEquals(obsAi, null) &&
+                                                obsAi != null &&
+                                                !obsAi.IsMoving();
+                        hasActiveThreatSector = isStationaryOverwatch &&
+                                                VeteranAndTacticsPatches.HasActiveThreatSectorContact(obsH, now);
                     }
 
                     if (isStationaryOverwatch)
@@ -1162,7 +1193,13 @@ namespace EasyRed2HumanAI
                     // Vanilla Creature.CanSee starts its linecast at observerPos + dir * 0.40f,
                     // skipping thin walls (<= 0.35m) pressed right in front of the observer's eyes.
                     // Skip for vehicle/emplacement crews near shields/frames and ignore vehicle hulls when looking at vehicles.
-                    if (IsObserverBlockedByCloseThinWall(observer.IsOnVehicle(), observerPos, toTarget, dist, obsH.RootTr ?? obsH.Tr.root, isWheeledOrTank))
+                    Transform obsRoot = obsH.RootTr;
+                    if (ReferenceEquals(obsRoot, null))
+                    {
+                        obsRoot = obsH.Tr.root;
+                        obsH.RootTr = obsRoot;
+                    }
+                    if (IsObserverBlockedByCloseThinWall(observer.IsOnVehicle(), observerPos, toTarget, dist, obsRoot, isWheeledOrTank))
                     {
                         __result = false;
                         runVanillaLinecast = false;
@@ -1180,7 +1217,7 @@ namespace EasyRed2HumanAI
                 finally
                 {
                     HitchProfiler.EndModScope(HitchBucket.CanSeeMod, pStart);
-                    if (runVanillaLinecast && __instance != null && __0 != null)
+                    if (runVanillaLinecast && !ReferenceEquals(__instance, null) && !ReferenceEquals(__0, null))
                         HitchProfiler.RecordCanSeeLinecastPassThrough();
                 }
             }

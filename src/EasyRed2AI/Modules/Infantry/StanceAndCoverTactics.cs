@@ -292,13 +292,15 @@ namespace EasyRed2HumanAI
                     ep = ai.MoveDestination;
                 }
             }
-            else if (h != null && AiCore.ResolveTargetDestination(h) != AiCore.CachedDestKind.None && h.CachedCover != null)
+            else if (h != null && AiCore.ResolveTargetDestination(h) != AiCore.CachedDestKind.None &&
+                     !ReferenceEquals(h.CachedDest, null) && h.CachedDest != null)
             {
-                ep = h.CachedCover.GetCoverPosition();
+                ep = h.CachedDest.GetCoverPosition();
             }
-            else if (!ReferenceEquals(soldier, null) && soldier.HasDestinationAssigned && soldier.targetDestination != null)
+            else if (h == null && !ReferenceEquals(soldier, null) && soldier.HasDestinationAssigned)
             {
-                ep = soldier.targetDestination.GetCoverPosition();
+                AiDestination rawDest = soldier.targetDestination;
+                ep = (!ReferenceEquals(rawDest, null) && rawDest != null) ? rawDest.GetCoverPosition() : ai.MoveDestination;
             }
             else
             {
@@ -308,7 +310,7 @@ namespace EasyRed2HumanAI
             if (h != null)
             {
                 h.LastEndpointFrame = frame;
-                h.NextEndpointCheckTime = now + 0.10f;
+                h.NextEndpointCheckTime = now + (hasPath ? 0.10f : 0.16f);
                 h.CachedEndpoint = ep;
                 h.CachedNodesCount = nc;
             }
@@ -399,11 +401,233 @@ namespace EasyRed2HumanAI
             return false;
         }
 
-        internal static bool IsActivelyDuckingFriendlyMuzzle(IntPtr ptr, float now)
+        internal static bool EvaluateTacticalStealthCrouch(
+            bool isStealthFollowingLowLeader,
+            bool isCovertHoldFireActive,
+            bool isCloseAcousticInvestigating,
+            bool isUnspottedCloseOrNightApproach,
+            bool isUnspottedUnderEnemyPlane,
+            bool isEmergencyOrCharging,
+            bool isCompromisedOrLoud,
+            bool isPointBlankVisibleCqb)
         {
-            return AiCore.TryGetSoldierHandles(ptr, out var h) &&
-                   now < h.Combat.NextFriendlyStepAsideTime &&
-                   now < h.Stance.CombatCrouchLockUntil;
+            if (isEmergencyOrCharging || isPointBlankVisibleCqb || isCompromisedOrLoud)
+                return false;
+
+            return isStealthFollowingLowLeader ||
+                   isCovertHoldFireActive ||
+                   isCloseAcousticInvestigating ||
+                   isUnspottedCloseOrNightApproach ||
+                   isUnspottedUnderEnemyPlane;
+        }
+
+        internal static bool ShouldBotStealthCrouch(SoldierAI ai, Soldier soldier, AiCore.SoldierFastHandles h, float now)
+        {
+            if (ReferenceEquals(soldier, null) || h == null)
+                return false;
+
+            bool emergencyOrCharge =
+                soldier.IsCharging() ||
+                soldier.isBleeding ||
+                soldier.IsCarryingBody() ||
+                (!ReferenceEquals(ai, null) && ai.knifeCharge) ||
+                (h.MoveOverride.Kind == AiCore.BotMoveOverrideKind.GrenadeReflex && now < h.MoveOverride.ExpireTime) ||
+                (h.MoveOverride.Kind == AiCore.BotMoveOverrideKind.VehicleEvade && now < h.MoveOverride.ExpireTime) ||
+                (h.MoveOverride.Kind == AiCore.BotMoveOverrideKind.EmergencyFallback && now < h.MoveOverride.ExpireTime) ||
+                (now < h.Goap.Plan.PlanExpireTime && h.Goap.Plan.IsEvacuatingBailedCrew) ||
+                (h.Emergent.HasDecision &&
+                 (h.Emergent.CurrentDecision.Step0 == EmergentEngine.EmergentActionId.FallbackRegroup ||
+                  (h.Emergent.CurrentDecision.Step0 == EmergentEngine.EmergentActionId.PopSmoke &&
+                   h.Emergent.CurrentDecision.Step1 == EmergentEngine.EmergentActionId.FallbackRegroup)));
+            if (emergencyOrCharge)
+                return false;
+
+            if (!ReferenceEquals(ai, null) && ai.HasEnemyAndCanFireAtHim && ai.distFromTarget > 0.1f && ai.distFromTarget <= 11.0f)
+                return false;
+
+            bool compromised = now < h.Vision.UnderFireUntil ||
+                               (h.Vision.LastFiredTime > 0f && now - h.Vision.LastFiredTime <= 3.5f);
+            if (compromised)
+                return false;
+
+            if (soldier.IsStealth)
+            {
+                Squad sq = AiCore.GetCachedSquad(h, now);
+                if (!ReferenceEquals(sq, null) && sq.Leader != null && sq.Leader.m_pose > SoldierPose.Idle)
+                    return true;
+            }
+
+            if (now < h.Stance.StealthCrouchUntil)
+            {
+                if (soldier.IsSpotted || soldier.GetSuppressionValue() >= 24f)
+                    return false;
+                return true;
+            }
+
+            return false;
+        }
+
+        internal static bool EvaluateProneSafetyVsWin(
+            bool currentlyProne,
+            bool inCoverOrShelteredWall,
+            bool hasClearProneLof,
+            bool hasVisibleEnemy,
+            float enemyDist,
+            float suppression,
+            float smoothedHarm,
+            float totalHarm,
+            bool underFireRecently,
+            bool underShelling,
+            bool enemyPlaneOverhead,
+            bool isOpenGunnerOrMarksman,
+            float wSurv,
+            float wWin,
+            float winUrgency,
+            float canHarm,
+            bool objectiveTickingAgainst,
+            bool wantsToMoveOrWinPush)
+        {
+            if (wantsToMoveOrWinPush || (hasVisibleEnemy && enemyDist > 0.1f && enemyDist <= 13.0f))
+                return false;
+
+            float supp01 = Mathf.Clamp01(suppression / 85.0f);
+            float danger01 = Mathf.Clamp01(Mathf.Max(totalHarm, Mathf.Max(smoothedHarm, supp01 * 0.90f)));
+
+            bool proneIsSafer;
+            if (enemyPlaneOverhead)
+            {
+                proneIsSafer = true;
+            }
+            else if (inCoverOrShelteredWall)
+            {
+                proneIsSafer = underShelling ||
+                               suppression >= 52.0f ||
+                               smoothedHarm >= 0.58f ||
+                               (currentlyProne && (suppression >= 34.0f || smoothedHarm >= 0.42f));
+            }
+            else
+            {
+                proneIsSafer = underShelling ||
+                               underFireRecently ||
+                               danger01 >= 0.30f ||
+                               (currentlyProne && danger01 >= 0.18f) ||
+                               (isOpenGunnerOrMarksman && hasVisibleEnemy && enemyDist >= 28.0f && hasClearProneLof);
+            }
+
+            if (!proneIsSafer)
+                return false;
+
+            float safetyGain = inCoverOrShelteredWall
+                ? (danger01 * 0.52f + (underShelling ? 0.48f : 0f))
+                : (danger01 * 0.92f + (underShelling ? 0.48f : 0f) + (underFireRecently ? 0.18f : 0f));
+            if (enemyPlaneOverhead)
+                safetyGain = Mathf.Max(safetyGain, 0.80f);
+            if (isOpenGunnerOrMarksman && !inCoverOrShelteredWall && hasVisibleEnemy && enemyDist >= 28.0f && hasClearProneLof)
+                safetyGain += 0.32f;
+            if (currentlyProne)
+                safetyGain += 0.14f;
+
+            float survivePronePull = Mathf.Max(0.50f, wSurv) * safetyGain;
+
+            float winRiseNeed = 0.14f + Mathf.Clamp01(winUrgency) * 0.50f;
+            if (objectiveTickingAgainst)
+                winRiseNeed += 0.38f;
+            if (hasVisibleEnemy && !hasClearProneLof)
+                winRiseNeed += Mathf.Clamp01(canHarm) * 0.62f + 0.18f;
+            else if (!hasVisibleEnemy && inCoverOrShelteredWall)
+                winRiseNeed += 0.22f;
+
+            float winRisePull = Mathf.Max(0.50f, wWin) * winRiseNeed;
+
+            return survivePronePull > winRisePull;
+        }
+
+        internal static bool ShouldBotChooseOrStayProneForSafety(
+            SoldierAI ai,
+            Soldier soldier,
+            AiCore.SoldierFastHandles h,
+            bool inCoverOrShelteredWall,
+            bool hasClearProneLof,
+            bool hasVisibleEnemy,
+            float enemyDist,
+            float suppression,
+            bool enemyPlaneOverhead,
+            bool wantsToMoveOrWinPush,
+            float now)
+        {
+            if (ReferenceEquals(soldier, null) || h == null)
+                return false;
+
+            bool currentlyProne = soldier.m_pose == SoldierPose.Prone;
+            if (soldier.IsOnVehicle() ||
+                soldier.IsCharging() ||
+                soldier.UsingBipod() ||
+                soldier.IsBipodTransitioning() ||
+                soldier.IsTowardWall() ||
+                (!currentlyProne && (soldier.IsReloading || soldier.MustReload())) ||
+                (!ReferenceEquals(ai, null) && (ai.HeldMortar != null || ai.knifeCharge)) ||
+                now < h.Stance.NoProneUntil)
+            {
+                return false;
+            }
+
+            bool harmPushingToMove = wantsToMoveOrWinPush;
+            if (!harmPushingToMove && h.Emergent.HasDecision)
+            {
+                var step0 = h.Emergent.CurrentDecision.Step0;
+                harmPushingToMove =
+                    step0 == EmergentEngine.EmergentActionId.EvadeGrenade ||
+                    step0 == EmergentEngine.EmergentActionId.FallbackRegroup ||
+                    step0 == EmergentEngine.EmergentActionId.CloseBreach ||
+                    step0 == EmergentEngine.EmergentActionId.FlankManeuver ||
+                    step0 == EmergentEngine.EmergentActionId.DragCasualty ||
+                    step0 == EmergentEngine.EmergentActionId.MedicHeal ||
+                    step0 == EmergentEngine.EmergentActionId.LiberatePrisoner;
+            }
+
+            float wSurv = h.Emergent.WeightsInitialized ? h.Emergent.Weights.WSurvive : 1.35f;
+            float wWin = h.Emergent.WeightsInitialized ? h.Emergent.Weights.WWin : 0.95f;
+            float smoothedHarm = h.Emergent.HasDecision ? h.Emergent.SmoothedHarmNow : 0f;
+            float totalHarm = h.Emergent.HasDecision ? h.Emergent.CurrentDecision.TotalHarm : smoothedHarm;
+            float winUrgency = h.Emergent.HasDecision ? h.Emergent.CurrentDecision.WinUrgency : 0.25f;
+            float canHarm = h.Emergent.HasDecision ? h.Emergent.CurrentDecision.CanHarm : (hasVisibleEnemy ? 0.70f : 0f);
+            bool underFireRecently = now < h.Vision.UnderFireUntil;
+
+            bool objectiveTickingAgainst = false;
+            Squad sq = AiCore.GetCachedSquad(h, now);
+            if (!ReferenceEquals(sq, null) &&
+                sq.Pointer != IntPtr.Zero &&
+                _squadBlackboards.TryGetValue(sq.Pointer, out SquadBlackboard b))
+            {
+                objectiveTickingAgainst = b.IsObjectiveTickingAgainstUs(now);
+            }
+
+            bool underShelling = h.Tr != null &&
+                                 TryGetActiveEnemyShellingPocket(AiCore.GetCachedFaction(h, now), h.Tr.position, now, out _, out _);
+
+            SoldierPersonality pers = GetPersonality(soldier);
+            bool isOpenGunnerOrMarksman = pers >= SoldierPersonality.Gunner_Anchor &&
+                                          pers <= SoldierPersonality.Marksman_Spotter;
+
+            return EvaluateProneSafetyVsWin(
+                currentlyProne,
+                inCoverOrShelteredWall,
+                hasClearProneLof,
+                hasVisibleEnemy,
+                enemyDist,
+                suppression,
+                smoothedHarm,
+                totalHarm,
+                underFireRecently,
+                underShelling,
+                enemyPlaneOverhead,
+                isOpenGunnerOrMarksman,
+                wSurv,
+                wWin,
+                winUrgency,
+                canHarm,
+                objectiveTickingAgainst,
+                harmPushingToMove);
         }
 
         internal static SoldierPose GetDesiredMovingPose(
@@ -425,8 +649,16 @@ namespace EasyRed2HumanAI
             }
 
             IntPtr ptr = !ReferenceEquals(soldier, null) ? soldier.Pointer : IntPtr.Zero;
-            if (IsActivelyDuckingFriendlyMuzzle(ptr, Time.time))
-                return SoldierPose.Crouch;
+            if (AiCore.TryGetSoldierHandles(ptr, out var hMove))
+            {
+                float nowMove = Time.time;
+                if (ShouldBotStealthCrouch(ai, soldier, hMove, nowMove) ||
+                    (nowMove < hMove.Combat.NextFriendlyStepAsideTime &&
+                     nowMove < hMove.Stance.CombatCrouchLockUntil))
+                {
+                    return SoldierPose.Crouch;
+                }
+            }
 
             // Keep crouched posture during short <= 3.2m cover/sidestep/anti-stack micro-adjustments
             if (remDistSq <= 3.2f * 3.2f &&
@@ -2698,9 +2930,10 @@ namespace EasyRed2HumanAI
 
                     VehicleRepairTask repairTask = null;
                     bool isRepairingVehicle = false;
-                    if (VisionConfig.EnableSmartTankCrewRepair.Value && soldier.targetDestination != null)
+                    if (VisionConfig.EnableSmartTankCrewRepair.Value &&
+                        AiCore.ResolveTargetDestination(h) == AiCore.CachedDestKind.VehicleRepair)
                     {
-                        repairTask = soldier.targetDestination.TryCast<VehicleRepairTask>();
+                        repairTask = h.CachedRepairTask;
                         if (repairTask != null && repairTask.VehicleStillneedsRepair && repairTask.vehToRepair != null)
                         {
                             isRepairingVehicle = true;
@@ -2812,7 +3045,7 @@ namespace EasyRed2HumanAI
                              h.Tr != null &&
                              (soldier.Params == null || soldier.Params.canMove))
                     {
-                        Squad utilSq = soldier.joinedSquad;
+                        Squad utilSq = AiCore.GetCachedSquad(h, Time.time);
                         SquadBlackboard utilBoard = GetOrUpdateSquadBlackboard(utilSq, soldier);
                         if (EmergentTryUnstick(__instance, soldier, ptr, ref utilBoard, h.Tr.position, suppression, isOnBridge, dist, Time.time) &&
                             utilSq != null && utilSq.Pointer != IntPtr.Zero)
@@ -2822,21 +3055,24 @@ namespace EasyRed2HumanAI
                         inHullStepOff = Time.time < h.Goap.FootStuck.UnstickOverrideUntil;
                     }
 
+                    float nowSeqPost = Time.time;
                     if (VisionConfig.EnforceStandingWhenOutOfCombat.Value && !soldier.IsStealth)
                     {
                         __instance.pose = SoldierPose.Idle;
 
-                        if (soldier.targetDestination != null)
+                        if (AiCore.ResolveTargetDestination(h) == AiCore.CachedDestKind.DestinationWithoutCover)
                         {
-                            DestinationWithoutCover noCoverDest = soldier.targetDestination.TryCast<DestinationWithoutCover>();
-                            if (noCoverDest != null && noCoverDest.pose == SoldierPose.Prone && suppression < 62f)
+                            DestinationWithoutCover noCoverDest = h.CachedNoCoverDest;
+                            if (noCoverDest != null &&
+                                noCoverDest.pose == SoldierPose.Prone &&
+                                suppression < 62f &&
+                                !ShouldBotChooseOrStayProneForSafety(__instance, soldier, h, false, true, __instance.HasEnemyAndCanFireAtHim, dist, suppression, false, false, nowSeqPost))
                             {
                                 noCoverDest.pose = SoldierPose.Crouch;
                             }
                         }
                     }
 
-                    float nowSeqPost = Time.time;
                     bool hasMoveIntent = HasActiveEscapeOrMoveIntent(__instance, soldier, h, nowSeqPost);
                     bool isEffectivelyMoving = __instance.IsMoving() ||
                                                hasMoveIntent ||
@@ -2851,6 +3087,103 @@ namespace EasyRed2HumanAI
                           h.Emergent.CurrentDecision.Step0 == EmergentEngine.EmergentActionId.FallbackRegroup ||
                           h.Emergent.CurrentDecision.Step0 == EmergentEngine.EmergentActionId.EvadeGrenade));
 
+                    if (!soldier.IsOnVehicle() &&
+                        __instance.IsMoving() &&
+                        !soldier.IsCharging() &&
+                        !isFleeingOrCoverSeeking &&
+                        !isHealingTeammate &&
+                        !isRepairingVehicle &&
+                        !inPointBlankMelee &&
+                        !h.Goap.Plan.IsEvacuatingBailedCrew &&
+                        !soldier.IsCarryingBody() &&
+                        h.Tr != null)
+                    {
+                        Vector3 smokeMoveDir = __instance.dir;
+                        smokeMoveDir.y = 0f;
+                        if (smokeMoveDir.sqrMagnitude < 0.01f)
+                        {
+                            smokeMoveDir = h.Tr.forward;
+                            smokeMoveDir.y = 0f;
+                        }
+                        if (smokeMoveDir.sqrMagnitude >= 0.01f)
+                        {
+                            Vector3 curFootPos = h.Tr.position;
+                            Vector3 smokeProbeEnd = curFootPos + smokeMoveDir.normalized * 12.0f;
+                            if (AiCore.IsBlindSmokePathHighRisk(h, curFootPos, smokeProbeEnd, nowSeqPost, false, false, 0f, out _))
+                            {
+                                __instance.moveDirectlyToward_end = 0f;
+                                __instance.Stop(true);
+                                h.Stance.CombatStanceHoldUntil = Mathf.Max(h.Stance.CombatStanceHoldUntil, nowSeqPost + 2.5f);
+                                if (soldier.m_pose == SoldierPose.Idle && AiCore.CanBotChangePoseAutonomously(soldier))
+                                    SetBotPose(__instance, soldier, SoldierPose.Crouch);
+                                isEffectivelyMoving = false;
+                            }
+                        }
+                    }
+
+                    bool enemyPlaneOverhead = false;
+                    if (!soldier.IsOnVehicle() &&
+                        !soldier.IsCharging() &&
+                        !isEvadingArmor &&
+                        !inFallbackSprint &&
+                        !isStaffingEmplacement &&
+                        !inPointBlankMelee &&
+                        !soldier.isBleeding &&
+                        !soldier.IsCarryingBody() &&
+                        suppression < 15f &&
+                        !soldier.IsSpotted &&
+                        nowSeqPost >= h.Vision.UnderFireUntil &&
+                        !VisionPatches.HasFiredRecently(soldier, 4.0f) &&
+                        h.Tr != null)
+                    {
+                        Squad sqSeq = AiCore.GetCachedSquad(h, nowSeqPost);
+                        SquadBlackboard seqBoard = default;
+                        bool hasSeqBoard = !ReferenceEquals(sqSeq, null) &&
+                                           sqSeq.Pointer != IntPtr.Zero &&
+                                           _squadBlackboards.TryGetValue(sqSeq.Pointer, out seqBoard);
+                        bool covertOrder = hasSeqBoard &&
+                                           seqBoard.IsAiCovertHoldFireActive &&
+                                           nowSeqPost < seqBoard.AiCovertHoldFireExpireTime &&
+                                           (ReferenceEquals(sqSeq, null) || !sqSeq.IsEnemyAwareOfThisSquad);
+
+                        bool closeOrNightApproach = false;
+                        if (!__instance.HasEnemyAndCanFireAtHim)
+                        {
+                            bool hasThreatPos = hasSeqBoard && seqBoard.HasActiveThreat;
+                            Vector3 threatPos = hasThreatPos
+                                ? seqBoard.ThreatPosition
+                                : (h.Vision.LastKnownTarget.LastSeenTime > 0f && nowSeqPost - h.Vision.LastKnownTarget.LastSeenTime <= 12.0f
+                                    ? h.Vision.LastKnownTarget.LastSeenPos
+                                    : default);
+                            if (hasThreatPos || (h.Vision.LastKnownTarget.LastSeenTime > 0f && nowSeqPost - h.Vision.LastKnownTarget.LastSeenTime <= 12.0f))
+                            {
+                                float threatDistSq = (threatPos - h.Tr.position).sqrMagnitude;
+                                float night01 = (VisionConfig.EnableRealisticNightDarkness != null && VisionConfig.EnableRealisticNightDarkness.Value)
+                                    ? AiCore.NightDarkness01
+                                    : 0f;
+                                float stealthRadius = night01 >= 0.35f ? 52.0f : 24.0f;
+                                closeOrNightApproach = threatDistSq <= stealthRadius * stealthRadius;
+                            }
+                        }
+
+                        if (AiCore.WorldAirSquadCount > 0 &&
+                            !__instance.HasEnemyAndCanFireAtHim &&
+                            (ReferenceEquals(sqSeq, null) || (!sqSeq.IsEnemyAwareOfThisSquad && !sqSeq.isMarked && !sqSeq.isHalfMarked && !sqSeq.isMarkedPinPoint)))
+                        {
+                            string myFac = AiCore.GetCachedFaction(h, nowSeqPost);
+                            if (AiCore.IsEnemyAircraftOverhead(h.Tr.position, myFac, 260f, 12f) &&
+                                !AiCore.HasLowCeilingOverhead(h.Tr.position, 5.5f))
+                            {
+                                enemyPlaneOverhead = true;
+                            }
+                        }
+
+                        if (EvaluateTacticalStealthCrouch(false, covertOrder, false, closeOrNightApproach, enemyPlaneOverhead, false, false, false))
+                        {
+                            h.Stance.StealthCrouchUntil = Mathf.Max(h.Stance.StealthCrouchUntil, nowSeqPost + 2.5f);
+                        }
+                    }
+
                     if (soldier.UsingBipod() || soldier.IsBipodTransitioning())
                     {
                         __instance.actualPose = soldier.m_pose;
@@ -2864,10 +3197,7 @@ namespace EasyRed2HumanAI
                     {
                         Vector3 moveEndpoint = GetActualMoveEndpoint(__instance, soldier);
                         float remDistSq = (h.Tr.position - moveEndpoint).sqrMagnitude;
-                        bool stealthCrouch = soldier.IsStealth &&
-                                             soldier.joinedSquad != null &&
-                                             soldier.joinedSquad.Leader != null &&
-                                             soldier.joinedSquad.Leader.m_pose > SoldierPose.Idle;
+                        bool stealthCrouch = ShouldBotStealthCrouch(__instance, soldier, h, nowSeqPost);
 
                         if (inPointBlankMelee)
                         {
@@ -2940,19 +3270,42 @@ namespace EasyRed2HumanAI
                                 }
                                 else
                                 {
-                                    bool inMidBoundFiringHalt = IsInCommittedFiringHalt(ptr, Time.time);
-                                    bool canGoProne = Time.time >= h.Stance.NoProneUntil &&
+                                    bool inMidBoundFiringHalt = IsInCommittedFiringHalt(ptr, nowSeqPost);
+                                    bool canGoProne = nowSeqPost >= h.Stance.NoProneUntil &&
                                                       !soldier.IsOnCover() &&
                                                       !soldier.IsTowardWall() &&
                                                       (!inMidBoundFiringHalt || isGunner || suppression >= 65f);
+
+                                    bool checkProne = canGoProne &&
+                                                      (soldier.m_pose == SoldierPose.Prone ||
+                                                       suppression >= 24f ||
+                                                       nowSeqPost < h.Vision.UnderFireUntil ||
+                                                       (h.Emergent.HasDecision &&
+                                                        (h.Emergent.SmoothedHarmNow >= 0.25f || h.Emergent.CurrentDecision.TotalHarm >= 0.25f)) ||
+                                                       (isGunner && !soldier.IsOnCover() && dist >= 28f));
+
+                                    bool proneLofClear = checkProne && HasClearLineOfFireFromProne(soldier, targetPos, dist, standTargetIsVeh);
+                                    bool harmWantsProne = canGoProne &&
+                                                          ShouldBotChooseOrStayProneForSafety(
+                                                              __instance,
+                                                              soldier,
+                                                              h,
+                                                              inCoverOrShelteredWall: false,
+                                                              hasClearProneLof: proneLofClear,
+                                                              hasVisibleEnemy: true,
+                                                              enemyDist: dist,
+                                                              suppression: suppression,
+                                                              enemyPlaneOverhead: false,
+                                                              wantsToMoveOrWinPush: inMidBoundFiringHalt && suppression < 65f && !isGunner,
+                                                              now: nowSeqPost);
 
                                     bool shouldBeProne = suppression >= 62f ||
                                                          (isGunner && !soldier.IsOnCover() && dist >= 28f);
 
                                     SoldierPose combatPose = SoldierPose.Crouch;
-                                    if (shouldBeProne &&
-                                        canGoProne &&
-                                        HasClearLineOfFireFromProne(soldier, targetPos, dist, standTargetIsVeh))
+                                    if (canGoProne &&
+                                        ((shouldBeProne && proneLofClear) ||
+                                         (harmWantsProne && (proneLofClear || suppression >= 62f || (h.Emergent.HasDecision && h.Emergent.CurrentDecision.TotalHarm >= 0.72f)))))
                                     {
                                         combatPose = SoldierPose.Prone;
                                     }
@@ -3023,14 +3376,16 @@ namespace EasyRed2HumanAI
                                     seqNow >= h.Stance.NextVantageSeekTime)
                                 {
                                     h.Stance.NextVantageSeekTime = seqNow + 20.0f;
-                                    CombatCover curCov = soldier.targetDestination != null ? soldier.targetDestination.TryCast<CombatCover>() : null;
+                                    CombatCover curCov = AiCore.ResolveTargetDestination(h) == AiCore.CachedDestKind.CombatCover
+                                        ? h.CachedCover
+                                        : null;
                                     bool settledInIntactCover = soldier.IsOnCover() && curCov != null && AiCore.IsCombatCoverIntact(curCov);
                                     SoldierPersonality vantagePers = GetPersonality(soldier);
                                     bool isOverwatchRole = vantagePers >= SoldierPersonality.Gunner_Anchor && vantagePers <= SoldierPersonality.Marksman_Spotter;
                                     bool alreadyVantage = curCov != null &&
                                                           AiCore.IsCombatCoverIntact(curCov) &&
                                                           curCov.GetCoverPose() == SoldierPose.Idle &&
-                                                          AiCore.HasLowCeilingOverhead(soldier.transform.position, 5.5f);
+                                                          AiCore.HasLowCeilingOverhead(h.Tr.position, 5.5f);
                                     if (!alreadyVantage &&
                                         (!settledInIntactCover || isOverwatchRole) &&
                                         !TryUpgradeToVantageOrWindowCover(__instance, soldier, h, seqNow))
@@ -3041,24 +3396,27 @@ namespace EasyRed2HumanAI
                             }
 
                             bool inCombatHold = Time.time < h.Stance.CombatStanceHoldUntil;
-                            bool stealthCrouch = soldier.IsStealth &&
-                                                 soldier.joinedSquad != null &&
-                                                 soldier.joinedSquad.Leader != null &&
-                                                 soldier.joinedSquad.Leader.m_pose > SoldierPose.Idle;
-                            CombatCover activeCover = soldier.targetDestination != null
-                                ? soldier.targetDestination.TryCast<CombatCover>()
+                            bool stealthCrouch = ShouldBotStealthCrouch(__instance, soldier, h, nowSeqPost);
+                            CombatCover activeCover = AiCore.ResolveTargetDestination(h) == AiCore.CachedDestKind.CombatCover
+                                ? h.CachedCover
                                 : null;
+                            Vector3 myPos = h.Tr.position;
+                            Transform myRoot = h.RootTr;
+                            if (ReferenceEquals(myRoot, null))
+                            {
+                                myRoot = h.Tr.root;
+                                h.RootTr = myRoot;
+                            }
+                            Squad seqPostSq = AiCore.GetCachedSquad(h, nowSeqPost);
                             bool onActualCombatCover = soldier.IsOnCover() ||
-                                                       (activeCover != null && (soldier.transform.position - activeCover.GetCoverPosition()).sqrMagnitude <= 3.2f * 3.2f);
-                            SquadTask currentTask = soldier.joinedSquad != null ? soldier.joinedSquad.currentTask : null;
-                            bool inObjectiveZone = currentTask != null && currentTask.IsInsideTaskArea(soldier.transform.position, 1.15f);
-                            bool isSquadAlerted = soldier.isAlerted || (soldier.joinedSquad != null && soldier.joinedSquad.IsEnemyAwareOfThisSquad);
-                            Vector3 myPos = soldier.transform.position;
-                            Transform myRoot = soldier.transform.root;
-                            Vector3 threatDir = GetEffectiveThreatDirection(soldier, soldier.joinedSquad, myPos, soldier.transform.forward);
+                                                       (activeCover != null && (myPos - activeCover.GetCoverPosition()).sqrMagnitude <= 3.2f * 3.2f);
+                            SquadTask currentTask = seqPostSq != null ? seqPostSq.currentTask : null;
+                            bool inObjectiveZone = currentTask != null && currentTask.IsInsideTaskArea(myPos, 1.15f);
+                            bool isSquadAlerted = soldier.isAlerted || (seqPostSq != null && seqPostSq.IsEnemyAwareOfThisSquad);
+                            Vector3 threatDir = GetEffectiveThreatDirection(soldier, seqPostSq, myPos, h.Tr.forward);
                             bool isShelteredByWall = VisionConfig.EnableSmartWallSideCover.Value &&
                                                      IsPositionShelteredByFrontCover(myPos, threatDir, myRoot);
-                            bool hasMortar = __instance.HeldMortar != null;
+                            bool hasMortar = AiCore.HasHeldMortarCached(h, __instance, nowSeqPost);
 
                             bool holdDefensiveCrouch = onActualCombatCover || inObjectiveZone || isShelteredByWall || isSquadAlerted;
                             bool canAttemptStand = !soldier.IsReloading &&
@@ -3084,7 +3442,7 @@ namespace EasyRed2HumanAI
 
                                 if (isIndoor || inOutdoorTrenchWindow)
                                 {
-                                    Vector3 lookFwd = soldier.transform.forward;
+                                    Vector3 lookFwd = h.Tr.forward;
                                     lookFwd.y = 0f;
                                     lookFwd = lookFwd.sqrMagnitude > 0.001f ? lookFwd.normalized : threatDir;
 
@@ -3116,20 +3474,44 @@ namespace EasyRed2HumanAI
                                 }
                             }
 
-                            if (shouldStandAtCoverOrTrench)
+                            bool inCoverOrWall = onActualCombatCover || isShelteredByWall;
+                            bool wantSafetyProne = !hasMortar &&
+                                                   !soldier.isBleeding &&
+                                                   !soldier.IsTowardWall() &&
+                                                   nowSeqPost >= h.Stance.NoProneUntil &&
+                                                   ShouldBotChooseOrStayProneForSafety(
+                                                       __instance,
+                                                       soldier,
+                                                       h,
+                                                       inCoverOrShelteredWall: inCoverOrWall,
+                                                       hasClearProneLof: true,
+                                                       hasVisibleEnemy: false,
+                                                       enemyDist: dist,
+                                                       suppression: suppression,
+                                                       enemyPlaneOverhead: enemyPlaneOverhead && !inCombatHold,
+                                                       wantsToMoveOrWinPush: false,
+                                                       now: nowSeqPost);
+                            if (wantSafetyProne)
+                            {
+                                __instance.pose = SoldierPose.Prone;
+                                if (soldier.m_pose == SoldierPose.Prone)
+                                    __instance.actualPose = SoldierPose.Prone;
+                                else
+                                    SetBotPose(__instance, soldier, SoldierPose.Prone);
+                            }
+                            else if (stealthCrouch && !hasMortar)
+                            {
+                                __instance.pose = SoldierPose.Crouch;
+                                if (__instance.actualPose != SoldierPose.Crouch || soldier.m_pose != SoldierPose.Crouch)
+                                    SetBotPose(__instance, soldier, SoldierPose.Crouch);
+                            }
+                            else if (shouldStandAtCoverOrTrench)
                             {
                                 SetBotPose(__instance, soldier, SoldierPose.Idle);
                             }
                             else if (!holdDefensiveCrouch && !inCombatHold && suppression < 8f && !stealthCrouch && !hasMortar)
                             {
                                 SetBotPose(__instance, soldier, SoldierPose.Idle);
-                            }
-                            else if (soldier.m_pose == SoldierPose.Prone &&
-                                     (suppression >= 45f || (isGunner && !soldier.IsOnCover() && suppression >= 18f)) &&
-                                     Time.time >= h.Stance.NoProneUntil)
-                            {
-                                __instance.pose = SoldierPose.Prone;
-                                __instance.actualPose = SoldierPose.Prone;
                             }
                             else if (suppression < 35f && !stealthCrouch && !hasMortar)
                             {
@@ -3146,7 +3528,7 @@ namespace EasyRed2HumanAI
                     {
                         Vector3 targetPos = AiCore.TryGetSpottableCenter(__instance.visibleTarget, out Vector3 validGunnerPos)
                             ? validGunnerPos
-                            : (soldier.transform.position + soldier.transform.forward * 25f);
+                            : (h.Tr.position + h.Tr.forward * 25f);
                         HandleGunnerBipodAndWallMounting(__instance, soldier, bipod, targetPos, dist);
                     }
 
@@ -3211,7 +3593,8 @@ namespace EasyRed2HumanAI
                             }
                             else if (soldier.isAlerted || nowLean < h.Stance.CombatStanceHoldUntil)
                             {
-                                Vector3 laneDirGuess = GetEffectiveThreatDirection(soldier, soldier.joinedSquad, leanOriginPos, soldier.transform.forward);
+                                Squad leanSq = AiCore.GetCachedSquad(h, nowLean);
+                                Vector3 laneDirGuess = GetEffectiveThreatDirection(soldier, leanSq, leanOriginPos, h.Tr.forward);
                                 if (laneDirGuess.sqrMagnitude > 0.01f)
                                 {
                                     laneAimPos = leanOriginPos + laneDirGuess * 16.0f + Vector3.up * 1.0f;
@@ -3778,10 +4161,18 @@ namespace EasyRed2HumanAI
                                                       !soldier.IsOnCover() &&
                                                       !soldier.IsTowardWall();
 
+                                    bool checkRotProne = canGoProne &&
+                                                         (curSupp >= 26f ||
+                                                          now < h.Vision.UnderFireUntil ||
+                                                          (h.Emergent.HasDecision && h.Emergent.CurrentDecision.TotalHarm >= 0.30f) ||
+                                                          (isGunner && !soldier.IsOnCover() && dist >= 28f));
+
                                     SoldierPose fightPose = SoldierPose.Crouch;
-                                    if ((curSupp >= 62f || (isGunner && !soldier.IsOnCover() && dist >= 28f)) &&
-                                        canGoProne &&
-                                        HasClearLineOfFireFromProne(soldier, __0, dist, rotateTargetIsVeh))
+                                    if (checkRotProne &&
+                                        HasClearLineOfFireFromProne(soldier, __0, dist, rotateTargetIsVeh) &&
+                                        (curSupp >= 62f ||
+                                         (isGunner && !soldier.IsOnCover() && dist >= 28f) ||
+                                         ShouldBotChooseOrStayProneForSafety(__instance, soldier, h, false, true, true, dist, curSupp, false, false, now)))
                                     {
                                         fightPose = SoldierPose.Prone;
                                     }
@@ -4152,9 +4543,11 @@ namespace EasyRed2HumanAI
                         return false;
                     }
 
+                    bool hasTargetDest = soldier.HasDestinationAssigned && AiCore.GetRawTargetDestinationPtr(soldier) != IntPtr.Zero;
+
                     // Pin AI Squad Leaders in Order.follow to their squad's active task destination instead of
                     // vanilla Soldier.GetBestMissionObjective(), so Squad Leaders never leave their squad behind.
-                    if (soldier.IsSquadLeader() && (!soldier.HasDestinationAssigned || soldier.targetDestination == null))
+                    if (soldier.IsSquadLeader() && !hasTargetDest)
                     {
                         Squad sq = covH != null ? AiCore.GetCachedSquad(covH, now) : soldier.joinedSquad;
                         if (sq != null && sq.order == Order.follow && sq.currentTask != null)
@@ -4170,7 +4563,7 @@ namespace EasyRed2HumanAI
 
                     // Release bots from vanilla's 15m FollowLeader leash if their human Squad Leader is AFK (>= 25s
                     // with zero movement/rotation/animation), snapping back immediately when the player moves.
-                    if (!soldier.IsSquadLeader() && (!soldier.HasDestinationAssigned || soldier.targetDestination == null))
+                    if (!soldier.IsSquadLeader() && !hasTargetDest)
                     {
                         Squad botSq = covH != null ? AiCore.GetCachedSquad(covH, now) : soldier.joinedSquad;
                         if (botSq != null &&
@@ -4189,8 +4582,9 @@ namespace EasyRed2HumanAI
                                     return false;
                                 }
                             }
-                            if (soldier.transform != null &&
-                                AiCore.TryFindFallbackObjectiveOrFriendlyPos(soldier.faction, soldier.transform.position, out Vector3 fallbackPos))
+                            Transform botTr = (covH != null && covH.Tr != null) ? covH.Tr : soldier.transform;
+                            if (botTr != null &&
+                                AiCore.TryFindFallbackObjectiveOrFriendlyPos(soldier.faction, botTr.position, out Vector3 fallbackPos))
                             {
                                 __result = fallbackPos;
                                 return false;
@@ -4198,7 +4592,7 @@ namespace EasyRed2HumanAI
                         }
                     }
 
-                    if (!soldier.HasDestinationAssigned || soldier.targetDestination == null)
+                    if (!hasTargetDest)
                     {
                         return true;
                     }
@@ -4210,8 +4604,14 @@ namespace EasyRed2HumanAI
 
                     if (protectedCover)
                     {
-                        __result = soldier.targetDestination.GetCoverPosition();
-                        return false;
+                        AiDestination cachedDest = (covH != null && AiCore.ResolveTargetDestination(covH) != AiCore.CachedDestKind.None)
+                            ? covH.CachedDest
+                            : soldier.targetDestination;
+                        if (!ReferenceEquals(cachedDest, null) && cachedDest != null)
+                        {
+                            __result = cachedDest.GetCoverPosition();
+                            return false;
+                        }
                     }
                 }
                 catch { }

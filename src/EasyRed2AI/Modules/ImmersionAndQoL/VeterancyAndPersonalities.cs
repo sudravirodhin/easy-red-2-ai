@@ -1203,7 +1203,7 @@ namespace EasyRed2HumanAI
                         ReferenceEquals(__instance, null) ||
                         __instance.Pointer == IntPtr.Zero ||
                         !__instance.IsAI() ||
-                        __instance.IsPlayer())
+                        AiCore.IsAnyHumanPlayerSoldier(__instance))
                     {
                         return true;
                     }
@@ -1288,7 +1288,16 @@ namespace EasyRed2HumanAI
                     {
                         Vector3 targetPos = __1.GetCenterOfUnit();
                         float dist = Vector3.Distance(h.Tr.position, targetPos);
-                        if (!IsSafeToThrowGrenadeAt(__instance, targetPos, dist, 11.5f))
+                        float reqSafeRadius = 11.5f;
+                        if (AiCore.TryGetThrowablePrefabInfo(__0, out AiCore.ThrowablePrefabInfo tInfo) &&
+                            tInfo.IsValid &&
+                            tInfo.ExplosionRadius > 0.1f)
+                        {
+                            reqSafeRadius = Mathf.Max(11.5f, tInfo.ExplosionRadius + 3.5f);
+                            if (tInfo.IsSatchelOrHeavyDemo)
+                                reqSafeRadius = Mathf.Max(reqSafeRadius, 16.0f);
+                        }
+                        if (!IsSafeToThrowGrenadeAt(__instance, targetPos, dist, reqSafeRadius))
                         {
                             __instance.throw_end_time = Time.time + 3.0f;
                             if (VisionConfig.DebugLogging.Value)

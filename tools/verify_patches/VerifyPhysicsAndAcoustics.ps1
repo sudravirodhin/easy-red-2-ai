@@ -9,11 +9,17 @@ $turFile  = Join-Path $workspace "src\EasyRed2AI\Modules\MacroAndVehicles\Turret
 $locFile  = Join-Path $workspace "src\EasyRed2AI\Modules\Infantry\LocomotionAndVaulting.cs"
 $ffFile   = Join-Path $workspace "src\EasyRed2AI\Modules\Infantry\FriendlyFireAndYield.cs"
 $stFile   = Join-Path $workspace "src\EasyRed2AI\Modules\Infantry\StanceAndCoverTactics.cs"
+$thmFile  = Join-Path $workspace "src\EasyRed2AI\Modules\Vision\ThreatMemoryAndWatchSectors.cs"
+$goapExecFile = Join-Path $workspace "src\EasyRed2AI\Modules\Goap\SoldierGoapExecution.cs"
 $vetFile  = Join-Path $workspace "src\EasyRed2AI\Modules\ImmersionAndQoL\VeterancyAndPersonalities.cs"
 $gvFile   = Join-Path $workspace "src\EasyRed2AI\Modules\MacroAndVehicles\GroundVehicleTactics.cs"
 $caFile   = Join-Path $workspace "src\EasyRed2AI\Modules\MacroAndVehicles\CombinedArmsAndTurrets.cs"
 $airFile  = Join-Path $workspace "src\EasyRed2AI\Modules\MacroAndVehicles\AircraftTactics.cs"
 $tbFile   = Join-Path $workspace "src\EasyRed2AI\Modules\MacroAndVehicles\TurretAmmoAndBailout.cs"
+$cfgHudFile = Join-Path $workspace "src\EasyRed2AI\UI\ConfigMenuAndHud.cs"
+$tnFile   = Join-Path $workspace "src\EasyRed2AI\Modules\Goap\TeamNetAndSquadCommand.cs"
+$emFile   = Join-Path $workspace "src\EasyRed2AI\Modules\Emergent\EmergentRuntimeBridge.cs"
+$pluginFile = Join-Path $workspace "src\EasyRed2AI\Plugin.cs"
 $buildDir = Join-Path $workspace "build"
 New-Item -ItemType Directory -Force -Path $buildDir | Out-Null
 
@@ -37,6 +43,7 @@ $aiFovPart = Slice-LinesBetween $aiLines '^\s*public static float EvaluateHumanS
 
 $visLines = Get-Content $visFile
 $visPartA = Slice-LinesBetween $visLines '^\s*private struct RecentGunfireEntry' '_explosionSeqCounter = 1;' 0
+$visFootstepRadiusPart = Slice-LinesBetween $visLines '^\s*internal static float ComputeFootstepAudibleRadius\(' '^\s*private static void RecordSoldierFootstep\(' -2
 $visPartB = Slice-LinesBetween $visLines '^\s*private static void RecordAcousticEventInternal' 'public static bool HasFiredRecently' -2
 $visRangePart = Slice-LinesBetween $visLines '^\s*internal static float ComputeEffectiveSoldierSightRange\(' '^\s*return \(baseDist \+ firingBonus\) \* camoMultiplier' 1
 $visThinWallPart = Slice-LinesBetween $visLines '^\s*internal static bool IsObserverBlockedByCloseThinWall\(' '^\s*\[HarmonyPatch\(typeof\(Creature\), nameof\(Creature\.CanSee\)\)\]' -2
@@ -46,6 +53,7 @@ $wqEnvPart = Slice-LinesBetween $wqLines '^\s*public static bool RaycastEnvironm
 $wqIgnoreColPart = Slice-LinesBetween $wqLines '^\s*private static bool ShouldIgnoreEnvCollider\(' '^\s*public static bool IsVehicleCollider\(' -5
 $wqSnapProbe  = Slice-LinesBetween $wqLines '^\s*public static bool TrySnapWalkableGroundProbe\(' 'snappedGroundPos = gHit\.point;\s*$' 2
 $wqBarrelPart = Slice-LinesBetween $wqLines '^\s*public static float GetBarrelHeightForPose\(' '^\s*return 1\.24f;' 2
+$wqSmokeRiskPart = Slice-LinesBetween $wqLines '^\s*public static bool EvaluateBlindSmokeTraversalRisk\(' '^\s*public static bool IsBlindSmokePathHighRisk\(' -2
 
 $goapLines = Get-Content $goapFile
 $goapPartA = Slice-LinesBetween $goapLines '^\s*internal enum SquadNetDirective' 'public Vector3 MoveOverrideDest;' 1
@@ -73,15 +81,28 @@ $ffWallPart = Slice-LinesBetween $ffLines '^\s*internal static bool IsBotGunClip
 $ffConePart = Slice-LinesBetween $ffLines '^\s*private static bool CheckSingleFriendlyInCone\(' '^\s*private static void TryNudgeFriendlyOutOfFireCone\(' -2
 
 $stLines = Get-Content $stFile
+$stStealthPart = Slice-LinesBetween $stLines '^\s*internal static bool EvaluateTacticalStealthCrouch\(' '^\s*internal static bool ShouldBotStealthCrouch\(' -2
+$stProneSafetyPart = Slice-LinesBetween $stLines '^\s*internal static bool EvaluateProneSafetyVsWin\(' '^\s*internal static bool ShouldBotChooseOrStayProneForSafety\(' -2
 $stLofPart = Slice-LinesBetween $stLines '^\s*private static bool HasClearLineOfFireAtHeight\(' '^\s*private static bool TrySidestepWallObstruction\(' -2
 
-# Static anti-regression source guards for over-wall shooting, auto-peek, turret/plane/crew raycast invariants
-$ffRaw  = Get-Content $ffFile -Raw
-$stRaw  = Get-Content $stFile -Raw
-$vetRaw = Get-Content $vetFile -Raw
+$tnLines = Get-Content $tnFile
+$tnEnemyHealSafetyPart = Slice-LinesBetween $tnLines '^\s*internal static bool EvaluateMedicConfidentlySafeForEnemyHeal\(' '^\s*internal static bool IsMedicConfidentlySafeToHealEnemy\(' -2
+$thmLines = Get-Content $thmFile
+$thmGrenadeClearancePart = Slice-LinesBetween $thmLines '^\s*internal static bool EvaluateGrenadeFriendlyClearance\(' '^\s*private static bool IsUnitFacingTowardTarget\(' -2
+
+# Static anti-regression source guards for over-wall shooting, auto-peek, turret/plane/crew raycast invariants & stealth-crouch
+$ffRaw       = Get-Content $ffFile -Raw
+$stRaw       = Get-Content $stFile -Raw
+$thmRaw      = Get-Content $thmFile -Raw
+$goapExecRaw = Get-Content $goapExecFile -Raw
+$wqRaw       = Get-Content $wqFile -Raw
+$vetRaw      = Get-Content $vetFile -Raw
 $tbRaw  = Get-Content $tbFile -Raw
 $airRaw = Get-Content $airFile -Raw
 $visRaw = Get-Content $visFile -Raw
+$aiCoreRaw = Get-Content $aiCoreFile -Raw
+$locRaw    = Get-Content $locFile -Raw
+$cfgHudRaw = Get-Content $cfgHudFile -Raw
 if ($tbRaw -notmatch 'TurretGun_SetGunTriggerPressed_Patch[\s\S]*?IsAirVehicle\(\)') {
     throw "Regression: TurretGun_SetGunTriggerPressed_Patch in TurretAmmoAndBailout.cs must early-skip IsAirVehicle()!"
 }
@@ -114,9 +135,85 @@ $defSuppMatch = [regex]::Match($peekParamMatch.Value, 'maxPeekSuppression\s*=\s*
 if (-not $defSuppMatch.Success -or [float]$defSuppMatch.Groups[1].Value -lt 40) {
     throw "Regression: GetEffectivePeekParameters default maxPeekSuppression must be >= 40f!"
 }
+if ($stRaw -notmatch 'internal static bool ShouldBotStealthCrouch\(' -or $stRaw -notmatch 'internal static bool EvaluateTacticalStealthCrouch\(') {
+    throw "Regression: StanceAndCoverTactics.cs must define ShouldBotStealthCrouch and EvaluateTacticalStealthCrouch!"
+}
+if ($thmRaw -notmatch 'ShouldBotStealthCrouch\(' -or $thmRaw -notmatch 'activeStealthCrouch[\s\S]*?MoveOptimized\(false,\s*__0\)') {
+    throw "Regression: ThreatMemoryAndWatchSectors.cs must call ShouldBotStealthCrouch and use MoveOptimized(false, __0) for quiet stealth movement!"
+}
+if ($goapExecRaw -notmatch 'TryExecuteCloseAcousticInvestigate[\s\S]*?StealthCrouchUntil' -or $goapExecRaw -notmatch 'ExecuteGoapMoveToFlankCover[\s\S]*?StealthCrouchUntil') {
+    throw "Regression: SoldierGoapExecution.cs must stamp StealthCrouchUntil in both TryExecuteCloseAcousticInvestigate and ExecuteGoapMoveToFlankCover!"
+}
+if ($wqRaw -notmatch 'IsEnemyAircraftOverhead\([\s\S]*?WorldAirSquadCount\s*<=\s*0') {
+    throw "Regression: AiCore.WorldQuery.cs must define IsEnemyAircraftOverhead with WorldAirSquadCount <= 0 fast-exit!"
+}
+if ($stRaw -notmatch 'internal static bool EvaluateProneSafetyVsWin\(' -or $stRaw -notmatch 'internal static bool ShouldBotChooseOrStayProneForSafety\(') {
+    throw "Regression: StanceAndCoverTactics.cs must define EvaluateProneSafetyVsWin and ShouldBotChooseOrStayProneForSafety!"
+}
+if ($goapExecRaw -notmatch 'ExecuteGoapSeekEmergencyCover[\s\S]*?ShouldBotChooseOrStayProneForSafety\(') {
+    throw "Regression: ExecuteGoapSeekEmergencyCover in SoldierGoapExecution.cs must call ShouldBotChooseOrStayProneForSafety!"
+}
+if ($aiCoreRaw -notmatch 'GetCachedSoldierSyncher\(' -or $aiCoreRaw -notmatch 'IsAnyHumanPlayerSoldier\([\s\S]*?GetCachedSoldierSyncher') {
+    throw "Regression: AiCore.cs must define GetCachedSoldierSyncher and use it in IsAnyHumanPlayerSoldier!"
+}
+if ($locRaw -notmatch 'SoldierAI_UpdateMoveDirection_Patch[\s\S]*?LastUpdateMoveDirRenderFrame') {
+    throw "Regression: LocomotionAndVaulting.cs SoldierAI_UpdateMoveDirection_Patch must guard on LastUpdateMoveDirRenderFrame!"
+}
+if ($cfgHudRaw -notmatch 'Squad_Join_Patch[\s\S]*?CachedSquad[\s\S]*?SyncBotOrdersOnSquadJoin\(') {
+    throw "Regression: ConfigMenuAndHud.cs Squad_Join_Patch must refresh CachedSquad and call SyncBotOrdersOnSquadJoin!"
+}
+if ($goapExecRaw -notmatch 'SyncBotOrdersOnSquadJoin\([\s\S]*?Order\.follow[\s\S]*?GetDestinationInPosition\([\s\S]*?AssignBotCoverOrDestination\(') {
+    throw "Regression: SoldierGoapExecution.cs SyncBotOrdersOnSquadJoin must handle Order.follow, GetDestinationInPosition, and AssignBotCoverOrDestination!"
+}
 
 $cqbPath = Join-Path $workspace "src\EasyRed2AI\Modules\Infantry\CloseCombatAndSupport.cs"
 $cqbText = Get-Content $cqbPath -Raw
+$tnRaw = Get-Content $tnFile -Raw
+$pluginRaw = Get-Content $pluginFile -Raw
+if ($tnRaw -notmatch 'EvaluateMedicConfidentlySafeForEnemyHeal\(' -or
+    $tnRaw -notmatch 'IsMedicConfidentlySafeToHealEnemy\(' -or
+    $tnRaw -notmatch 'IsActivelyHealingTeammate[\s\S]*?IsMedicConfidentlySafeToHealEnemy\(' -or
+    $tnRaw -notmatch 'DriveMedicHealingApproach[\s\S]*?IsMedicConfidentlySafeToHealEnemy\(') {
+    throw "Regression: TeamNetAndSquadCommand.cs must define EvaluateMedicConfidentlySafeForEnemyHeal/IsMedicConfidentlySafeToHealEnemy and call IsMedicConfidentlySafeToHealEnemy in both IsActivelyHealingTeammate and DriveMedicHealingApproach!"
+}
+if ($cqbText -notmatch 'Squad_MedicRoutine_Patch[\s\S]*?IsMedicConfidentlySafeToHealEnemy\(' -or
+    $cqbText -notmatch 'MedicHealingDestination_OnCoverReached_Patch[\s\S]*?IsMedicConfidentlySafeToHealEnemy\(') {
+    throw "Regression: CloseCombatAndSupport.cs must enforce IsMedicConfidentlySafeToHealEnemy in both Squad_MedicRoutine_Patch and MedicHealingDestination_OnCoverReached_Patch!"
+}
+if ($pluginRaw -notmatch 'SafePatch\(typeof\(VeteranAndTacticsPatches\.MedicHealingDestination_OnCoverReached_Patch\)\)') {
+    throw "Regression: Plugin.cs must register SafePatch(typeof(VeteranAndTacticsPatches.MedicHealingDestination_OnCoverReached_Patch))!"
+}
+$emRaw = Get-Content $emFile -Raw
+if ($wqRaw -notmatch 'IsSegmentCrossingSmoke\(' -or
+    $wqRaw -notmatch 'HasFriendlyEyesBeyondSmoke\(' -or
+    $wqRaw -notmatch 'EvaluateBlindSmokeTraversalRisk\(' -or
+    $wqRaw -notmatch 'IsBlindSmokePathHighRisk\(') {
+    throw "Regression: AiCore.WorldQuery.cs must define IsSegmentCrossingSmoke, HasFriendlyEyesBeyondSmoke, EvaluateBlindSmokeTraversalRisk, and IsBlindSmokePathHighRisk!"
+}
+if ($emRaw -notmatch 'IsBlindSmokePathHighRisk\(' -or
+    $goapExecRaw -notmatch 'IsBlindSmokePathHighRisk\(' -or
+    $tnRaw -notmatch 'IsBlindSmokePathHighRisk\(' -or
+    $stRaw -notmatch 'IsBlindSmokePathHighRisk\(') {
+    throw "Regression: EmergentRuntimeBridge.cs, SoldierGoapExecution.cs, TeamNetAndSquadCommand.cs, and StanceAndCoverTactics.cs must all enforce IsBlindSmokePathHighRisk!"
+}
+if ($tnRaw -match 'hasSmokeCover\s*=[\s\S]{0,260}Physics\.Linecast\([\s\S]{0,140}GetSmokeOcclusionMask\(') {
+    throw "Regression: TeamNetAndSquadCommand.cs must not grant hasSmokeCover for charges from arbitrary Physics.Linecast smoke checks!"
+}
+$grenadeFnText = ([regex]::Match($thmRaw, 'internal static bool IsSafeToThrowGrenadeAt[\s\S]*?\r?\n        \}')).Value
+if ($thmRaw -notmatch 'EvaluateGrenadeFriendlyClearance\(' -or
+    [string]::IsNullOrEmpty($grenadeFnText) -or
+    $grenadeFnText -notmatch 'AiCore\.WorldSoldiers' -or
+    $grenadeFnText -notmatch 'AiCore\.WorldInjuredSoldiers' -or
+    $grenadeFnText -notmatch 'AiCore\.AreSameSideFactions\(myFaction,\s*fSnap\.Faction\)' -or
+    $grenadeFnText -match 'sqSnap\.Faction\s*!=\s*myFaction') {
+    throw "Regression: ThreatMemoryAndWatchSectors.cs grenade FF must scan WorldSoldiers + WorldInjuredSoldiers via AreSameSideFactions and EvaluateGrenadeFriendlyClearance!"
+}
+if ($vetRaw -notmatch 'Soldier_Throw_Patch[\s\S]*?AiCore\.TryGetThrowablePrefabInfo\(') {
+    throw "Regression: VeterancyAndPersonalities.cs Soldier_Throw_Patch must scale safety radius via AiCore.TryGetThrowablePrefabInfo!"
+}
+if ($wqRaw -match 'EnsureWorldSnapshot[\s\S]*?(?:IsPlayer\s*=\s*u\.IsPlayer\(\)|bool\s+isHuman\s*=\s*u\.IsPlayer\(\))') {
+    throw "Regression: AiCore.WorldQuery.cs EnsureWorldSnapshot must use IsAnyHumanPlayerSoldier(...) instead of raw u.IsPlayer()!"
+}
 function Extract-CqbFloat {
     param([string]$Text, [string]$Pattern, [string]$Label)
     $m = [regex]::Match($Text, $Pattern)
@@ -728,11 +825,13 @@ $wqIgnoreColPart
 $aiFovPart
 $wqBarrelPart
 $wqSnapProbe
+$wqSmokeRiskPart
     }
 
     public static partial class VisionPatches
     {
 $visPartA
+$visFootstepRadiusPart
 $visPartB
 $visRangePart
 $visThinWallPart
@@ -762,6 +861,10 @@ $caTurretWallPart
 $caTurretFfPart
 $ffWallPart
 $ffConePart
+$stStealthPart
+$stProneSafetyPart
+$tnEnemyHealSafetyPart
+$thmGrenadeClearancePart
 $stLofPart
 $locVaultArcPart
 
@@ -1944,6 +2047,265 @@ $locVaultArcPart
                     Physics.SceneWalls.Add(new Physics.WallBox { MinX = -5f, MaxX = 5f, MinY = 0f, MaxY = 2.5f, MinZ = 0.20f, MaxZ = 0.35f, IsVehicle = false });
                     Assert(VisionPatches.TestIsObserverBlockedByCloseThinWall(false, new Vector3(0f, 1.5f, 0f), new Vector3(0f, 0f, 20f), 20f, obsRoot, false),
                         "11E Foot soldier pressed against solid 0.25m brick wall MUST remain sight-blocked!");
+
+                    // 11F. Tactical Stealth-Crouch triggers, emergency/CQB overrides & footstep acoustic scaling
+                    Assert(Mathf.Abs(VisionPatches.ComputeFootstepAudibleRadius(SoldierPose.Prone, false) - 0f) < 1e-4f &&
+                           Mathf.Abs(VisionPatches.ComputeFootstepAudibleRadius(SoldierPose.Prone, true) - 0f) < 1e-4f &&
+                           Mathf.Abs(VisionPatches.ComputeFootstepAudibleRadius(SoldierPose.Crouch, false) - 4.5f) < 1e-4f &&
+                           Mathf.Abs(VisionPatches.ComputeFootstepAudibleRadius(SoldierPose.Crouch, true) - 7.0f) < 1e-4f &&
+                           Mathf.Abs(VisionPatches.ComputeFootstepAudibleRadius(SoldierPose.Idle, false) - 11.5f) < 1e-4f &&
+                           Mathf.Abs(VisionPatches.ComputeFootstepAudibleRadius(SoldierPose.Idle, true) - 18.0f) < 1e-4f,
+                        "11F ComputeFootstepAudibleRadius values mismatch (Prone=0, Crouch=4.5/7.0, Stand=11.5/18.0)!");
+
+                    Assert(VeteranAndTacticsPatches.EvaluateTacticalStealthCrouch(true, false, false, false, false, false, false, false) &&
+                           VeteranAndTacticsPatches.EvaluateTacticalStealthCrouch(false, true, false, false, false, false, false, false) &&
+                           VeteranAndTacticsPatches.EvaluateTacticalStealthCrouch(false, false, true, false, false, false, false, false) &&
+                           VeteranAndTacticsPatches.EvaluateTacticalStealthCrouch(false, false, false, true, false, false, false, false) &&
+                           VeteranAndTacticsPatches.EvaluateTacticalStealthCrouch(false, false, false, false, true, false, false, false),
+                        "11F Each of the 5 stealth triggers must enable tactical stealth-crouch when uncompromised!");
+
+                    Assert(!VeteranAndTacticsPatches.EvaluateTacticalStealthCrouch(false, false, false, false, false, false, false, false),
+                        "11F Open-field movement with no stealth trigger must stay upright!");
+
+                    Assert(!VeteranAndTacticsPatches.EvaluateTacticalStealthCrouch(true, true, true, true, true, true, false, false) &&
+                           !VeteranAndTacticsPatches.EvaluateTacticalStealthCrouch(true, true, true, true, true, false, true, false) &&
+                           !VeteranAndTacticsPatches.EvaluateTacticalStealthCrouch(true, true, true, true, true, false, false, true),
+                        "11F Emergency/charging, compromised/loud fire, or point-blank CQB must override ALL stealth triggers!");
+
+                    // 11G. H.A.R.M. Prone-for-Safety vs Win-to-Rise utility trade-off
+                    // 1) Exposed under fire with low win urgency -> drops prone for safety
+                    Assert(VeteranAndTacticsPatches.EvaluateProneSafetyVsWin(
+                            currentlyProne: false, inCoverOrShelteredWall: false, hasClearProneLof: true,
+                            hasVisibleEnemy: true, enemyDist: 55f, suppression: 30f, smoothedHarm: 0.42f, totalHarm: 0.45f,
+                            underFireRecently: true, underShelling: false, enemyPlaneOverhead: false, isOpenGunnerOrMarksman: false,
+                            wSurv: 1.40f, wWin: 0.90f, winUrgency: 0.25f, canHarm: 0.65f, objectiveTickingAgainst: false, wantsToMoveOrWinPush: false),
+                        "11G Exposed soldier under fire (TotalHarm=0.45) with low win urgency should choose Prone for safety!");
+
+                    // 2) Already prone exposed during brief lull (hysteresis keeps them down at 0.26 harm)
+                    Assert(VeteranAndTacticsPatches.EvaluateProneSafetyVsWin(
+                            currentlyProne: true, inCoverOrShelteredWall: false, hasClearProneLof: false,
+                            hasVisibleEnemy: false, enemyDist: 999f, suppression: 12f, smoothedHarm: 0.26f, totalHarm: 0.26f,
+                            underFireRecently: false, underShelling: false, enemyPlaneOverhead: false, isOpenGunnerOrMarksman: false,
+                            wSurv: 1.35f, wWin: 0.95f, winUrgency: 0.20f, canHarm: 0f, objectiveTickingAgainst: false, wantsToMoveOrWinPush: false),
+                        "11G Already prone exposed soldier should stay Prone during brief lull (hysteresis)!");
+
+                    // 3) High Win urgency + ticking objective + bold wWin -> gets them up!
+                    Assert(!VeteranAndTacticsPatches.EvaluateProneSafetyVsWin(
+                            currentlyProne: true, inCoverOrShelteredWall: false, hasClearProneLof: true,
+                            hasVisibleEnemy: true, enemyDist: 45f, suppression: 28f, smoothedHarm: 0.35f, totalHarm: 0.38f,
+                            underFireRecently: true, underShelling: false, enemyPlaneOverhead: false, isOpenGunnerOrMarksman: false,
+                            wSurv: 1.15f, wWin: 1.35f, winUrgency: 0.85f, canHarm: 0.70f, objectiveTickingAgainst: true, wantsToMoveOrWinPush: false),
+                        "11G High Win urgency + ticking objective must lift bot out of Prone!");
+
+                    // 4) Exposed with blocked prone LOF & moderate threat -> rises to shoot, vs extreme fire+shelling -> stays flat!
+                    Assert(!VeteranAndTacticsPatches.EvaluateProneSafetyVsWin(
+                            currentlyProne: true, inCoverOrShelteredWall: false, hasClearProneLof: false,
+                            hasVisibleEnemy: true, enemyDist: 42f, suppression: 22f, smoothedHarm: 0.34f, totalHarm: 0.34f,
+                            underFireRecently: true, underShelling: false, enemyPlaneOverhead: false, isOpenGunnerOrMarksman: false,
+                            wSurv: 1.25f, wWin: 1.05f, winUrgency: 0.45f, canHarm: 0.85f, objectiveTickingAgainst: false, wantsToMoveOrWinPush: false),
+                        "11G Blocked prone LOF against visible enemy under moderate threat should rise to Crouch!");
+                    Assert(VeteranAndTacticsPatches.EvaluateProneSafetyVsWin(
+                            currentlyProne: true, inCoverOrShelteredWall: false, hasClearProneLof: false,
+                            hasVisibleEnemy: true, enemyDist: 42f, suppression: 70f, smoothedHarm: 0.80f, totalHarm: 0.85f,
+                            underFireRecently: true, underShelling: true, enemyPlaneOverhead: false, isOpenGunnerOrMarksman: false,
+                            wSurv: 1.50f, wWin: 0.90f, winUrgency: 0.30f, canHarm: 0.70f, objectiveTickingAgainst: false, wantsToMoveOrWinPush: false),
+                        "11G Extreme fire + shelling must keep pinned soldier Prone even without prone LOF!");
+
+                    // 5) Intact cover under moderate fire -> stays crouched in cover; under shelling -> flattens in cover
+                    Assert(!VeteranAndTacticsPatches.EvaluateProneSafetyVsWin(
+                            currentlyProne: false, inCoverOrShelteredWall: true, hasClearProneLof: false,
+                            hasVisibleEnemy: false, enemyDist: 999f, suppression: 30f, smoothedHarm: 0.35f, totalHarm: 0.35f,
+                            underFireRecently: true, underShelling: false, enemyPlaneOverhead: false, isOpenGunnerOrMarksman: false,
+                            wSurv: 1.35f, wWin: 0.95f, winUrgency: 0.30f, canHarm: 0.40f, objectiveTickingAgainst: false, wantsToMoveOrWinPush: false),
+                        "11G Soldier in intact cover under moderate fire should hold Crouch rather than belly-flopping!");
+                    Assert(VeteranAndTacticsPatches.EvaluateProneSafetyVsWin(
+                            currentlyProne: false, inCoverOrShelteredWall: true, hasClearProneLof: false,
+                            hasVisibleEnemy: false, enemyDist: 999f, suppression: 45f, smoothedHarm: 0.60f, totalHarm: 0.75f,
+                            underFireRecently: true, underShelling: true, enemyPlaneOverhead: false, isOpenGunnerOrMarksman: false,
+                            wSurv: 1.45f, wWin: 0.90f, winUrgency: 0.25f, canHarm: 0f, objectiveTickingAgainst: false, wantsToMoveOrWinPush: false),
+                        "11G Soldier in cover under active artillery shelling should go Prone!");
+
+                    // 6) Open-ground gunner/marksman (65m, clear prone LOF) -> Prone, unless objective ticks urgently
+                    Assert(VeteranAndTacticsPatches.EvaluateProneSafetyVsWin(
+                            currentlyProne: false, inCoverOrShelteredWall: false, hasClearProneLof: true,
+                            hasVisibleEnemy: true, enemyDist: 65f, suppression: 0f, smoothedHarm: 0.05f, totalHarm: 0.05f,
+                            underFireRecently: false, underShelling: false, enemyPlaneOverhead: false, isOpenGunnerOrMarksman: true,
+                            wSurv: 1.35f, wWin: 0.95f, winUrgency: 0.20f, canHarm: 0.85f, objectiveTickingAgainst: false, wantsToMoveOrWinPush: false),
+                        "11G Open-ground MG/Marksman at 65m with clear prone LOF should go Prone!");
+                    Assert(!VeteranAndTacticsPatches.EvaluateProneSafetyVsWin(
+                            currentlyProne: true, inCoverOrShelteredWall: false, hasClearProneLof: true,
+                            hasVisibleEnemy: true, enemyDist: 65f, suppression: 0f, smoothedHarm: 0.05f, totalHarm: 0.05f,
+                            underFireRecently: false, underShelling: false, enemyPlaneOverhead: false, isOpenGunnerOrMarksman: true,
+                            wSurv: 1.10f, wWin: 1.35f, winUrgency: 0.90f, canHarm: 0.75f, objectiveTickingAgainst: true, wantsToMoveOrWinPush: false),
+                        "11G Urgent ticking objective + high wWin should get open gunner/marksman up!");
+
+                    // 7) Outdoor unmarked under enemy aircraft -> Prone
+                    Assert(VeteranAndTacticsPatches.EvaluateProneSafetyVsWin(
+                            currentlyProne: false, inCoverOrShelteredWall: false, hasClearProneLof: true,
+                            hasVisibleEnemy: false, enemyDist: 999f, suppression: 0f, smoothedHarm: 0f, totalHarm: 0f,
+                            underFireRecently: false, underShelling: false, enemyPlaneOverhead: true, isOpenGunnerOrMarksman: false,
+                            wSurv: 1.35f, wWin: 0.95f, winUrgency: 0.25f, canHarm: 0f, objectiveTickingAgainst: false, wantsToMoveOrWinPush: false),
+                        "11G Outdoor bot under enemy aircraft with low win urgency should go Prone!");
+
+                    // 8) Danger cleared, close CQB (10m), or moving push -> never stay Prone
+                    Assert(!VeteranAndTacticsPatches.EvaluateProneSafetyVsWin(
+                            currentlyProne: true, inCoverOrShelteredWall: false, hasClearProneLof: true,
+                            hasVisibleEnemy: false, enemyDist: 999f, suppression: 0f, smoothedHarm: 0.05f, totalHarm: 0.05f,
+                            underFireRecently: false, underShelling: false, enemyPlaneOverhead: false, isOpenGunnerOrMarksman: false,
+                            wSurv: 1.50f, wWin: 0.85f, winUrgency: 0.20f, canHarm: 0f, objectiveTickingAgainst: false, wantsToMoveOrWinPush: false) &&
+                           !VeteranAndTacticsPatches.EvaluateProneSafetyVsWin(
+                            currentlyProne: true, inCoverOrShelteredWall: false, hasClearProneLof: true,
+                            hasVisibleEnemy: true, enemyDist: 10f, suppression: 50f, smoothedHarm: 0.70f, totalHarm: 0.80f,
+                            underFireRecently: true, underShelling: false, enemyPlaneOverhead: false, isOpenGunnerOrMarksman: false,
+                            wSurv: 1.60f, wWin: 0.80f, winUrgency: 0.20f, canHarm: 0.90f, objectiveTickingAgainst: false, wantsToMoveOrWinPush: false) &&
+                           !VeteranAndTacticsPatches.EvaluateProneSafetyVsWin(
+                            currentlyProne: true, inCoverOrShelteredWall: false, hasClearProneLof: true,
+                            hasVisibleEnemy: false, enemyDist: 999f, suppression: 60f, smoothedHarm: 0.70f, totalHarm: 0.80f,
+                            underFireRecently: true, underShelling: true, enemyPlaneOverhead: false, isOpenGunnerOrMarksman: false,
+                            wSurv: 1.60f, wWin: 0.80f, winUrgency: 0.20f, canHarm: 0f, objectiveTickingAgainst: false, wantsToMoveOrWinPush: true),
+                        "11G Safe area, close CQB (10m), or active move push must NEVER choose/stay Prone!");
+
+                    // 11H. Medic enemy-heal safety gate (only when medic themselves is confidently safe)
+                    Assert(VeteranAndTacticsPatches.EvaluateMedicConfidentlySafeForEnemyHeal(
+                            medicAliveAndStanding: true, medicBleeding: false, medicInVehicleOrCarrying: false,
+                            suppression: 5.9f, underFireRecently: false, hasVisibleEnemy: false, hasActiveCombatEnemyNearby: false,
+                            medicHarm: 0.15f, patientSpotHarm: 0.19f, underShellingOrDangerClose: false, enemyPlaneOverhead: false,
+                            hasWoundedFriendlyNearby: false),
+                        "11H Calm post-fight lull with zero wounded friendlies should permit enemy POW syringe heal!");
+                    Assert(!VeteranAndTacticsPatches.EvaluateMedicConfidentlySafeForEnemyHeal(
+                            medicAliveAndStanding: true, medicBleeding: false, medicInVehicleOrCarrying: false,
+                            suppression: 0f, underFireRecently: false, hasVisibleEnemy: false, hasActiveCombatEnemyNearby: false,
+                            medicHarm: 0f, patientSpotHarm: 0f, underShellingOrDangerClose: false, enemyPlaneOverhead: false,
+                            hasWoundedFriendlyNearby: true),
+                        "11H Nearby wounded friendly must ALWAYS block enemy syringe heal!");
+                    Assert(!VeteranAndTacticsPatches.EvaluateMedicConfidentlySafeForEnemyHeal(
+                            medicAliveAndStanding: true, medicBleeding: false, medicInVehicleOrCarrying: false,
+                            suppression: 6.0f, underFireRecently: false, hasVisibleEnemy: false, hasActiveCombatEnemyNearby: false,
+                            medicHarm: 0f, patientSpotHarm: 0f, underShellingOrDangerClose: false, enemyPlaneOverhead: false,
+                            hasWoundedFriendlyNearby: false) &&
+                           !VeteranAndTacticsPatches.EvaluateMedicConfidentlySafeForEnemyHeal(
+                            medicAliveAndStanding: true, medicBleeding: false, medicInVehicleOrCarrying: false,
+                            suppression: 0f, underFireRecently: true, hasVisibleEnemy: false, hasActiveCombatEnemyNearby: false,
+                            medicHarm: 0f, patientSpotHarm: 0f, underShellingOrDangerClose: false, enemyPlaneOverhead: false,
+                            hasWoundedFriendlyNearby: false) &&
+                           !VeteranAndTacticsPatches.EvaluateMedicConfidentlySafeForEnemyHeal(
+                            medicAliveAndStanding: true, medicBleeding: false, medicInVehicleOrCarrying: false,
+                            suppression: 0f, underFireRecently: false, hasVisibleEnemy: true, hasActiveCombatEnemyNearby: false,
+                            medicHarm: 0f, patientSpotHarm: 0f, underShellingOrDangerClose: false, enemyPlaneOverhead: false,
+                            hasWoundedFriendlyNearby: false) &&
+                           !VeteranAndTacticsPatches.EvaluateMedicConfidentlySafeForEnemyHeal(
+                            medicAliveAndStanding: true, medicBleeding: false, medicInVehicleOrCarrying: false,
+                            suppression: 0f, underFireRecently: false, hasVisibleEnemy: false, hasActiveCombatEnemyNearby: true,
+                            medicHarm: 0f, patientSpotHarm: 0f, underShellingOrDangerClose: false, enemyPlaneOverhead: false,
+                            hasWoundedFriendlyNearby: false),
+                        "11H Suppression >= 6, underFire, visible enemy, or nearby combat enemy out of LOS must block enemy heal!");
+                    Assert(!VeteranAndTacticsPatches.EvaluateMedicConfidentlySafeForEnemyHeal(
+                            medicAliveAndStanding: true, medicBleeding: false, medicInVehicleOrCarrying: false,
+                            suppression: 0f, underFireRecently: false, hasVisibleEnemy: false, hasActiveCombatEnemyNearby: false,
+                            medicHarm: 0.16f, patientSpotHarm: 0f, underShellingOrDangerClose: false, enemyPlaneOverhead: false,
+                            hasWoundedFriendlyNearby: false) &&
+                           !VeteranAndTacticsPatches.EvaluateMedicConfidentlySafeForEnemyHeal(
+                            medicAliveAndStanding: true, medicBleeding: false, medicInVehicleOrCarrying: false,
+                            suppression: 0f, underFireRecently: false, hasVisibleEnemy: false, hasActiveCombatEnemyNearby: false,
+                            medicHarm: 0f, patientSpotHarm: 0.20f, underShellingOrDangerClose: false, enemyPlaneOverhead: false,
+                            hasWoundedFriendlyNearby: false) &&
+                           !VeteranAndTacticsPatches.EvaluateMedicConfidentlySafeForEnemyHeal(
+                            medicAliveAndStanding: true, medicBleeding: false, medicInVehicleOrCarrying: false,
+                            suppression: 0f, underFireRecently: false, hasVisibleEnemy: false, hasActiveCombatEnemyNearby: false,
+                            medicHarm: 0f, patientSpotHarm: 0f, underShellingOrDangerClose: true, enemyPlaneOverhead: false,
+                            hasWoundedFriendlyNearby: false) &&
+                           !VeteranAndTacticsPatches.EvaluateMedicConfidentlySafeForEnemyHeal(
+                            medicAliveAndStanding: true, medicBleeding: false, medicInVehicleOrCarrying: false,
+                            suppression: 0f, underFireRecently: false, hasVisibleEnemy: false, hasActiveCombatEnemyNearby: false,
+                            medicHarm: 0f, patientSpotHarm: 0f, underShellingOrDangerClose: false, enemyPlaneOverhead: true,
+                            hasWoundedFriendlyNearby: false),
+                        "11H Elevated HARM (>=0.16 / patient>=0.20), shelling, or enemy plane overhead must block enemy heal!");
+                    Assert(!VeteranAndTacticsPatches.EvaluateMedicConfidentlySafeForEnemyHeal(
+                            medicAliveAndStanding: true, medicBleeding: true, medicInVehicleOrCarrying: false,
+                            suppression: 0f, underFireRecently: false, hasVisibleEnemy: false, hasActiveCombatEnemyNearby: false,
+                            medicHarm: 0f, patientSpotHarm: 0f, underShellingOrDangerClose: false, enemyPlaneOverhead: false,
+                            hasWoundedFriendlyNearby: false) &&
+                           !VeteranAndTacticsPatches.EvaluateMedicConfidentlySafeForEnemyHeal(
+                            medicAliveAndStanding: false, medicBleeding: false, medicInVehicleOrCarrying: false,
+                            suppression: 0f, underFireRecently: false, hasVisibleEnemy: false, hasActiveCombatEnemyNearby: false,
+                            medicHarm: 0f, patientSpotHarm: 0f, underShellingOrDangerClose: false, enemyPlaneOverhead: false,
+                            hasWoundedFriendlyNearby: false) &&
+                           !VeteranAndTacticsPatches.EvaluateMedicConfidentlySafeForEnemyHeal(
+                            medicAliveAndStanding: true, medicBleeding: false, medicInVehicleOrCarrying: true,
+                            suppression: 0f, underFireRecently: false, hasVisibleEnemy: false, hasActiveCombatEnemyNearby: false,
+                            medicHarm: 0f, patientSpotHarm: 0f, underShellingOrDangerClose: false, enemyPlaneOverhead: false,
+                            hasWoundedFriendlyNearby: false),
+                        "11H Bleeding, incapacitated/charging, or in-vehicle/carrying medic must never heal enemies!");
+
+                    // 11I. Blind-smoke traversal high-risk assessment (never charge blindly through smoke without far-side intel)
+                    Assert(!AiCore.EvaluateBlindSmokeTraversalRisk(false, false, false, false, false, 0.12f, out float clearHarm) &&
+                           Mathf.Abs(clearHarm - 0.12f) < 1e-4f,
+                        "11I Clear path without smoke must preserve known Harm!");
+                    Assert(AiCore.EvaluateBlindSmokeTraversalRisk(true, false, false, false, false, 0.12f, out float blindHarm) &&
+                           blindHarm >= 0.68f,
+                        "11I Blind smoke ahead with no friendly eyes beyond smoke MUST mark high risk (Harm >= 0.68)!");
+                    Assert(!AiCore.EvaluateBlindSmokeTraversalRisk(true, false, true, false, false, 0.12f, out float spotHarm) &&
+                           Mathf.Abs(spotHarm - 0.12f) < 1e-4f,
+                        "11I Smoke with calm friendly eyes already beyond it must allow traversal without inflating Harm!");
+                    Assert(!AiCore.EvaluateBlindSmokeTraversalRisk(true, true, false, false, false, 0.15f, out float insideHarm) &&
+                           Mathf.Abs(insideHarm - 0.15f) < 1e-4f &&
+                           !AiCore.EvaluateBlindSmokeTraversalRisk(true, false, false, true, false, 0.25f, out float escHarm) &&
+                           Mathf.Abs(escHarm - 0.25f) < 1e-4f,
+                        "11I Already-inside smoke or hazard-escape/retreat must never trap bots!");
+                    Assert(!AiCore.EvaluateBlindSmokeTraversalRisk(true, false, false, false, true, 0.12f, out float despHarm) &&
+                           despHarm >= 0.44f,
+                        "11I Desperate overtime/Gyokusai may push through smoke if needed, raising caution floor to 0.44!");
+
+                    // 11J. Large-group, shoulder-bounce, moving-assault & satchel grenade FF clearance
+                    Vector3 gThrower = new Vector3(0f, 0f, 0f);
+                    Vector3 gTarget = new Vector3(0f, 0f, 25f);
+                    Assert(VeteranAndTacticsPatches.EvaluateGrenadeFriendlyClearance(
+                            gThrower, gTarget, 25f, new Vector3(20f, 0f, 10f),
+                            friendlyIsHumanPlayer: false, friendlyMovingTowardTarget: false,
+                            baseAiSafeRadius: 11.5f, basePlayerSafeRadius: 15.0f),
+                        "11J Clear throw (friendly 20m off lateral arc) must be allowed!");
+                    Assert(!VeteranAndTacticsPatches.EvaluateGrenadeFriendlyClearance(
+                            gThrower, gTarget, 25f, new Vector3(0f, 0f, 15f),
+                            friendlyIsHumanPlayer: false, friendlyMovingTowardTarget: false,
+                            baseAiSafeRadius: 11.5f, basePlayerSafeRadius: 15.0f),
+                        "11J AI friendly within 10m of target must block frag throw!");
+                    Assert(!VeteranAndTacticsPatches.EvaluateGrenadeFriendlyClearance(
+                            gThrower, gTarget, 25f, new Vector3(13.5f, 0f, 25f),
+                            friendlyIsHumanPlayer: true, friendlyMovingTowardTarget: false,
+                            baseAiSafeRadius: 11.5f, basePlayerSafeRadius: 15.0f),
+                        "11J Human player (local or remote Co-op) at 13.5m must be protected by 15.0m player envelope!");
+                    Assert(!VeteranAndTacticsPatches.EvaluateGrenadeFriendlyClearance(
+                            gThrower, gTarget, 25f, new Vector3(0.4f, 0f, 0.6f),
+                            friendlyIsHumanPlayer: false, friendlyMovingTowardTarget: false,
+                            baseAiSafeRadius: 11.5f, basePlayerSafeRadius: 15.0f),
+                        "11J Teammate 0.6m ahead / 0.4m lateral (close crowd shoulder bounce) must block throw!");
+                    Assert(VeteranAndTacticsPatches.EvaluateGrenadeFriendlyClearance(
+                            gThrower, gTarget, 25f, new Vector3(0f, 0f, -0.8f),
+                            friendlyIsHumanPlayer: false, friendlyMovingTowardTarget: false,
+                            baseAiSafeRadius: 11.5f, basePlayerSafeRadius: 15.0f) &&
+                           !VeteranAndTacticsPatches.EvaluateGrenadeFriendlyClearance(
+                            gThrower, gTarget, 25f, new Vector3(0f, 0f, -0.8f),
+                            friendlyIsHumanPlayer: true, friendlyMovingTowardTarget: false,
+                            baseAiSafeRadius: 11.5f, basePlayerSafeRadius: 15.0f),
+                        "11J Friendly 0.8m behind thrower should allow AI throw but block close human-player envelope!");
+                    Assert(VeteranAndTacticsPatches.EvaluateGrenadeFriendlyClearance(
+                            gThrower, gTarget, 25f, new Vector3(13.5f, 0f, 25f),
+                            friendlyIsHumanPlayer: false, friendlyMovingTowardTarget: false,
+                            baseAiSafeRadius: 11.5f, basePlayerSafeRadius: 15.0f) &&
+                           !VeteranAndTacticsPatches.EvaluateGrenadeFriendlyClearance(
+                            gThrower, gTarget, 25f, new Vector3(13.5f, 0f, 25f),
+                            friendlyIsHumanPlayer: false, friendlyMovingTowardTarget: true,
+                            baseAiSafeRadius: 11.5f, basePlayerSafeRadius: 15.0f),
+                        "11J Advancing friendly at 13.5m heading toward target must trigger +3.0m lead buffer!");
+                    Assert(!VeteranAndTacticsPatches.EvaluateGrenadeFriendlyClearance(
+                            gThrower, gTarget, 25f, new Vector3(15.0f, 0f, 25f),
+                            friendlyIsHumanPlayer: false, friendlyMovingTowardTarget: false,
+                            baseAiSafeRadius: 16.0f, basePlayerSafeRadius: 16.0f) &&
+                           VeteranAndTacticsPatches.EvaluateGrenadeFriendlyClearance(
+                            gThrower, gTarget, 25f, new Vector3(18.0f, 0f, 25f),
+                            friendlyIsHumanPlayer: false, friendlyMovingTowardTarget: false,
+                            baseAiSafeRadius: 16.0f, basePlayerSafeRadius: 16.0f),
+                        "11J Heavy satchel/demo scaled radius (16.0m) must block friendly at 15.0m and allow at 18.0m!");
                 }
                 finally
                 {

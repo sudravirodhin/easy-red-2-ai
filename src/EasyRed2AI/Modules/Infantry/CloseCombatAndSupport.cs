@@ -2020,6 +2020,34 @@ namespace EasyRed2HumanAI
             _reusableDeadPatientPtrs.Clear();
         }
 
+        internal static void ReleaseMedicClaimForSoldier(IntPtr medicPtr, IntPtr patientPtr)
+        {
+            if (medicPtr == IntPtr.Zero || patientPtr == IntPtr.Zero || _medicPatientClaims.Count == 0)
+                return;
+
+            if (!_medicPatientClaims.TryGetValue(patientPtr, out MedicPatientClaim claim))
+                return;
+
+            if (claim.PrimaryMedic != null && claim.PrimaryMedic.Pointer == medicPtr)
+            {
+                if (claim.BackupMedic != null && claim.BackupMedic.Pointer != IntPtr.Zero)
+                {
+                    claim.PrimaryMedic = claim.BackupMedic;
+                    claim.BackupMedic = null;
+                    _medicPatientClaims[patientPtr] = claim;
+                }
+                else
+                {
+                    _medicPatientClaims.Remove(patientPtr);
+                }
+            }
+            else if (claim.BackupMedic != null && claim.BackupMedic.Pointer == medicPtr)
+            {
+                claim.BackupMedic = null;
+                _medicPatientClaims[patientPtr] = claim;
+            }
+        }
+
         [HarmonyPatch(typeof(Squad), nameof(Squad.MedicRoutine))]
         public static class Squad_MedicRoutine_Patch
         {
@@ -2061,18 +2089,36 @@ namespace EasyRed2HumanAI
                     PruneAndValidateMedicClaims(medicPtr, out IntPtr activePatientPtr);
 
                     // If this medic is already actively heading to a valid incapacitated (!IsDead && IsInjured) patient, let him continue!
-                    if (activePatientPtr != IntPtr.Zero &&
-                        AiCore.ResolveTargetDestination(mh) == AiCore.CachedDestKind.MedicHeal &&
-                        mh.CachedHealDest != null)
+                    if (activePatientPtr != IntPtr.Zero)
                     {
-                        MedicHealingDestination curHeal = mh.CachedHealDest;
-                        if (curHeal.soldierToHealUp != null &&
-                            !curHeal.soldierToHealUp.IsDead &&
-                            curHeal.soldierToHealUp.IsInjured &&
-                            !curHeal.soldierToHealUp.IsCarried())
+                        IntPtr curDestRaw = AiCore.GetRawTargetDestinationPtr(character);
+                        if (curDestRaw != IntPtr.Zero && curDestRaw != mh.CachedDestPtr)
+                            mh.NextDestCheckTime = 0f;
+                        if (AiCore.ResolveTargetDestination(mh) == AiCore.CachedDestKind.MedicHeal &&
+                            mh.CachedHealDest != null)
                         {
-                            DriveMedicHealingApproach(ai, character, mh, curHeal, now);
-                            return false;
+                            MedicHealingDestination curHeal = mh.CachedHealDest;
+                            Soldier curPat = curHeal.soldierToHealUp;
+                            if (curPat != null &&
+                                !curPat.IsDead &&
+                                curPat.IsInjured &&
+                                !curPat.IsCarried())
+                            {
+                                string myActiveFac = AiCore.GetCachedFaction(mh, now);
+                                string patActiveFac = AiCore.GetCachedFaction(curPat);
+                                if (AiCore.AreEnemyFactions(myActiveFac, patActiveFac) &&
+                                    !IsMedicConfidentlySafeToHealEnemy(ai, character, mh, curPat, now))
+                                {
+                                    ReleaseMedicClaimForSoldier(medicPtr, curPat.Pointer);
+                                    character.CoverPosition(null);
+                                    AiCore.InvalidateTargetDestinationCache(character);
+                                }
+                                else
+                                {
+                                    DriveMedicHealingApproach(ai, character, mh, curHeal, now);
+                                    return false;
+                                }
+                            }
                         }
                     }
 
@@ -2087,6 +2133,8 @@ namespace EasyRed2HumanAI
 
                     Soldier bestPatient = null;
                     float bestScoreDistSq = 55.0f * 55.0f;
+                    Soldier bestEnemyPow = null;
+                    float bestEnemyDistSq = 20.0f * 20.0f;
                     bool skippedDogpiledNearest = false;
 
                     for (int i = 0; i < injCount; i++)
@@ -2098,18 +2146,37 @@ namespace EasyRed2HumanAI
                         if (mh.Goap.MedicUnreachablePatientPtr == sSnap.Ptr && now < mh.Goap.MedicUnreachableUntil)
                             continue;
 
+                        float dSq = (sSnap.Pos - medicPos).sqrMagnitude;
+                        bool sameFloorOrFar = !(Mathf.Abs(sSnap.Pos.y - medicPos.y) > 4.5f && dSq < 12.0f * 12.0f);
                         if (!AiCore.AreSameSideFactions(myFaction, sSnap.Faction))
+                        {
+                            if (bestPatient == null &&
+                                dSq < bestEnemyDistSq &&
+                                sameFloorOrFar &&
+                                AiCore.AreEnemyFactions(myFaction, sSnap.Faction))
+                            {
+                                Soldier ePat = sSnap.Ref;
+                                if (!ePat.IsDead &&
+                                    ePat.IsInjured &&
+                                    !ePat.IsCarried() &&
+                                    !ePat.IsOnVehicle() &&
+                                    !ePat.HasSurrended() &&
+                                    (!_medicPatientClaims.TryGetValue(sSnap.Ptr, out MedicPatientClaim eClaim) ||
+                                     eClaim.PrimaryMedic == null ||
+                                     eClaim.PrimaryMedic.Pointer == medicPtr))
+                                {
+                                    bestEnemyDistSq = dSq;
+                                    bestEnemyPow = ePat;
+                                }
+                            }
                             continue;
+                        }
 
                         Soldier pat = sSnap.Ref;
                         if (pat.IsDead || !pat.IsInjured || pat.IsCarried() || pat.IsOnVehicle())
                             continue;
 
-                        float dSq = (sSnap.Pos - medicPos).sqrMagnitude;
-                        if (dSq > 55.0f * 55.0f)
-                            continue;
-
-                        if (Mathf.Abs(sSnap.Pos.y - medicPos.y) > 4.5f && dSq < 12.0f * 12.0f)
+                        if (dSq > 55.0f * 55.0f || !sameFloorOrFar)
                             continue;
 
                         bool isBackupSlot = false;
@@ -2144,6 +2211,13 @@ namespace EasyRed2HumanAI
                         }
                     }
 
+                    if (bestPatient == null &&
+                        bestEnemyPow != null &&
+                        IsMedicConfidentlySafeToHealEnemy(ai, character, mh, bestEnemyPow, now, knownHasWoundedFriendlyNearby: false))
+                    {
+                        bestPatient = bestEnemyPow;
+                    }
+
                     if (bestPatient != null)
                     {
                         IntPtr bestPtr = bestPatient.Pointer;
@@ -2166,9 +2240,16 @@ namespace EasyRed2HumanAI
                     }
                     else
                     {
-                        if (character.targetDestination != null && character.targetDestination.TryCast<MedicHealingDestination>() != null)
+                        IntPtr postDestRaw = AiCore.GetRawTargetDestinationPtr(character);
+                        if (postDestRaw != IntPtr.Zero)
                         {
-                            character.CoverPosition(null);
+                            if (postDestRaw != mh.CachedDestPtr)
+                                mh.NextDestCheckTime = 0f;
+                            if (AiCore.ResolveTargetDestination(mh) == AiCore.CachedDestKind.MedicHeal)
+                            {
+                                character.CoverPosition(null);
+                                AiCore.InvalidateTargetDestinationCache(character);
+                            }
                         }
                         if (skippedDogpiledNearest)
                         {
@@ -2186,6 +2267,47 @@ namespace EasyRed2HumanAI
             public static void Postfix(long __state)
             {
                 HitchProfiler.End(HitchBucket.VanMedicRtn, __state);
+            }
+        }
+
+        [HarmonyPatch(typeof(MedicHealingDestination), nameof(MedicHealingDestination.OnCoverReached))]
+        public static class MedicHealingDestination_OnCoverReached_Patch
+        {
+            public static bool Prefix(MedicHealingDestination __instance, Soldier __0)
+            {
+                try
+                {
+                    if (!VisionConfig.EnableMod.Value ||
+                        ReferenceEquals(__instance, null) ||
+                        ReferenceEquals(__0, null) ||
+                        __0.Pointer == IntPtr.Zero)
+                    {
+                        return true;
+                    }
+
+                    AiCore.SoldierFastHandles medH = AiCore.GetOrCreateSoldierHandles(__0);
+                    if (!AiCore.IsLocallyOwnedBot(medH))
+                        return true;
+
+                    Soldier patient = __instance.soldierToHealUp;
+                    if (ReferenceEquals(patient, null) || patient == null || patient.Pointer == IntPtr.Zero)
+                        return true;
+
+                    float now = Time.time;
+                    string medFac = AiCore.GetCachedFaction(medH, now);
+                    string patFac = AiCore.GetCachedFaction(patient);
+                    if (AiCore.AreEnemyFactions(medFac, patFac) &&
+                        !IsMedicConfidentlySafeToHealEnemy(medH.Ai, __0, medH, patient, now))
+                    {
+                        __instance.coverReached = true;
+                        ReleaseMedicClaimForSoldier(__0.Pointer, patient.Pointer);
+                        __0.CoverPosition(null);
+                        AiCore.InvalidateTargetDestinationCache(__0);
+                        return false;
+                    }
+                }
+                catch { }
+                return true;
             }
         }
 

@@ -7,6 +7,186 @@ namespace EasyRed2HumanAI
 {
     public static partial class VeteranAndTacticsPatches
     {
+        internal static bool EvaluateMedicConfidentlySafeForEnemyHeal(
+            bool medicAliveAndStanding,
+            bool medicBleeding,
+            bool medicInVehicleOrCarrying,
+            float suppression,
+            bool underFireRecently,
+            bool hasVisibleEnemy,
+            bool hasActiveCombatEnemyNearby,
+            float medicHarm,
+            float patientSpotHarm,
+            bool underShellingOrDangerClose,
+            bool enemyPlaneOverhead,
+            bool hasWoundedFriendlyNearby)
+        {
+            if (!medicAliveAndStanding || medicBleeding || medicInVehicleOrCarrying)
+                return false;
+
+            if (hasWoundedFriendlyNearby)
+                return false;
+
+            if (suppression >= 6.0f ||
+                underFireRecently ||
+                hasVisibleEnemy ||
+                hasActiveCombatEnemyNearby ||
+                underShellingOrDangerClose ||
+                enemyPlaneOverhead)
+            {
+                return false;
+            }
+
+            if (medicHarm >= 0.16f || patientSpotHarm >= 0.20f)
+                return false;
+
+            return true;
+        }
+
+        internal static bool IsMedicConfidentlySafeToHealEnemy(
+            SoldierAI ai,
+            Soldier medic,
+            AiCore.SoldierFastHandles medH,
+            Soldier enemyPatient,
+            float now,
+            bool knownHasWoundedFriendlyNearby = false)
+        {
+            if (ReferenceEquals(medic, null) || medic == null || medic.Pointer == IntPtr.Zero)
+                return false;
+
+            if (medH == null)
+                medH = AiCore.GetOrCreateSoldierHandles(medic);
+            if (medH == null || medH.Tr == null)
+                return false;
+
+            bool medicAliveAndStanding = medic.IsAlive &&
+                                         !medic.IsDead &&
+                                         !medic.IsInjured &&
+                                         !medic.HasSurrended() &&
+                                         !medic.IsCharging();
+            bool medicBleeding = medic.isBleeding;
+            bool medicInVehOrCarry = AiCore.IsSoldierInVehicleOrTransition(medic) || medic.IsCarryingBody();
+            if (!medicAliveAndStanding || medicBleeding || medicInVehOrCarry || knownHasWoundedFriendlyNearby)
+                return false;
+
+            float suppression = medic.GetSuppressionValue();
+            bool underFireRecently = now < medH.Vision.UnderFireUntil ||
+                                     (medH.Vision.UnderFireStartedAt > 0f && (now - medH.Vision.UnderFireStartedAt) < 8.0f);
+            SoldierAI effAi = !ReferenceEquals(ai, null) && ai != null ? ai : medH.Ai;
+            bool hasVisibleEnemy = !ReferenceEquals(effAi, null) &&
+                                   effAi != null &&
+                                   (effAi.HasEnemyAndCanFireAtHim || AiCore.GetRawVisibleTargetPtr(effAi) != IntPtr.Zero);
+            float medicHarm = medH.Emergent.HasDecision
+                ? Mathf.Max(medH.Emergent.SmoothedHarmNow, medH.Emergent.CurrentDecision.TotalHarm)
+                : 0f;
+
+            // Fast O(1) rejection before touching world snapshots or spatial checks
+            if (suppression >= 6.0f || underFireRecently || hasVisibleEnemy || medicHarm >= 0.16f)
+                return false;
+
+            string myFaction = AiCore.GetCachedFaction(medH, now);
+            if (string.IsNullOrEmpty(myFaction))
+                return false;
+
+            Vector3 medicPos = medH.Tr.position;
+            Vector3 patPos = (!ReferenceEquals(enemyPatient, null) && enemyPatient != null && enemyPatient.transform != null)
+                ? enemyPatient.transform.position
+                : medicPos;
+
+            float patientSpotHarm = 0f;
+            Squad sq = AiCore.GetCachedSquad(medH, now);
+            if (!ReferenceEquals(sq, null) &&
+                sq.Pointer != IntPtr.Zero &&
+                _squadBlackboards.TryGetValue(sq.Pointer, out SquadBlackboard b) &&
+                b.HasActiveThreat &&
+                (b.ThreatPosition - medicPos).sqrMagnitude <= 55.0f * 55.0f)
+            {
+                patientSpotHarm = 0.35f;
+            }
+
+            bool underShelling = TryGetActiveEnemyShellingPocket(myFaction, medicPos, now, out _, out _);
+            bool enemyPlaneOverhead = AiCore.IsEnemyAircraftOverhead(medicPos, myFaction, 220.0f) &&
+                                      !AiCore.HasLowCeilingOverhead(medicPos, 4.5f);
+            if (patientSpotHarm >= 0.20f || underShelling || enemyPlaneOverhead)
+                return false;
+
+            AiCore.EnsureWorldSnapshot();
+
+            bool hasWoundedFriendlyNearby = false;
+            var injured = AiCore.WorldInjuredSoldiers;
+            int injCount = AiCore.WorldInjuredSoldierCount;
+            for (int i = 0; i < injCount; i++)
+            {
+                ref AiCore.SoldierSnapshot iSnap = ref injured[i];
+                if (!iSnap.IsInjured || iSnap.Ptr == medH.Ptr || iSnap.IsOnVehicle || iSnap.Ref == null)
+                    continue;
+                if (!AiCore.AreSameSideFactions(myFaction, iSnap.Faction))
+                    continue;
+                if ((iSnap.Pos - medicPos).sqrMagnitude > 45.0f * 45.0f)
+                    continue;
+                Soldier fPat = iSnap.Ref;
+                if (!fPat.IsDead && fPat.IsInjured && !fPat.IsCarried() && !fPat.IsOnVehicle() && !fPat.HasSurrended())
+                {
+                    hasWoundedFriendlyNearby = true;
+                    break;
+                }
+            }
+
+            bool hasActiveCombatEnemyNearby = false;
+            if (!hasWoundedFriendlyNearby)
+            {
+                var soldiers = AiCore.WorldSoldiers;
+                int solCount = AiCore.WorldSoldierCount;
+                for (int i = 0; i < solCount; i++)
+                {
+                    ref AiCore.SoldierSnapshot sSnap = ref soldiers[i];
+                    if (sSnap.Ptr == IntPtr.Zero ||
+                        sSnap.Ptr == medH.Ptr ||
+                        sSnap.HasSurrendered ||
+                        sSnap.IsInjured ||
+                        !AiCore.AreEnemyFactions(myFaction, sSnap.Faction))
+                    {
+                        continue;
+                    }
+
+                    if (sSnap.IsOnVehicle)
+                    {
+                        // Skip high-altitude aircraft (covered by IsEnemyAircraftOverhead); treat crewed ground vehicles/turrets within 60m/50m as active threats.
+                        if ((sSnap.Pos.y - medicPos.y) <= 15.0f &&
+                            ((sSnap.Pos - medicPos).sqrMagnitude <= 60.0f * 60.0f ||
+                             (sSnap.Pos - patPos).sqrMagnitude <= 50.0f * 50.0f))
+                        {
+                            hasActiveCombatEnemyNearby = true;
+                            break;
+                        }
+                    }
+                    else
+                    {
+                        if ((sSnap.Pos - medicPos).sqrMagnitude <= 36.0f * 36.0f ||
+                            (sSnap.Pos - patPos).sqrMagnitude <= 28.0f * 28.0f)
+                        {
+                            hasActiveCombatEnemyNearby = true;
+                            break;
+                        }
+                    }
+                }
+            }
+
+            return EvaluateMedicConfidentlySafeForEnemyHeal(
+                medicAliveAndStanding,
+                medicBleeding,
+                medicInVehOrCarry,
+                suppression,
+                underFireRecently,
+                hasVisibleEnemy,
+                hasActiveCombatEnemyNearby,
+                medicHarm,
+                patientSpotHarm,
+                underShelling,
+                enemyPlaneOverhead,
+                hasWoundedFriendlyNearby);
+        }
+
         internal static bool IsActivelyHealingTeammate(Soldier soldier, out MedicHealingDestination healDest)
         {
             healDest = null;
@@ -22,10 +202,22 @@ namespace EasyRed2HumanAI
                 return true;
             }
 
-            if (soldier.targetDestination == null || soldier.targetDestination.Pointer == IntPtr.Zero)
+            IntPtr rawDestPtr = AiCore.GetRawTargetDestinationPtr(soldier);
+            if (rawDestPtr == IntPtr.Zero)
                 return false;
 
-            healDest = soldier.targetDestination.TryCast<MedicHealingDestination>();
+            if (medH != null)
+            {
+                if (rawDestPtr != medH.CachedDestPtr)
+                    medH.NextDestCheckTime = 0f;
+                if (AiCore.ResolveTargetDestination(medH) != AiCore.CachedDestKind.MedicHeal)
+                    return false;
+                healDest = medH.CachedHealDest;
+            }
+            else
+            {
+                healDest = soldier.targetDestination.TryCast<MedicHealingDestination>();
+            }
             if (healDest == null)
                 return false;
 
@@ -46,8 +238,27 @@ namespace EasyRed2HumanAI
                     medH.Goap.MedicCloseApproachSince = 0f;
                 }
                 soldier.CoverPosition(null);
+                AiCore.InvalidateTargetDestinationCache(soldier);
                 healDest = null;
                 return false;
+            }
+
+            if (medH != null && AiCore.IsLocallyOwnedBot(medH))
+            {
+                string medFac = AiCore.GetCachedFaction(medH, now);
+                string patFac = AiCore.GetCachedFaction(patient);
+                if (AiCore.AreEnemyFactions(medFac, patFac) &&
+                    !IsMedicConfidentlySafeToHealEnemy(medH.Ai, soldier, medH, patient, now))
+                {
+                    medH.Goap.MedicHealStartTime = 0f;
+                    medH.Goap.MedicHealTargetPtr = IntPtr.Zero;
+                    medH.Goap.MedicCloseApproachSince = 0f;
+                    ReleaseMedicClaimForSoldier(soldier.Pointer, patient.Pointer);
+                    soldier.CoverPosition(null);
+                    AiCore.InvalidateTargetDestinationCache(soldier);
+                    healDest = null;
+                    return false;
+                }
             }
 
             if (soldier.transform != null && patient.transform != null)
@@ -68,6 +279,7 @@ namespace EasyRed2HumanAI
                         medH.Goap.MedicUnreachableUntil = now + 12.0f;
                     }
                     soldier.CoverPosition(null);
+                    AiCore.InvalidateTargetDestinationCache(soldier);
                     healDest = null;
                     return false;
                 }
@@ -89,6 +301,7 @@ namespace EasyRed2HumanAI
                         medH.Goap.MedicUnreachablePatientPtr = patient.Pointer;
                         medH.Goap.MedicUnreachableUntil = now + 12.0f;
                         soldier.CoverPosition(null);
+                        AiCore.InvalidateTargetDestinationCache(soldier);
                         healDest = null;
                         return false;
                     }
@@ -125,6 +338,25 @@ namespace EasyRed2HumanAI
                 patient.HasSurrended())
             {
                 return;
+            }
+
+            if (medH != null && AiCore.IsLocallyOwnedBot(medH))
+            {
+                string medFac = AiCore.GetCachedFaction(medH, now);
+                string patFac = AiCore.GetCachedFaction(patient);
+                if (AiCore.AreEnemyFactions(medFac, patFac) &&
+                    !IsMedicConfidentlySafeToHealEnemy(ai, medic, medH, patient, now))
+                {
+                    medH.Goap.MedicCloseApproachSince = 0f;
+                    medH.Goap.MedicHealStartTime = 0f;
+                    medH.Goap.MedicHealTargetPtr = IntPtr.Zero;
+                    ReleaseMedicClaimForSoldier(medic.Pointer, patient.Pointer);
+                    medic.CoverPosition(null);
+                    AiCore.InvalidateTargetDestinationCache(medic);
+                    ai.moveDirectlyToward_end = 0f;
+                    ai.Stop(true);
+                    return;
+                }
             }
 
             Transform medTr = medH != null && medH.Tr != null ? medH.Tr : medic.transform;
@@ -554,14 +786,6 @@ namespace EasyRed2HumanAI
                 {
                     _nextCoopArtyWarnChatTime = now + 14.0f;
                     _lastCoopArtyWarnPos = z.Position;
-                    if (BattleLoader.instance != null && BattleLoader.instance.photonView != null && Photon.Pun.PhotonNetwork.LocalPlayer != null)
-                    {
-                        var rpcArgs = new Il2CppInterop.Runtime.InteropTypes.Arrays.Il2CppReferenceArray<Il2CppSystem.Object>(3);
-                        rpcArgs[0] = Photon.Pun.PhotonNetwork.LocalPlayer;
-                        rpcArgs[1] = (Il2CppSystem.String)z.Faction;
-                        rpcArgs[2] = (Il2CppSystem.String)"[HQ] DANGER CLOSE: Friendly artillery inbound near your position — clear area!";
-                        BattleLoader.instance.photonView.RPC("Chat_NewMessageFaction", Photon.Pun.RpcTarget.All, rpcArgs);
-                    }
 
                     Vector3 hp = threatenedHuman.transform.position;
                     for (int s = 0; s < solCount; s++)
@@ -2817,12 +3041,23 @@ namespace EasyRed2HumanAI
                         chargeCost *= 0.68f;
                     }
 
-                    bool hasSmokeCover = (now < board.SmokeActiveUntil &&
-                                          (board.LastSmokeTargetPos - chargeTarget).sqrMagnitude <= 28.0f * 28.0f) ||
-                                         Physics.Linecast(
-                                             leaderPos + Vector3.up * 1.2f,
-                                             chargeTarget + Vector3.up * 1.2f,
-                                             AiCore.GetSmokeOcclusionMask());
+                    bool hasSmokeCover = now < board.SmokeActiveUntil &&
+                                         (board.LastSmokeTargetPos - chargeTarget).sqrMagnitude <= 28.0f * 28.0f;
+                    AiCore.SoldierFastHandles ldrH = AiCore.GetOrCreateSoldierHandles(leader);
+                    bool blindSmokeBlocksCharge = AiCore.IsBlindSmokePathHighRisk(
+                        ldrH,
+                        leaderPos,
+                        chargeTarget,
+                        now,
+                        isEscapingHazardOrRetreating: false,
+                        isDesperateOvertimeOrGyokusai: isTrueGyokusai || isDesperateCap,
+                        currentKnownHarm: 0f,
+                        out _);
+                    if (blindSmokeBlocksCharge)
+                    {
+                        hasSmokeCover = false;
+                        hasChargeTarget = false;
+                    }
                     if (hasSmokeCover)
                         chargeCost *= 0.68f;
 
@@ -2843,7 +3078,7 @@ namespace EasyRed2HumanAI
                     if (!isDesperateCap && leaderSupp >= 42.0f && !isTrueGyokusai)
                         chargeCost *= 1.55f;
 
-                    if (hasTacticalJustification && chargeCost < bestCost)
+                    if (hasChargeTarget && hasTacticalJustification && chargeCost < bestCost)
                     {
                         bestCost = chargeCost;
                         bestAction = 1;

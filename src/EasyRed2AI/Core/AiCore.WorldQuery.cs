@@ -1333,6 +1333,140 @@ namespace EasyRed2HumanAI
             return false;
         }
 
+        public static bool IsPointInsideSmoke(Vector3 pos)
+        {
+            int smokeMask = GetSmokeOcclusionMask();
+            return smokeMask != 0 &&
+                   Physics.CheckSphere(pos + Vector3.up * 1.0f, 0.55f, smokeMask, QueryTriggerInteraction.Collide);
+        }
+
+        public static bool IsSegmentCrossingSmoke(Vector3 fromPos, Vector3 toPos)
+        {
+            int smokeMask = GetSmokeOcclusionMask();
+            if (smokeMask == 0 || (toPos - fromPos).sqrMagnitude < 1.0f)
+                return false;
+            return Physics.Linecast(
+                fromPos + Vector3.up * 1.15f,
+                toPos + Vector3.up * 1.15f,
+                smokeMask,
+                QueryTriggerInteraction.Collide);
+        }
+
+        public static bool HasFriendlyEyesBeyondSmoke(Vector3 fromPos, Vector3 toPos, string myFaction, IntPtr selfPtr)
+        {
+            if (string.IsNullOrEmpty(myFaction))
+                return false;
+
+            float dx = toPos.x - fromPos.x;
+            float dz = toPos.z - fromPos.z;
+            float segFlatSq = dx * dx + dz * dz;
+            if (segFlatSq < 1.0f)
+                return false;
+
+            float segDist = Mathf.Sqrt(segFlatSq);
+            float invLen = 1.0f / segDist;
+            float dirX = dx * invLen;
+            float dirZ = dz * invLen;
+            float minProjDist = Mathf.Max(4.0f, segDist * 0.55f);
+            const float maxBeyondTargetSq = 26.0f * 26.0f;
+            float now = Time.time;
+
+            EnsureWorldSnapshot();
+            var soldiers = WorldSoldiers;
+            int count = WorldSoldierCount;
+            for (int i = 0; i < count; i++)
+            {
+                ref SoldierSnapshot sSnap = ref soldiers[i];
+                if (sSnap.Ptr == IntPtr.Zero ||
+                    sSnap.Ptr == selfPtr ||
+                    sSnap.IsInjured ||
+                    sSnap.HasSurrendered ||
+                    sSnap.IsOnVehicle ||
+                    !AreSameSideFactions(myFaction, sSnap.Faction))
+                {
+                    continue;
+                }
+
+                if ((sSnap.Pos - toPos).sqrMagnitude > maxBeyondTargetSq)
+                    continue;
+
+                float relX = sSnap.Pos.x - fromPos.x;
+                float relZ = sSnap.Pos.z - fromPos.z;
+                float proj = relX * dirX + relZ * dirZ;
+                if (proj < minProjDist)
+                    continue;
+
+                SoldierFastHandles fH = sSnap.Handles;
+                if (fH != null && (fH.InSmokeCached || now < fH.Vision.UnderFireUntil))
+                    continue;
+
+                Soldier fSol = sSnap.Ref;
+                if (!ReferenceEquals(fSol, null) && fSol != null && fSol.GetSuppressionValue() >= 30.0f)
+                    continue;
+
+                return true;
+            }
+            return false;
+        }
+
+        public static bool EvaluateBlindSmokeTraversalRisk(
+            bool crossesSmokeAhead,
+            bool alreadyInsideSmoke,
+            bool hasFriendlyEyesBeyondSmoke,
+            bool isEscapingHazardOrRetreating,
+            bool isDesperateOvertimeOrGyokusai,
+            float currentKnownHarm,
+            out float effectiveTraversalHarm)
+        {
+            effectiveTraversalHarm = currentKnownHarm;
+            if (!crossesSmokeAhead || alreadyInsideSmoke || isEscapingHazardOrRetreating)
+                return false;
+
+            if (hasFriendlyEyesBeyondSmoke)
+                return false;
+
+            float blindSmokeFloor = isDesperateOvertimeOrGyokusai ? 0.44f : 0.68f;
+            if (effectiveTraversalHarm < blindSmokeFloor)
+                effectiveTraversalHarm = blindSmokeFloor;
+
+            return !isDesperateOvertimeOrGyokusai;
+        }
+
+        public static bool IsBlindSmokePathHighRisk(
+            SoldierFastHandles h,
+            Vector3 fromPos,
+            Vector3 toPos,
+            float now,
+            bool isEscapingHazardOrRetreating,
+            bool isDesperateOvertimeOrGyokusai,
+            float currentKnownHarm,
+            out float effectiveTraversalHarm)
+        {
+            effectiveTraversalHarm = currentKnownHarm;
+            if (h == null || ReferenceEquals(h.Ref, null))
+                return false;
+
+            if (!IsSegmentCrossingSmoke(fromPos, toPos))
+                return false;
+
+            bool alreadyInsideSmoke = h.InSmokeCached || IsPointInsideSmoke(fromPos);
+            if (alreadyInsideSmoke || isEscapingHazardOrRetreating)
+                return false;
+
+            string fac = GetCachedFaction(h, now);
+            bool hasFriendlyEyes = !string.IsNullOrEmpty(fac) &&
+                                   HasFriendlyEyesBeyondSmoke(fromPos, toPos, fac, h.Ptr);
+
+            return EvaluateBlindSmokeTraversalRisk(
+                crossesSmokeAhead: true,
+                alreadyInsideSmoke: false,
+                hasFriendlyEyesBeyondSmoke: hasFriendlyEyes,
+                isEscapingHazardOrRetreating: false,
+                isDesperateOvertimeOrGyokusai: isDesperateOvertimeOrGyokusai,
+                currentKnownHarm: currentKnownHarm,
+                out effectiveTraversalHarm);
+        }
+
         public static bool RaycastEnvironment(
             Vector3 origin,
             Vector3 dir,
@@ -2578,6 +2712,8 @@ namespace EasyRed2HumanAI
         public static int WorldSoldierCount;
         public static SoldierSnapshot[] WorldInjuredSoldiers = new SoldierSnapshot[64];
         public static int WorldInjuredSoldierCount;
+        public static readonly int[] WorldAirSquadIndices = new int[32];
+        public static int WorldAirSquadCount;
 
         private static readonly Dictionary<IntPtr, int> _worldSquadIndexByPtr = new Dictionary<IntPtr, int>(96);
         private static readonly HashSet<IntPtr> _seenWorldSoldierPtrs = new HashSet<IntPtr>(384);
@@ -2593,6 +2729,37 @@ namespace EasyRed2HumanAI
                 return true;
             }
             snap = default;
+            return false;
+        }
+
+        public static bool IsEnemyAircraftOverhead(Vector3 groundPos, string myFaction, float horizRadius = 260f, float minAltitudeDelta = 12f)
+        {
+            if (WorldAirSquadCount <= 0 || string.IsNullOrEmpty(myFaction))
+                return false;
+
+            float rSq = horizRadius * horizRadius;
+            for (int i = 0; i < WorldAirSquadCount; i++)
+            {
+                int sqIdx = WorldAirSquadIndices[i];
+                if (sqIdx < 0 || sqIdx >= WorldSquadCount)
+                    continue;
+
+                ref SquadSnapshot sqSnap = ref WorldSquads[sqIdx];
+                if (!sqSnap.RefOnPlane || sqSnap.UnitCount <= 0 || string.IsNullOrEmpty(sqSnap.Faction))
+                    continue;
+
+                if (!AreEnemyFactions(myFaction, sqSnap.Faction))
+                    continue;
+
+                float dy = sqSnap.RefPos.y - groundPos.y;
+                if (dy < minAltitudeDelta || dy > 550f)
+                    continue;
+
+                float dx = sqSnap.RefPos.x - groundPos.x;
+                float dz = sqSnap.RefPos.z - groundPos.z;
+                if (dx * dx + dz * dz <= rSq)
+                    return true;
+            }
             return false;
         }
 
@@ -2637,6 +2804,7 @@ namespace EasyRed2HumanAI
             WorldSquadCount = 0;
             WorldSoldierCount = 0;
             WorldInjuredSoldierCount = 0;
+            WorldAirSquadCount = 0;
             _worldSquadIndexByPtr.Clear();
             _seenWorldSoldierPtrs.Clear();
 
@@ -2695,7 +2863,7 @@ namespace EasyRed2HumanAI
                                         SquadPtr = sq.Pointer,
                                         Pos = uHandles.Tr.position,
                                         Faction = GetCachedFaction(uHandles, now),
-                                        IsPlayer = u.IsPlayer(),
+                                        IsPlayer = IsAnyHumanPlayerSoldier(uHandles),
                                         IsOnVehicle = u.IsOnVehicle(),
                                         IsSquadLeader = u.IsSquadLeader(),
                                         IsRadioman = u.IsRadioman(),
@@ -2712,12 +2880,12 @@ namespace EasyRed2HumanAI
                             }
 
                             Vector3 uPos = uHandles.Tr.position;
-                            bool isHuman = u.IsPlayer();
+                            bool isHuman = IsAnyHumanPlayerSoldier(uHandles);
                             bool isOnVeh = u.IsOnVehicle();
                             if (isHuman)
                             {
                                 float curYaw = uHandles.Tr.eulerAngles.y;
-                                bool vehActive = isOnVeh && !u.IsAI();
+                                bool vehActive = isOnVeh && (!u.IsPlayer() || !u.IsAI());
                                 if (uHandles.LastHumanActiveTime <= 0f ||
                                     now < uHandles.LastHumanActiveTime ||
                                     (uPos - uHandles.LastHumanActivePos).sqrMagnitude > 0.75f * 0.75f ||
@@ -2837,6 +3005,9 @@ namespace EasyRed2HumanAI
                             HasRadioOrRelay = hasIntrinsicRadio,
                             IsSpottedOrAware = spottedOrAware
                         };
+
+                        if (refOnPlane && WorldAirSquadCount < WorldAirSquadIndices.Length)
+                            WorldAirSquadIndices[WorldAirSquadCount++] = sqIdx;
                     }
 
                     // Pass 2: Pure C# L1-cache Radio Relay propagation (< 2 microseconds, zero IL2CPP boundary crossings)
@@ -2914,7 +3085,7 @@ namespace EasyRed2HumanAI
                                     SquadPtr = u.joinedSquad != null ? u.joinedSquad.Pointer : IntPtr.Zero,
                                     Pos = dh.Tr.position,
                                     Faction = GetCachedFaction(dh, now),
-                                    IsPlayer = u.IsPlayer(),
+                                    IsPlayer = IsAnyHumanPlayerSoldier(dh),
                                     IsOnVehicle = u.IsOnVehicle(),
                                     IsInjured = true
                                 };
@@ -2936,7 +3107,7 @@ namespace EasyRed2HumanAI
                             SquadPtr = u.joinedSquad != null ? u.joinedSquad.Pointer : IntPtr.Zero,
                             Pos = dh.Tr.position,
                             Faction = GetCachedFaction(dh, now),
-                            IsPlayer = u.IsPlayer(),
+                            IsPlayer = IsAnyHumanPlayerSoldier(dh),
                             IsOnVehicle = u.IsOnVehicle(),
                             IsSquadLeader = false,
                             HasSurrendered = IsTrueSurrenderedPrisoner(u, dh),
@@ -3660,6 +3831,7 @@ namespace EasyRed2HumanAI
             WorldSquadCount = 0;
             WorldSoldierCount = 0;
             WorldInjuredSoldierCount = 0;
+            WorldAirSquadCount = 0;
             _lastWorldSnapshotTime = -999f;
             ResetCoopRpcNetworkState();
             _nextLocalPlayerRadioHintTime = 0f;

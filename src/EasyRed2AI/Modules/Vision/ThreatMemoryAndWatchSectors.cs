@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Runtime.CompilerServices;
 using HarmonyLib;
 using UnityEngine;
 
@@ -534,6 +535,78 @@ namespace EasyRed2HumanAI
             }
         }
 
+        internal static bool EvaluateGrenadeFriendlyClearance(
+            Vector3 throwerPos,
+            Vector3 targetPos,
+            float throwDist,
+            Vector3 friendlyPos,
+            bool friendlyIsHumanPlayer,
+            bool friendlyMovingTowardTarget,
+            float baseAiSafeRadius,
+            float basePlayerSafeRadius)
+        {
+            float effBlastRadius = friendlyIsHumanPlayer
+                ? Mathf.Max(baseAiSafeRadius, basePlayerSafeRadius)
+                : baseAiSafeRadius;
+            if (friendlyMovingTowardTarget)
+                effBlastRadius += 3.0f;
+
+            if ((friendlyPos - targetPos).sqrMagnitude <= effBlastRadius * effBlastRadius)
+                return false;
+
+            float safeDist = Mathf.Max(throwDist, 0.1f);
+            Vector3 throwDir = (targetPos - throwerPos) / safeDist;
+            float fProj = Vector3.Dot(friendlyPos - throwerPos, throwDir);
+
+            if (friendlyIsHumanPlayer)
+            {
+                if (fProj > -1.5f && fProj < throwDist + 4.0f)
+                {
+                    Vector3 closestOnArc = throwerPos + throwDir * Mathf.Clamp(fProj, 0f, throwDist);
+                    if ((friendlyPos - closestOnArc).sqrMagnitude <= 5.5f * 5.5f)
+                        return false;
+                }
+                return true;
+            }
+
+            // Close-crowd shoulder/back bounce guard (0.15m..2.5m directly in front of thrower)
+            if (fProj > 0.15f && fProj <= 2.5f && Mathf.Abs(friendlyPos.y - throwerPos.y) <= 2.4f)
+            {
+                Vector3 closestNear = throwerPos + throwDir * fProj;
+                if ((friendlyPos - closestNear).sqrMagnitude <= 1.85f * 1.85f)
+                    return false;
+            }
+            else if (fProj > 2.5f && fProj < throwDist + 2.0f)
+            {
+                Vector3 closestOnArc = throwerPos + throwDir * Mathf.Clamp(fProj, 0f, throwDist);
+                if ((friendlyPos - closestOnArc).sqrMagnitude <= 3.5f * 3.5f)
+                    return false;
+            }
+
+            return true;
+        }
+
+        private static bool IsUnitFacingTowardTarget(Transform tr, Vector3 unitPos, Vector3 targetPos)
+        {
+            if (tr == null)
+                return false;
+
+            Vector3 fwd = tr.forward;
+            fwd.y = 0f;
+            float fwdSq = fwd.sqrMagnitude;
+            if (fwdSq <= 0.0001f)
+                return false;
+
+            Vector3 toTgt = targetPos - unitPos;
+            toTgt.y = 0f;
+            float toSq = toTgt.sqrMagnitude;
+            if (toSq <= 0.04f)
+                return false;
+
+            float dot = Vector3.Dot(fwd, toTgt);
+            return dot > 0f && (dot * dot) > (0.45f * 0.45f * fwdSq * toSq);
+        }
+
         internal static bool IsSafeToThrowGrenadeAt(Soldier thrower, Vector3 targetPos, float dist, float friendlySafeRadius = 11.5f)
         {
             if (thrower == null || thrower.transform == null)
@@ -581,30 +654,61 @@ namespace EasyRed2HumanAI
                 }
             }
 
-            // 2. Ensure no friendly soldiers (or the player) are within the blast radius or throw trajectory corridor
+            // 2. Ensure no friendly soldiers (same-side sub-factions, local & remote Co-op human players, or downed casualties)
+            //    are within the blast radius, close-crowd release zone, or throw trajectory corridor.
             string myFaction = thrower.faction;
             IntPtr throwerPtr = thrower.Pointer;
             float aiSafeRadius = Mathf.Max(friendlySafeRadius, 11.5f);
-            float aiSafeRadiusSq = aiSafeRadius * aiSafeRadius;
-            float playerSafeRadius = Mathf.Max(friendlySafeRadius, 15.0f);
-            float playerSafeRadiusSq = playerSafeRadius * playerSafeRadius;
-            Vector3 throwDir = (targetPos - myPos) / Mathf.Max(dist, 0.1f);
+            float playerSafeRadius = Mathf.Max(aiSafeRadius, 15.0f);
+            float moveCheckRadius = playerSafeRadius + 3.5f;
+            float moveCheckRadiusSq = moveCheckRadius * moveCheckRadius;
 
+            IntPtr localPlayerPtr = IntPtr.Zero;
             Soldier player = Soldier.CurrentControlledSoldierOrNull();
-            if (player != null && player.IsAlive && AiCore.AreSameSideFactions(myFaction, player.faction) && player.transform != null)
+            if (player != null &&
+                player.IsAlive &&
+                player.Pointer != throwerPtr &&
+                AiCore.AreSameSideFactions(myFaction, player.faction) &&
+                player.transform != null)
             {
+                localPlayerPtr = player.Pointer;
                 Vector3 playerPos = player.transform.position;
-                if ((playerPos - targetPos).sqrMagnitude <= playerSafeRadiusSq)
+                bool playerMovingToward = !player.IsOnVehicle() &&
+                                          (playerPos - targetPos).sqrMagnitude <= moveCheckRadiusSq &&
+                                          IsUnitFacingTowardTarget(player.transform, playerPos, targetPos);
+                if (!EvaluateGrenadeFriendlyClearance(myPos, targetPos, dist, playerPos, true, playerMovingToward, aiSafeRadius, playerSafeRadius))
                 {
                     VeteranAndTacticsPatches.FriendlyFirePrevented++;
                     return false;
                 }
+            }
 
-                float playerProj = Vector3.Dot(playerPos - myPos, throwDir);
-                if (playerProj > -1.5f && playerProj < dist + 4.0f)
+            AiCore.EnsureWorldSnapshot();
+
+            int solCount = AiCore.WorldSoldierCount;
+            if (solCount > 0)
+            {
+                var soldiers = AiCore.WorldSoldiers;
+                for (int i = 0; i < solCount; i++)
                 {
-                    Vector3 closestOnArc = myPos + throwDir * Mathf.Clamp(playerProj, 0f, dist);
-                    if ((playerPos - closestOnArc).sqrMagnitude <= 5.5f * 5.5f)
+                    ref AiCore.SoldierSnapshot fSnap = ref soldiers[i];
+                    if (fSnap.Ptr == throwerPtr || fSnap.Ptr == localPlayerPtr)
+                        continue;
+                    if (!AiCore.AreSameSideFactions(myFaction, fSnap.Faction))
+                        continue;
+
+                    bool movingToward = false;
+                    if (!fSnap.IsOnVehicle &&
+                        (fSnap.Pos - targetPos).sqrMagnitude <= moveCheckRadiusSq &&
+                        fSnap.Handles != null &&
+                        fSnap.Handles.Tr != null)
+                    {
+                        bool isAdvancing = fSnap.IsPlayer || (fSnap.Handles.Ai != null && fSnap.Handles.Ai.IsMoving());
+                        if (isAdvancing)
+                            movingToward = IsUnitFacingTowardTarget(fSnap.Handles.Tr, fSnap.Pos, targetPos);
+                    }
+
+                    if (!EvaluateGrenadeFriendlyClearance(myPos, targetPos, dist, fSnap.Pos, fSnap.IsPlayer, movingToward, aiSafeRadius, playerSafeRadius))
                     {
                         VeteranAndTacticsPatches.FriendlyFirePrevented++;
                         return false;
@@ -612,42 +716,22 @@ namespace EasyRed2HumanAI
                 }
             }
 
-            AiCore.EnsureWorldSnapshot();
-            int sqCount = AiCore.WorldSquadCount;
-            if (sqCount > 0)
+            int injCount = AiCore.WorldInjuredSoldierCount;
+            if (injCount > 0)
             {
-                var squads = AiCore.WorldSquads;
-                var soldiers = AiCore.WorldSoldiers;
-                for (int s = 0; s < sqCount; s++)
+                var injured = AiCore.WorldInjuredSoldiers;
+                for (int i = 0; i < injCount; i++)
                 {
-                    ref AiCore.SquadSnapshot sqSnap = ref squads[s];
-                    if (sqSnap.UnitCount == 0 || sqSnap.Faction != myFaction) continue;
-                    if ((sqSnap.RefPos - targetPos).sqrMagnitude > 52f * 52f) continue;
+                    ref AiCore.SoldierSnapshot iSnap = ref injured[i];
+                    if (iSnap.Ptr == throwerPtr)
+                        continue;
+                    if (!AiCore.AreSameSideFactions(myFaction, iSnap.Faction))
+                        continue;
 
-                    int end = sqSnap.UnitStartIndex + sqSnap.UnitCount;
-                    for (int i = sqSnap.UnitStartIndex; i < end; i++)
+                    if (!EvaluateGrenadeFriendlyClearance(myPos, targetPos, dist, iSnap.Pos, iSnap.IsPlayer, false, aiSafeRadius, playerSafeRadius))
                     {
-                        ref AiCore.SoldierSnapshot fSnap = ref soldiers[i];
-                        if (fSnap.Ptr == throwerPtr)
-                            continue;
-
-                        Vector3 fPos = fSnap.Pos;
-                        if ((fPos - targetPos).sqrMagnitude <= aiSafeRadiusSq)
-                        {
-                            VeteranAndTacticsPatches.FriendlyFirePrevented++;
-                            return false;
-                        }
-
-                        float fProj = Vector3.Dot(fPos - myPos, throwDir);
-                        if (fProj > 1.0f && fProj < dist + 2.0f)
-                        {
-                            Vector3 closestOnArc = myPos + throwDir * Mathf.Clamp(fProj, 0f, dist);
-                            if ((fPos - closestOnArc).sqrMagnitude <= 3.5f * 3.5f)
-                            {
-                                VeteranAndTacticsPatches.FriendlyFirePrevented++;
-                                return false;
-                            }
-                        }
+                        VeteranAndTacticsPatches.FriendlyFirePrevented++;
+                        return false;
                     }
                 }
             }
@@ -1006,6 +1090,14 @@ namespace EasyRed2HumanAI
         // =====================================================================
         // Helper: Threat-Sector Gaze Concentration & Window-Aperture Alignment
         // =====================================================================
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        internal static bool HasActiveThreatSectorContact(AiCore.SoldierFastHandles sh, float now)
+        {
+            return sh != null &&
+                   now < sh.Vision.ThreatSector.ExpireTime &&
+                   sh.Vision.ThreatSector.HasActiveContact;
+        }
+
         public static bool HasActiveThreatSectorContact(Soldier soldier)
         {
             if (soldier == null || soldier.Pointer == IntPtr.Zero)
@@ -1014,8 +1106,7 @@ namespace EasyRed2HumanAI
             // Pure O(1) handle lookup — NEVER trigger Squad.AllSquads iteration or 18-angle window raycast
             // sweeps inside Creature.CanSee! ThreatSector is populated by SequentialUpdate & MovementRoutine.
             return AiCore.TryGetSoldierHandles(soldier.Pointer, out AiCore.SoldierFastHandles sh) &&
-                   Time.time < sh.Vision.ThreatSector.ExpireTime &&
-                   sh.Vision.ThreatSector.HasActiveContact;
+                   HasActiveThreatSectorContact(sh, Time.time);
         }
 
         private static readonly float[] _watchSweepOffsets = new float[]
@@ -1904,12 +1995,7 @@ namespace EasyRed2HumanAI
                             }
                             else
                             {
-                                bool stealthCrouch = false;
-                                if (soldier.IsStealth)
-                                {
-                                    Squad sq = AiCore.GetCachedSquad(h, now);
-                                    stealthCrouch = !ReferenceEquals(sq, null) && sq.Leader != null && sq.Leader.m_pose > SoldierPose.Idle;
-                                }
+                                bool stealthCrouch = ShouldBotStealthCrouch(__instance, soldier, h, now);
 
                                 SoldierPose desiredMovePose = (destKind == AiCore.CachedDestKind.VehicleRepair ||
                                                                soldier.IsReloading ||
@@ -1932,12 +2018,7 @@ namespace EasyRed2HumanAI
                              !soldier.isInHandsAnimation &&
                              !soldier.IsReloading)
                     {
-                        bool stealthCrouch = false;
-                        if (soldier.IsStealth)
-                        {
-                            Squad sq = AiCore.GetCachedSquad(h, now);
-                            stealthCrouch = !ReferenceEquals(sq, null) && sq.Leader != null && sq.Leader.m_pose > SoldierPose.Idle;
-                        }
+                        bool stealthCrouch = ShouldBotStealthCrouch(__instance, soldier, h, now);
                         if (GetDesiredMovingPose(__instance, soldier, remDistSq, soldier.GetSuppressionValue(), stealthCrouch) == SoldierPose.Idle)
                         {
                             SetBotPose(__instance, soldier, SoldierPose.Idle, true);
@@ -2030,6 +2111,18 @@ namespace EasyRed2HumanAI
                         return false;
                     }
 
+                    bool activeStealthCrouch = ShouldBotStealthCrouch(__instance, soldier, h, now);
+                    if (activeStealthCrouch && remDistSq > 1.65f * 1.65f)
+                    {
+                        __state.PieHandled = true;
+                        soldier.SetGunTriggerPressed(false);
+                        if (soldier.m_pose == SoldierPose.Idle || __instance.actualPose == SoldierPose.Idle)
+                            SetBotPose(__instance, soldier, SoldierPose.Crouch, false);
+                        h.Vision.LastMovementRoutineCatchUpMode = 2;
+                        __instance.MoveOptimized(false, __0);
+                        return false;
+                    }
+
                     // Committed Forward Bound: bypass vanilla's 2.0s ShouldLookTargetWhileMoving FPS strafe-shoot parity,
                     // vanilla's dist <= 60m sprint=false casual firefight stroll, and vanilla's NodesCount == 1 long slow-walk,
                     // while letting vanilla's MoveFPSOptimized settle smoothly inside 1.65m of the final endpoint and
@@ -2058,6 +2151,7 @@ namespace EasyRed2HumanAI
                         }
                         bool shouldSprint = soldier.m_pose != SoldierPose.Prone &&
                                             !soldier.IsStealth &&
+                                            !activeStealthCrouch &&
                                             !sharpTurn;
                         h.Vision.LastMovementRoutineCatchUpMode = shouldSprint ? (byte)1 : (byte)2;
                         __instance.MoveOptimized(shouldSprint, __0);

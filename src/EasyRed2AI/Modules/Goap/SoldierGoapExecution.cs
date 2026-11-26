@@ -1027,9 +1027,19 @@ namespace EasyRed2HumanAI
                 plan.LockUnitCoverChange = true;
                 if (soldier.IsOnCover())
                 {
-                    SoldierPose coverPose = (!onNarrowBridge && !ai.HasEnemyAndCanFireAtHim && (isIndoorRoofed || inMultiSidedOrIndoors || underShelling || suppression >= 58f))
-                        ? SoldierPose.Prone
-                        : SoldierPose.Crouch;
+                    bool dropProneCov = !onNarrowBridge &&
+                                        ((!ai.HasEnemyAndCanFireAtHim && (isIndoorRoofed || inMultiSidedOrIndoors || underShelling || suppression >= 58f)) ||
+                                         ShouldBotChooseOrStayProneForSafety(
+                                             ai, soldier, shGoap,
+                                             inCoverOrShelteredWall: true,
+                                             hasClearProneLof: !ai.HasEnemyAndCanFireAtHim,
+                                             hasVisibleEnemy: ai.HasEnemyAndCanFireAtHim,
+                                             enemyDist: ai.distFromTarget,
+                                             suppression: suppression,
+                                             enemyPlaneOverhead: false,
+                                             wantsToMoveOrWinPush: false,
+                                             now: now));
+                    SoldierPose coverPose = dropProneCov ? SoldierPose.Prone : SoldierPose.Crouch;
                     SetBotPose(ai, soldier, coverPose);
                 }
                 else
@@ -1069,12 +1079,20 @@ namespace EasyRed2HumanAI
                     if (shGoap != null)
                         shGoap.Stance.LocalCoverProtectedUntil = now + 4.5f;
                     plan.LockUnitCoverChange = true;
-                    SoldierPose shelterPose = (!alreadyMovingToShelter &&
-                                               !ai.HasEnemyAndCanFireAtHim &&
-                                               (underShelling || suppression >= 62f) &&
-                                               (shGoap == null || now >= shGoap.Stance.NoProneUntil))
-                        ? SoldierPose.Prone
-                        : SoldierPose.Crouch;
+                    bool dropProneShelter = !alreadyMovingToShelter &&
+                                            ((!ai.HasEnemyAndCanFireAtHim && (underShelling || suppression >= 62f)) ||
+                                             ShouldBotChooseOrStayProneForSafety(
+                                                 ai, soldier, shGoap,
+                                                 inCoverOrShelteredWall: true,
+                                                 hasClearProneLof: !ai.HasEnemyAndCanFireAtHim,
+                                                 hasVisibleEnemy: ai.HasEnemyAndCanFireAtHim,
+                                                 enemyDist: ai.distFromTarget,
+                                                 suppression: suppression,
+                                                 enemyPlaneOverhead: false,
+                                                 wantsToMoveOrWinPush: false,
+                                                 now: now)) &&
+                                            (shGoap == null || now >= shGoap.Stance.NoProneUntil);
+                    SoldierPose shelterPose = dropProneShelter ? SoldierPose.Prone : SoldierPose.Crouch;
                     SetBotPose(ai, soldier, shelterPose, soldier.m_pose == SoldierPose.Idle);
                     plan.PlanExpireTime = Mathf.Min(plan.PlanExpireTime, now + 2.4f);
                 }
@@ -1128,12 +1146,20 @@ namespace EasyRed2HumanAI
                     }
                     else
                     {
-                        SoldierPose dropPose = (!onNarrowBridge &&
-                                                (underShelling || suppression >= 62f) &&
-                                                (!ai.HasEnemyAndCanFireAtHim || suppression >= 72f) &&
-                                                (shGoap == null || now >= shGoap.Stance.NoProneUntil))
-                            ? SoldierPose.Prone
-                            : SoldierPose.Crouch;
+                        bool dropProneOpen = !onNarrowBridge &&
+                                             (((underShelling || suppression >= 62f) && (!ai.HasEnemyAndCanFireAtHim || suppression >= 72f)) ||
+                                              ShouldBotChooseOrStayProneForSafety(
+                                                  ai, soldier, shGoap,
+                                                  inCoverOrShelteredWall: false,
+                                                  hasClearProneLof: !ai.HasEnemyAndCanFireAtHim,
+                                                  hasVisibleEnemy: ai.HasEnemyAndCanFireAtHim,
+                                                  enemyDist: ai.distFromTarget,
+                                                  suppression: suppression,
+                                                  enemyPlaneOverhead: false,
+                                                  wantsToMoveOrWinPush: false,
+                                                  now: now)) &&
+                                             (shGoap == null || now >= shGoap.Stance.NoProneUntil);
+                        SoldierPose dropPose = dropProneOpen ? SoldierPose.Prone : SoldierPose.Crouch;
                         SetBotPose(ai, soldier, dropPose, soldier.m_pose == SoldierPose.Idle);
                         plan.PlanExpireTime = Mathf.Min(plan.PlanExpireTime, now + 1.8f);
                     }
@@ -1291,7 +1317,32 @@ namespace EasyRed2HumanAI
             if (chosenCover != null)
             {
                 Vector3 chosenPos = chosenCover.GetCoverPosition();
+                if (AiCore.IsBlindSmokePathHighRisk(shGoap, myPos, chosenPos, now, false, false, 0f, out _))
+                {
+                    plan.PlanExpireTime = 0f;
+                    return;
+                }
                 float flankDistSq = (chosenPos - myPos).sqrMagnitude;
+                bool stealthFlank = !soldier.IsSpotted &&
+                                    suppression < 15f &&
+                                    !VisionPatches.HasFiredRecently(soldier, 4.0f) &&
+                                    (shGoap == null || now >= shGoap.Vision.UnderFireUntil);
+                if (stealthFlank)
+                {
+                    bool nightDark = VisionConfig.EnableRealisticNightDarkness != null &&
+                                     VisionConfig.EnableRealisticNightDarkness.Value &&
+                                     AiCore.NightDarkness01 >= 0.35f;
+                    SoldierPersonality fp = GetPersonality(soldier);
+                    stealthFlank =
+                        (nightDark && flankDistSq <= 42f * 42f) ||
+                        (flankDistSq <= 24f * 24f && board.HasActiveThreat && (board.ThreatPosition - myPos).sqrMagnitude <= 38f * 38f) ||
+                        ((fp == SoldierPersonality.Marksman_Stalker || fp == SoldierPersonality.AT_Ambusher) &&
+                         (sq == null || !sq.IsEnemyAwareOfThisSquad) &&
+                         flankDistSq <= 30f * 30f);
+                }
+                if (stealthFlank && shGoap != null)
+                    shGoap.Stance.StealthCrouchUntil = Mathf.Max(shGoap.Stance.StealthCrouchUntil, now + 4.5f);
+
                 board.FlankUntil = Mathf.Max(board.FlankUntil, now + 6.5f);
                 plan.LockUnitCoverChange = true;
                 plan.PlanExpireTime = now + 6.5f;
@@ -1309,7 +1360,7 @@ namespace EasyRed2HumanAI
                         plan.MoveOverrideDest = chosenPos;
                         if (soldier.m_pose == SoldierPose.Prone && flankDistSq > 1.8f * 1.8f)
                             SetBotPose(ai, soldier, SoldierPose.Crouch, true);
-                        ApplyDesiredMovingPose(ai, soldier, flankDistSq, suppression);
+                        ApplyDesiredMovingPose(ai, soldier, flankDistSq, suppression, stealthFlank);
                         if (shGoap != null)
                             shGoap.Emergent.NextPlanTime = Mathf.Max(shGoap.Emergent.NextPlanTime, now + 4.5f);
                         GoapPinAndFlankCount++;
@@ -1335,7 +1386,7 @@ namespace EasyRed2HumanAI
                     plan.MoveOverrideDest = chosenPos;
                     if (soldier.m_pose == SoldierPose.Prone && flankDistSq > 1.8f * 1.8f)
                         SetBotPose(ai, soldier, SoldierPose.Crouch, true);
-                    ApplyDesiredMovingPose(ai, soldier, flankDistSq, suppression);
+                    ApplyDesiredMovingPose(ai, soldier, flankDistSq, suppression, stealthFlank);
                     if (!ai.IsMoving() && !ai.HasPath && !ai.HasPathRequest)
                     {
                         AiCore.ResetBotPathLockout(ai);
@@ -2374,6 +2425,7 @@ namespace EasyRed2HumanAI
             if (h != null)
             {
                 h.Stance.LocalCoverProtectedUntil = now + 5.5f;
+                h.Stance.StealthCrouchUntil = Mathf.Max(h.Stance.StealthCrouchUntil, now + 5.5f);
                 AiCore.SetBotMoveOverride(h, AiCore.BotMoveOverrideKind.GoapAction, peekPos, now + 4.5f);
             }
 
@@ -2606,6 +2658,9 @@ namespace EasyRed2HumanAI
                         if (isOnBridge && !AiCore.IsSafeBridgeDeckStep(myPos, covPos, out _))
                             continue;
 
+                        if (AiCore.IsBlindSmokePathHighRisk(covH, myPos, covPos, now, false, false, 0f, out _))
+                            continue;
+
                         if (!cc.IsCoverAvailable(threatDir, AiCore.GetCachedFaction(soldier)))
                             continue;
 
@@ -2649,7 +2704,8 @@ namespace EasyRed2HumanAI
 
                     float bridgeDistSq = (bridgeBoundSpot - myPos).sqrMagnitude;
                     if (bridgeDistSq >= 4.5f * 4.5f &&
-                        Vector3.Dot(bridgeBoundSpot - myPos, threatDir) >= 3.5f)
+                        Vector3.Dot(bridgeBoundSpot - myPos, threatDir) >= 3.5f &&
+                        !AiCore.IsBlindSmokePathHighRisk(covH, myPos, bridgeBoundSpot, now, false, false, 0f, out _))
                     {
                         DestinationWithoutCover bridgeBoundDest = new DestinationWithoutCover(bridgeBoundSpot, SoldierPose.Crouch);
                         AiCore.AssignBotCoverOrDestination(ai, soldier, bridgeBoundDest.Cast<AiDestination>());
@@ -2700,6 +2756,8 @@ namespace EasyRed2HumanAI
                     if ((threatPos - openBoundPos).sqrMagnitude < 9.0f * 9.0f)
                         continue;
                     if (AiCore.TryGetNearbyKnownMine(openBoundPos, 4.0f, false, out _))
+                        continue;
+                    if (AiCore.IsBlindSmokePathHighRisk(covH, myPos, openBoundPos, now, false, false, 0f, out _))
                         continue;
 
                     float openDistSq = (openBoundPos - myPos).sqrMagnitude;
@@ -2819,7 +2877,9 @@ namespace EasyRed2HumanAI
                     carried != null &&
                     !carried.IsDead &&
                     carried.IsInjured &&
-                    ai != null)
+                    ai != null &&
+                    (!AiCore.AreEnemyFactions(myFaction, AiCore.GetCachedFaction(carried)) ||
+                     IsMedicConfidentlySafeToHealEnemy(ai, soldier, dragH, carried, now)))
                 {
                     MedicHealingDestination healDest = new MedicHealingDestination(carried, soldier);
                     AiCore.AssignBotCoverOrDestination(ai, soldier, healDest.Cast<AiDestination>(), requestImmediatePath: true);
@@ -3375,13 +3435,6 @@ namespace EasyRed2HumanAI
                 (!Photon.Pun.PhotonNetwork.InRoom || AiCore.TryConsumeBotRpcBudget(0.40f)))
             {
                 bestSquad.Join(self);
-                AiCore.SoldierFastHandles joinH = AiCore.GetOrCreateSoldierHandles(self);
-                if (joinH != null)
-                {
-                    joinH.Goap.Plan.PlanExpireTime = 0f;
-                    joinH.Emergent.NextPlanTime = 0f;
-                    AiCore.ClearBotMoveOverride(joinH, AiCore.BotMoveOverrideKind.GoapAction);
-                }
                 if (VisionConfig.DebugLogging.Value)
                 {
                     AiCore.LogDebug(
@@ -3397,6 +3450,91 @@ namespace EasyRed2HumanAI
             activeMoveDest = leaderPos;
             AiCore.MoveBotTowardPosition(ai, self, leaderPos, 3.5f, 3.0f);
             return true;
+        }
+
+        internal static void SyncBotOrdersOnSquadJoin(Squad newSquad, Soldier soldier)
+        {
+            if (newSquad == null || newSquad.Pointer == IntPtr.Zero || soldier == null || soldier.Pointer == IntPtr.Zero)
+                return;
+
+            AiCore.SoldierFastHandles h = AiCore.GetOrCreateSoldierHandles(soldier);
+            if (h == null ||
+                !AiCore.IsLocallyOwnedBot(h) ||
+                AiCore.IsSoldierInVehicleOrTransition(soldier) ||
+                soldier.IsDead ||
+                !soldier.IsAlive ||
+                soldier.IsInjured ||
+                soldier.HasSurrended())
+            {
+                return;
+            }
+
+            SoldierAI ai = h.Ai;
+            if (ReferenceEquals(ai, null) || ai == null || ai.Pointer == IntPtr.Zero)
+                return;
+
+            AiCore.CachedDestKind curKind = AiCore.ResolveTargetDestination(h);
+            if (curKind == AiCore.CachedDestKind.MedicHeal || curKind == AiCore.CachedDestKind.VehicleRepair)
+                return;
+
+            h.Goap.Plan = default;
+            h.Emergent.NextPlanTime = 0f;
+            h.Stance.LocalCoverProtectedUntil = 0f;
+            h.Stance.CoverSettledUntil = 0f;
+            h.Stance.NextLocalCoverSeekTime = 0f;
+            h.Stance.StealthCrouchUntil = 0f;
+            if (h.MoveOverride.Kind != AiCore.BotMoveOverrideKind.GrenadeReflex &&
+                h.MoveOverride.Kind != AiCore.BotMoveOverrideKind.VehicleEvade)
+            {
+                h.MoveOverride = default;
+            }
+
+            if (soldier.HasDestinationAssigned || AiCore.GetRawTargetDestinationPtr(soldier) != IntPtr.Zero)
+            {
+                soldier.targetDestination = null;
+                AiCore.InvalidateTargetDestinationCache(soldier);
+            }
+
+            if (newSquad.order == Order.follow)
+            {
+                Soldier leader = newSquad.Leader;
+                if (leader != null && leader.Pointer != IntPtr.Zero && leader.Pointer != soldier.Pointer && leader.IsAlive)
+                {
+                    Vector3 leaderPos = AiCore.TryGetSoldierHandles(leader.Pointer, out AiCore.SoldierFastHandles lh) && lh.Tr != null
+                        ? lh.Tr.position
+                        : (leader.transform != null ? leader.transform.position : Vector3.zero);
+                    if (leaderPos.sqrMagnitude > 0.01f)
+                    {
+                        ai.moveDirectlyToward_end = 0f;
+                        AiCore.ResetBotPathLockout(ai);
+                        ai.MoveDestination = leaderPos;
+                        ai.UpdatePath();
+                    }
+                }
+            }
+            else
+            {
+                Vector3 orderPos = newSquad.moveOrderPosition;
+                if (orderPos.sqrMagnitude <= 1.0f && newSquad.currentTask != null)
+                    orderPos = newSquad.currentTask.GetTaskDestination();
+
+                if (orderPos.sqrMagnitude > 1.0f)
+                {
+                    float orderRadius = Mathf.Clamp(newSquad.moveOrderRadius > 1.0f ? newSquad.moveOrderRadius : 12.0f, 6.0f, 45.0f);
+                    AiDestination newDest = soldier.GetDestinationInPosition(orderPos, orderRadius, null, false, newSquad.MoveOrderBoxTask);
+                    if (!ReferenceEquals(newDest, null) && newDest != null && newDest.Pointer != IntPtr.Zero)
+                    {
+                        AiCore.AssignBotCoverOrDestination(ai, soldier, newDest, requestImmediatePath: true);
+                    }
+                    else
+                    {
+                        ai.moveDirectlyToward_end = 0f;
+                        AiCore.ResetBotPathLockout(ai);
+                        ai.MoveDestination = orderPos;
+                        ai.UpdatePath();
+                    }
+                }
+            }
         }
 
         private static float _nextLonePlayerRejoinCheckTime;

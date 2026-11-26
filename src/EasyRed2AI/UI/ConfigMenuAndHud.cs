@@ -2451,11 +2451,25 @@ namespace EasyRed2HumanAI
         [HarmonyPatch(typeof(Squad), nameof(Squad.Join))]
         public static class Squad_Join_Patch
         {
-            public static bool Prefix(Squad __instance, Soldier __0, ref bool __state)
+            public struct JoinState
             {
-                __state = false;
+                public bool IsSurvivorMerge;
+                public IntPtr OldSquadPtr;
+                public bool WasSurrendered;
+            }
+
+            public static bool Prefix(Squad __instance, Soldier __0, ref JoinState __state)
+            {
+                __state = default;
                 try
                 {
+                    if (__0 != null && __0.Pointer != IntPtr.Zero)
+                    {
+                        Squad prevSq = __0.joinedSquad;
+                        __state.OldSquadPtr = (prevSq != null && prevSq.Pointer != IntPtr.Zero) ? prevSq.Pointer : IntPtr.Zero;
+                        __state.WasSurrendered = __0.HasSurrended();
+                    }
+
                     if (InsideIncomingSyncSquadRpc)
                         return true;
 
@@ -2506,13 +2520,13 @@ namespace EasyRed2HumanAI
                         }
                     }
 
-                    __state = true;
+                    __state.IsSurvivorMerge = true;
                 }
                 catch { }
                 return true;
             }
 
-            public static void Postfix(Squad __instance, Soldier __0, bool __state)
+            public static void Postfix(Squad __instance, Soldier __0, JoinState __state)
             {
                 try
                 {
@@ -2525,11 +2539,25 @@ namespace EasyRed2HumanAI
                         return;
                     }
 
+                    bool joinedNewSquad = __0.joinedSquad != null && __0.joinedSquad.Pointer == __instance.Pointer;
+                    if (joinedNewSquad && AiCore.TryGetSoldierHandles(__0.Pointer, out AiCore.SoldierFastHandles joinH))
+                    {
+                        joinH.CachedSquad = __instance;
+                        joinH.NextSquadRefreshTime = Time.time + 0.5f;
+                    }
+
+                    if (joinedNewSquad &&
+                        (__state.IsSurvivorMerge ||
+                         (__state.OldSquadPtr != IntPtr.Zero && __state.OldSquadPtr != __instance.Pointer) ||
+                         (__state.WasSurrendered && __instance.units != null && __instance.units.Count >= 2)))
+                    {
+                        VeteranAndTacticsPatches.SyncBotOrdersOnSquadJoin(__instance, __0);
+                    }
+
                     Soldier localPlayer = Soldier.CurrentControlledSoldierOrNull();
                     if (PlayerGUI.instance != null &&
                         !PlayerGUI.IsSelectingSquad() &&
-                        __0.joinedSquad != null &&
-                        __0.joinedSquad.Pointer == __instance.Pointer &&
+                        joinedNewSquad &&
                         localPlayer != null &&
                         localPlayer.Pointer != IntPtr.Zero &&
                         localPlayer.IsAlive &&
@@ -2541,9 +2569,8 @@ namespace EasyRed2HumanAI
                         RefreshSquadHeaderLabel();
                     }
 
-                    if (!__state ||
-                        __0.joinedSquad == null ||
-                        __0.joinedSquad.Pointer != __instance.Pointer ||
+                    if (!__state.IsSurvivorMerge ||
+                        !joinedNewSquad ||
                         __instance.units == null ||
                         __instance.units.Count < 2)
                     {
@@ -2558,7 +2585,9 @@ namespace EasyRed2HumanAI
                     }
                     else if (__0.IsPlayer() && AiCore.IsInMultiplayerRoom() && AiCore.IsMasterClient())
                     {
-                        SyncSoldier syn = __0.soldierSyncher;
+                        SyncSoldier syn = AiCore.TryGetSoldierHandles(__0.Pointer, out AiCore.SoldierFastHandles sh)
+                            ? AiCore.GetCachedSoldierSyncher(sh)
+                            : __0.soldierSyncher;
                         Photon.Realtime.Player owner = syn != null ? (syn.Controller ?? syn.Owner) : null;
                         if (owner != null && !owner.IsLocal && !AiCore.IsPhotonPlayerConfirmedModded(owner))
                         {

@@ -747,19 +747,30 @@ namespace EasyRed2HumanAI
                     if (h == null)
                         return;
 
-                    IntPtr ptr = h.Ptr;
+                    int frameCount = Time.frameCount;
+                    if (h.Vision.LastUpdateMoveDirRenderFrame == frameCount)
+                        return;
+                    h.Vision.LastUpdateMoveDirRenderFrame = frameCount;
+
                     float now = Time.time;
+                    bool needDeadzone = now >= h.Combat.NextDeadzoneNodeCheckTime || now < h.Combat.NextDeadzoneNodeCheckTime - 2.0f;
+                    bool needVault = now >= h.Combat.NextVaultCheckTime || now < h.Combat.NextVaultCheckTime - 3.0f;
+                    if (!needDeadzone && !needVault)
+                        return;
+
+                    IntPtr ptr = h.Ptr;
                     if (!AiCore.IsLocallyOwnedBot(h) || AiCore.IsSoldierInVehicleOrTransition(h.Ref))
                     {
-                        if (now >= h.Combat.NextVaultCheckTime)
-                            h.Combat.NextVaultCheckTime = now + 1.50f;
+                        h.Combat.NextDeadzoneNodeCheckTime = now + 1.50f;
+                        h.Combat.NextVaultCheckTime = now + 1.50f;
                         return;
                     }
 
                     Soldier soldier = h.Ref;
-                    TryPopVerticalDeadzonePathNode(__instance, h, soldier, now);
+                    if (needDeadzone)
+                        TryPopVerticalDeadzonePathNode(__instance, h, soldier, now);
 
-                    if (now < h.Combat.NextVaultCheckTime)
+                    if (!needVault)
                         return;
 
                     h.Combat.NextVaultCheckTime = now + 0.50f;
@@ -831,7 +842,7 @@ namespace EasyRed2HumanAI
                 if (now < h.Combat.NextDeadzoneNodeCheckTime && now >= h.Combat.NextDeadzoneNodeCheckTime - 2.0f)
                     return;
 
-                h.Combat.NextDeadzoneNodeCheckTime = now + 0.10f;
+                h.Combat.NextDeadzoneNodeCheckTime = now + 0.16f;
 
                 if (h.Tr == null ||
                     !ai.IsMoving() ||
@@ -1593,9 +1604,9 @@ namespace EasyRed2HumanAI
                     __state.PrevMoveDest = __instance.MoveDestination;
                     AiCore.SoldierFastHandles h = AiCore.GetOrCreateSoldierHandlesByAi(__instance);
                     if (h != null && h.Ref != null && h.Ptr != IntPtr.Zero &&
-                        AiCore.GetRawTargetDestinationPtr(h.Ref) != IntPtr.Zero)
+                        AiCore.ResolveTargetDestination(h) != AiCore.CachedDestKind.None)
                     {
-                        __state.PrevTargetDest = h.Ref.targetDestination;
+                        __state.PrevTargetDest = h.CachedDest;
                     }
                 }
                 catch { }
