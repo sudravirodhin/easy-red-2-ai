@@ -413,10 +413,10 @@ namespace EasyRed2HumanAI
             public bool IsFriendlyRadioStrike;
         }
 
-        private static readonly ActiveBarragePocket[] _friendlyArtilleryZones = new ActiveBarragePocket[12];
+        private static ActiveBarragePocket[] _friendlyArtilleryZones = new ActiveBarragePocket[16];
         private static int _friendlyArtilleryZoneCount;
         private static float _nextFriendlyArtilleryRefreshTime;
-        private static readonly ActiveBarragePocket[] _activeShellingPockets = new ActiveBarragePocket[8];
+        private static readonly ActiveBarragePocket[] _activeShellingPockets = new ActiveBarragePocket[16];
         private static int _shellingPocketRingHead;
         private static float _nextLocalArtyWarnToastTime;
         private static float _nextCoopArtyWarnChatTime;
@@ -448,7 +448,7 @@ namespace EasyRed2HumanAI
 
             int sqCount = AiCore.WorldSquadCount;
             var squads = AiCore.WorldSquads;
-            for (int s = 0; s < sqCount && _friendlyArtilleryZoneCount < _friendlyArtilleryZones.Length; s++)
+            for (int s = 0; s < sqCount; s++)
             {
                 ref AiCore.SquadSnapshot sqSnap = ref squads[s];
                 Squad sq = sqSnap.Ref;
@@ -459,6 +459,9 @@ namespace EasyRed2HumanAI
                 {
                     if (sq.RadioRequestActiveAndConfirmed() && sq.RadioRequestIsExplosiveArtillery)
                     {
+                        if (!AiCore.TryEnsureArrayCapacity(ref _friendlyArtilleryZones, _friendlyArtilleryZoneCount + 1, 64))
+                            break;
+
                         float exp = sq.radioRequestEnd > now ? sq.radioRequestEnd : (now + 2.0f);
                         _friendlyArtilleryZones[_friendlyArtilleryZoneCount++] = new ActiveBarragePocket
                         {
@@ -499,7 +502,13 @@ namespace EasyRed2HumanAI
                     if (dSq <= warnR * warnR && now >= _nextLocalArtyWarnToastTime)
                     {
                         _nextLocalArtyWarnToastTime = now + 10.0f;
-                        VisionPatches.ShowToast($"[HQ] DANGER CLOSE: Friendly artillery inbound ({Mathf.RoundToInt(Mathf.Sqrt(dSq))}m) — clear area!", 4.5f);
+                        try
+                        {
+                            PlayerController.HintToPlayer(
+                                $"HQ Radio: DANGER CLOSE \u2014 Friendly artillery inbound ({Mathf.RoundToInt(Mathf.Sqrt(dSq))}m), clear area!",
+                                false);
+                        }
+                        catch { }
                         break;
                     }
                 }
@@ -1357,6 +1366,27 @@ namespace EasyRed2HumanAI
                 board.PendingLeaderSuccession = true;
                 _squadBlackboards[sq.Pointer] = board;
             }
+        }
+
+        internal static SquadBlackboard GetSquadBlackboardBudgeted(Squad sq, Soldier fallbackSoldier, float now, ref int refreshBudget)
+        {
+            if (sq == null || sq.Pointer == IntPtr.Zero)
+                return default;
+
+            if (_squadBlackboards.TryGetValue(sq.Pointer, out SquadBlackboard cached))
+            {
+                if (now < cached.NextRefreshTime || refreshBudget <= 0)
+                    return cached;
+
+                refreshBudget--;
+                return GetOrUpdateSquadBlackboard(sq, fallbackSoldier, allowRefresh: true);
+            }
+
+            if (refreshBudget <= 0)
+                return default;
+
+            refreshBudget--;
+            return GetOrUpdateSquadBlackboard(sq, fallbackSoldier, allowRefresh: true);
         }
 
         internal static SquadBlackboard GetOrUpdateSquadBlackboard(Squad sq, Soldier fallbackSoldier, bool allowRefresh = true)

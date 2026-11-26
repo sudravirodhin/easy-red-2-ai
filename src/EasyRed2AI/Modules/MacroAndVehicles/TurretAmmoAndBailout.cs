@@ -1552,33 +1552,12 @@ namespace EasyRed2HumanAI
                                 float effPen = Mathf.Max(kinPen, bd.explosion_penetration);
                                 if (effPen > bestArmorEffPen)
                                     bestArmorEffPen = effPen;
-                                ShellType st = bd.shellType;
-
-                                float score;
-                                if (effPen >= penThreshold)
-                                {
-                                    // Round can penetrate target at this distance: prefer APHE > HEAT > solid AP/APCR > HE
-                                    float typeBonus = st == ShellType.APHE
-                                        ? 220f
-                                        : (st == ShellType.HEAT
-                                            ? 175f
-                                            : (st == ShellType.AP ? 140f : 80f));
-                                    score = 1000f + typeBonus + Mathf.Min(effPen, 250f) * 0.25f;
-                                }
-                                else if (effPen >= 12f)
-                                {
-                                    // Target armor is thick: rank strictly by effective penetration at distance
-                                    score = effPen * 5.0f + (st == ShellType.APHE ? 8f : 0f);
-                                }
-                                else if (bd.caliber >= 37f && IsTrueHeOrAntiInfantryRound(bd))
-                                {
-                                    // Out of AP/HEAT: heavy HE cannon shell can still track/concuss armor better than small-caliber MG
-                                    score = 25f + bd.caliber * 0.15f;
-                                }
-                                else
-                                {
-                                    score = effPen;
-                                }
+                                float score = ScoreTurretShellAgainstArmor(
+                                    bd.shellType,
+                                    effPen,
+                                    bd.caliber,
+                                    IsTrueHeOrAntiInfantryRound(bd),
+                                    penThreshold);
 
                                 if (score > bestArmorScore)
                                 {
@@ -1792,6 +1771,36 @@ namespace EasyRed2HumanAI
             }
         }
 
+        internal static float ScoreTurretShellAgainstArmor(
+            ShellType st,
+            float effPen,
+            float caliberMm,
+            bool isTrueHeOrAntiInf,
+            float penThreshold)
+        {
+            if (effPen >= penThreshold)
+            {
+                // Round can penetrate target at this distance: prefer APHE > HEAT > solid AP/APCR > HE
+                float typeBonus = st == ShellType.APHE
+                    ? 220f
+                    : (st == ShellType.HEAT
+                        ? 175f
+                        : (st == ShellType.AP ? 140f : 80f));
+                return 1000f + typeBonus + Mathf.Min(effPen, 250f) * 0.25f;
+            }
+            if (effPen >= 12f)
+            {
+                // Target armor is thick: rank strictly by effective penetration at distance
+                return effPen * 5.0f + (st == ShellType.APHE ? 8f : 0f);
+            }
+            if (caliberMm >= 37f && isTrueHeOrAntiInf)
+            {
+                // Out of AP/HEAT: heavy HE cannon shell can still track/concuss armor better than small-caliber MG
+                return 25f + caliberMm * 0.15f;
+            }
+            return effPen;
+        }
+
         [HarmonyPatch(typeof(TurretGun), nameof(TurretGun.SetGunTriggerPressed))]
         public static class TurretGun_SetGunTriggerPressed_Patch
         {
@@ -1807,6 +1816,10 @@ namespace EasyRed2HumanAI
                     {
                         return;
                     }
+
+                    Vehicle rootVeh = AiCore.GetCachedTurretVehicle(__instance);
+                    if (rootVeh != null && rootVeh.IsAirVehicle())
+                        return;
 
                     if (__1 != null && AiCore.IsAnyHumanPlayerSoldier(__1))
                         return;

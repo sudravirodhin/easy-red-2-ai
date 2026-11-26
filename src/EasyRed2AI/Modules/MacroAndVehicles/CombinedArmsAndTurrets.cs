@@ -1357,6 +1357,44 @@ namespace EasyRed2HumanAI
         // =====================================================================
         // Emplacement & Vehicle Turret Friendly Fire Prevention (TurretAI.AutoPilot / TurretGun)
         // =====================================================================
+        internal static bool IsTurretDirectFireBlockedByWall(
+            Vector3 pivotPos,
+            Vector3 firePos,
+            Vector3 fireDir,
+            bool isAirVehicle,
+            bool isIndirect,
+            bool isExplosive,
+            bool hasTargetPos,
+            float targetDist,
+            Transform ignoreRoot)
+        {
+            if (isAirVehicle || isIndirect)
+                return false;
+
+            // 0. Direct-fire barrel/muzzle clip check: ignore own hull/gun-shield and vehicle hulls, catch solid walls/berms
+            if ((firePos - pivotPos).sqrMagnitude > 0.04f &&
+                AiCore.LinecastEnvironment(pivotPos, firePos, ignoreRoot, out _, ignoreVehicles: true))
+            {
+                return true;
+            }
+
+            // 1. Direct-fire explosive/autocannon muzzle check: prevent detonating on masonry right in front of barrel
+            //    without muting point-blank tank-vs-tank duels or hitting a building behind a close target.
+            if (isExplosive)
+            {
+                float wallCheckDist = hasTargetPos
+                    ? Mathf.Min(5.2f, targetDist - 0.35f)
+                    : 5.2f;
+                if (wallCheckDist > 0.25f &&
+                    AiCore.IsDirectionBlockedByEnvironment(firePos, fireDir, wallCheckDist, ignoreRoot, ignoreVehicles: true))
+                {
+                    return true;
+                }
+            }
+
+            return false;
+        }
+
         internal static bool ShouldBlockTurretFriendlyFire(TurretAI turretAi, Turret turret, Soldier gunner, bool forceFreshCheck = false)
         {
             if (turret == null || turret.Pointer == IntPtr.Zero)
@@ -1474,27 +1512,16 @@ namespace EasyRed2HumanAI
             else if (caliber >= 20.0f)
                 dangerCloseBlastRadius = 6.5f;
 
-            // 0. Block direct-fire tank/MG turrets whose barrel/muzzle has clipped through a solid wall or berm
-            if (!isIndirect && VisionConfig.EnableWallShootingPrevention.Value &&
-                rootVeh != null && !rootVeh.IsAirVehicle() && turret.transform != null)
-            {
-                Vector3 pivotPos = turret.transform.position;
-                if ((firePos - pivotPos).sqrMagnitude > 0.04f &&
-                    Physics.Linecast(pivotPos, firePos, AiCore.GetSolidEnvironmentMask(), QueryTriggerInteraction.Ignore))
-                {
-                    _turretFFBlockedUntil[turretPtr] = now + 0.30f;
-                    WallsBlocked++;
-                    return true;
-                }
-            }
-
-            // 1. Prevent direct-fire cannons/AT guns from detonating HE shells on a low wall or sandbag right in front of the muzzle
-            if (isExplosive && !isIndirect && VisionConfig.EnableWallShootingPrevention.Value)
+            // 0 & 1. Block direct-fire ground/static turrets whose barrel or explosive muzzle is blocked by a solid wall/berm
+            //       (ignores own vehicle/gun-shield and enemy vehicle hulls so point-blank duels and shielded emplacements still fire).
+            bool isAirVeh = rootVeh != null && rootVeh.IsAirVehicle();
+            if (VisionConfig.EnableWallShootingPrevention.Value && !isAirVeh && !isIndirect)
             {
                 Transform ignoreRoot = (rootVeh != null && rootVeh.transform != null)
                     ? rootVeh.transform.root
                     : (turret.transform != null ? turret.transform.root : null);
-                if (ignoreRoot != null && AiCore.IsDirectionBlockedByEnvironment(firePos, fireDir, 5.2f, ignoreRoot))
+                Vector3 pivotPos = turret.transform != null ? turret.transform.position : firePos;
+                if (IsTurretDirectFireBlockedByWall(pivotPos, firePos, fireDir, isAirVeh, isIndirect, isExplosive, hasTargetPos, targetDist, ignoreRoot))
                 {
                     _turretFFBlockedUntil[turretPtr] = now + 0.30f;
                     WallsBlocked++;

@@ -503,7 +503,6 @@ namespace EasyRed2HumanAI
             {
                 string msg = $"Command Succession: You stepped up as a {archLabel} leader.";
                 try { PlayerController.HintToPlayer(msg, false); } catch { }
-                VisionPatches.ShowToast($"[Battle Hardened] {msg}", 5.0f);
             }
             else if (sq.IsPlayerInSquad())
             {
@@ -515,7 +514,7 @@ namespace EasyRed2HumanAI
                     minInterval: 4.0f);
             }
 
-            if (!s.IsPlayer())
+            if (!AiCore.IsAnyHumanPlayerSoldier(s))
             {
                 TrySayTacticalVoice(s, sq, VoiceManager.VoiceClip.followMe, 0.0f);
             }
@@ -668,9 +667,9 @@ namespace EasyRed2HumanAI
 
         private static void GetEffectivePeekParameters(Soldier s, float vet01, out float maxPeekSuppression, out float duckBackSuppression, out float peekCooldown)
         {
-            maxPeekSuppression = 25f;
-            duckBackSuppression = 30f;
-            peekCooldown = 3.0f;
+            maxPeekSuppression = 46f;
+            duckBackSuppression = 58f;
+            peekCooldown = 2.4f;
 
             SoldierPersonality p = GetPersonality(s);
             switch (p)
@@ -678,19 +677,19 @@ namespace EasyRed2HumanAI
                 case SoldierPersonality.Assaulter_Breacher:
                 case SoldierPersonality.Assaulter_Shock:
                 case SoldierPersonality.Leader_Spearhead:
-                    maxPeekSuppression = 38f;
-                    duckBackSuppression = 45f;
-                    peekCooldown = 2.0f;
+                    maxPeekSuppression = 62f;
+                    duckBackSuppression = 74f;
+                    peekCooldown = 1.6f;
                     break;
                 case SoldierPersonality.Rifleman_Cautious:
                 case SoldierPersonality.Medic_Triage:
                     float cure = VisionConfig.VeterancyCuresSkittishness.Value ? vet01 : 0f;
-                    maxPeekSuppression = Mathf.Lerp(15f, 25f, cure);
-                    duckBackSuppression = Mathf.Lerp(19f, 30f, cure);
-                    peekCooldown = Mathf.Lerp(6.2f, 3.2f, cure);
+                    maxPeekSuppression = Mathf.Lerp(30f, 46f, cure);
+                    duckBackSuppression = Mathf.Lerp(38f, 58f, cure);
+                    peekCooldown = Mathf.Lerp(4.8f, 2.6f, cure);
                     break;
                 case SoldierPersonality.Marksman_Stalker:
-                    peekCooldown = 4.2f;
+                    peekCooldown = 3.6f;
                     break;
             }
         }
@@ -1057,7 +1056,7 @@ namespace EasyRed2HumanAI
                     }
                     else if (owned &&
                              !traits.IsCommanderTurret &&
-                             (__0 == null || !__0.IsPlayer()) &&
+                             (__0 == null || !AiCore.IsAnyHumanPlayerSoldier(__0)) &&
                              (curTarget == null || curTarget.Pointer == IntPtr.Zero) &&
                              !__instance.HasRadioSupportRequest &&
                              traits.VehHandles != null &&
@@ -1493,7 +1492,7 @@ namespace EasyRed2HumanAI
                     }
 
                     VehiclePlane vp = __instance.veh;
-                    if (vp == null || vp.Pointer == IntPtr.Zero || vp.planeType != PlaneType.Fighter || vp.PlayerIsInside())
+                    if (vp == null || vp.Pointer == IntPtr.Zero || vp.planeType != PlaneType.Fighter || AiCore.IsAnyHumanPlayerInsideVehicle(vp))
                         return;
 
                     AiCore.VehicleFastHandles vh = AiCore.GetOrCreateVehicleHandles(vp);

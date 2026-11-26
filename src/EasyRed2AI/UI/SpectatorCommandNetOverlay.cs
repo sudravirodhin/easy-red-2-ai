@@ -52,7 +52,7 @@ namespace EasyRed2HumanAI
         private static bool _cmdNetAssetsInitialized;
 
         private static readonly List<MissionObjective> _cmdNetObjBuf = new List<MissionObjective>(16);
-        private static readonly CmdNetObjTally[] _cmdNetTallies = new CmdNetObjTally[12];
+        private static CmdNetObjTally[] _cmdNetTallies = new CmdNetObjTally[16];
         private static readonly Vector2[] _cmdNetRingPts = new Vector2[16];
         private static readonly bool[] _cmdNetRingOk = new bool[16];
 
@@ -668,6 +668,7 @@ namespace EasyRed2HumanAI
             _cmdNetObjBuf.Clear();
             AiCore.CollectActiveMissionObjectives(phase, _cmdNetObjBuf);
 
+            AiCore.TryEnsureArrayCapacity(ref _cmdNetTallies, Math.Min(_cmdNetObjBuf.Count, 64), 64);
             int tallyCount = Mathf.Min(_cmdNetObjBuf.Count, _cmdNetTallies.Length);
             for (int i = 0; i < tallyCount; i++)
             {

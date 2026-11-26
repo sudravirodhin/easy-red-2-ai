@@ -123,6 +123,7 @@ namespace EasyRed2HumanAI
         public static ConfigEntry<bool> EnablePlaneAudioSmoothing;
         public static ConfigEntry<bool> EnableDynamicSoldierVoicePitch;
         public static ConfigEntry<bool> EnableThinCoverBulletPenetration;
+        public static ConfigEntry<bool> EnableHumanBulletOverPenetration;
         public static ConfigEntry<bool> EnableRealisticVehicleArmorAndTopAttack;
         public static ConfigEntry<bool> EnableParachuteWindDrift;
         public static ConfigEntry<bool> EnableSpectatorHudRetention;
@@ -765,6 +766,12 @@ namespace EasyRed2HumanAI
                 true,
                 "Material-aware thin-cover bullet penetration: allows full-power rifle, MG, and high-caliber rounds to penetrate thin wooden fences, doors, shutters, and light planks once with reduced velocity while solid terrain, masonry, and armor still stop rounds.");
 
+            EnableHumanBulletOverPenetration = config.Bind(
+                "8. Ballistics & Immersion",
+                "EnableHumanBulletOverPenetration",
+                true,
+                "Realistic human bullet over-penetration: allows full-power rifle, MG, HMG, and anti-materiel rounds with sufficient kinetic energy and clean exit geometry to pass through a soldier once with reduced velocity/damage and slight deflection, while pistols and SMGs stop inside torso/armor.");
+
             EnableRealisticVehicleArmorAndTopAttack = config.Bind(
                 "8. Ballistics & Immersion",
                 "EnableRealisticVehicleArmorAndTopAttack",
@@ -787,7 +794,7 @@ namespace EasyRed2HumanAI
                 "8. Ballistics & Immersion",
                 "EnableFriendlyBlastWarnings",
                 true,
-                "Warn human players when inside a friendly artillery barrage blast radius (HUD toast for modded players, plus team-only Co-op chat alert for vanilla clients).");
+                "Warn human players when inside a friendly artillery barrage blast radius (centered HUD banner for modded players, plus team-only Co-op chat alert for vanilla clients).");
 
             EnableSpectatorBotInspector = config.Bind(
                 "8. Ballistics & Immersion",
@@ -839,6 +846,7 @@ namespace EasyRed2HumanAI
             return new ConfigEntry<bool>[]
             {
                 EnableThinCoverBulletPenetration,
+                EnableHumanBulletOverPenetration,
                 EnableRealisticVehicleArmorAndTopAttack,
                 EnableTacticalReloadAndBipodCancel,
                 EnableQuickTapSpot,

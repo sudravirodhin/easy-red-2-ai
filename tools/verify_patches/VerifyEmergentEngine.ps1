@@ -915,6 +915,28 @@ $partB
                 Check("5.5m path-ahead probe detects doorway casualty before bot steps into threshold",
                     aheadDoor && aheadH > hereH,
                     $"here=(H={hereH:F2},door={hereDoor}) ahead=(H={aheadH:F2},door={aheadDoor})");
+
+                var safeMedDragInp = new EmergentEngine.EmergentInput
+                {
+                    Now = 115f, IsMedic = true, InCover = true, HasInjuredAlly = true, InjuredAllyInOpen = true,
+                    InjuredAllyHarm = 0.55f, SmoothedHarmNow = 0.12f, HasSmokeGrenade = false, HasDownedAllyToDrag = true
+                };
+                var decSafeMedDrag = EmergentEngine.EvaluateDeliberative(in safeMedDragInp, in wDefault, default, 115f);
+                Check("Safe medic with exposed casualty and no smoke chains DragCasualty -> MedicHeal",
+                    decSafeMedDrag.Step0 == EmergentEngine.EmergentActionId.DragCasualty &&
+                    decSafeMedDrag.Step1 == EmergentEngine.EmergentActionId.MedicHeal &&
+                    decSafeMedDrag.Reason == "prereq_drag_medic",
+                    $"{decSafeMedDrag.Step0}->{decSafeMedDrag.Step1} ({decSafeMedDrag.Reason})");
+
+                var riskyMedDragInp = safeMedDragInp;
+                riskyMedDragInp.Now = 116f;
+                riskyMedDragInp.SmoothedHarmNow = 0.45f;
+                var decRiskyMedDrag = EmergentEngine.EvaluateDeliberative(in riskyMedDragInp, in wDefault, default, 116f);
+                Check("Medic at immediate personal risk (SmoothedHarmNow=0.45) aborts prereq_drag_medic",
+                    decRiskyMedDrag.Step0 != EmergentEngine.EmergentActionId.DragCasualty &&
+                    decRiskyMedDrag.UnsafePrereqRejected &&
+                    decRiskyMedDrag.RejectedPrereqAction == EmergentEngine.EmergentActionId.MedicHeal,
+                    $"{decRiskyMedDrag.Step0} rej={decRiskyMedDrag.RejectedPrereqAction}");
             }
 
             Console.WriteLine("============================================================");

@@ -758,7 +758,10 @@ namespace EasyRed2HumanAI
                     if (AiCore.IsAnyHumanPlayerSoldier(__instance) || AiCore.IsSoldierInVehicleOrTransition(__instance) || !AiCore.IsLocallyOwnedBot(__instance))
                         return true;
 
-                    if (VeteranAndTacticsPatches.IsBotGunClippedThroughWall(__instance))
+                    bool targetIsVehicle = __instance.aiController != null &&
+                                           __instance.aiController.visibleTarget != null &&
+                                           __instance.aiController.visibleTarget.IsWheeledVehicleOrTank();
+                    if (VeteranAndTacticsPatches.IsBotGunClippedThroughWall(__instance, targetIsVehicle))
                     {
                         __instance.SetGunTriggerPressed(false);
                         VeteranAndTacticsPatches.IncrementWallsBlocked();
@@ -809,6 +812,67 @@ namespace EasyRed2HumanAI
         // =====================================================================
         // 2. Infantry Stance, Camouflage & Squad Awareness Sight Calculation
         // =====================================================================
+        internal static float ComputeEffectiveSoldierSightRange(
+            SoldierPose pose,
+            bool aware,
+            bool preserveStanceInCombat,
+            float standingRange,
+            float crouchRange,
+            float proneRange,
+            float combatAwareMult,
+            float night01,
+            float vanillaNightDenom,
+            float sinceShot,
+            float firingBonus,
+            float camoMultiplier,
+            float opticMultiplier)
+        {
+            float baseDist;
+            if (!aware || preserveStanceInCombat)
+            {
+                switch (pose)
+                {
+                    case SoldierPose.Idle:
+                        baseDist = standingRange;
+                        break;
+                    case SoldierPose.Crouch:
+                        baseDist = crouchRange;
+                        break;
+                    case SoldierPose.Prone:
+                        baseDist = proneRange;
+                        break;
+                    default:
+                        baseDist = standingRange;
+                        break;
+                }
+
+                if (aware)
+                    baseDist *= combatAwareMult;
+            }
+            else
+            {
+                baseDist = 300.0f;
+            }
+
+            if (night01 > 0.05f)
+            {
+                float denom = Mathf.Max(0.25f, vanillaNightDenom);
+                float silentNightDist = baseDist * Mathf.Lerp(1.0f, 0.30f, night01);
+                if (sinceShot >= 0f && sinceShot <= 1.85f)
+                {
+                    // Active muzzle flare in darkness: pops starkly against night sky/ground (155m-215m in FOV cone),
+                    // decaying rapidly over 1.85s so night shoot-and-scoot stealth works once firing stops!
+                    float flare01 = 1.0f - (sinceShot / 1.85f);
+                    float flarePeakDist = baseDist * Mathf.Lerp(1.0f, 0.72f, night01) + Mathf.Lerp(85f, 130f, night01);
+                    float worldTargetDist = Mathf.Lerp(silentNightDist, flarePeakDist, flare01);
+                    return (worldTargetDist * camoMultiplier * opticMultiplier) / denom;
+                }
+                return (silentNightDist * camoMultiplier * opticMultiplier) / denom;
+            }
+
+            return (baseDist + firingBonus) * camoMultiplier * opticMultiplier;
+        }
+
         [HarmonyPatch(typeof(Soldier), nameof(Soldier.CamoDistanceAwareEnemies))]
         public static class Soldier_CamoDistanceAwareEnemies_Patch
         {
@@ -825,70 +889,26 @@ namespace EasyRed2HumanAI
 
                     float now = Time.time;
                     float camoMultiplier = AiCore.GetCachedCamoMultiplier(h, now);
-
-                    SoldierPose pose = __instance.m_pose;
-                    float baseDist;
-                    if (!__0 || VisionConfig.PreserveStanceStealthInCombat.Value)
-                    {
-                        switch (pose)
-                        {
-                            case SoldierPose.Idle:
-                                baseDist = VisionConfig.StandingSightRange.Value;
-                                break;
-                            case SoldierPose.Crouch:
-                                baseDist = VisionConfig.CrouchingSightRange.Value;
-                                break;
-                            case SoldierPose.Prone:
-                                baseDist = VisionConfig.ProneSightRange.Value;
-                                break;
-                            default:
-                                baseDist = VisionConfig.StandingSightRange.Value;
-                                break;
-                        }
-
-                        if (__0)
-                        {
-                            baseDist *= VisionConfig.CombatAwareStanceMultiplier.Value;
-                        }
-                    }
-                    else
-                    {
-                        baseDist = 300.0f;
-                    }
-
                     float night01 = (VisionConfig.EnableRealisticNightDarkness != null && VisionConfig.EnableRealisticNightDarkness.Value)
                         ? AiCore.NightDarkness01
                         : 0f;
+                    float sinceShot = h.Vision.LastFiredTime > 0f ? (now - h.Vision.LastFiredTime) : 999f;
+                    float firingBonus = night01 > 0.05f ? 0f : GetFiringVisibilityBonus(__instance);
 
-                    float finalDist;
-                    if (night01 > 0.05f)
-                    {
-                        float vanillaNightDenom = Mathf.Max(0.25f, AiCore.VanillaNightFactor);
-                        float sinceShot = h.Vision.LastFiredTime > 0f ? (now - h.Vision.LastFiredTime) : 999f;
-                        if (sinceShot >= 0f && sinceShot <= 1.85f)
-                        {
-                            // Active muzzle flare in darkness: pops starkly against night sky/ground (155m-215m in FOV cone),
-                            // decaying rapidly over 1.85s so night shoot-and-scoot stealth works once firing stops!
-                            float flare01 = 1.0f - (sinceShot / 1.85f);
-                            float silentNightDist = baseDist * Mathf.Lerp(1.0f, 0.30f, night01);
-                            float flarePeakDist = baseDist * Mathf.Lerp(1.0f, 0.72f, night01) + Mathf.Lerp(85f, 130f, night01);
-                            float worldTargetDist = Mathf.Lerp(silentNightDist, flarePeakDist, flare01);
-                            finalDist = (worldTargetDist * camoMultiplier * GetObserverOpticMultiplier()) / vanillaNightDenom;
-                        }
-                        else
-                        {
-                            // Silent / unlit infantry in darkness (~45-60m standing, ~24-32m crouching, ~12-16m prone)
-                            float silentNightDist = baseDist * Mathf.Lerp(1.0f, 0.30f, night01);
-                            finalDist = (silentNightDist * camoMultiplier * GetObserverOpticMultiplier()) / vanillaNightDenom;
-                        }
-                    }
-                    else
-                    {
-                        baseDist += GetFiringVisibilityBonus(__instance);
-                        finalDist = baseDist * camoMultiplier * GetObserverOpticMultiplier();
-                    }
-
-                    __result = finalDist;
+                    __result = ComputeEffectiveSoldierSightRange(
+                        __instance.m_pose,
+                        __0,
+                        VisionConfig.PreserveStanceStealthInCombat.Value,
+                        VisionConfig.StandingSightRange.Value,
+                        VisionConfig.CrouchingSightRange.Value,
+                        VisionConfig.ProneSightRange.Value,
+                        VisionConfig.CombatAwareStanceMultiplier.Value,
+                        night01,
+                        AiCore.VanillaNightFactor,
+                        sinceShot,
+                        firingBonus,
+                        camoMultiplier,
+                        GetObserverOpticMultiplier());
                     return false;
                 }
                 catch
@@ -901,6 +921,29 @@ namespace EasyRed2HumanAI
         // =====================================================================
         // 3. Infantry Observer FOV Cones & Scope Magnification (Creature.CanSee)
         // =====================================================================
+        internal static bool IsObserverBlockedByCloseThinWall(
+            bool observerOnVehicle,
+            Vector3 observerPos,
+            Vector3 toTarget,
+            float dist,
+            Transform observerRoot,
+            bool targetIsVehicle)
+        {
+            if (observerOnVehicle || dist <= 0.30f)
+                return false;
+
+            float checkDist = Mathf.Min(0.50f, dist - 0.15f);
+            if (checkDist <= 0.05f)
+                return false;
+
+            return AiCore.IsDirectionBlockedByEnvironment(
+                observerPos,
+                toTarget / dist,
+                checkDist,
+                observerRoot,
+                ignoreVehicles: targetIsVehicle);
+        }
+
         [HarmonyPatch(typeof(Creature), nameof(Creature.CanSee))]
         public static class Creature_CanSee_Patch
         {
@@ -922,10 +965,11 @@ namespace EasyRed2HumanAI
                         return false;
                     }
 
+                    float now = Time.time;
                     Soldier targetSoldier = targetSolH != null ? targetSolH.Ref : null;
                     if (targetSoldier != null && targetSoldier.IsOnVehicle())
                     {
-                        AiCore.VehicleFastHandles tvH = AiCore.GetOrCreateVehicleHandles(targetSoldier.GetCurrentVehicle());
+                        AiCore.VehicleFastHandles tvH = AiCore.GetCachedCurrentVehicleHandles(targetSolH, now);
                         if (tvH != null && (tvH.IsAir || AiCore.IsButtonedUpArmoredVehicleCrew(targetSolH, tvH)))
                         {
                             // Never allow ground infantry to X-ray target a pilot inside an aircraft cockpit OR a buttoned-up
@@ -942,7 +986,6 @@ namespace EasyRed2HumanAI
                     if (!AiCore.TryGetSoldierHandlesFromCreature(__instance, out AiCore.SoldierFastHandles obsH) || obsH.Tr == null)
                         return true;
 
-                    float now = Time.time;
                     float night01 = (VisionConfig.EnableRealisticNightDarkness != null && VisionConfig.EnableRealisticNightDarkness.Value)
                         ? AiCore.NightDarkness01
                         : 0f;
@@ -1118,8 +1161,8 @@ namespace EasyRed2HumanAI
 
                     // Vanilla Creature.CanSee starts its linecast at observerPos + dir * 0.40f,
                     // skipping thin walls (<= 0.35m) pressed right in front of the observer's eyes.
-                    if (dist > 0.30f &&
-                        Physics.Raycast(observerPos, toTarget / dist, Mathf.Min(0.50f, dist - 0.15f), AiCore.GetSolidEnvironmentMask(), QueryTriggerInteraction.Ignore))
+                    // Skip for vehicle/emplacement crews near shields/frames and ignore vehicle hulls when looking at vehicles.
+                    if (IsObserverBlockedByCloseThinWall(observer.IsOnVehicle(), observerPos, toTarget, dist, obsH.RootTr ?? obsH.Tr.root, isWheeledOrTank))
                     {
                         __result = false;
                         runVanillaLinecast = false;
@@ -1168,17 +1211,18 @@ namespace EasyRed2HumanAI
                     if (!VisionConfig.EnableMod.Value || ReferenceEquals(__instance, null) || ReferenceEquals(__0, null))
                         return true;
 
-                    Turret turret = __instance.turret;
+                    Turret turret = AiCore.GetCachedTurretForAi(__instance);
                     if (turret == null || !AiCore.TryResolveSpottableFast(__0, out AiCore.SoldierFastHandles targetSolH, out AiCore.VehicleFastHandles targetVehH))
                     {
                         __result = false;
                         return false;
                     }
 
+                    float now = Time.time;
                     Soldier targetSoldier = targetSolH != null ? targetSolH.Ref : null;
                     if (targetSoldier != null && targetSoldier.IsOnVehicle())
                     {
-                        AiCore.VehicleFastHandles tvH = AiCore.GetOrCreateVehicleHandles(targetSoldier.GetCurrentVehicle());
+                        AiCore.VehicleFastHandles tvH = AiCore.GetCachedCurrentVehicleHandles(targetSolH, now);
                         if (tvH != null && (tvH.IsAir || AiCore.IsButtonedUpArmoredVehicleCrew(targetSolH, tvH)))
                         {
                             // Never allow turrets to target the pilot inside an airplane cockpit OR a buttoned-up crewman
@@ -1190,7 +1234,6 @@ namespace EasyRed2HumanAI
 
                     TotalSightChecks++;
 
-                    float now = Time.time;
                     float night01 = (VisionConfig.EnableRealisticNightDarkness != null && VisionConfig.EnableRealisticNightDarkness.Value)
                         ? AiCore.NightDarkness01
                         : 0f;
@@ -1227,10 +1270,8 @@ namespace EasyRed2HumanAI
                         ? VeteranAndTacticsPatches.GetVehicleCrewPersonality(turretVeh)
                         : VeteranAndTacticsPatches.SoldierPersonality.None;
 
-                    Spottable curTracked = __instance.CurrentVisibleTarget;
-                    bool isAlreadyTrackingThis = !ReferenceEquals(curTracked, null) &&
-                                                 curTracked != null &&
-                                                 curTracked.Pointer == __0.Pointer;
+                    IntPtr curTrackedPtr = AiCore.GetRawTurretVisibleTargetPtr(__instance);
+                    bool isAlreadyTrackingThis = curTrackedPtr != IntPtr.Zero && curTrackedPtr == __0.Pointer;
                     bool isUnderFireAttacker = obsVehH != null &&
                                                now < obsVehH.UnderFireUntil &&
                                                obsVehH.UnderFireAttackerPtr != IntPtr.Zero &&
@@ -1241,9 +1282,9 @@ namespace EasyRed2HumanAI
                         !AllowCommanderIntercomFovBypass &&
                         !isUnderFireAttacker)
                     {
-                        if (AllowLoneDriverSeatSwitchFovBypass && turretVeh != null && turretVeh.transform != null)
+                        if (AllowLoneDriverSeatSwitchFovBypass && obsVehH != null && obsVehH.Tr != null)
                         {
-                            float driverAngle = Vector3.Angle(toTarget, turretVeh.transform.forward);
+                            float driverAngle = Vector3.Angle(toTarget, obsVehH.Tr.forward);
                             float driverHalfFov = dist <= 28.0f ? 115.0f : (dist <= 110.0f ? 72.0f : 50.0f);
                             if (driverAngle > driverHalfFov)
                             {

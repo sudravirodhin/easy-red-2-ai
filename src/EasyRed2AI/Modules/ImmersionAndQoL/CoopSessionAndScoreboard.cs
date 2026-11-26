@@ -87,9 +87,12 @@ namespace EasyRed2HumanAI
             }
         }
 
-        public static int GetOnlineMaxUnitsPerFaction()
+        public static int GetOnlineMaxUnitsPerFaction(MatchData md = null)
         {
-            if (!Photon.Pun.PhotonNetwork.InRoom || Photon.Pun.PhotonNetwork.OfflineMode)
+            MatchData activeMd = md ?? MatchData.data;
+            bool isOnline = !Photon.Pun.PhotonNetwork.OfflineMode &&
+                            (Photon.Pun.PhotonNetwork.InRoom || (activeMd != null && activeMd.isMultiplayer));
+            if (!isOnline)
                 return 500;
 
             int onlineCap = 70;
@@ -98,6 +101,15 @@ namespace EasyRed2HumanAI
                 int nativeCap = ServerListMenu.MaxFactionUnitsOnCurrentSystemOnline;
                 if (nativeCap > 0)
                     onlineCap = nativeCap;
+
+                if (activeMd != null)
+                {
+                    int profileCap = activeMd.isMultiplayer
+                        ? (int)activeMd.MaxAllowedUnits
+                        : MissionProfiles.OnlineCap(activeMd.profile);
+                    if (profileCap > 0 && profileCap < onlineCap)
+                        onlineCap = profileCap;
+                }
             }
             catch { }
 
@@ -106,10 +118,15 @@ namespace EasyRed2HumanAI
 
         public static bool ClampMatchBattlesToOnlineEnvelope(MatchData md)
         {
-            if (!Photon.Pun.PhotonNetwork.InRoom || Photon.Pun.PhotonNetwork.OfflineMode || md == null || md.battles == null)
+            if (md == null || md.battles == null)
                 return false;
 
-            short maxPerSide = (short)GetOnlineMaxUnitsPerFaction();
+            bool isOnline = !Photon.Pun.PhotonNetwork.OfflineMode &&
+                            (Photon.Pun.PhotonNetwork.InRoom || md.isMultiplayer);
+            if (!isOnline)
+                return false;
+
+            short maxPerSide = (short)GetOnlineMaxUnitsPerFaction(md);
             bool clamped = false;
             for (int i = 0; i < md.battles.Count; i++)
             {

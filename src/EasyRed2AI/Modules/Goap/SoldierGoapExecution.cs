@@ -1145,27 +1145,45 @@ namespace EasyRed2HumanAI
         {
             bool smokeThrown = false;
             float nextSmkThrow = shGoap != null ? shGoap.Goap.NextSmokeGrenadeTime : 0f;
-            bool hasGroundBoardThreat = board.HasActiveThreat &&
-                                        (board.PrimaryTarget == null || !board.PrimaryTarget.IsAirVehicle());
+            Vector3 smokeTargetPos = Vector3.zero;
+            Spottable smokePrimaryTarget = null;
+            bool hasGroundSmokeThreat = false;
+            if (board.HasActiveThreat &&
+                (board.PrimaryTarget == null || !board.PrimaryTarget.IsAirVehicle()))
+            {
+                smokeTargetPos = board.ThreatPosition;
+                smokePrimaryTarget = board.PrimaryTarget;
+                hasGroundSmokeThreat = true;
+            }
+            else if (ai != null &&
+                     ai.visibleTarget != null &&
+                     !ai.visibleTarget.IsAirVehicle() &&
+                     AiCore.TryGetSpottableCenter(ai.visibleTarget, out Vector3 visSmokePos))
+            {
+                smokeTargetPos = visSmokePos;
+                smokePrimaryTarget = ai.visibleTarget;
+                hasGroundSmokeThreat = true;
+            }
+
             if (soldier.inventory != null &&
                 !soldier.isInHandsAnimation &&
                 !soldier.isInBodyAnimation &&
                 now > soldier.throw_end_time + 5.0f &&
-                hasGroundBoardThreat &&
+                hasGroundSmokeThreat &&
                 (now >= nextSmkThrow || nextSmkThrow - now > 60.0f) &&
-                (now >= board.SmokeActiveUntil || board.SmokeActiveUntil - now > 60.0f || (board.ThreatPosition - board.LastSmokeTargetPos).sqrMagnitude > 18f * 18f))
+                (now >= board.SmokeActiveUntil || board.SmokeActiveUntil - now > 60.0f || (smokeTargetPos - board.LastSmokeTargetPos).sqrMagnitude > 18f * 18f))
             {
                 VirtualItem smokeItem = soldier.inventory.FindItemOfType<VirtualSmokeGrenade>();
                 if (smokeItem != null)
                 {
-                    float dToThreat = Vector3.Distance(myPos, board.ThreatPosition);
+                    float dToThreat = Vector3.Distance(myPos, smokeTargetPos);
                     if (dToThreat >= 12f && dToThreat <= 95.0f &&
-                        TryThrowTacticalSmokeToward(soldier, smokeItem, board.ThreatPosition, board.PrimaryTarget, isDefensive: suppression >= 55f, now))
+                        TryThrowTacticalSmokeToward(soldier, smokeItem, smokeTargetPos, smokePrimaryTarget, isDefensive: suppression >= 55f, now))
                     {
                         if (shGoap != null)
                             shGoap.Goap.NextSmokeGrenadeTime = now + 32.0f;
                         board.SmokeActiveUntil = now + 22.0f;
-                        board.LastSmokeTargetPos = board.ThreatPosition;
+                        board.LastSmokeTargetPos = smokeTargetPos;
                         board.Suppressor0Ptr = ptr;
                         board.SuppressHoldUntil = now + 6.5f;
                         GoapSmokeScreensCount++;
@@ -1230,22 +1248,44 @@ namespace EasyRed2HumanAI
             }
         }
 
-        private static void ExecuteGoapMoveToFlankCover(SoldierAI ai, Soldier soldier, Squad sq, IntPtr ptr, AiCore.SoldierFastHandles shGoap, ref SquadBlackboard board, ref BotGoapPlan plan, float suppression, Vector3 myPos, float now)
+        internal static bool HasClaimableFlankCover(Soldier soldier, IntPtr ptr, in SquadBlackboard board, out CombatCover chosenCover, out bool isLeft)
         {
-            CombatCover chosenCover = null;
+            chosenCover = null;
+            isLeft = false;
+            if (soldier == null)
+                return false;
+
+            var unreachable = soldier.nonReachableCovers;
             if (board.FlankLeftCover != null &&
                 (board.FlankerLeftPtr == IntPtr.Zero || board.FlankerLeftPtr == ptr) &&
-                (soldier.nonReachableCovers == null || !soldier.nonReachableCovers.Contains(board.FlankLeftCover.Cast<AiDestination>())))
+                (unreachable == null || !unreachable.Contains(board.FlankLeftCover.Cast<AiDestination>())))
             {
-                board.FlankerLeftPtr = ptr;
                 chosenCover = board.FlankLeftCover;
+                isLeft = true;
+                return true;
             }
-            else if (board.FlankRightCover != null &&
-                     (board.FlankerRightPtr == IntPtr.Zero || board.FlankerRightPtr == ptr) &&
-                     (soldier.nonReachableCovers == null || !soldier.nonReachableCovers.Contains(board.FlankRightCover.Cast<AiDestination>())))
+            if (board.FlankRightCover != null &&
+                (board.FlankerRightPtr == IntPtr.Zero || board.FlankerRightPtr == ptr) &&
+                (unreachable == null || !unreachable.Contains(board.FlankRightCover.Cast<AiDestination>())))
             {
-                board.FlankerRightPtr = ptr;
                 chosenCover = board.FlankRightCover;
+                isLeft = false;
+                return true;
+            }
+            return false;
+        }
+
+        internal static bool HasClaimableFlankCover(Soldier soldier, IntPtr ptr, in SquadBlackboard board)
+            => HasClaimableFlankCover(soldier, ptr, in board, out _, out _);
+
+        private static void ExecuteGoapMoveToFlankCover(SoldierAI ai, Soldier soldier, Squad sq, IntPtr ptr, AiCore.SoldierFastHandles shGoap, ref SquadBlackboard board, ref BotGoapPlan plan, float suppression, Vector3 myPos, float now)
+        {
+            if (HasClaimableFlankCover(soldier, ptr, in board, out CombatCover chosenCover, out bool claimedLeft))
+            {
+                if (claimedLeft)
+                    board.FlankerLeftPtr = ptr;
+                else
+                    board.FlankerRightPtr = ptr;
             }
 
             if (chosenCover != null)
@@ -1350,7 +1390,7 @@ namespace EasyRed2HumanAI
                                     fragTarget,
                                     tPos,
                                     dFrag,
-                                    8.5f,
+                                    soldier.IsOnCover() ? 6.5f : 8.5f,
                                     isCombatGrenadier ? 34.0f : 31.0f,
                                     isCombatGrenadier ? 8.5f : 9.5f,
                                     now,
@@ -1376,12 +1416,14 @@ namespace EasyRed2HumanAI
             {
                 board.BreacherPtr = ptr;
                 board.BreachUntil = now + 4.0f;
+                plan.PlanExpireTime = Mathf.Min(plan.PlanExpireTime, now + 0.85f);
             }
-            else if (board.BreacherPtr == ptr)
+            else
             {
-                board.BreacherPtr = IntPtr.Zero;
+                if (board.BreacherPtr == ptr)
+                    board.BreacherPtr = IntPtr.Zero;
+                plan.PlanExpireTime = 0f;
             }
-            plan.PlanExpireTime = Mathf.Min(plan.PlanExpireTime, now + 0.85f);
         }
 
         private static void ExecuteGoapScavengeSupplyFromCorpse(SoldierAI ai, Soldier soldier, Squad sq, AiCore.SoldierFastHandles shGoap, ref BotGoapPlan plan, float suppression, Vector3 myPos, float now)
@@ -2707,6 +2749,9 @@ namespace EasyRed2HumanAI
             }
 
             bool nearbyMedicOrCloseEnemy = false;
+            bool closeEnemyAbort = false;
+            SoldierPersonality carrierPers = GetPersonality(soldier);
+            bool carrierIsMedic = (soldier.IsMedic() || AiCore.IsMedicSoldierOrPersonality(soldier, carrierPers)) && soldier.hasSyringe;
             string myFaction = AiCore.GetCachedFaction(soldier);
             if (!string.IsNullOrEmpty(myFaction))
             {
@@ -2722,8 +2767,8 @@ namespace EasyRed2HumanAI
                     float dSq = (sSnap.Pos - myPos).sqrMagnitude;
                     if (AiCore.AreSameSideFactions(myFaction, sSnap.Faction))
                     {
-                        bool isMedic = sSnap.IsMedic || (sSnap.IsPlayer && sSnap.Ref != null && sSnap.Ref.hasSyringe);
-                        if (isMedic && dSq <= 11.0f * 11.0f)
+                        bool isOtherMedic = sSnap.IsMedic || (sSnap.IsPlayer && sSnap.Ref != null && sSnap.Ref.hasSyringe);
+                        if (!carrierIsMedic && isOtherMedic && dSq <= 11.0f * 11.0f)
                         {
                             nearbyMedicOrCloseEnemy = true;
                             break;
@@ -2732,10 +2777,16 @@ namespace EasyRed2HumanAI
                     else if (AiCore.AreEnemyFactions(myFaction, sSnap.Faction) && dSq <= 16.0f * 16.0f)
                     {
                         nearbyMedicOrCloseEnemy = true;
+                        closeEnemyAbort = true;
                         break;
                     }
                 }
             }
+
+            float dropSupp = soldier.GetSuppressionValue();
+            bool visEnemyCloseAbort = ai != null && (ai.HasEnemyAndCanFireAtHim || (ai.visibleTarget != null && ai.distFromTarget <= 20.0f));
+            bool combatAbort = closeEnemyAbort || visEnemyCloseAbort || dropSupp >= (carrierIsMedic ? 20.0f : 28.0f);
+            bool reachedDrop = hasState && (myPos - activeDrag.DropSpot).sqrMagnitude <= 2.6f * 2.6f;
 
             bool shouldDrop = !VisionConfig.EnableBuddyCasualtyDragging.Value ||
                               !hasState ||
@@ -2743,13 +2794,12 @@ namespace EasyRed2HumanAI
                               carried.IsDead ||
                               !carried.IsInjured ||
                               now >= activeDrag.DragEndTime ||
-                              (myPos - activeDrag.DropSpot).sqrMagnitude <= 2.6f * 2.6f ||
+                              reachedDrop ||
                               stalled ||
                               nearbyMedicOrCloseEnemy ||
                               soldier.isBleeding ||
                               soldier.IsInjured ||
-                              (ai != null && (ai.HasEnemyAndCanFireAtHim || ai.visibleTarget != null)) ||
-                              soldier.GetSuppressionValue() >= 18.0f;
+                              combatAbort;
 
             if (shouldDrop)
             {
@@ -2761,7 +2811,20 @@ namespace EasyRed2HumanAI
                     dragH.Goap.CasualtyDrag = new CasualtyDragState { NextScanTime = activeDrag.NextScanTime };
                     AiCore.ClearBotMoveOverride(dragH, AiCore.BotMoveOverrideKind.CasualtyDrag);
                 }
-                if (ai != null && soldier.transform != null)
+                if (carrierIsMedic &&
+                    !stalled &&
+                    !combatAbort &&
+                    !soldier.isBleeding &&
+                    !soldier.IsInjured &&
+                    carried != null &&
+                    !carried.IsDead &&
+                    carried.IsInjured &&
+                    ai != null)
+                {
+                    MedicHealingDestination healDest = new MedicHealingDestination(carried, soldier);
+                    AiCore.AssignBotCoverOrDestination(ai, soldier, healDest.Cast<AiDestination>(), requestImmediatePath: true);
+                }
+                else if (ai != null && soldier.transform != null)
                 {
                     Vector3 clearStep = myPos - soldier.transform.forward * 2.4f;
                     AiCore.MoveBotTowardPosition(ai, soldier, clearStep, 0.8f, 1.8f);
@@ -2778,42 +2841,191 @@ namespace EasyRed2HumanAI
             }
         }
 
+        internal static bool IsBuddyDragRescuerEligible(
+            SoldierAI ai,
+            Soldier soldier,
+            bool isMedicCoverDrag,
+            bool smokeActive,
+            float suppression,
+            float visDist,
+            float rawHarmNow,
+            out float maxDragRadius)
+        {
+            maxDragRadius = 10.0f;
+            if (!VisionConfig.EnableBuddyCasualtyDragging.Value || soldier == null)
+                return false;
+
+            if (soldier.IsCarryingBody())
+            {
+                maxDragRadius = 14.0f;
+                return true;
+            }
+
+            if (soldier.isBleeding || soldier.IsSquadLeader() || soldier.IsRadioman() || soldier.carryData != null)
+                return false;
+
+            SoldierPersonality pers = GetPersonality(soldier);
+            bool hasVisibleTarget = ai != null && ai.visibleTarget != null && ai.visibleTarget.Pointer != IntPtr.Zero;
+
+            if (isMedicCoverDrag)
+            {
+                if (rawHarmNow >= 0.28f ||
+                    suppression >= (smokeActive ? 20f : 12f) ||
+                    (ai != null && ai.HasEnemyAndCanFireAtHim) ||
+                    (hasVisibleTarget && visDist <= 24.0f))
+                {
+                    return false;
+                }
+                maxDragRadius = 10.0f;
+                return true;
+            }
+
+            if (soldier.IsMedic() || AiCore.IsMedicSoldierOrPersonality(soldier, pers))
+                return false;
+
+            FactionCommandProfile factionProfile = GetFactionCommandProfile(soldier.faction);
+            float comradeMult = Mathf.Max(0.55f, factionProfile.ComradeAidAndDragMult);
+            float maxDragSupp = smokeActive
+                ? Mathf.Clamp(30f / comradeMult, 20f, 36f)
+                : Mathf.Clamp(18f / comradeMult, 12f, 24f);
+            bool unsafeVisEnemy = ai != null &&
+                                  (ai.HasEnemyAndCanFireAtHim ||
+                                   (hasVisibleTarget && (!soldier.IsOnCover() ? visDist <= 24.0f : visDist <= 14.0f)));
+            if (suppression >= maxDragSupp || unsafeVisEnemy)
+                return false;
+
+            maxDragRadius = Mathf.Clamp(11.0f / comradeMult, 8.5f, 14.0f);
+            return true;
+        }
+
+        internal static Soldier FindBestDragCasualtyCandidate(
+            Soldier soldier,
+            Squad sq,
+            Vector3 myPos,
+            float maxDragRadius,
+            bool isMedicCoverDrag,
+            Soldier preferredPatient,
+            out bool isSameSquad)
+        {
+            isSameSquad = false;
+            if (soldier == null)
+                return null;
+
+            string myFac = AiCore.GetCachedFaction(soldier);
+            if (string.IsNullOrEmpty(myFac))
+                return null;
+
+            IntPtr myPtr = soldier.Pointer;
+            IntPtr mySqPtr = sq != null ? sq.Pointer : IntPtr.Zero;
+            float maxDistSq = maxDragRadius * maxDragRadius;
+
+            if (isMedicCoverDrag && preferredPatient != null)
+            {
+                if (preferredPatient.Pointer != IntPtr.Zero &&
+                    preferredPatient.Pointer != myPtr &&
+                    !preferredPatient.IsDead &&
+                    preferredPatient.IsInjured &&
+                    !preferredPatient.IsOnVehicle() &&
+                    !preferredPatient.IsCarried() &&
+                    !preferredPatient.IsOnCover() &&
+                    preferredPatient.transform != null)
+                {
+                    Vector3 pPos = preferredPatient.transform.position;
+                    if (Mathf.Abs(pPos.y - myPos.y) <= 2.2f && (pPos - myPos).sqrMagnitude <= maxDistSq)
+                    {
+                        isSameSquad = mySqPtr != IntPtr.Zero && preferredPatient.joinedSquad != null && preferredPatient.joinedSquad.Pointer == mySqPtr;
+                        return preferredPatient;
+                    }
+                }
+                return null;
+            }
+
+            AiCore.EnsureWorldSnapshot(0.35f);
+            Soldier bestPatient = null;
+            float bestRankSq = float.MaxValue;
+            int injCount = AiCore.WorldInjuredSoldierCount;
+            var injured = AiCore.WorldInjuredSoldiers;
+            int solCount = AiCore.WorldSoldierCount;
+            var soldiers = AiCore.WorldSoldiers;
+
+            for (int i = 0; i < injCount; i++)
+            {
+                ref var candSnap = ref injured[i];
+                Soldier cand = candSnap.Ref;
+                if (candSnap.Ptr == IntPtr.Zero || candSnap.Ptr == myPtr || cand == null)
+                    continue;
+                if (!AiCore.AreSameSideFactions(myFac, candSnap.Faction))
+                    continue;
+                if (cand.IsDead || !cand.IsInjured || cand.IsOnVehicle() || cand.IsCarried() || cand.IsOnCover())
+                    continue;
+
+                Vector3 cPos = candSnap.Pos;
+                if (Mathf.Abs(cPos.y - myPos.y) > 2.2f)
+                    continue;
+
+                float dSq = (cPos - myPos).sqrMagnitude;
+                if (dSq > maxDistSq)
+                    continue;
+
+                if (!isMedicCoverDrag)
+                {
+                    bool medicNearPatient = false;
+                    for (int m = 0; m < solCount; m++)
+                    {
+                        ref var mSnap = ref soldiers[m];
+                        if (mSnap.Ptr == IntPtr.Zero || mSnap.IsInjured || mSnap.IsOnVehicle)
+                            continue;
+                        if (!(mSnap.IsMedic || (mSnap.IsPlayer && mSnap.Ref != null && mSnap.Ref.hasSyringe)))
+                            continue;
+                        if (AiCore.AreSameSideFactions(myFac, mSnap.Faction) && (mSnap.Pos - cPos).sqrMagnitude <= 6.0f * 6.0f)
+                        {
+                            medicNearPatient = true;
+                            break;
+                        }
+                    }
+                    if (medicNearPatient)
+                        continue;
+                }
+
+                bool sameSq = mySqPtr != IntPtr.Zero && candSnap.SquadPtr == mySqPtr;
+                float rankSq = sameSq ? (dSq * 0.55f) : dSq;
+                if (rankSq < bestRankSq)
+                {
+                    bestRankSq = rankSq;
+                    bestPatient = cand;
+                    isSameSquad = sameSq;
+                }
+            }
+
+            return bestPatient;
+        }
+
         private static bool TryExecuteBuddyCasualtyDrag(
             SoldierAI ai,
             Soldier soldier,
             Squad sq,
             ref SquadBlackboard board,
             Vector3 myPos,
-            float now)
+            float now,
+            Soldier preferredPatient = null,
+            bool isMedicCoverDrag = false,
+            float visDist = 999f,
+            float suppression = 0f,
+            float rawHarmNow = 0f)
         {
             if (ai == null || soldier == null)
                 return false;
 
             IntPtr ptr = soldier.Pointer;
 
-            // 1. If already carrying a casualty, drag them to the sheltered drop spot or release immediately for Medics
+            // 1. If already carrying a casualty, drag them to the sheltered drop spot or hand off to MedicHeal
             if (soldier.IsCarryingBody())
             {
                 HandleActiveCasualtyCarryTick(ai, soldier, ptr, now);
                 return true;
             }
 
-            if (!VisionConfig.EnableBuddyCasualtyDragging.Value || sq == null || sq.units == null)
-                return false;
-
-            if (soldier.isBleeding || soldier.IsSquadLeader() || soldier.IsRadioman() || soldier.IsMedic() || soldier.carryData != null)
-                return false;
-
-            SoldierPersonality pers = GetPersonality(soldier);
-            if (AiCore.IsMedicSoldierOrPersonality(null, pers))
-                return false;
-
-            FactionCommandProfile factionProfile = GetFactionCommandProfile(soldier.faction);
-            float comradeMult = Mathf.Max(0.55f, factionProfile.ComradeAidAndDragMult);
-            float maxDragSupp = now < board.SmokeActiveUntil
-                ? Mathf.Clamp(22f / comradeMult, 14f, 26f)
-                : Mathf.Clamp(10f / comradeMult, 7f, 14f);
-            if (soldier.GetSuppressionValue() >= maxDragSupp || ai.HasEnemyAndCanFireAtHim || ai.visibleTarget != null)
+            if (!IsBuddyDragRescuerEligible(ai, soldier, isMedicCoverDrag, now < board.SmokeActiveUntil, suppression, visDist, rawHarmNow, out float maxDragRadius))
                 return false;
 
             // Prevent multiple squadmates from simultaneously walking over to drag a casualty in the same squad
@@ -2829,70 +3041,49 @@ namespace EasyRed2HumanAI
             if (dragH != null)
                 dragH.Goap.CasualtyDrag = dragState;
 
-            if (!board.HasActiveThreat)
+            if (!board.HasActiveThreat && !isMedicCoverDrag)
                 return false;
 
-            int uCount = sq.units.Count;
-            Soldier bestPatient = null;
-            Vector3 bestPatientPos = Vector3.zero;
-            float maxDragRadius = Mathf.Clamp(9.5f / comradeMult, 7.0f, 12.5f);
-            float bestDistSq = maxDragRadius * maxDragRadius;
+            Soldier bestPatient = FindBestDragCasualtyCandidate(soldier, sq, myPos, maxDragRadius, isMedicCoverDrag, preferredPatient, out _);
+            if (bestPatient == null || bestPatient.transform == null)
+                return false;
+
+            Vector3 bestPatientPos = bestPatient.transform.position;
+            float bestDistSq = (bestPatientPos - myPos).sqrMagnitude;
+
             Soldier squadMedic = null;
             Vector3 squadMedicPos = Vector3.zero;
-
-            for (int i = 0; i < uCount; i++)
+            if (!isMedicCoverDrag && sq != null && sq.units != null)
             {
-                Soldier u = sq.units[i];
-                if (u == null || !u.IsAlive || u.transform == null)
-                    continue;
-                if (u.IsMedic() && !u.IsInjured)
+                int uCount = sq.units.Count;
+                for (int i = 0; i < uCount; i++)
                 {
-                    squadMedic = u;
-                    squadMedicPos = u.transform.position;
-                    break;
+                    Soldier u = sq.units[i];
+                    if (u != null && u.IsAlive && u.IsMedic() && !u.IsInjured && u.transform != null)
+                    {
+                        squadMedic = u;
+                        squadMedicPos = u.transform.position;
+                        break;
+                    }
                 }
             }
-
-            for (int i = 0; i < uCount; i++)
-            {
-                Soldier cand = sq.units[i];
-                if (cand == null || cand.Pointer == ptr || cand.IsDead || !cand.IsInjured || cand.IsOnVehicle())
-                    continue;
-                if (cand.carryData != null || cand.IsOnCover() || cand.transform == null)
-                    continue;
-
-                Vector3 cPos = cand.transform.position;
-                if (Mathf.Abs(cPos.y - myPos.y) > 2.2f)
-                    continue;
-
-                // Skip if a squad medic is already right next to the casualty
-                if (squadMedic != null && (squadMedicPos - cPos).sqrMagnitude <= 6.0f * 6.0f)
-                    continue;
-
-                float dSq = (cPos - myPos).sqrMagnitude;
-                if (dSq < bestDistSq)
-                {
-                    bestDistSq = dSq;
-                    bestPatient = cand;
-                    bestPatientPos = cPos;
-                }
-            }
-
-            if (bestPatient == null)
-                return false;
 
             board.DragRescuerPtr = ptr;
             board.DragPatientPtr = bestPatient.Pointer;
             board.DragClaimUntil = now + 4.5f;
 
+            Vector3 threatDir = (board.HasActiveThreat && board.ThreatDirection.sqrMagnitude > 0.01f)
+                ? board.ThreatDirection
+                : (soldier.transform != null ? soldier.transform.forward : Vector3.forward);
+
             Vector3 dropSpot;
-            if (squadMedic != null && (squadMedicPos - bestPatientPos).sqrMagnitude <= 14.0f * 14.0f)
+            if (!isMedicCoverDrag && squadMedic != null && (squadMedicPos - bestPatientPos).sqrMagnitude <= 14.0f * 14.0f)
             {
-                dropSpot = squadMedicPos - board.ThreatDirection * 1.8f;
+                dropSpot = squadMedicPos - threatDir * 1.8f;
             }
-            else if (!TryFindShelteredSideOfWall(bestPatientPos, board.ThreatDirection, soldier.transform.root, out dropSpot))
+            else if (!TryFindShelteredSideOfWall(bestPatientPos, threatDir, soldier.transform.root, out dropSpot))
             {
-                dropSpot = bestPatientPos - board.ThreatDirection * 5.5f;
+                dropSpot = bestPatientPos - threatDir * (isMedicCoverDrag ? 4.5f : 5.5f);
             }
 
             if (bestDistSq <= 2.35f * 2.35f)
@@ -2917,9 +3108,10 @@ namespace EasyRed2HumanAI
                     TrySayTacticalVoice(soldier, sq, VoiceManager.VoiceClip.imMoving, 0.25f);
                     if (VisionConfig.DebugLogging.Value)
                     {
+                        SoldierPersonality pers = GetPersonality(soldier);
                         AiCore.LogDebug(
                             "CasualtyDrag",
-                            $"{soldier.faction} {pers} dragging wounded squadmate out of fire line to shelter.",
+                            $"{soldier.faction} {pers} dragging wounded {(isMedicCoverDrag ? "patient to shelter for safe healing" : "comrade out of fire line")}.",
                             3.0f);
                     }
                     return true;
@@ -3133,7 +3325,7 @@ namespace EasyRed2HumanAI
             Vector3 leaderPos = Vector3.zero;
             string myFaction = self.faction;
             IntPtr mySqPtr = self.joinedSquad != null ? self.joinedSquad.Pointer : IntPtr.Zero;
-            bool selfIsPlayer = self.IsPlayer();
+            bool selfIsPlayer = AiCore.IsAnyHumanPlayerSoldier(self);
 
             var squads = AiCore.WorldSquads;
             for (int i = 0; i < sqCount; i++)

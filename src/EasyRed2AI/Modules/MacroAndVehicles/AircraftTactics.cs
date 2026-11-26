@@ -501,7 +501,7 @@ namespace EasyRed2HumanAI
                 }
             }
 
-            return !AiCore.RaycastEnvironment(planePos, toTarget / dist, dist - 4.0f, planeRoot, out _);
+            return !AiCore.RaycastEnvironment(planePos, toTarget / dist, dist - 4.0f, planeRoot, out _, ignoreVehicles: target.IsWheeledVehicleOrTank());
         }
 
         public static void TrySelectKnownAircraftTarget(AIPlane plane, ref Spottable currentResult)
@@ -682,7 +682,7 @@ namespace EasyRed2HumanAI
                         continue;
 
                     // Verify unobstructed air-to-ground line of sight
-                    if (AiCore.RaycastEnvironment(planePos, dirToCand, dist - 4.0f, planeRoot, out _))
+                    if (AiCore.RaycastEnvironment(planePos, dirToCand, dist - 4.0f, planeRoot, out _, ignoreVehicles: isVehCand))
                         continue;
 
                     bestScore = candScore;
@@ -762,7 +762,7 @@ namespace EasyRed2HumanAI
                     if (candScore <= bestScore)
                         continue;
 
-                    if (AiCore.RaycastEnvironment(planePos, dirToCand, dist - 4.0f, planeRoot, out _))
+                    if (AiCore.RaycastEnvironment(planePos, dirToCand, dist - 4.0f, planeRoot, out _, ignoreVehicles: isVeh))
                         continue;
 
                     bestScore = candScore;
@@ -1201,7 +1201,7 @@ namespace EasyRed2HumanAI
             bool losBlockedByRidge =
                 horizDist > 140.0f &&
                 dist3D > 16.0f &&
-                AiCore.RaycastEnvironment(planePos, toTarget3D / dist3D, dist3D - 12.0f, plane.transform.root, out _);
+                AiCore.RaycastEnvironment(planePos, toTarget3D / dist3D, dist3D - 12.0f, plane.transform.root, out _, ignoreVehicles: true);
 
             if ((horizDist > 165.0f && heightAboveTarget < horizDist * 0.72f) ||
                 planePos.y < maxTerrainAheadY + 75.0f ||
@@ -1380,12 +1380,12 @@ namespace EasyRed2HumanAI
 
                     plane.GetDiveData(out _, out float nativeLimitHeight);
                     float rayDist = Mathf.Clamp(speed * 1.35f, 65.0f, 135.0f);
-                    bool rayHitObstacle = Physics.Raycast(
+                    bool rayHitObstacle = AiCore.IsDirectionBlockedByEnvironment(
                         pos,
                         velDir,
                         rayDist,
-                        AiCore.GetSolidEnvironmentMask(),
-                        QueryTriggerInteraction.Ignore);
+                        plane.transform.root,
+                        ignoreVehicles: true);
 
                     float minSafeAlt = maxGroundY + Mathf.Max(nativeLimitHeight, 52.0f + sinkRate * 1.15f);
                     if (pos.y <= minSafeAlt || rayHitObstacle)

@@ -60,7 +60,7 @@ namespace EasyRed2HumanAI
             LiberatePrisoner = 17,
             MaintainRadioLink = 18,
             VehicleFaceAndFight = 19,
-            VehicleCrewSwap = 20,
+            VehicleCrewSwap = 20, // Reserved: vanilla handles seat swaps
             VehicleFieldRepair = 21,
             VehicleBailout = 22
         }
@@ -761,7 +761,6 @@ namespace EasyRed2HumanAI
             public float SquadCohesionBonus; // [0..1] soft attraction to staying near living squadmates
 
             // Vehicle-specific
-            public bool NeedsSeatSwap;
             public bool NeedsTrackOrEngineRepair;
             public float PrereqBlockedUntil;
             public byte PrereqBlockedAction;
@@ -1245,6 +1244,11 @@ namespace EasyRed2HumanAI
                 float swCost = (hasCommit && prevStep0 != act0)
                     ? 0.30f
                     : ((hasSoftTail && prevStep0 != act0) ? 0.13f : 0.0f);
+                bool movePeerFlip = (hasCommit || hasSoftTail) &&
+                                    ((prevStep0 == EmergentActionId.AdvanceObjective && act0 == EmergentActionId.FlankManeuver) ||
+                                     (prevStep0 == EmergentActionId.FlankManeuver && act0 == EmergentActionId.AdvanceObjective));
+                if (movePeerFlip)
+                    swCost += 0.07f;
                 float score = wSurv * deltaSurvive + wWin * winDelta + wAid * aidDelta + extraBonus - swCost;
 
                 if (score > bestScore)
@@ -1274,19 +1278,6 @@ namespace EasyRed2HumanAI
                     ? 0.98f
                     : (inp.UncounterableArmorClose && inp.AmmoEmpty ? 0.85f : Mathf.Clamp01(curHarm * 0.65f));
 
-                if (inp.NeedsSeatSwap)
-                {
-                    ConsiderCandidate(
-                        EmergentActionId.VehicleCrewSwap,
-                        EmergentActionId.VehicleFaceAndFight,
-                        curHarm * 0.72f,
-                        0.32f,
-                        0f,
-                        curHarm * 0.85f,
-                        0.12f,
-                        "prereq_swap_seat");
-                }
-
                 if (inp.NeedsTrackOrEngineRepair && !(now < inp.PrereqBlockedUntil && inp.PrereqBlockedAction == (byte)EmergentActionId.VehicleFieldRepair))
                 {
                     float repairChainHarm = Mathf.Max(inp.SmoothedHarmNow, curHarm);
@@ -1302,19 +1293,6 @@ namespace EasyRed2HumanAI
                             repairChainHarm,
                             0.14f,
                             "safe_field_repair");
-                    }
-                    else if (inp.HasSmokeGrenade && !inp.SmokeActive &&
-                             IsSafeForDuration(repairChainHarm * 0.42f, 10.0f, w.RiskThreshold))
-                    {
-                        ConsiderCandidate(
-                            EmergentActionId.PopSmoke,
-                            EmergentActionId.VehicleFieldRepair,
-                            curHarm * 0.40f,
-                            0.32f,
-                            0.08f,
-                            repairChainHarm * 0.42f,
-                            0.06f,
-                            "prereq_smoke_repair");
                     }
                     else
                     {
@@ -1447,7 +1425,7 @@ namespace EasyRed2HumanAI
                 else if (inp.IsBleeding && !inp.HasBandage && inp.NearbyAmmoSource && !prereqResupplyBlocked && !inp.PointBlankThreat)
                 {
                     float bleedScavHarm = safeInCover ? curHarm * 0.45f : curHarm;
-                    if (IsSafeForDuration(bleedScavHarm, 1.5f, w.RiskThreshold))
+                    if (inp.RawHarmNow < 0.32f && IsSafeForDuration(bleedScavHarm, 1.5f, w.RiskThreshold))
                     {
                         ConsiderCandidate(
                             EmergentActionId.ResupplyAmmo,
@@ -1471,6 +1449,7 @@ namespace EasyRed2HumanAI
                     inp.NearbyAmmoSource &&
                     !prereqResupplyBlocked &&
                     !cqbImmediate &&
+                    inp.RawHarmNow < 0.32f &&
                     !(inp.HasVisibleEnemy && inp.VisibleEnemyDist <= 16.0f))
                 {
                     float upgHarm = safeInCover ? curHarm * 0.50f : curHarm;
@@ -1495,7 +1474,7 @@ namespace EasyRed2HumanAI
                     !(inp.HasVisibleEnemy && inp.CanHarmTarget > 0.05f && inp.VisibleEnemyDist <= 16.0f))
                 {
                     float atScavHarm = safeInCover ? curHarm * 0.40f : curHarm;
-                    if (IsSafeForDuration(atScavHarm, 1.5f, w.RiskThreshold))
+                    if (inp.RawHarmNow < 0.32f && IsSafeForDuration(atScavHarm, 1.5f, w.RiskThreshold))
                     {
                         ConsiderCandidate(
                             EmergentActionId.ResupplyAmmo,
@@ -1519,7 +1498,7 @@ namespace EasyRed2HumanAI
                     if (inp.AmmoEmpty)
                     {
                         float resupHarm = safeInCover ? curHarm * 0.40f : curHarm * 0.65f;
-                        if (inp.NearbyAmmoSource && !prereqResupplyBlocked && IsSafeForDuration(resupHarm, 1.5f, w.RiskThreshold))
+                        if (inp.NearbyAmmoSource && !prereqResupplyBlocked && inp.RawHarmNow < 0.32f && IsSafeForDuration(resupHarm, 1.5f, w.RiskThreshold))
                         {
                             ConsiderCandidate(
                                 EmergentActionId.ResupplyAmmo,
@@ -1594,7 +1573,7 @@ namespace EasyRed2HumanAI
                             "hold_angle_overwatch");
                     }
 
-                    if ((inp.AmmoEmpty || (!inp.HasVisibleEnemy && curHarm < 0.20f && !inp.ObjectiveTickingAgainstUs)) && inp.NearbyAmmoSource && !prereqResupplyBlocked)
+                    if ((inp.AmmoEmpty || (!inp.HasVisibleEnemy && inp.RawHarmNow < 0.075f && curHarm < 0.20f && !inp.ObjectiveTickingAgainstUs)) && inp.NearbyAmmoSource && !prereqResupplyBlocked)
                 {
                     float resupHarm2 = safeInCover ? curHarm * 0.45f : curHarm;
                     if (IsSafeForDuration(resupHarm2, 1.5f, w.RiskThreshold))
@@ -1753,7 +1732,13 @@ namespace EasyRed2HumanAI
                                 0.16f,
                                 "prereq_smoke_medic");
                         }
-                        else if (inp.HasDownedAllyToDrag && IsSafeForDuration(smokeExposure, 4.0f, w.RiskThreshold + 0.10f))
+                        else if (inp.HasDownedAllyToDrag &&
+                                 !inp.IsBleeding &&
+                                 !inp.PointBlankThreat &&
+                                 !cqbImmediate &&
+                                 inp.SmoothedHarmNow < 0.28f &&
+                                 !(inp.HasVisibleEnemy && inp.VisibleEnemyDist <= 24.0f) &&
+                                 IsSafeForDuration(Mathf.Max(curHarm, smokeExposure), 4.0f, w.RiskThreshold + 0.08f))
                         {
                             ConsiderCandidate(
                                 EmergentActionId.DragCasualty,
@@ -1774,9 +1759,11 @@ namespace EasyRed2HumanAI
                 }
                 else if (inp.HasDownedAllyToDrag &&
                          !inp.IsLeader &&
+                         !inp.IsRadioman &&
+                         !inp.IsBleeding &&
                          !inp.PointBlankThreat &&
                          !cqbImmediate &&
-                         !(!safeInCover && inp.HasVisibleEnemy && inp.VisibleEnemyDist <= 24.0f))
+                         !(inp.HasVisibleEnemy && inp.VisibleEnemyDist <= (safeInCover ? 14.0f : 24.0f)))
                 {
                     float dragHarm = curHarm * (inp.SmokeActive ? 0.38f : 0.68f);
                     if (IsSafeForDuration(dragHarm, 4.0f, w.RiskThreshold))

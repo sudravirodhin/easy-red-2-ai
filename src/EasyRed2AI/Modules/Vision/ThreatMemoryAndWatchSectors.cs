@@ -789,7 +789,7 @@ namespace EasyRed2HumanAI
 
         private static bool HasClearSuppressiveSightline(Soldier soldier, Vector3 aimPos, Vector3 gunPos, Vector3 toAim, float aimLen)
         {
-            if (soldier.IsTowardWall() || IsBotGunClippedThroughWall(soldier))
+            if (IsBotGunClippedThroughWall(soldier))
                 return false;
 
             Transform myRoot = soldier.transform.root;
@@ -806,7 +806,8 @@ namespace EasyRed2HumanAI
                 }
             }
 
-            if (aimLen > 1.5f &&
+            if (soldier.pointingGun &&
+                aimLen > 1.5f &&
                 AiCore.RaycastEnvironment(gunPos, toAim / aimLen, aimLen - 0.65f, myRoot, out _))
             {
                 return false;
@@ -1987,7 +1988,7 @@ namespace EasyRed2HumanAI
                         dist > 0.1f &&
                         (dist <= 8.5f || (soldier.IsCharging() && dist <= 16.0f)) &&
                         h.Tr != null &&
-                        AiCore.TryGetSpottableCenter(__instance.visibleTarget, out Vector3 cqbPos))
+                        AiCore.TryGetVisibleTargetCenterFast(__instance, out Vector3 cqbPos))
                     {
                         Vector3 fwdRef = __instance.dir;
                         fwdRef.y = 0f;

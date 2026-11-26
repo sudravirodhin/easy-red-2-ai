@@ -101,7 +101,7 @@ namespace EasyRed2HumanAI
         /// Catches rifle/SMG barrels clipping through thin walls (including leaning around corners into a wall)
         /// without falsely blocking legitimate shots over waist-high sandbags or window sills where face-to-muzzle is clear.
         /// </summary>
-        internal static bool IsBotGunClippedThroughWall(Soldier shooter)
+        internal static bool IsBotGunClippedThroughWall(Soldier shooter, bool targetIsVehicle = false)
         {
             if (shooter == null || AiCore.IsSoldierInVehicleOrTransition(shooter))
                 return false;
@@ -114,20 +114,20 @@ namespace EasyRed2HumanAI
             if (muzzlePos.sqrMagnitude < 0.01f)
                 muzzlePos = shooter.GunPosition();
 
+            Transform myRoot = shooter.transform != null ? shooter.transform.root : null;
             Vector3 basePos = shooter.transform.position;
             Vector3 unleanedTorso = basePos + Vector3.up * AiCore.GetBarrelHeightForPose(shooter.m_pose);
             Vector3 facePos = shooter.FacePosition();
             Vector3 leanedTorso = new Vector3(facePos.x, unleanedTorso.y, facePos.z);
-            int envMask = AiCore.GetSolidEnvironmentMask();
 
             if (Mathf.Abs(shooter.LeanAngle) >= 0.45f &&
-                Physics.Linecast(unleanedTorso, leanedTorso, envMask, QueryTriggerInteraction.Ignore))
+                AiCore.LinecastEnvironment(unleanedTorso, leanedTorso, myRoot, out _, targetIsVehicle))
             {
                 return true;
             }
 
-            if (Physics.Linecast(leanedTorso, muzzlePos, envMask, QueryTriggerInteraction.Ignore) &&
-                Physics.Linecast(facePos, muzzlePos, envMask, QueryTriggerInteraction.Ignore))
+            if (AiCore.LinecastEnvironment(leanedTorso, muzzlePos, myRoot, out _, targetIsVehicle) &&
+                AiCore.LinecastEnvironment(facePos, muzzlePos, myRoot, out _, targetIsVehicle))
             {
                 return true;
             }
@@ -140,21 +140,22 @@ namespace EasyRed2HumanAI
             if (shooter == null || target == null || distToTarget <= 0.45f || target.IsAirVehicle())
                 return false;
 
-            int envMask = AiCore.GetSolidEnvironmentMask();
+            Transform myRoot = shooter.transform != null ? shooter.transform.root : null;
+            bool targetIsVehicle = target.IsWheeledVehicleOrTank();
             Vector3 eyePos = shooter.FacePosition();
             Vector3 targetSpot = target.SpotPosition();
 
-            if (!Physics.Linecast(eyePos, targetSpot, envMask, QueryTriggerInteraction.Ignore))
+            if (!AiCore.LinecastEnvironment(eyePos, targetSpot, myRoot, out _, targetIsVehicle))
                 return false;
 
             Vector3 barrelPos = shooter.transform.position + Vector3.up * AiCore.GetBarrelHeightForPose(shooter.m_pose);
-            if (!Physics.Linecast(barrelPos, targetCenterPos, envMask, QueryTriggerInteraction.Ignore))
+            if (!AiCore.LinecastEnvironment(barrelPos, targetCenterPos, myRoot, out _, targetIsVehicle))
                 return false;
 
             return true;
         }
 
-        private static bool IsMuzzleBlockedByWall(Soldier shooter, Vector3 targetPos, float distToTarget)
+        private static bool IsMuzzleBlockedByWall(Soldier shooter, Vector3 targetPos, float distToTarget, bool targetIsVehicle = false)
         {
             if (shooter == null || distToTarget <= 0.30f)
                 return false;
@@ -164,10 +165,8 @@ namespace EasyRed2HumanAI
 
             float leanAngle = shooter.LeanAngle;
             bool activelyLeaning = Mathf.Abs(leanAngle) >= 0.45f;
-            if (!activelyLeaning && shooter.IsTowardWall())
-                return true;
 
-            if (IsBotGunClippedThroughWall(shooter))
+            if (IsBotGunClippedThroughWall(shooter, targetIsVehicle))
                 return true;
 
             Transform myRoot = shooter.transform.root;
@@ -188,15 +187,24 @@ namespace EasyRed2HumanAI
                 if (spineMaxCheck > 0.25f)
                 {
                     Vector3 spineStart = spineAtBarrel - spineAimDir * 0.10f;
-                    if (AiCore.RaycastEnvironment(spineStart, spineAimDir, spineMaxCheck, myRoot, out _))
+                    if (AiCore.IsDirectionBlockedByEnvironment(spineStart, spineAimDir, spineMaxCheck, myRoot, targetIsVehicle))
                         return true;
+                }
 
-                    if (AiCore.RaycastEnvironment(spineStart - Vector3.up * 0.08f, spineAimDir, Mathf.Min(spineMaxCheck, 6.0f), myRoot, out _))
+                // Short solid-environment eye-lintel check catches face-in-wall or low window headers
+                // without tripping on friendly silhouettes or waist-high parapets.
+                if (!activelyLeaning)
+                {
+                    float eyeCheckDist = Mathf.Min(0.55f, distToTarget - 0.35f);
+                    if (eyeCheckDist > 0.20f &&
+                        AiCore.IsDirectionBlockedByEnvironment(shooter.FacePosition(), spineAimDir, eyeCheckDist, myRoot, targetIsVehicle))
+                    {
                         return true;
+                    }
                 }
             }
 
-            if (!shooter.isInBodyAnimation && !shooter.IsReloading)
+            if (!shooter.isInBodyAnimation && !shooter.IsReloading && shooter.pointingGun)
             {
                 Vector3 gunPos = shooter.GunPosition();
                 GenericGun heldGun = shooter.GetHeldGun();
@@ -207,20 +215,69 @@ namespace EasyRed2HumanAI
                 if (receiverPos.y < floorSafeY) receiverPos.y = floorSafeY;
                 if (gunPos.y < floorSafeY) gunPos.y = floorSafeY;
 
-                Vector3 toTarget = targetPos - receiverPos;
-                Vector3 aimDir = toTarget.sqrMagnitude > 0.01f ? toTarget.normalized : shooter.GetFireDir();
-
-                float maxCheck = Mathf.Min(Mathf.Max(VisionConfig.MuzzleObstructionCheckDist.Value + 0.35f, midLowWallDist), distToTarget - 0.35f);
-                if (maxCheck > 0.25f)
+                // Skip hip/low-ready weapon bone probes while still raising the rifle into shoulder height.
+                if (gunPos.y >= soldierPos.y + barrelH - 0.16f)
                 {
-                    if (AiCore.RaycastEnvironment(receiverPos - aimDir * 0.10f, aimDir, maxCheck, myRoot, out _))
-                        return true;
+                    Vector3 toTarget = targetPos - receiverPos;
+                    Vector3 aimDir = toTarget.sqrMagnitude > 0.01f ? toTarget.normalized : shooter.GetFireDir();
 
-                    if (AiCore.RaycastEnvironment(gunPos - aimDir * 0.15f, aimDir, maxCheck, myRoot, out _))
-                        return true;
+                    float maxCheck = Mathf.Min(Mathf.Max(VisionConfig.MuzzleObstructionCheckDist.Value + 0.35f, midLowWallDist), distToTarget - 0.35f);
+                    if (maxCheck > 0.25f)
+                    {
+                        if (AiCore.IsDirectionBlockedByEnvironment(receiverPos - aimDir * 0.10f, aimDir, maxCheck, myRoot, targetIsVehicle))
+                            return true;
 
-                    if (AiCore.RaycastEnvironment(gunPos - Vector3.up * 0.06f - aimDir * 0.10f, aimDir, Mathf.Min(maxCheck, 4.5f), myRoot, out _))
-                        return true;
+                        if (AiCore.IsDirectionBlockedByEnvironment(gunPos - aimDir * 0.15f, aimDir, maxCheck, myRoot, targetIsVehicle))
+                            return true;
+                    }
+                }
+            }
+
+            return false;
+        }
+
+        internal static bool TryResolveExposedOverWallAim(
+            Soldier shooter,
+            Spottable target,
+            Vector3 torsoPos,
+            float distToTarget,
+            out Vector3 exposedPos)
+        {
+            exposedPos = torsoPos;
+            if (shooter == null || target == null || distToTarget <= 0.60f || target.IsWheeledVehicleOrTank() || target.IsAirVehicle())
+                return false;
+
+            Vector3 spotPos = target.SpotPosition();
+            if (spotPos.y <= torsoPos.y + 0.14f)
+                return false;
+
+            Vector3 shoulderedOrigin = shooter.transform.position + Vector3.up * AiCore.GetBarrelHeightForPose(shooter.m_pose);
+            float leanAngle = shooter.LeanAngle;
+            if (Mathf.Abs(leanAngle) > 0.15f && shooter.transform != null)
+            {
+                shoulderedOrigin += shooter.transform.right * (leanAngle * 0.40f);
+            }
+            Transform myRoot = shooter.transform.root;
+
+            for (int i = 0; i < 2; i++)
+            {
+                Vector3 cand = Vector3.Lerp(torsoPos, spotPos, i == 0 ? 0.80f : 0.90f);
+                if (IsMuzzleBlockedByWall(shooter, cand, distToTarget))
+                    continue;
+
+                Vector3 toCand = cand - shoulderedOrigin;
+                float candLen = toCand.magnitude;
+                if (candLen <= 0.40f)
+                {
+                    exposedPos = cand;
+                    return true;
+                }
+
+                float checkDist = Mathf.Max(0.25f, candLen - 0.30f);
+                if (!AiCore.RaycastEnvironment(shoulderedOrigin, toCand / candLen, checkDist, myRoot, out _))
+                {
+                    exposedPos = cand;
+                    return true;
                 }
             }
 
@@ -804,57 +861,175 @@ namespace EasyRed2HumanAI
             }
         }
 
-        private static bool TryGetAntiStackPush(Soldier shooter, out Vector3 pushDir)
+        private static bool TryGetAntiStackPush(
+            Soldier shooter,
+            AiCore.SoldierFastHandles h,
+            Vector3 myPos,
+            out Vector3 pushDir,
+            out float pushDist,
+            out bool isIndoors)
         {
             pushDir = Vector3.zero;
+            pushDist = 0f;
+            isIndoors = false;
+
             float configuredSpace = VisionConfig.MinFriendlySpacingMeters.Value;
-            if (configuredSpace <= 0.2f) return false;
+            if (configuredSpace <= 0.2f || shooter == null || h == null)
+                return false;
 
-            float minSpace = Mathf.Min(configuredSpace, 1.25f);
+            float outerSpace = Mathf.Clamp(configuredSpace, 0.5f, 3.2f);
             if (GetPersonality(shooter) == SoldierPersonality.Assaulter_Skirmisher)
-                minSpace = Mathf.Min(configuredSpace * 1.25f, 1.65f);
+                outerSpace = Mathf.Min(outerSpace * 1.15f, 3.5f);
 
-            float minSpaceSq = minSpace * minSpace;
-            Vector3 myPos = shooter.transform.position;
-            IntPtr myPtr = shooter.Pointer;
-            string myFaction = shooter.faction;
+            float outerSpaceSq = outerSpace * outerSpace;
+            float effectiveSpace = outerSpace;
+            float effectiveSpaceSq = outerSpaceSq;
+            bool checkedIndoors = false;
 
-            Squad mySquad = shooter.joinedSquad;
-            if (mySquad != null && mySquad.units != null)
+            IntPtr myPtr = h.Ptr;
+            string myFaction = AiCore.GetCachedFaction(h, Time.time);
+
+            AiCore.EnsureWorldSnapshot();
+            int wCount = AiCore.WorldSoldierCount;
+            Vector3 accum = Vector3.zero;
+            float nearestDist = float.MaxValue;
+            int crowdCount = 0;
+
+            for (int i = 0; i < wCount; i++)
             {
-                var units = mySquad.units;
-                int c = units.Count;
-                for (int i = 0; i < c; i++)
-                {
-                    Soldier f = units[i];
-                    if (f == null || !f.IsAlive || f.Pointer == myPtr || f.IsOnVehicle()) continue;
-                    if (myPtr.ToInt64() < f.Pointer.ToInt64()) continue;
+                ref AiCore.SoldierSnapshot s = ref AiCore.WorldSoldiers[i];
+                if (s.Ptr == IntPtr.Zero || s.Ptr == myPtr || s.IsOnVehicle || s.HasSurrendered || s.IsInjured)
+                    continue;
 
-                    Vector3 diff = myPos - f.transform.position;
-                    diff.y = 0f;
-                    float dSq = diff.sqrMagnitude;
-                    if (dSq < minSpaceSq)
+                if (!AiCore.AreSameSideFactions(myFaction, s.Faction))
+                    continue;
+
+                if (Mathf.Abs(s.Pos.y - myPos.y) > 1.8f)
+                    continue;
+
+                Vector3 diff = myPos - s.Pos;
+                diff.y = 0f;
+                float dSq = diff.sqrMagnitude;
+                if (dSq >= outerSpaceSq)
+                    continue;
+
+                if (!checkedIndoors)
+                {
+                    checkedIndoors = true;
+                    isIndoors = AiCore.HasLowCeilingOverhead(myPos, 5.5f);
+                    effectiveSpace = isIndoors ? Mathf.Min(outerSpace, 1.35f) : outerSpace;
+                    effectiveSpaceSq = effectiveSpace * effectiveSpace;
+                }
+
+                if (dSq >= effectiveSpaceSq)
+                    continue;
+
+                // Deterministic tiebreaker so only one overlapping bot steps aside; bots always yield to human players.
+                if (!s.IsPlayer && myPtr.ToInt64() < s.Ptr.ToInt64())
+                    continue;
+
+                float d = Mathf.Sqrt(dSq);
+                Vector3 away = d > 0.05f
+                    ? (diff / d)
+                    : ((myPtr.ToInt64() & 1) == 0 ? shooter.transform.right : -shooter.transform.right);
+                float weight = (effectiveSpace - d) / Mathf.Max(0.25f, effectiveSpace);
+                accum += away * (0.35f + weight);
+                if (d < nearestDist)
+                    nearestDist = d;
+                crowdCount++;
+            }
+
+            if (wCount == 0)
+            {
+                Soldier player = Soldier.CurrentControlledSoldierOrNull();
+                if (player != null &&
+                    player.IsAlive &&
+                    player.Pointer != myPtr &&
+                    AiCore.AreSameSideFactions(myFaction, player.faction) &&
+                    !player.IsOnVehicle() &&
+                    player.transform != null)
+                {
+                    Vector3 pPos = player.transform.position;
+                    if (Mathf.Abs(pPos.y - myPos.y) <= 1.8f)
                     {
-                        if (dSq > 0.01f)
-                            pushDir = diff.normalized;
-                        else
-                            pushDir = (myPtr.ToInt64() & 1) == 0 ? shooter.transform.right : -shooter.transform.right;
-                        return true;
+                        Vector3 diff = myPos - pPos;
+                        diff.y = 0f;
+                        float dSq = diff.sqrMagnitude;
+                        if (dSq < outerSpaceSq)
+                        {
+                            if (!checkedIndoors)
+                            {
+                                checkedIndoors = true;
+                                isIndoors = AiCore.HasLowCeilingOverhead(myPos, 5.5f);
+                                effectiveSpace = isIndoors ? Mathf.Min(outerSpace, 1.35f) : outerSpace;
+                                effectiveSpaceSq = effectiveSpace * effectiveSpace;
+                            }
+
+                            if (dSq < effectiveSpaceSq)
+                            {
+                                float d = Mathf.Sqrt(dSq);
+                                accum += d > 0.05f ? (diff / d) : shooter.transform.right;
+                                nearestDist = d;
+                                crowdCount = 1;
+                            }
+                        }
                     }
                 }
             }
 
-            Soldier player = Soldier.CurrentControlledSoldierOrNull();
-            if (player != null && player.IsAlive && player.Pointer != myPtr && AiCore.AreSameSideFactions(myFaction, player.faction) && !player.IsOnVehicle())
+            if (crowdCount == 0 || accum.sqrMagnitude < 0.0004f)
+                return false;
+
+            pushDir = accum.normalized;
+            pushDist = Mathf.Clamp((effectiveSpace - nearestDist) + 0.50f, 1.15f, 2.35f);
+            return true;
+        }
+
+        private static bool TryApplyAntiStackSpacingStep(
+            SoldierAI ai,
+            Soldier soldier,
+            AiCore.SoldierFastHandles h,
+            Vector3 myPos,
+            bool isOnBridge,
+            float now,
+            float missCooldown)
+        {
+            if (!VisionConfig.EnableAntiStacking.Value ||
+                ai == null ||
+                soldier == null ||
+                h == null ||
+                ai.IsMoving() ||
+                isOnBridge ||
+                soldier.m_pose == SoldierPose.Prone ||
+                soldier.IsOnVehicle() ||
+                soldier.IsOnCover() ||
+                soldier.IsTowardWall() ||
+                soldier.UsingBipod() ||
+                soldier.isBleeding ||
+                soldier.isInBodyAnimation ||
+                !AiCore.CanBotMoveAutonomously(soldier))
             {
-                Vector3 diff = myPos - player.transform.position;
-                diff.y = 0f;
-                float dSq = diff.sqrMagnitude;
-                if (dSq < minSpaceSq)
-                {
-                    pushDir = dSq > 0.01f ? diff.normalized : shooter.transform.right;
-                    return true;
-                }
+                return false;
+            }
+
+            if (now < h.Combat.NextAntiStackTime)
+                return false;
+
+            h.Combat.NextAntiStackTime = now + missCooldown;
+            if (!TryGetAntiStackPush(soldier, h, myPos, out Vector3 pushDir, out float pushDist, out bool isIndoors))
+                return false;
+
+            Vector3 pushTarget = myPos + pushDir * pushDist;
+            if (!AiCore.IsMovementBlockedByObstacle(myPos + Vector3.up * 0.48f, pushDir, pushDist + 0.30f) &&
+                Physics.Raycast(pushTarget + Vector3.up * 0.90f, Vector3.down, out RaycastHit gHit, 2.2f, AiCore.GetSolidEnvironmentMask(), QueryTriggerInteraction.Ignore) &&
+                gHit.normal.y >= 0.65f &&
+                Mathf.Abs(gHit.point.y - myPos.y) <= 0.95f &&
+                (!isIndoors || AiCore.HasLowCeilingOverhead(gHit.point, 5.5f)))
+            {
+                ai.MoveDirectlyToward(gHit.point, 0.85f);
+                h.Combat.NextAntiStackTime = now + 8.0f;
+                AntiStackNudges++;
+                return true;
             }
 
             return false;

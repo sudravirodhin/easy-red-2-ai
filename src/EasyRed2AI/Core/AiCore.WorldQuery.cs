@@ -33,7 +33,7 @@ namespace EasyRed2HumanAI
             public float ExpireTime;
         }
 
-        public static readonly ActiveLandMine[] ActiveLandMines = new ActiveLandMine[128];
+        public static ActiveLandMine[] ActiveLandMines = new ActiveLandMine[128];
         public static int ActiveLandMineCount;
         public static int SpecialMunitionsUsedCount { get; internal set; }
 
@@ -1333,17 +1333,86 @@ namespace EasyRed2HumanAI
             return false;
         }
 
-        public static bool RaycastEnvironment(Vector3 origin, Vector3 dir, float maxDist, Transform ignoreRoot, out RaycastHit envHit)
+        public static bool RaycastEnvironment(
+            Vector3 origin,
+            Vector3 dir,
+            float maxDist,
+            Transform ignoreRoot,
+            out RaycastHit envHit,
+            bool ignoreVehicles = false)
         {
             // ResourcesManager.groundMask (Default | Terrain) hits only solid environment geometry (walls, buildings,
             // sandbags, terrain) and ignores soldier BodyPart colliders, ragdolls, items, foliage, and triggers.
-            // This eliminates multi-hop raycast loops and IL2CPP GetComponentInParent<Creature>() hierarchy walks!
-            return Physics.Raycast(origin, dir, out envHit, maxDist, GetSolidEnvironmentMask(), QueryTriggerInteraction.Ignore);
+            // Fast path uses a single native Raycast; only allocates from static scratch buffer if the nearest hit
+            // belongs to ignoreRoot or (when ignoreVehicles is requested) a Vehicle collider.
+            envHit = default;
+            if (maxDist <= 0.001f)
+                return false;
+
+            int mask = GetSolidEnvironmentMask();
+            if (!Physics.Raycast(origin, dir, out envHit, maxDist, mask, QueryTriggerInteraction.Ignore))
+                return false;
+
+            IntPtr ignoreRootPtr = (!ReferenceEquals(ignoreRoot, null) && ignoreRoot != null)
+                ? ignoreRoot.Pointer
+                : IntPtr.Zero;
+            if (ignoreRootPtr == IntPtr.Zero && !ignoreVehicles)
+                return true;
+
+            if (!ShouldIgnoreEnvCollider(envHit.collider, ignoreRootPtr, ignoreVehicles))
+                return true;
+
+            if (_envRayScratch == null)
+                _envRayScratch = new Il2CppInterop.Runtime.InteropTypes.Arrays.Il2CppStructArray<RaycastHit>(16);
+
+            int hitCount = Physics.RaycastNonAlloc(origin, dir, _envRayScratch, maxDist, mask, QueryTriggerInteraction.Ignore);
+            float bestDistSq = float.MaxValue;
+            bool found = false;
+            RaycastHit bestHit = default;
+            for (int i = 0; i < hitCount; i++)
+            {
+                RaycastHit cand = _envRayScratch[i];
+                if (ShouldIgnoreEnvCollider(cand.collider, ignoreRootPtr, ignoreVehicles))
+                    continue;
+
+                float dSq = (cand.point - origin).sqrMagnitude;
+                if (dSq < bestDistSq)
+                {
+                    bestDistSq = dSq;
+                    bestHit = cand;
+                    found = true;
+                }
+            }
+
+            envHit = found ? bestHit : default;
+            return found;
         }
 
-        public static bool IsDirectionBlockedByEnvironment(Vector3 origin, Vector3 dir, float dist, Transform ignoreRoot)
+        public static bool IsDirectionBlockedByEnvironment(
+            Vector3 origin,
+            Vector3 dir,
+            float dist,
+            Transform ignoreRoot,
+            bool ignoreVehicles = false)
         {
-            return Physics.Raycast(origin, dir, dist, GetSolidEnvironmentMask(), QueryTriggerInteraction.Ignore);
+            return RaycastEnvironment(origin, dir, dist, ignoreRoot, out _, ignoreVehicles);
+        }
+
+        public static bool LinecastEnvironment(
+            Vector3 start,
+            Vector3 end,
+            Transform ignoreRoot,
+            out RaycastHit envHit,
+            bool ignoreVehicles = false)
+        {
+            Vector3 delta = end - start;
+            float len = delta.magnitude;
+            if (len <= 0.001f)
+            {
+                envHit = default;
+                return false;
+            }
+            return RaycastEnvironment(start, delta / len, len, ignoreRoot, out envHit, ignoreVehicles);
         }
 
         public static bool HasLowCeilingOverhead(Vector3 feetPos, float maxHeight = 2.6f)
@@ -1431,46 +1500,62 @@ namespace EasyRed2HumanAI
             return isTerrain;
         }
 
-        /// <summary>
-        /// Pointer-cached check identifying colliders belonging to a <see cref="Vehicle"/> hull, turret,
-        /// or chassis so foot bots never vault onto, or snap walkable ground destinations onto, vehicle roofs.
-        /// </summary>
-        public static bool IsVehicleCollider(Collider col)
+        private static ColliderEnvMeta GetColliderEnvMeta(Collider col)
         {
             if (ReferenceEquals(col, null) || col == null)
-                return false;
+                return default;
 
             IntPtr ptr = col.Pointer;
             if (ptr == IntPtr.Zero)
-                return false;
+                return default;
 
-            if (_vehicleColliderCache.TryGetValue(ptr, out bool cached))
+            if (_vehicleColliderCache.TryGetValue(ptr, out ColliderEnvMeta cached))
                 return cached;
 
-            bool isVeh = false;
+            ColliderEnvMeta meta = default;
             try
             {
+                Transform tr = col.transform;
+                Transform root = tr != null ? tr.root : null;
+                if (root != null && root.Pointer != IntPtr.Zero)
+                    meta.RootPtr = root.Pointer;
+
                 Rigidbody rb = col.attachedRigidbody;
                 if (rb != null && rb.GetComponent<Vehicle>() != null)
                 {
-                    isVeh = true;
+                    meta.IsVehicle = true;
                 }
-                else if (col.transform != null)
+                else if (tr != null)
                 {
-                    Transform root = col.transform.root;
                     if (root != null && root.GetComponent<Vehicle>() != null)
-                        isVeh = true;
+                        meta.IsVehicle = true;
                     else if (col.GetComponentInParent<Vehicle>() != null)
-                        isVeh = true;
+                        meta.IsVehicle = true;
                 }
             }
             catch { }
 
             if (_vehicleColliderCache.Count > 1024)
                 _vehicleColliderCache.Clear();
-            _vehicleColliderCache[ptr] = isVeh;
-            return isVeh;
+            _vehicleColliderCache[ptr] = meta;
+            return meta;
         }
+
+        private static bool ShouldIgnoreEnvCollider(Collider col, IntPtr ignoreRootPtr, bool ignoreAllVehicles)
+        {
+            if ((!ignoreAllVehicles && ignoreRootPtr == IntPtr.Zero) || ReferenceEquals(col, null) || col == null)
+                return false;
+
+            ColliderEnvMeta meta = GetColliderEnvMeta(col);
+            return (ignoreAllVehicles && meta.IsVehicle) ||
+                   (ignoreRootPtr != IntPtr.Zero && meta.RootPtr == ignoreRootPtr);
+        }
+
+        /// <summary>
+        /// Pointer-cached check identifying colliders belonging to a <see cref="Vehicle"/> hull, turret,
+        /// or chassis so foot bots never vault onto, or snap walkable ground destinations onto, vehicle roofs.
+        /// </summary>
+        public static bool IsVehicleCollider(Collider col) => GetColliderEnvMeta(col).IsVehicle;
 
         /// <summary>
         /// Returns <c>true</c> if a dismounted foot bot's feet are currently resting on top of a <see cref="Vehicle"/> collider.
@@ -1814,7 +1899,7 @@ namespace EasyRed2HumanAI
             public bool IsCrouched;
         }
 
-        public static readonly PlayerAimLane[] ActivePlayerAimLanes = new PlayerAimLane[12];
+        public static PlayerAimLane[] ActivePlayerAimLanes = new PlayerAimLane[32];
         public static int ActivePlayerAimLaneCount;
         private static float _nextPlayerAimLaneRefreshTime;
 
@@ -1837,7 +1922,7 @@ namespace EasyRed2HumanAI
             public bool IsReversing;
         }
 
-        public static readonly VehicleDangerCorridor[] ActiveVehicleDangerCorridors = new VehicleDangerCorridor[32];
+        public static VehicleDangerCorridor[] ActiveVehicleDangerCorridors = new VehicleDangerCorridor[32];
         public static int ActiveVehicleDangerCorridorCount;
         private static float _nextVehicleDangerCorridorRefreshTime;
 
@@ -1856,7 +1941,7 @@ namespace EasyRed2HumanAI
                 if (allVehicles != null)
                 {
                     int vCount = allVehicles.Count;
-                    for (int i = 0; i < vCount && ActiveVehicleDangerCorridorCount < ActiveVehicleDangerCorridors.Length; i++)
+                    for (int i = 0; i < vCount; i++)
                     {
                         Vehicle v = allVehicles[i];
                         if (ReferenceEquals(v, null) || v == null || v.Pointer == IntPtr.Zero || !v.CanFight())
@@ -1965,6 +2050,9 @@ namespace EasyRed2HumanAI
                         float corridorHalfWidth = stationaryHuman
                             ? (halfWidth + 1.15f)
                             : (halfWidth + (vh.IsTank ? 1.85f : 1.45f));
+
+                        if (!TryEnsureArrayCapacity(ref ActiveVehicleDangerCorridors, ActiveVehicleDangerCorridorCount + 1, 256))
+                            break;
 
                         ActiveVehicleDangerCorridors[ActiveVehicleDangerCorridorCount++] = new VehicleDangerCorridor
                         {
@@ -2122,8 +2210,7 @@ namespace EasyRed2HumanAI
 
         private static void TryAppendPlayerAimLane(Soldier p, SoldierFastHandles h, bool isLocalPlayer, float now)
         {
-            if (ActivePlayerAimLaneCount >= ActivePlayerAimLanes.Length ||
-                h == null ||
+            if (h == null ||
                 h.Tr == null ||
                 p == null ||
                 !p.IsAlive ||
@@ -2197,6 +2284,9 @@ namespace EasyRed2HumanAI
                                VisionPatches.HasFiredRecently(p, 2.2f);
             SoldierPose pose = onGroundVeh ? SoldierPose.Crouch : p.m_pose;
 
+            if (!TryEnsureArrayCapacity(ref ActivePlayerAimLanes, ActivePlayerAimLaneCount + 1, 256))
+                return;
+
             ActivePlayerAimLanes[ActivePlayerAimLaneCount++] = new PlayerAimLane
             {
                 Ptr = h.Ptr,
@@ -2244,7 +2334,7 @@ namespace EasyRed2HumanAI
                         EnsureWorldSnapshot();
                         int solCount = WorldSoldierCount;
                         var soldiers = WorldSoldiers;
-                        for (int i = 0; i < solCount && ActivePlayerAimLaneCount < ActivePlayerAimLanes.Length; i++)
+                        for (int i = 0; i < solCount; i++)
                         {
                             ref SoldierSnapshot snap = ref soldiers[i];
                             if (!snap.IsPlayer || snap.Ptr == localPtr || snap.Ref == null)
@@ -3407,7 +3497,7 @@ namespace EasyRed2HumanAI
                 }
             }
 
-            if (ActiveLandMineCount < ActiveLandMines.Length)
+            if (TryEnsureArrayCapacity(ref ActiveLandMines, ActiveLandMineCount + 1, 512))
             {
                 ActiveLandMines[ActiveLandMineCount++] = new ActiveLandMine
                 {
@@ -3427,10 +3517,11 @@ namespace EasyRed2HumanAI
                 return;
 
             _nextActiveMineScanTime = now + 0.50f;
+            int prevCount = ActiveLandMineCount;
             int writeIdx = 0;
 
             // Keep recently registered or still-live tracked mines up front, culling detonated/expired entries
-            for (int i = 0; i < ActiveLandMineCount; i++)
+            for (int i = 0; i < prevCount; i++)
             {
                 ActiveLandMine m = ActiveLandMines[i];
                 if (now > m.ExpireTime)
@@ -3447,6 +3538,8 @@ namespace EasyRed2HumanAI
 
                 ActiveLandMines[writeIdx++] = m;
             }
+            if (prevCount > writeIdx)
+                Array.Clear(ActiveLandMines, writeIdx, prevCount - writeIdx);
             ActiveLandMineCount = writeIdx;
 
             try
@@ -3518,6 +3611,7 @@ namespace EasyRed2HumanAI
             _cachedMovementObstacleMask = 0;
             _cachedSmokeOcclusionMask = 0;
             _turretVehicleCache.Clear();
+            _turretByAiPtr.Clear();
             _turretTraitsCache.Clear();
             _ceilingCache.Clear();
             _bridgeCellCache.Clear();
@@ -3574,10 +3668,10 @@ namespace EasyRed2HumanAI
             TotalHitchesOver28ms = 0;
             _currentWindowMaxFrameMs = 0f;
             _previousWindowMaxFrameMs = 0f;
-            _pendingGen1FinalizerReclaim = false;
-            _lastManagedGcBaselineBytes = 0L;
+            try { GC.Collect(1, GCCollectionMode.Optimized, blocking: false); } catch { }
             RestoreForegroundFpsIfCapped();
             _nextFrameWindowRolloverTime = 0f;
+            ClearUrgentUnderFireWakeQueue();
             _nextWatchObjectiveSnapshotTime = 0f;
             _watchObjectiveSnapshotCount = 0;
             _nextVehicleAnomalyScanTime = 0f;
@@ -3589,6 +3683,8 @@ namespace EasyRed2HumanAI
         {
             if (_turretVehicleCache.Count > 256)
                 _turretVehicleCache.Clear();
+            if (_turretByAiPtr.Count > 256)
+                _turretByAiPtr.Clear();
             if (_turretTraitsCache.Count > 256)
                 _turretTraitsCache.Clear();
             if (_ceilingCache.Count > 4096)
@@ -3614,7 +3710,7 @@ namespace EasyRed2HumanAI
         }
 
         private static readonly List<MissionObjective> _reusableWatchObjectivesList = new List<MissionObjective>(16);
-        private static readonly WatchObjectiveSnapshotEntry[] _watchObjectiveSnapshot = new WatchObjectiveSnapshotEntry[16];
+        private static WatchObjectiveSnapshotEntry[] _watchObjectiveSnapshot = new WatchObjectiveSnapshotEntry[16];
         private static int _watchObjectiveSnapshotCount;
         private static float _nextWatchObjectiveSnapshotTime;
         private static string _watchObjectiveInvaderFaction;
@@ -3645,6 +3741,7 @@ namespace EasyRed2HumanAI
                         _watchObjectiveInvaderFaction = invFac;
                         BattlePhase phase = TryGetCurrentBattlePhase(bm);
                         CollectActiveMissionObjectives(phase, _reusableWatchObjectivesList);
+                        TryEnsureArrayCapacity(ref _watchObjectiveSnapshot, Math.Min(_reusableWatchObjectivesList.Count, 64), 64);
                         int count = Mathf.Min(_reusableWatchObjectivesList.Count, _watchObjectiveSnapshot.Length);
                         int outIdx = 0;
                         for (int i = 0; i < count; i++)
@@ -3805,8 +3902,8 @@ namespace EasyRed2HumanAI
             if (held != null && !held.IsAtWeapon() && (held.GetCurrentAmmoCount() > 0 || !soldier.IsOutOfAmmosFor(held)))
                 return true;
 
-            GenericGun g0 = soldier.GetHeldGun(0);
-            if (g0 != null && !g0.IsAtWeapon() && (g0.GetCurrentAmmoCount() > 0 || !soldier.IsOutOfAmmosFor(g0)))
+            GenericGun g1 = soldier.GetHeldGun(1);
+            if (g1 != null && !g1.IsAtWeapon() && (g1.GetCurrentAmmoCount() > 0 || !soldier.IsOutOfAmmosFor(g1)))
                 return true;
 
             GenericGun g2 = soldier.GetHeldGun(2);

@@ -968,6 +968,7 @@ internal static class VerifyPatches
             .ToArray();
 
         int errors = 0;
+        int checkedBotRpcCalls = 0;
         var intPtrDicts = new List<(string RelPath, int LineNo, string Name)>();
         var strippedSources = new List<string>(files.Length);
 
@@ -980,18 +981,40 @@ internal static class VerifyPatches
             ".ForceControllerEnabled("
         };
 
+        string[] botRpcCallMarkers =
+        {
+            ".Vault(",
+            ".Throw(",
+            ".Melee(",
+            ".ToggleInventoryKnife(",
+            ".InstallAttachment("
+        };
+
+        string[] ownerGuardMarkers =
+        {
+            "IsLocallyOwnedBot",
+            "IsLocallyOwnedVehicle",
+            "IsMasterClient",
+            "OwnSyncher",
+            "IsMine("
+        };
+
         foreach (string filePath in files)
         {
             string relPath = Path.GetRelativePath(workspaceDir, filePath).Replace('\\', '/');
             string rawText = File.ReadAllText(filePath);
             string[] lines = File.ReadAllLines(filePath);
+            string[] strippedLines = new string[lines.Length];
             bool inBlockComment = false;
             var fileStripped = new System.Text.StringBuilder(rawText.Length);
             bool hasDllImport = false;
+            bool checkBotRpc = relPath.StartsWith("src/EasyRed2AI/Modules/", StringComparison.OrdinalIgnoreCase) &&
+                               !relPath.EndsWith("/PlayerVisualsAndReloadQoL.cs", StringComparison.OrdinalIgnoreCase);
 
             for (int li = 0; li < lines.Length; li++)
             {
                 string code = StripCSharpCommentsPreservingStrings(lines[li], ref inBlockComment);
+                strippedLines[li] = code;
                 fileStripped.AppendLine(code);
                 if (string.IsNullOrWhiteSpace(code))
                     continue;
@@ -1002,6 +1025,37 @@ internal static class VerifyPatches
                     {
                         Console.Error.WriteLine($"  [STATIC LINT ERROR] {relPath}:{li + 1} uses unsafe IL2CPP pattern '{bad}'");
                         errors++;
+                    }
+                }
+
+                if (checkBotRpc && !lines[li].Contains("coop-rpc-exempt", StringComparison.Ordinal))
+                {
+                    foreach (string marker in botRpcCallMarkers)
+                    {
+                        if (!code.Contains(marker, StringComparison.Ordinal))
+                            continue;
+
+                        checkedBotRpcCalls++;
+                        bool hasBudgetGuard = false;
+                        int lookStart = Math.Max(0, li - 55);
+                        for (int b = li; b >= lookStart; b--)
+                        {
+                            string prev = strippedLines[b];
+                            if (string.IsNullOrEmpty(prev))
+                                continue;
+                            if (prev.Contains("TryConsumeBotRpcBudget(", StringComparison.Ordinal) ||
+                                prev.Contains("bypassRpcBudget", StringComparison.Ordinal))
+                            {
+                                hasBudgetGuard = true;
+                                break;
+                            }
+                        }
+
+                        if (!hasBudgetGuard)
+                        {
+                            Console.Error.WriteLine($"  [COOP RPC ERROR] {relPath}:{li + 1} calls '{marker}' without TryConsumeBotRpcBudget guard within 55 preceding lines.");
+                            errors++;
+                        }
                     }
                 }
 
@@ -1033,6 +1087,26 @@ internal static class VerifyPatches
             string noComments = fileStripped.ToString();
             strippedSources.Add(noComments);
 
+            if (checkBotRpc)
+            {
+                bool touchedBotRpc = false;
+                for (int i = 0; i < botRpcCallMarkers.Length && !touchedBotRpc; i++)
+                    touchedBotRpc = noComments.Contains(botRpcCallMarkers[i], StringComparison.Ordinal);
+
+                if (touchedBotRpc)
+                {
+                    bool hasOwnerGuard = false;
+                    for (int i = 0; i < ownerGuardMarkers.Length && !hasOwnerGuard; i++)
+                        hasOwnerGuard = noComments.Contains(ownerGuardMarkers[i], StringComparison.Ordinal);
+
+                    if (!hasOwnerGuard)
+                    {
+                        Console.Error.WriteLine($"  [COOP OWNER ERROR] {relPath} invokes networked bot actions without an ownership guard (IsLocallyOwnedBot / IsMasterClient / OwnSyncher).");
+                        errors++;
+                    }
+                }
+            }
+
             if (hasDllImport && !noComments.Contains("OperatingSystem.IsWindows()", StringComparison.Ordinal))
             {
                 Console.Error.WriteLine($"  [STATIC LINT ERROR] {relPath} uses [DllImport] without an OperatingSystem.IsWindows() runtime guard.");
@@ -1057,7 +1131,7 @@ internal static class VerifyPatches
         if (errors > 0)
             return errors;
 
-        Console.WriteLine($"  -> Verified {intPtrDicts.Count} static IntPtr dictionaries have Clear/Prune/Remove cleanup (0 leaks) & 0 IL2CPP footguns");
+        Console.WriteLine($"  -> Verified {intPtrDicts.Count} static IntPtr dictionaries (0 leaks), {checkedBotRpcCalls} Co-op bot-RPC call sites (0 unthrottled) & 0 IL2CPP footguns");
         return 0;
     }
 }

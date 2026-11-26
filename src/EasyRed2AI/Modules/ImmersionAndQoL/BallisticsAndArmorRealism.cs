@@ -41,9 +41,11 @@ namespace EasyRed2HumanAI
         private static readonly Dictionary<IntPtr, ParachuteDriftState> _parachuteDriftStates = new Dictionary<IntPtr, ParachuteDriftState>(32);
         private static readonly Dictionary<IntPtr, float> _vehicleExplosionArmorCache = new Dictionary<IntPtr, float>(64);
         private static readonly Dictionary<IntPtr, TrailRenderer[]> _cachedTracerTrails = new Dictionary<IntPtr, TrailRenderer[]>(64);
+        private static Il2CppInterop.Runtime.InteropTypes.Arrays.Il2CppStructArray<RaycastHit> _overPenHits;
 
         public static int PlaneAudioLoopsDesyncedCount { get; private set; }
         public static int ThinCoverPenetrationsCount { get; private set; }
+        public static int HumanOverPenetrationsCount { get; private set; }
         public static int ParachutesDriftedCount { get; private set; }
         public static int AircraftTopAttackPenetrationsAssistedCount { get; private set; }
         public static int AirplanePilotMgHitsBlockedCount { get; internal set; }
@@ -358,10 +360,77 @@ namespace EasyRed2HumanAI
             }
         }
 
+        internal static bool TryComputeHumanOverPenetration(
+            float impactSpeed,
+            int massGrains,
+            float caliberMm,
+            int mmPenetration,
+            bool isHighCaliber,
+            bool isLimb,
+            bool isHelmet,
+            float bodyDepthMeters,
+            out float exitSpeed,
+            out float deflectionRad)
+        {
+            exitSpeed = 0f;
+            deflectionRad = 0f;
+
+            float impactKE = massGrains > 0
+                ? (0.5f * impactSpeed * impactSpeed * (massGrains * 6.48e-5f))
+                : 0f;
+
+            bool isHeavyCal = isHighCaliber || caliberMm >= 11.0f || mmPenetration >= 14;
+            if (isHelmet)
+            {
+                if (!isHeavyCal || impactSpeed < 620f || (massGrains > 0 && impactKE < 8000f))
+                    return false;
+            }
+            else if (isLimb)
+            {
+                if (impactSpeed < 420f || mmPenetration < 2 || (massGrains > 0 && impactKE < 1150f))
+                    return false;
+            }
+            else
+            {
+                if (impactSpeed < 520f || mmPenetration < 2 || (massGrains > 0 && impactKE < 1800f))
+                    return false;
+            }
+
+            float maxBodyDepth = isHeavyCal ? 1.05f : (isLimb ? 0.55f : 0.72f);
+            if (bodyDepthMeters <= 0.01f || bodyDepthMeters > maxBodyDepth)
+                return false;
+
+            float depthRatio = Mathf.Clamp01(bodyDepthMeters / maxBodyDepth);
+            float retention;
+            if (isHeavyCal)
+            {
+                retention = Mathf.Lerp(0.84f, 0.70f, depthRatio);
+                if (isHelmet)
+                    retention *= 0.90f;
+            }
+            else if (isLimb)
+            {
+                retention = Mathf.Lerp(0.76f, 0.60f, depthRatio);
+            }
+            else
+            {
+                retention = Mathf.Lerp(0.62f, 0.46f, depthRatio);
+            }
+
+            exitSpeed = impactSpeed * retention;
+            if (exitSpeed < 180f)
+                return false;
+
+            deflectionRad = isHeavyCal ? 0.015f : (isLimb ? 0.030f : 0.048f);
+            return true;
+        }
+
         [HarmonyPatch(typeof(BulletInstance), nameof(BulletInstance.OnHit))]
         public static class BulletInstance_OnHit_Patch
         {
             private const int ImpactUnknownOrBlocked = -1;
+            private const int ImpactHumanBodyPart = -2;
+            private const int ImpactHumanHelmet = -3;
 
             public static bool Prefix(
                 BulletInstance __instance,
@@ -446,7 +515,7 @@ namespace EasyRed2HumanAI
                                         AiCore.IsLocallyOwnedVehicleSyncher(rootVeh) &&
                                         shooter != null &&
                                         shooter.Pointer != IntPtr.Zero &&
-                                        shooter.IsPlayer() &&
+                                        AiCore.IsAnyHumanPlayerSoldier(shooter) &&
                                         !AiCore.IsPlayerRunningBattleHardened(shooter))
                                     {
                                         float dist = Vector3.Distance(__instance.startPosition, hit.point);
@@ -492,11 +561,16 @@ namespace EasyRed2HumanAI
                     if (__state)
                         return;
 
-                    if (!VisionConfig.EnableMod.Value || !VisionConfig.EnableThinCoverBulletPenetration.Value)
+                    if (!VisionConfig.EnableMod.Value)
+                        return;
+
+                    bool allowWoodPen = VisionConfig.EnableThinCoverBulletPenetration.Value;
+                    bool allowHumanPen = VisionConfig.EnableHumanBulletOverPenetration.Value;
+                    if (!allowWoodPen && !allowHumanPen)
                         return;
 
                     // Penetrated continuation bullets are spawned with canRicochet = false,
-                    // which guarantees each projectile can penetrate thin cover at most once.
+                    // which guarantees each projectile can penetrate thin cover or human flesh at most once.
                     if (__instance == null ||
                         !__instance.canRicochet ||
                         bulletData == null ||
@@ -505,9 +579,6 @@ namespace EasyRed2HumanAI
                     {
                         return;
                     }
-
-                    if (impactSpeed < 220f || bulletData.mmPenetration < 6)
-                        return;
 
                     if (bulletData.IsHe() || bulletData.IsSmoke() || bulletData.IsFire() || bulletData.IsFlak() || bulletData.IsShotgun())
                         return;
@@ -526,6 +597,16 @@ namespace EasyRed2HumanAI
                     }
 
                     if (cachedImpact == ImpactUnknownOrBlocked)
+                        return;
+
+                    if (cachedImpact == ImpactHumanBodyPart || cachedImpact == ImpactHumanHelmet)
+                    {
+                        if (allowHumanPen)
+                            TryHandleHumanOverPenetration(__instance, hitDirection, impactSpeed, bulletData, hit, col, cachedImpact);
+                        return;
+                    }
+
+                    if (!allowWoodPen || impactSpeed < 220f || bulletData.mmPenetration < 6)
                         return;
 
                     ImpactType impactType = (ImpactType)cachedImpact;
@@ -567,40 +648,7 @@ namespace EasyRed2HumanAI
                         Mathf.Sin(hit.point.z * 43.7f + hit.point.y * 17.1f) * 0.016f);
                     Vector3 exitDir = (dir + jitter).normalized;
 
-                    bool penCanDamage = __instance.canDamage;
-                    if (!penCanDamage &&
-                        AiCore.IsInMultiplayerRoom() &&
-                        AiCore.IsMasterClient() &&
-                        __instance.shooter != null &&
-                        __instance.shooter.Pointer != IntPtr.Zero &&
-                        __instance.shooter.IsPlayer() &&
-                        !AiCore.IsPlayerRunningBattleHardened(__instance.shooter))
-                    {
-                        // Unmodded vanilla client's own bullet stopped on the front face of the wooden cover (0% double-damage risk);
-                        // promote Host's penetrated continuation round to authoritative damage for two-way fairness!
-                        penCanDamage = true;
-                        HostVanillaClientApAssistsCount++;
-                    }
-
-                    var penetratedBullet = new BulletInstance(
-                        exitPos,
-                        exitDir,
-                        exitSpeed,
-                        bulletData,
-                        __instance.shooter,
-                        false, // Prevents a penetrated round from penetrating or ricocheting a second time
-                        penCanDamage,
-                        null);
-
-                    ProjectilesManager pm = ProjectilesManager.instance;
-                    if (pm != null && pm.activeBullets != null)
-                    {
-                        int count = pm.activeBullets.Count;
-                        if (count == 0 || pm.activeBullets[count - 1] == null || pm.activeBullets[count - 1].Pointer != penetratedBullet.Pointer)
-                        {
-                            ProjectilesManager.OnNewBulletCreated(penetratedBullet);
-                        }
-                    }
+                    SpawnPenetratedContinuationBullet(__instance, bulletData, exitPos, exitDir, exitSpeed);
 
                     ThinCoverPenetrationsCount++;
                     AiCore.LogDebug("Ballistics", $"Bullet penetrated {thickness:F2}m {impactType} cover (in={impactSpeed:F0}m/s -> out={exitSpeed:F0}m/s, pen={bulletData.mmPenetration}mm).", 5.0f);
@@ -610,6 +658,224 @@ namespace EasyRed2HumanAI
                 {
                     HitchProfiler.EndModScope(HitchBucket.BallisticsExpl, profStart);
                 }
+            }
+
+            private static void SpawnPenetratedContinuationBullet(
+                BulletInstance src,
+                BulletData bulletData,
+                Vector3 exitPos,
+                Vector3 exitDir,
+                float exitSpeed)
+            {
+                bool penCanDamage = src.canDamage;
+                if (!penCanDamage &&
+                    AiCore.IsInMultiplayerRoom() &&
+                    AiCore.IsMasterClient() &&
+                    src.shooter != null &&
+                    src.shooter.Pointer != IntPtr.Zero &&
+                    AiCore.IsAnyHumanPlayerSoldier(src.shooter) &&
+                    !AiCore.IsPlayerRunningBattleHardened(src.shooter))
+                {
+                    // Unmodded vanilla client's own bullet stopped on the front face (0% double-damage risk);
+                    // promote Host's penetrated continuation round to authoritative damage for two-way fairness!
+                    penCanDamage = true;
+                    HostVanillaClientApAssistsCount++;
+                }
+
+                var penetratedBullet = new BulletInstance(
+                    exitPos,
+                    exitDir,
+                    exitSpeed,
+                    bulletData,
+                    src.shooter,
+                    false, // Prevents a penetrated round from penetrating or ricocheting a second time
+                    penCanDamage,
+                    null);
+
+                ProjectilesManager pm = ProjectilesManager.instance;
+                if (pm != null && pm.activeBullets != null)
+                {
+                    int count = pm.activeBullets.Count;
+                    if (count == 0 || pm.activeBullets[count - 1] == null || pm.activeBullets[count - 1].Pointer != penetratedBullet.Pointer)
+                    {
+                        ProjectilesManager.OnNewBulletCreated(penetratedBullet);
+                    }
+                }
+            }
+
+            private static bool IsTransformDescendantOf(Transform tr, IntPtr ancestorPtr)
+            {
+                if (ancestorPtr == IntPtr.Zero)
+                    return false;
+
+                for (int hop = 0; hop < 14 && tr != null && tr.Pointer != IntPtr.Zero; hop++)
+                {
+                    if (tr.Pointer == ancestorPtr)
+                        return true;
+                    tr = tr.parent;
+                }
+                return false;
+            }
+
+            private static void TryHandleHumanOverPenetration(
+                BulletInstance bullet,
+                Vector3 hitDirection,
+                float impactSpeed,
+                BulletData bulletData,
+                RaycastHit hit,
+                Collider col,
+                int cachedImpact)
+            {
+                if (hitDirection.sqrMagnitude < 0.0001f)
+                    return;
+
+                bool isHelmet = cachedImpact == ImpactHumanHelmet;
+                Creature victim = null;
+                BodyPartType partType = BodyPartType.chest;
+                if (!isHelmet)
+                {
+                    BodyPart bp = col.GetComponent<BodyPart>();
+                    if (bp == null || bp.Pointer == IntPtr.Zero)
+                        return;
+                    victim = bp.unit;
+                    partType = bp.bodyPart == BodyPartType.auto_detect ? bp.GetNearestBodyPart(hit.point) : bp.bodyPart;
+                }
+                else
+                {
+                    victim = col.GetComponentInParent<Creature>();
+                    partType = BodyPartType.head;
+                }
+
+                if (victim == null || victim.Pointer == IntPtr.Zero || victim.transform == null || victim.Pointer == bullet.shooter.Pointer)
+                    return;
+
+                bool isLimb = partType == BodyPartType.arm_l ||
+                              partType == BodyPartType.arm_r ||
+                              partType == BodyPartType.leg_l ||
+                              partType == BodyPartType.leg_r;
+                bool isHighCal = bulletData.IsHighCaliber();
+
+                // Fast kinetic/velocity gate before any physics exit probe (zero overhead for pistols/SMGs/slow bullets).
+                if (!TryComputeHumanOverPenetration(
+                        impactSpeed,
+                        bulletData.mass_grains,
+                        bulletData.caliber,
+                        bulletData.mmPenetration,
+                        isHighCal,
+                        isLimb,
+                        isHelmet,
+                        0.20f,
+                        out _,
+                        out _))
+                {
+                    return;
+                }
+
+                Vector3 dir = hitDirection.normalized;
+                float entryExitDist = isLimb ? 0.14f : 0.26f;
+                if (col.Raycast(new Ray(hit.point + dir * 0.85f, -dir), out RaycastHit entryBackHit, 0.84f))
+                {
+                    float backD = Vector3.Dot(entryBackHit.point - hit.point, dir);
+                    if (backD > 0.02f && backD <= 0.85f)
+                        entryExitDist = Mathf.Clamp(backD, 0.04f, 0.85f);
+                }
+
+                if (_overPenHits == null)
+                    _overPenHits = new Il2CppInterop.Runtime.InteropTypes.Arrays.Il2CppStructArray<RaycastHit>(16);
+
+                IntPtr victimTrPtr = victim.transform.Pointer;
+                Transform shooterRoot = bullet.shooter.transform != null ? bullet.shooter.transform.root : null;
+                IntPtr shooterRootPtr = (shooterRoot != null && shooterRoot.Pointer != IntPtr.Zero) ? shooterRoot.Pointer : IntPtr.Zero;
+
+                float nearestOtherDist = 999f;
+                float farthestVictimExitDist = entryExitDist;
+                int hitCount = Physics.RaycastNonAlloc(
+                    hit.point + dir * 0.02f,
+                    dir,
+                    _overPenHits,
+                    1.40f,
+                    ResourcesManager.bulletMask.value,
+                    QueryTriggerInteraction.Ignore);
+
+                for (int i = 0; i < hitCount; i++)
+                {
+                    Collider hCol = _overPenHits[i].collider;
+                    if (hCol == null || hCol.Pointer == IntPtr.Zero || hCol.isTrigger)
+                        continue;
+
+                    Transform hTr = hCol.transform;
+                    if (IsTransformDescendantOf(hTr, victimTrPtr) || IsTransformDescendantOf(hTr, shooterRootPtr))
+                        continue;
+
+                    float d = Vector3.Dot(_overPenHits[i].point - hit.point, dir);
+                    if (d > 0.005f && d < nearestOtherDist)
+                        nearestOtherDist = d;
+                }
+
+                for (int i = 0; i < hitCount; i++)
+                {
+                    Collider hCol = _overPenHits[i].collider;
+                    if (hCol == null || hCol.Pointer == IntPtr.Zero || hCol.isTrigger || hCol.Pointer == col.Pointer)
+                        continue;
+
+                    if (!IsTransformDescendantOf(hCol.transform, victimTrPtr))
+                        continue;
+
+                    float forwardD = Vector3.Dot(_overPenHits[i].point - hit.point, dir);
+                    if (forwardD >= nearestOtherDist)
+                        continue;
+
+                    float subExit = forwardD + 0.14f;
+                    if (hCol.Raycast(new Ray(_overPenHits[i].point + dir * 0.70f, -dir), out RaycastHit vBack, 0.69f))
+                    {
+                        float bd = Vector3.Dot(vBack.point - hit.point, dir);
+                        if (bd > forwardD && bd <= 1.25f)
+                            subExit = bd;
+                    }
+
+                    if (subExit > farthestVictimExitDist)
+                        farthestVictimExitDist = subExit;
+                }
+
+                if (!TryComputeHumanOverPenetration(
+                        impactSpeed,
+                        bulletData.mass_grains,
+                        bulletData.caliber,
+                        bulletData.mmPenetration,
+                        isHighCal,
+                        isLimb,
+                        isHelmet,
+                        farthestVictimExitDist,
+                        out float exitSpeed,
+                        out float deflectionRad))
+                {
+                    return;
+                }
+
+                if (nearestOtherDist <= 0.05f)
+                    return;
+
+                float exitDist = farthestVictimExitDist + 0.04f;
+                if (exitDist >= nearestOtherDist - 0.02f)
+                {
+                    if (nearestOtherDist <= entryExitDist * 0.65f)
+                        return;
+                    exitDist = nearestOtherDist - 0.025f;
+                }
+
+                Vector3 exitPos = hit.point + dir * exitDist;
+                Vector3 jitter = new Vector3(
+                    Mathf.Sin(hit.point.x * 41.3f + hit.point.z * 17.9f) * deflectionRad,
+                    Mathf.Cos(hit.point.y * 31.7f + hit.point.x * 23.1f) * (deflectionRad * 0.85f),
+                    Mathf.Sin(hit.point.z * 47.1f + hit.point.y * 19.7f) * deflectionRad);
+                Vector3 exitDir = (dir + jitter).normalized;
+
+                SpawnPenetratedContinuationBullet(bullet, bulletData, exitPos, exitDir, exitSpeed);
+                HumanOverPenetrationsCount++;
+                AiCore.LogDebug(
+                    "Ballistics",
+                    $"Bullet over-penetrated {partType} ({farthestVictimExitDist:F2}m flesh, in={impactSpeed:F0}m/s -> out={exitSpeed:F0}m/s, cal={bulletData.caliber:F1}mm).",
+                    5.0f);
             }
 
             public static void Finalizer(BulletInstance __instance, bool __state)
@@ -625,9 +891,13 @@ namespace EasyRed2HumanAI
             {
                 try
                 {
-                    // Never treat terrain, vehicles, or living creatures as thin static cover props
+                    // Never treat terrain as thin static cover props; human BodyPart/ItemHelmet use dedicated over-pen path.
                     if (AiCore.IsTerrainCollider(col))
                         return ImpactUnknownOrBlocked;
+                    if (col.GetComponent<BodyPart>() != null)
+                        return ImpactHumanBodyPart;
+                    if (col.GetComponent<ItemHelmet>() != null)
+                        return ImpactHumanHelmet;
                     if (col.GetComponentInParent<Creature>() != null)
                         return ImpactUnknownOrBlocked;
                     if (col.GetComponentInParent<Vehicle>() != null)
@@ -800,6 +1070,81 @@ namespace EasyRed2HumanAI
         //   external explosions into concussive suppression while AT grenades, HEAT, mines,
         //   satchel charges, heavy artillery, aerial bombs, and open-topped seats stay lethal.
         // ============================================================================
+        internal static void EvaluateArmorImpactModifiers(
+            bool targetIsAir,
+            bool coverDestroyedOrDisabled,
+            bool isHeOrFlak,
+            float caliberMm,
+            int mmPenetration,
+            float basePlateArmor,
+            bool isAirOrTopAttack,
+            bool nearAirCrew,
+            float obliquityDeg,
+            out float effectiveArmorMm,
+            out float effectiveObliquityDeg,
+            out bool modifiedArmor,
+            out bool modifiedCrewSpall,
+            out float crewSpallMult,
+            out float crewSpallMaxDamage,
+            out bool blockedAirMgHit)
+        {
+            effectiveArmorMm = basePlateArmor;
+            effectiveObliquityDeg = obliquityDeg;
+            modifiedArmor = false;
+            modifiedCrewSpall = false;
+            crewSpallMult = 1.0f;
+            crewSpallMaxDamage = 9999f;
+            blockedAirMgHit = false;
+
+            // Case 1: Intact airplane fuselage hit by small-arms or heavy machine gun (< 18mm, non-HE, non-Flak).
+            if (targetIsAir)
+            {
+                if (!coverDestroyedOrDisabled && !isHeOrFlak && caliberMm < 18f)
+                {
+                    if (caliberMm >= 12.5f && nearAirCrew)
+                    {
+                        modifiedCrewSpall = true;
+                        crewSpallMult = 0.28f;
+                        crewSpallMaxDamage = 34.0f;
+                    }
+                    else
+                    {
+                        modifiedCrewSpall = true;
+                        crewSpallMult = 0.0f;
+                        crewSpallMaxDamage = 0.0f;
+                        blockedAirMgHit = true;
+                    }
+                }
+                return;
+            }
+
+            // Case 2: Ground vehicle / tank hit by an aircraft AP weapon or steep top-down dive attack.
+            if (mmPenetration >= 12 && basePlateArmor > 8f && isAirOrTopAttack)
+            {
+                modifiedArmor = true;
+                if (effectiveObliquityDeg > 15.0f)
+                    effectiveObliquityDeg = 15.0f;
+                effectiveArmorMm = Mathf.Max(8.0f, basePlateArmor * 0.45f);
+            }
+
+            // Case 3: Solid kinetic AP spall scaling inside armored ground vehicles (>= 8mm hull/turret armor).
+            if (!coverDestroyedOrDisabled && !isHeOrFlak && basePlateArmor >= 8.0f)
+            {
+                if (caliberMm < 25.0f)
+                {
+                    modifiedCrewSpall = true;
+                    crewSpallMult = 0.40f;
+                    crewSpallMaxDamage = 45.0f;
+                }
+                else if (caliberMm < 58.0f)
+                {
+                    modifiedCrewSpall = true;
+                    crewSpallMult = 0.72f;
+                    crewSpallMaxDamage = 95.0f;
+                }
+            }
+        }
+
         [HarmonyPatch(typeof(VehicleDamagablePart), nameof(VehicleDamagablePart.TryPenetrateArmor))]
         public static class VehicleDamagablePart_TryPenetrateArmor_Patch
         {
@@ -875,90 +1220,61 @@ namespace EasyRed2HumanAI
 
                     Vehicle rootVeh = __instance.rootVeh;
                     bool targetIsAir = rootVeh != null && rootVeh.Pointer != IntPtr.Zero && rootVeh.IsAirVehicle();
-
-                    // Case 1: Intact airplane fuselage hit by small-arms or heavy machine gun (< 18mm, non-HE, non-Flak).
-                    if (targetIsAir)
-                    {
-                        if (!rootVeh.IsCoverDestroyed() &&
-                            !rootVeh.IsDisabled() &&
-                            !__0.IsHe() &&
-                            !__0.IsFlak() &&
-                            __0.caliber < 18f)
-                        {
-                            // .50 cal / HMG (12.5mm-17.9mm) hitting directly within 0.42m of a seated crewman deals scaled spall;
-                            // rifle-caliber (< 12.5mm) or fuselage/wing hits away from the cockpit only damage aircraft HP.
-                            if (__0.caliber >= 12.5f && IsImpactNearSeatedAirCrew(rootVeh, __2, 0.42f * 0.42f))
-                            {
-                                ActiveCrewSpallContext = true;
-                                ActiveCrewSpallMultiplier = 0.28f;
-                                ActiveCrewSpallMaxDamage = 34.0f;
-                                __state.ModifiedCrewSpall = true;
-                            }
-                            else
-                            {
-                                ActiveCrewSpallContext = true;
-                                ActiveCrewSpallMultiplier = 0.0f;
-                                ActiveCrewSpallMaxDamage = 0.0f;
-                                __state.ModifiedCrewSpall = true;
-                                AirplanePilotMgHitsBlockedCount++;
-                            }
-                        }
-                        return;
-                    }
-
+                    bool coverDestroyedOrDisabled = rootVeh == null || rootVeh.Pointer == IntPtr.Zero || rootVeh.IsCoverDestroyed() || rootVeh.IsDisabled();
+                    bool isHeOrFlak = __0.IsHe() || __0.IsFlak();
                     float basePlateArmor = __instance.armorThickness;
 
-                    // Case 2: Ground vehicle / tank hit by an aircraft AP weapon or steep top-down dive attack.
-                    if (__0.mmPenetration >= 12 && basePlateArmor > 8f)
+                    bool nearAirCrew = false;
+                    if (targetIsAir && !coverDestroyedOrDisabled && !isHeOrFlak && __0.caliber >= 12.5f && __0.caliber < 18f)
+                        nearAirCrew = IsImpactNearSeatedAirCrew(rootVeh, __2, 0.42f * 0.42f);
+
+                    bool isAirOrTopAttack = false;
+                    if (!targetIsAir && __0.mmPenetration >= 12 && basePlateArmor > 8f)
                     {
-                        bool isAirOrTopAttack = ((__1.y - __2.y) >= 20.0f && __3.y <= -0.15f);
+                        isAirOrTopAttack = ((__1.y - __2.y) >= 20.0f && __3.y <= -0.15f);
                         if (!isAirOrTopAttack && __5 != null && __5.Pointer != IntPtr.Zero && __5.IsOnVehicle())
                         {
                             Vehicle shooterVeh = __5.GetCurrentVehicle();
                             if (shooterVeh != null && shooterVeh.Pointer != IntPtr.Zero && shooterVeh.IsAirVehicle())
                                 isAirOrTopAttack = true;
                         }
-
-                        if (isAirOrTopAttack)
-                        {
-                            __state.SavedArmorThickness = basePlateArmor;
-                            __state.ModifiedArmorThickness = true;
-
-                            // Normalize obliquity for top-deck roof strikes and scale hull/turret box armor
-                            // to reflect thin WWII tank roof/engine-deck plating (12mm-25mm) + dive velocity energy.
-                            if (__4 > 15.0f)
-                                __4 = 15.0f;
-
-                            __instance.armorThickness = Mathf.Max(8.0f, basePlateArmor * 0.45f);
-                            AircraftTopAttackPenetrationsAssistedCount++;
-                        }
                     }
 
-                    // Case 3: Solid kinetic AP spall scaling inside armored ground vehicles (>= 8mm hull/turret armor).
-                    // AT rifles / autocannons (< 25mm) and light solid AP (25mm-57mm) wound/incapacitate individual
-                    // crewmen along the penetration path instead of rolling vanilla's full 150 HP wipe, while 58mm+
-                    // tank/AT guns and all HE/APHE/HEAT bursts retain full 1.0x crew lethality.
-                    if (rootVeh != null &&
-                        rootVeh.Pointer != IntPtr.Zero &&
-                        !rootVeh.IsCoverDestroyed() &&
-                        !__0.IsHe() &&
-                        !__0.IsFlak() &&
-                        basePlateArmor >= 8.0f)
+                    EvaluateArmorImpactModifiers(
+                        targetIsAir,
+                        coverDestroyedOrDisabled,
+                        isHeOrFlak,
+                        __0.caliber,
+                        __0.mmPenetration,
+                        basePlateArmor,
+                        isAirOrTopAttack,
+                        nearAirCrew,
+                        __4,
+                        out float effectiveArmorMm,
+                        out float effectiveObliquityDeg,
+                        out bool modifiedArmor,
+                        out bool modifiedCrewSpall,
+                        out float crewSpallMult,
+                        out float crewSpallMaxDamage,
+                        out bool blockedAirMgHit);
+
+                    if (modifiedArmor)
                     {
-                        if (__0.caliber < 25.0f)
-                        {
-                            ActiveCrewSpallContext = true;
-                            ActiveCrewSpallMultiplier = 0.40f;
-                            ActiveCrewSpallMaxDamage = 45.0f;
-                            __state.ModifiedCrewSpall = true;
-                        }
-                        else if (__0.caliber < 58.0f)
-                        {
-                            ActiveCrewSpallContext = true;
-                            ActiveCrewSpallMultiplier = 0.72f;
-                            ActiveCrewSpallMaxDamage = 95.0f;
-                            __state.ModifiedCrewSpall = true;
-                        }
+                        __state.SavedArmorThickness = basePlateArmor;
+                        __state.ModifiedArmorThickness = true;
+                        __4 = effectiveObliquityDeg;
+                        __instance.armorThickness = effectiveArmorMm;
+                        AircraftTopAttackPenetrationsAssistedCount++;
+                    }
+
+                    if (modifiedCrewSpall)
+                    {
+                        ActiveCrewSpallContext = true;
+                        ActiveCrewSpallMultiplier = crewSpallMult;
+                        ActiveCrewSpallMaxDamage = crewSpallMaxDamage;
+                        __state.ModifiedCrewSpall = true;
+                        if (blockedAirMgHit)
+                            AirplanePilotMgHitsBlockedCount++;
                     }
                 }
                 catch { }

@@ -472,7 +472,8 @@ namespace EasyRed2HumanAI
                 if (dist > engageWindow)
                     continue;
 
-                if (!soldier.isInHandsAnimation &&
+                if (!soldier.IsReloading &&
+                    !soldier.isInHandsAnimation &&
                     !soldier.isInBodyAnimation &&
                     soldier.CanSwitchHeldItem &&
                     (!Photon.Pun.PhotonNetwork.InRoom || AiCore.TryConsumeBotRpcBudget(0.35f)))
@@ -486,15 +487,102 @@ namespace EasyRed2HumanAI
             return false;
         }
 
+        internal enum AtWeaponSwitchAction : byte
+        {
+            FallthroughToVanilla = 0,
+            HoldSlot0AndFinalize = 1,
+            SwitchToSlotAndFinalize = 2
+        }
+
+        internal struct AtWeaponSelectionDecision
+        {
+            public AtWeaponSwitchAction Action;
+            public int TargetSlot;
+            public bool ShouldRefillSlot0;
+            public bool EnemyIsInRange;
+        }
+
+        internal static AtWeaponSelectionDecision DecideAtWeaponSelection(
+            bool hasTarget,
+            bool targetIsArmoredVehicle,
+            float dist,
+            bool g0IsAt,
+            bool g0HasAmmo,
+            float g0DamageRange,
+            int stowedAtSlot,
+            float stowedAtDamageRange,
+            int stowedNonAtSlot,
+            float stowedNonAtDamageRange)
+        {
+            if (hasTarget && targetIsArmoredVehicle)
+            {
+                if (dist <= 95.0f)
+                {
+                    if (g0IsAt && g0HasAmmo)
+                    {
+                        return new AtWeaponSelectionDecision
+                        {
+                            Action = AtWeaponSwitchAction.HoldSlot0AndFinalize,
+                            TargetSlot = 0,
+                            ShouldRefillSlot0 = true,
+                            EnemyIsInRange = dist <= g0DamageRange
+                        };
+                    }
+
+                    if (stowedAtSlot >= 1 && dist <= Mathf.Max(55.0f, stowedAtDamageRange + 18.0f))
+                    {
+                        return new AtWeaponSelectionDecision
+                        {
+                            Action = AtWeaponSwitchAction.SwitchToSlotAndFinalize,
+                            TargetSlot = stowedAtSlot,
+                            ShouldRefillSlot0 = false,
+                            EnemyIsInRange = dist <= stowedAtDamageRange
+                        };
+                    }
+                }
+
+                return new AtWeaponSelectionDecision { Action = AtWeaponSwitchAction.FallthroughToVanilla };
+            }
+
+            if (g0IsAt)
+            {
+                if (stowedNonAtSlot >= 1)
+                {
+                    return new AtWeaponSelectionDecision
+                    {
+                        Action = AtWeaponSwitchAction.SwitchToSlotAndFinalize,
+                        TargetSlot = stowedNonAtSlot,
+                        ShouldRefillSlot0 = false,
+                        EnemyIsInRange = hasTarget && dist <= stowedNonAtDamageRange
+                    };
+                }
+
+                if (g0HasAmmo)
+                {
+                    return new AtWeaponSelectionDecision
+                    {
+                        Action = AtWeaponSwitchAction.HoldSlot0AndFinalize,
+                        TargetSlot = 0,
+                        ShouldRefillSlot0 = hasTarget,
+                        EnemyIsInRange = hasTarget && dist <= g0DamageRange
+                    };
+                }
+            }
+
+            return new AtWeaponSelectionDecision { Action = AtWeaponSwitchAction.FallthroughToVanilla };
+        }
+
         // =====================================================================
         // Vanilla AI Fix: Handheld AT vs. Primary Firearm Selection (SoldierAI.UseBestWearedWeaponCheck)
         // In vanilla SoldierAI.UseBestWearedWeaponCheck (0x180561950):
         // 1) Vanilla only checks if visibleTarget is VehicleTank (0x180561B2E). When targeting an armored
         //    VehicleWithWheels (halftrack / armored car), vanilla thinks the target is NOT a vehicle and
         //    switches the soldier AWAY from their AT launcher back to their rifle (SwitchTo(1))!
-        // 2) Conversely, if a non-isAtUnit soldier scavenged an AT launcher into Slot 0 (or switched to an
-        //    AT weapon against armor) and now targets foot infantry, ensure they switch back to a standard
-        //    firearm/sidearm if they have one with ammo.
+        // 2) Returning false early without running the tail (0x180561CE2..0x180561D83) would skip setting
+        //    SoldierAI.enemyIsInRange (+0xAE) and calling RefillAmmoForWearedWeapon(0), leaving bots muted!
+        // 3) Conversely, if a non-isAtUnit soldier scavenged an AT launcher into Slot 0 (or switched to an
+        //    AT weapon against armor) and now targets foot infantry, switch back to a loaded non-AT firearm
+        //    only if one actually has ammo (never switch to an empty Slot 1 weapon!).
         // =====================================================================
         [HarmonyPatch(typeof(SoldierAI), nameof(SoldierAI.UseBestWearedWeaponCheck))]
         public static class SoldierAI_UseBestWearedWeaponCheck_Patch
@@ -509,6 +597,8 @@ namespace EasyRed2HumanAI
                     Soldier soldier = __instance.character;
                     if (!AiCore.IsLocallyOwnedBot(soldier) ||
                         soldier.IsOnVehicle() ||
+                        soldier.HoldsMeleeWeapon ||
+                        soldier.IsReloading ||
                         soldier.isInHandsAnimation ||
                         soldier.isInBodyAnimation ||
                         !soldier.CanSwitchHeldItem)
@@ -517,7 +607,11 @@ namespace EasyRed2HumanAI
                     }
 
                     Spottable vt = __instance.visibleTarget;
-                    if (vt != null && vt.Pointer != IntPtr.Zero && vt.IsWheeledVehicleOrTank() && !vt.IsAirVehicle())
+                    bool hasTarget = vt != null && vt.Pointer != IntPtr.Zero;
+                    bool targetIsArmoredVeh = false;
+                    float dist = __instance.distFromTarget;
+
+                    if (hasTarget && vt.IsWheeledVehicleOrTank() && !vt.IsAirVehicle())
                     {
                         Vehicle targetVeh = vt.TryCast<Vehicle>();
                         if (targetVeh != null &&
@@ -525,37 +619,100 @@ namespace EasyRed2HumanAI
                             GetVehicleMaxHullArmorMm(targetVeh) >= 6.0f &&
                             soldier.transform != null)
                         {
-                            float dist = Vector3.Distance(soldier.transform.position, vt.GetPosition());
-                            if (TryEquipOrHoldStowedAtWeaponAgainstVehicle(soldier, targetVeh, dist))
-                            {
-                                return false;
-                            }
+                            targetIsArmoredVeh = true;
+                            dist = Vector3.Distance(soldier.transform.position, vt.GetPosition());
                         }
                     }
-                    else
+
+                    GenericGun g0 = soldier.GetHeldGun(0);
+                    bool g0IsAt = g0 != null && g0.IsAtWeapon();
+                    bool g0HasAmmo = g0 != null && (g0.GetCurrentAmmoCount() > 0 || !soldier.IsOutOfAmmosFor(g0));
+                    float g0Range = g0 != null ? g0.DamageRange() : 0f;
+
+                    int stowedAtSlot = -1;
+                    float stowedAtRange = 0f;
+                    int stowedNonAtSlot = -1;
+                    float stowedNonAtRange = 0f;
+
+                    for (int slot = 1; slot <= 2; slot++)
                     {
-                        // Target is foot infantry (or no target): if currently holding a dedicated AT weapon in Slot 0,
-                        // switch back to a non-AT primary/secondary firearm if one has ammo!
-                        GenericGun g0 = soldier.GetHeldGun(0);
-                        if (g0 != null && g0.IsAtWeapon())
+                        GenericGun g = soldier.GetHeldGun(slot);
+                        if (g == null || (g.GetCurrentAmmoCount() <= 0 && soldier.IsOutOfAmmosFor(g)))
+                            continue;
+
+                        if (g.IsAtWeapon())
                         {
-                            for (int slot = 1; slot <= 2; slot++)
+                            if (stowedAtSlot < 0)
                             {
-                                GenericGun altGun = soldier.GetHeldGun(slot);
-                                if (altGun != null &&
-                                    !altGun.IsAtWeapon() &&
-                                    (altGun.GetCurrentAmmoCount() > 0 || !soldier.IsOutOfAmmosFor(altGun)))
-                                {
-                                    if (!Photon.Pun.PhotonNetwork.InRoom || AiCore.TryConsumeBotRpcBudget(0.35f))
-                                    {
-                                        soldier.SetGunTriggerPressed(false);
-                                        soldier.SwitchTo(slot);
-                                    }
-                                    return false;
-                                }
+                                stowedAtSlot = slot;
+                                stowedAtRange = g.DamageRange();
                             }
                         }
+                        else if (stowedNonAtSlot < 0)
+                        {
+                            stowedNonAtSlot = slot;
+                            stowedNonAtRange = g.DamageRange();
+                        }
                     }
+
+                    AtWeaponSelectionDecision decision = DecideAtWeaponSelection(
+                        hasTarget,
+                        targetIsArmoredVeh,
+                        dist,
+                        g0IsAt,
+                        g0HasAmmo,
+                        g0Range,
+                        stowedAtSlot,
+                        stowedAtRange,
+                        stowedNonAtSlot,
+                        stowedNonAtRange);
+
+                    if (decision.Action == AtWeaponSwitchAction.FallthroughToVanilla)
+                        return true;
+
+                    if (decision.Action == AtWeaponSwitchAction.SwitchToSlotAndFinalize)
+                    {
+                        bool canSwitch = !Photon.Pun.PhotonNetwork.InRoom || AiCore.TryConsumeBotRpcBudget(0.35f);
+                        if (canSwitch)
+                        {
+                            soldier.SetGunTriggerPressed(false);
+                            soldier.SwitchTo(decision.TargetSlot);
+                        }
+                        else if (hasTarget)
+                        {
+                            soldier.RefillAmmoForWearedWeapon(0, false, null, true, 0);
+                        }
+
+                        if (hasTarget)
+                        {
+                            bool inRange = canSwitch ? decision.EnemyIsInRange : (g0 != null && dist <= g0Range);
+                            __instance.enemyIsInRange = inRange;
+                            if (!canSwitch && inRange && !soldier.IsStealth)
+                            {
+                                __instance.allowFireAtEnemy = true;
+                                if (!soldier.HasMovementsSlowed())
+                                    __instance.moveLookingTarget = true;
+                            }
+                        }
+                        return false;
+                    }
+
+                    // HoldSlot0AndFinalize: mirror vanilla tail so Slot 0 refills & enemyIsInRange (+0xAE) is set
+                    if (decision.ShouldRefillSlot0)
+                    {
+                        soldier.RefillAmmoForWearedWeapon(0, false, null, true, 0);
+                    }
+                    if (hasTarget)
+                    {
+                        __instance.enemyIsInRange = decision.EnemyIsInRange;
+                        if (decision.EnemyIsInRange && !soldier.IsStealth)
+                        {
+                            __instance.allowFireAtEnemy = true;
+                            if (!soldier.HasMovementsSlowed())
+                                __instance.moveLookingTarget = true;
+                        }
+                    }
+                    return false;
                 }
                 catch { }
                 return true;

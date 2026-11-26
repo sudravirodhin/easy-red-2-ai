@@ -44,11 +44,18 @@ namespace EasyRed2HumanAI
         private static StringBuilder _sharedLogBuilder;
         private static readonly List<IntPtr> _sharedPruneBuffer = new List<IntPtr>(256);
         private static readonly Dictionary<IntPtr, Vehicle> _turretVehicleCache = new Dictionary<IntPtr, Vehicle>(64);
+        private static readonly Dictionary<IntPtr, (IntPtr TurretPtr, Turret Obj)> _turretByAiPtr = new Dictionary<IntPtr, (IntPtr TurretPtr, Turret Obj)>(64);
         private static readonly Dictionary<IntPtr, TurretFastTraits> _turretTraitsCache = new Dictionary<IntPtr, TurretFastTraits>(96);
         private static readonly Dictionary<long, bool> _ceilingCache = new Dictionary<long, bool>(512);
         private static readonly Dictionary<long, bool> _bridgeCellCache = new Dictionary<long, bool>(512);
         private static readonly Dictionary<IntPtr, bool> _terrainColliderCache = new Dictionary<IntPtr, bool>(64);
-        private static readonly Dictionary<IntPtr, bool> _vehicleColliderCache = new Dictionary<IntPtr, bool>(256);
+        internal struct ColliderEnvMeta
+        {
+            public bool IsVehicle;
+            public IntPtr RootPtr;
+        }
+        private static readonly Dictionary<IntPtr, ColliderEnvMeta> _vehicleColliderCache = new Dictionary<IntPtr, ColliderEnvMeta>(256);
+        private static Il2CppInterop.Runtime.InteropTypes.Arrays.Il2CppStructArray<RaycastHit> _envRayScratch;
         private static readonly Dictionary<string, float> _debugLogCooldowns = new Dictionary<string, float>(32);
         private static readonly Dictionary<int, (bool HasMod, float ExpireTime)> _playerModdedCache = new Dictionary<int, (bool HasMod, float ExpireTime)>(16);
         private static readonly List<Vector3> _cachedRemotePlayerPositions = new List<Vector3>(12);
@@ -103,6 +110,8 @@ namespace EasyRed2HumanAI
 
             public float NextMortarCheckTime;
             public bool CachedHasHeldMortar;
+            public VehicleFastHandles CachedVehicleHandles;
+            public float NextVehicleHandleCheckTime;
 
             public Squad CachedSquad;
             public float NextSquadRefreshTime;
@@ -236,6 +245,8 @@ namespace EasyRed2HumanAI
             public float NextCoverIntegrityCheckTime;
             public float NextVantageSeekTime;
             public float NoLocalCoverUntil;
+            public float ExposedAimYOffset;
+            public float ExposedAimUntil;
             public byte ZombieRecoveries;
         }
 
@@ -275,6 +286,7 @@ namespace EasyRed2HumanAI
             public float MeleeWhiffFallbackUntil;
             public float NextAtCapCheckTime;
             public bool CachedHasUsableAt;
+            public float NextDeadzoneNodeCheckTime;
             public VeteranAndTacticsPatches.FireAndMovementState FireAndMovement;
             public VeteranAndTacticsPatches.RotateAndFireFrameState RotateFireFrame;
             public VeteranAndTacticsPatches.InfantrySightReactionState SightReaction;
@@ -1018,6 +1030,8 @@ namespace EasyRed2HumanAI
         private static int _offsetSoldierTargetDest = -1;
         private static int _offsetSoldierAiVisibleTarget = -1;
         private static int _offsetSoldierAiPath = -1;
+        private static int _offsetTurretAiCurrentVisibleTarget = -1;
+        private static int _offsetTurretAiTurret = -1;
 
         private static int ResolveIl2CppFieldOffset<T>(string fieldName)
         {
@@ -1048,6 +1062,8 @@ namespace EasyRed2HumanAI
             _offsetSoldierTargetDest = ResolveIl2CppFieldOffset<Soldier>("targetDestination");
             _offsetSoldierAiVisibleTarget = ResolveIl2CppFieldOffset<SoldierAI>("visibleTarget");
             _offsetSoldierAiPath = ResolveIl2CppFieldOffset<SoldierAI>("path");
+            _offsetTurretAiCurrentVisibleTarget = ResolveIl2CppFieldOffset<TurretAI>("<CurrentVisibleTarget>k__BackingField");
+            _offsetTurretAiTurret = ResolveIl2CppFieldOffset<TurretAI>("turret");
         }
 
         internal static string FormatNativeFieldOffsetsSummary()
@@ -1186,6 +1202,119 @@ namespace EasyRed2HumanAI
 
             Spottable vt = ai.visibleTarget;
             return (!ReferenceEquals(vt, null) && vt != null) ? vt.Pointer : IntPtr.Zero;
+        }
+
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        public static IntPtr GetRawTurretVisibleTargetPtr(TurretAI ai)
+        {
+            if (ReferenceEquals(ai, null))
+                return IntPtr.Zero;
+            IntPtr aiPtr = ai.Pointer;
+            if (aiPtr == IntPtr.Zero)
+                return IntPtr.Zero;
+
+            if (!_nativeFieldOffsetsResolved)
+                EnsureNativeFieldOffsetsResolved();
+
+            if (_offsetTurretAiCurrentVisibleTarget > 0)
+                return Marshal.ReadIntPtr(aiPtr + _offsetTurretAiCurrentVisibleTarget);
+
+            Spottable vt = ai.CurrentVisibleTarget;
+            return (!ReferenceEquals(vt, null) && vt != null) ? vt.Pointer : IntPtr.Zero;
+        }
+
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        public static Turret GetCachedTurretForAi(TurretAI ai)
+        {
+            if (ReferenceEquals(ai, null))
+                return null;
+            IntPtr aiPtr = ai.Pointer;
+            if (aiPtr == IntPtr.Zero)
+                return null;
+
+            if (!_nativeFieldOffsetsResolved)
+                EnsureNativeFieldOffsetsResolved();
+
+            if (_offsetTurretAiTurret <= 0)
+                return ai.turret;
+
+            IntPtr rawTurretPtr = Marshal.ReadIntPtr(aiPtr + _offsetTurretAiTurret);
+            if (rawTurretPtr == IntPtr.Zero)
+                return null;
+
+            if (_turretByAiPtr.TryGetValue(aiPtr, out var cached) &&
+                cached.TurretPtr == rawTurretPtr &&
+                !ReferenceEquals(cached.Obj, null) &&
+                cached.Obj.Pointer == rawTurretPtr)
+            {
+                return cached.Obj;
+            }
+
+            Turret resolved = ai.turret;
+            _turretByAiPtr[aiPtr] = (rawTurretPtr, resolved);
+            return resolved;
+        }
+
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        public static VehicleFastHandles GetCachedCurrentVehicleHandles(SoldierFastHandles h, float now)
+        {
+            if (h == null || h.Ref == null || !h.Ref.IsOnVehicle())
+            {
+                if (h != null)
+                    h.CachedVehicleHandles = null;
+                return null;
+            }
+
+            if (now < h.NextVehicleHandleCheckTime &&
+                h.CachedVehicleHandles != null &&
+                h.CachedVehicleHandles.Ref != null &&
+                h.CachedVehicleHandles.Ptr != IntPtr.Zero)
+            {
+                return h.CachedVehicleHandles;
+            }
+
+            h.NextVehicleHandleCheckTime = now + 0.35f;
+            Vehicle curVeh = h.Ref.GetCurrentVehicle();
+            VehicleFastHandles vh = !ReferenceEquals(curVeh, null) && curVeh != null
+                ? GetOrCreateVehicleHandles(curVeh)
+                : null;
+            h.CachedVehicleHandles = vh;
+            return vh;
+        }
+
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        public static bool TryGetVisibleTargetCenterFast(SoldierAI ai, out Vector3 center)
+        {
+            IntPtr visPtr = GetRawVisibleTargetPtr(ai);
+            if (visPtr == IntPtr.Zero)
+            {
+                center = Vector3.zero;
+                return false;
+            }
+
+            if (_soldierHandlesByPtr.TryGetValue(visPtr, out SoldierFastHandles sh) &&
+                sh != null &&
+                sh.Ref != null &&
+                sh.Ref.IsAlive &&
+                !ReferenceEquals(sh.Tr, null) &&
+                sh.Tr != null)
+            {
+                center = sh.Tr.position + Vector3.up * 0.90f;
+                return true;
+            }
+
+            if (_vehicleHandlesByPtr.TryGetValue(visPtr, out VehicleFastHandles vh) &&
+                vh != null &&
+                vh.Ref != null &&
+                vh.Ref.CanFight() &&
+                !ReferenceEquals(vh.Tr, null) &&
+                vh.Tr != null)
+            {
+                center = vh.Tr.position + Vector3.up * 1.10f;
+                return true;
+            }
+
+            return TryGetSpottableCenter(ai.visibleTarget, out center);
         }
 
         /// <summary>
@@ -1433,11 +1562,6 @@ namespace EasyRed2HumanAI
         private static int _savedVSyncCountBeforeUnfocus = 1;
         private static int _savedTargetFpsBeforeUnfocus = -1;
 
-        private static int _lastManagedGc0Count;
-        private static long _lastManagedGcBaselineBytes;
-        private static bool _pendingGen1FinalizerReclaim;
-        private static int _gen1ReclaimDueFrame;
-
         public static bool IsGameWindowFocused => _isGameWindowFocused;
 
         public static void RestoreForegroundFpsIfCapped()
@@ -1524,53 +1648,6 @@ namespace EasyRed2HumanAI
             catch { }
         }
 
-        private static void UpdateManagedNurseryGcPacing(float dtMs)
-        {
-            if (!_isGameWindowFocused || Time.timeSinceLevelLoad <= 5.0f || dtMs <= 0f || dtMs >= 18.0f)
-                return;
-
-            try
-            {
-                float scaledNow = Time.time;
-                if (_lastWorldSnapshotTime < 0f ||
-                    scaledNow == _lastWorldSnapshotTime ||
-                    (scaledNow - _lastWorldSnapshotTime) >= 0.30f)
-                {
-                    return;
-                }
-
-                int curFrame = Time.frameCount;
-                int gc0 = GC.CollectionCount(0);
-                long netMem = GC.GetTotalMemory(false);
-
-                if (_lastManagedGcBaselineBytes == 0L || netMem < _lastManagedGcBaselineBytes || gc0 != _lastManagedGc0Count)
-                {
-                    _lastManagedGc0Count = gc0;
-                    _lastManagedGcBaselineBytes = netMem;
-                }
-
-                if (_pendingGen1FinalizerReclaim && curFrame >= _gen1ReclaimDueFrame)
-                {
-                    // Stage 2: reclaim Gen1 finalizable wrappers already drained by CoreCLR's background Finalizer thread.
-                    GC.Collect(1, GCCollectionMode.Forced, blocking: false);
-                    _pendingGen1FinalizerReclaim = false;
-                    _lastManagedGc0Count = GC.CollectionCount(0);
-                    _lastManagedGcBaselineBytes = GC.GetTotalMemory(false);
-                }
-                else if (!_pendingGen1FinalizerReclaim &&
-                         (netMem - _lastManagedGcBaselineBytes) >= 1800L * 1024L)
-                {
-                    // Stage 1: trim small ~1.8MB Gen0 wrapper growth early before CoreCLR's ~2.6MB Gen0 budget triggers mid-WorldSnapshot.
-                    GC.Collect(0, GCCollectionMode.Forced, blocking: false);
-                    _pendingGen1FinalizerReclaim = true;
-                    _gen1ReclaimDueFrame = curFrame + 20;
-                    _lastManagedGc0Count = GC.CollectionCount(0);
-                    _lastManagedGcBaselineBytes = GC.GetTotalMemory(false);
-                }
-            }
-            catch { }
-        }
-
         public static void RecordFrameTiming()
         {
             float now = Time.unscaledTime;
@@ -1594,8 +1671,6 @@ namespace EasyRed2HumanAI
             float dtMs = dt * 1000.0f;
             if (!_isGameWindowFocused)
                 return;
-
-            UpdateManagedNurseryGcPacing(dtMs);
 
             if (dtMs > _currentWindowMaxFrameMs)
                 _currentWindowMaxFrameMs = dtMs;
@@ -4131,12 +4206,47 @@ namespace EasyRed2HumanAI
         // Adaptive AI Brain Tick Scheduler (Creature.ProcessSequentialUpdates)
         // =====================================================================
         // Vanilla Creature.ProcessSequentialUpdates (0x180A53760) hardcodes `cmp ebp, 1`,
-        // updating only 1 slot in Creature.allCreatures per frame. In a 120-140 bot match,
+        // updating only 1 slot in Creature.aliveCreatures per frame. In a 120-140 bot match,
         // each soldier waits 2.0-2.5+ seconds between SoldierAI.SequentialUpdate brain ticks,
         // and any frame that lands on a Vehicle, dead soldier, or seated passenger wastes
         // the entire frame's AI budget.
-        private static readonly SoldierFastHandles[] _urgentUnderFireWakeQueue = new SoldierFastHandles[24];
+        private static SoldierFastHandles[] _urgentUnderFireWakeQueue = new SoldierFastHandles[64];
         private static int _urgentUnderFireWakeCount;
+
+        internal static bool TryEnsureArrayCapacity<T>(ref T[] array, int neededLength, int maxLength)
+        {
+            if (neededLength <= array.Length)
+                return true;
+            if (array.Length >= maxLength)
+                return false;
+
+            int newSize = Math.Max(1, array.Length) * 2;
+            while (newSize < neededLength && newSize < maxLength)
+                newSize *= 2;
+            Array.Resize(ref array, Math.Min(maxLength, newSize));
+            return neededLength <= array.Length;
+        }
+
+        public static void ClearUrgentUnderFireWakeQueue()
+        {
+            if (_urgentUnderFireWakeCount > 0)
+            {
+                Array.Clear(_urgentUnderFireWakeQueue, 0, _urgentUnderFireWakeCount);
+                _urgentUnderFireWakeCount = 0;
+            }
+        }
+
+        private static bool IsStaleUrgentWakeEntry(SoldierFastHandles uh, float now)
+        {
+            return uh == null ||
+                   uh.Ref == null ||
+                   uh.Ptr == IntPtr.Zero ||
+                   !uh.Ref.IsAlive ||
+                   uh.Ref.IsOnVehicle() ||
+                   uh.Vision.UnderFireWakeAt <= 0f ||
+                   now < uh.Vision.UnderFireWakeAt - 10.0f ||
+                   now > uh.Vision.UnderFireWakeAt + 4.0f;
+        }
 
         public static void EnqueueUrgentUnderFireWake(SoldierFastHandles h, float wakeAt)
         {
@@ -4153,8 +4263,31 @@ namespace EasyRed2HumanAI
                     return;
             }
 
-            if (_urgentUnderFireWakeCount < _urgentUnderFireWakeQueue.Length)
-                _urgentUnderFireWakeQueue[_urgentUnderFireWakeCount++] = h;
+            if (_urgentUnderFireWakeCount >= _urgentUnderFireWakeQueue.Length)
+            {
+                float now = Time.time;
+                int writeIdx = 0;
+                for (int i = 0; i < _urgentUnderFireWakeCount; i++)
+                {
+                    SoldierFastHandles uh = _urgentUnderFireWakeQueue[i];
+                    if (IsStaleUrgentWakeEntry(uh, now))
+                    {
+                        if (uh != null)
+                            uh.Vision.UnderFireWakeAt = 0f;
+                        continue;
+                    }
+
+                    _urgentUnderFireWakeQueue[writeIdx++] = uh;
+                }
+                if (_urgentUnderFireWakeCount > writeIdx)
+                    Array.Clear(_urgentUnderFireWakeQueue, writeIdx, _urgentUnderFireWakeCount - writeIdx);
+                _urgentUnderFireWakeCount = writeIdx;
+
+                if (!TryEnsureArrayCapacity(ref _urgentUnderFireWakeQueue, _urgentUnderFireWakeCount + 1, 256))
+                    return;
+            }
+
+            _urgentUnderFireWakeQueue[_urgentUnderFireWakeCount++] = h;
         }
 
         [HarmonyPatch(typeof(Creature), nameof(Creature.ProcessSequentialUpdates))]
@@ -4190,7 +4323,7 @@ namespace EasyRed2HumanAI
                 long extraProfStart = HitchProfiler.BeginModScope();
                 try
                 {
-                    var list = Creature.allCreatures;
+                    var list = Creature.aliveCreatures;
                     if (list == null)
                         return;
 
@@ -4258,10 +4391,7 @@ namespace EasyRed2HumanAI
                     for (int wi = _urgentUnderFireWakeCount - 1; wi >= 0; wi--)
                     {
                         SoldierFastHandles uh = _urgentUnderFireWakeQueue[wi];
-                        if (uh == null || uh.Ref == null || uh.Ptr == IntPtr.Zero || !uh.Ref.IsAlive || uh.Ref.IsOnVehicle() ||
-                            uh.Vision.UnderFireWakeAt <= 0f ||
-                            nowWake < uh.Vision.UnderFireWakeAt - 10.0f ||
-                            nowWake > uh.Vision.UnderFireWakeAt + 4.0f)
+                        if (IsStaleUrgentWakeEntry(uh, nowWake))
                         {
                             if (uh != null)
                                 uh.Vision.UnderFireWakeAt = 0f;
@@ -4298,6 +4428,10 @@ namespace EasyRed2HumanAI
                     while (activeFootSoldiersTicked < targetFootTicks && scanned < maxScanSteps)
                     {
                         if ((Stopwatch.GetTimestamp() - startStamp) >= budgetTicks)
+                            break;
+
+                        count = list.Count;
+                        if (count <= 1)
                             break;
 
                         int idx = Creature.sequentialUpdateIndex;

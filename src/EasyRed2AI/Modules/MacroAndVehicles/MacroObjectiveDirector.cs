@@ -2508,7 +2508,7 @@ namespace EasyRed2HumanAI
                 IntPtr tPtr = obj.missionTask.Pointer;
                 int units = CountAlliedGroundUnitsOnObjective(faction, tPtr, obj.GetTaskPosition(), out int sqCnt, true);
 
-                if (sqCnt >= 2 && units >= 14 && units >= idealUnitsPerObj * 1.60f && units > heavyUnits)
+                if (sqCnt >= 2 && units >= 12 && units >= idealUnitsPerObj * 1.40f && units > heavyUnits)
                 {
                     heavyUnits = units;
                     heavyObj = obj;
@@ -2516,7 +2516,7 @@ namespace EasyRed2HumanAI
 
                 bool avoidLight = _objectiveAttrition.TryGetValue(new ObjectiveAttritionKey { Faction = faction, TaskPtr = tPtr }, out ObjectiveAttritionState lAttr) &&
                                   now < lAttr.AvoidUntil;
-                if (!avoidLight && units <= idealUnitsPerObj * 0.45f)
+                if (!avoidLight && units <= idealUnitsPerObj * 0.60f)
                 {
                     float ls = units;
                     if (ls < lightScore)
@@ -2527,7 +2527,7 @@ namespace EasyRed2HumanAI
                 }
             }
 
-            if (heavyObj == null || lightObj == null || heavyObj.missionTask.Pointer == lightObj.missionTask.Pointer)
+            if (heavyObj == null || lightObj == null || heavyObj.missionTask.Pointer == lightObj.missionTask.Pointer || lightScore + 5.0f > heavyUnits)
                 return;
 
             IntPtr heavyPtr = heavyObj.missionTask.Pointer;
@@ -2549,7 +2549,7 @@ namespace EasyRed2HumanAI
                     continue;
                 if (cand.InChargeTime() || _squadOrderedToVehicle.ContainsKey(cand.Pointer) || IsSquadLockedInCloseFirefight(cand))
                     continue;
-                if ((cand.Leader.transform.position - heavyPos).sqrMagnitude <= 65.0f * 65.0f)
+                if ((cand.Leader.transform.position - heavyPos).sqrMagnitude <= 45.0f * 45.0f)
                     continue;
 
                 float dLightSq = (cand.Leader.transform.position - lightPos).sqrMagnitude;

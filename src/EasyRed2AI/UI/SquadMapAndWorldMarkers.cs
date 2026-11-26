@@ -14,9 +14,27 @@ namespace EasyRed2HumanAI
         /// Renders a pooled native <c>[HQ]</c> preview marker on the <c>M</c> tactical map whenever the local
         /// Player Squad Leader has an active unaccepted HQ / Radio Net order.
         /// </summary>
-        internal static readonly Dictionary<IntPtr, UnityEngine.UI.Text> _minimapMarkerTextByImgPtr =
-            new Dictionary<IntPtr, UnityEngine.UI.Text>(64);
+        internal struct MiniMapMarkerTextCache
+        {
+            public UnityEngine.UI.Text Txt;
+            public GameObject Go;
+        }
+
+        internal sealed class ActiveSquad3DLabel
+        {
+            public Marker3DGUI.Entry Entry;
+            public UnityEngine.UI.RawImage Img;
+            public GameObject ImgGo;
+            public UnityEngine.UI.Text Txt;
+            public GameObject TxtGo;
+            public float LastAlpha;
+            public bool LastActive;
+        }
+
+        internal static readonly Dictionary<IntPtr, MiniMapMarkerTextCache> _minimapMarkerTextByImgPtr =
+            new Dictionary<IntPtr, MiniMapMarkerTextCache>(64);
         internal static UnityEngine.UI.Text _lastUnitMarkerTextComp;
+        private static GameObject _lastUnitMarkerTextGo;
         internal static int _lastUsedUnitMarkerIndex = -1;
         internal static bool _insideMiniMapUpdate;
 
@@ -28,6 +46,7 @@ namespace EasyRed2HumanAI
                 try
                 {
                     _lastUnitMarkerTextComp = null;
+                    _lastUnitMarkerTextGo = null;
                     if (!VisionConfig.EnableMod.Value ||
                         __instance == null ||
                         __result == null ||
@@ -44,28 +63,38 @@ namespace EasyRed2HumanAI
                         __result.enabled = __1;
 
                     IntPtr imgPtr = __result.Pointer;
-                    if (!_minimapMarkerTextByImgPtr.TryGetValue(imgPtr, out UnityEngine.UI.Text txt) ||
-                        ReferenceEquals(txt, null) ||
-                        txt == null)
+                    if (!_minimapMarkerTextByImgPtr.TryGetValue(imgPtr, out MiniMapMarkerTextCache txtCache) ||
+                        ReferenceEquals(txtCache.Txt, null) ||
+                        txtCache.Txt == null)
                     {
+                        UnityEngine.UI.Text txtResolved = null;
+                        GameObject goResolved = null;
                         Transform tr = __result.transform;
                         if (tr != null && tr.childCount > 0)
                         {
                             Transform child0 = tr.GetChild(0);
                             if (child0 != null)
-                                txt = child0.GetComponent<UnityEngine.UI.Text>();
+                            {
+                                txtResolved = child0.GetComponent<UnityEngine.UI.Text>();
+                                if (txtResolved != null)
+                                    goResolved = txtResolved.gameObject;
+                            }
                         }
                         if (_minimapMarkerTextByImgPtr.Count > 256)
                             _minimapMarkerTextByImgPtr.Clear();
-                        _minimapMarkerTextByImgPtr[imgPtr] = txt;
+                        txtCache = new MiniMapMarkerTextCache { Txt = txtResolved, Go = goResolved };
+                        _minimapMarkerTextByImgPtr[imgPtr] = txtCache;
                     }
 
+                    UnityEngine.UI.Text txt = txtCache.Txt;
+                    GameObject txtGo = txtCache.Go;
                     _lastUnitMarkerTextComp = txt;
-                    if (txt != null && txt.gameObject != null)
+                    _lastUnitMarkerTextGo = txtGo;
+                    if (txt != null && !ReferenceEquals(txtGo, null) && txtGo != null)
                     {
                         bool hasText = !string.IsNullOrEmpty(__0);
-                        if (txt.gameObject.activeSelf != hasText)
-                            txt.gameObject.SetActive(hasText);
+                        if (txtGo.activeSelf != hasText)
+                            txtGo.SetActive(hasText);
                         if (hasText && txt.text != __0)
                             txt.text = __0;
                         txt.color = Color.white;
@@ -83,7 +112,9 @@ namespace EasyRed2HumanAI
                 try
                 {
                     UnityEngine.UI.Text txt = _lastUnitMarkerTextComp;
+                    GameObject txtGo = _lastUnitMarkerTextGo;
                     _lastUnitMarkerTextComp = null;
+                    _lastUnitMarkerTextGo = null;
                     if (!_insideMiniMapUpdate ||
                         !__0 ||
                         !VisionConfig.EnableMod.Value ||
@@ -91,7 +122,8 @@ namespace EasyRed2HumanAI
                         __instance == null ||
                         !IsFriendlySquadToLocalPlayer(__instance) ||
                         txt == null ||
-                        txt.gameObject == null)
+                        ReferenceEquals(txtGo, null) ||
+                        txtGo == null)
                     {
                         return;
                     }
@@ -101,8 +133,8 @@ namespace EasyRed2HumanAI
                         return;
 
                     string letter = sqName.Length == 1 ? sqName : sqName.Substring(0, 1);
-                    if (!txt.gameObject.activeSelf)
-                        txt.gameObject.SetActive(true);
+                    if (!txtGo.activeSelf)
+                        txtGo.SetActive(true);
                     if (txt.text != letter)
                         txt.text = letter;
                     txt.color = GetSquadLetterColor(__instance, 0.96f);
@@ -165,13 +197,14 @@ namespace EasyRed2HumanAI
             new Dictionary<IntPtr, Marker3DGUI.Entry>(32);
         internal static readonly Dictionary<IntPtr, IntPtr> _marker3DEntryOwnerByEntryPtr =
             new Dictionary<IntPtr, IntPtr>(64);
-        internal static readonly Dictionary<IntPtr, UnityEngine.UI.Text> _marker3DEntryTexts =
-            new Dictionary<IntPtr, UnityEngine.UI.Text>(64);
-        internal static readonly Dictionary<IntPtr, (Marker3DGUI.Entry Entry, UnityEngine.UI.Text Txt)> _activeSquad3DLabels =
-            new Dictionary<IntPtr, (Marker3DGUI.Entry Entry, UnityEngine.UI.Text Txt)>(32);
+        internal static readonly Dictionary<IntPtr, MiniMapMarkerTextCache> _marker3DEntryTexts =
+            new Dictionary<IntPtr, MiniMapMarkerTextCache>(64);
+        internal static readonly Dictionary<IntPtr, ActiveSquad3DLabel> _activeSquad3DLabels =
+            new Dictionary<IntPtr, ActiveSquad3DLabel>(32);
         private static Font _cachedSquad3DFont;
         private static IntPtr _lastLocalHudVehiclePtr;
         private static IntPtr _lastLocalHudVehicleTaskPtr;
+        private static float _nextLocalHudVehicleCheckTime;
 
         private static bool HasActiveVehicleSquadObjectiveTask(Squad sq)
         {
@@ -326,20 +359,27 @@ namespace EasyRed2HumanAI
             return _cachedSquad3DFont;
         }
 
-        private static UnityEngine.UI.Text GetOrCreateMarker3DSquadText(Marker3DGUI.Entry entry)
+        private static UnityEngine.UI.Text GetOrCreateMarker3DSquadText(
+            Marker3DGUI.Entry entry,
+            UnityEngine.UI.RawImage entryImg,
+            out GameObject txtGo)
         {
-            if (entry == null || entry.img == null)
+            txtGo = null;
+            if (entry == null || ReferenceEquals(entryImg, null) || entryImg == null)
                 return null;
 
             IntPtr entryPtr = entry.Pointer;
-            if (_marker3DEntryTexts.TryGetValue(entryPtr, out UnityEngine.UI.Text cached) &&
-                !ReferenceEquals(cached, null) &&
-                cached != null)
+            if (_marker3DEntryTexts.TryGetValue(entryPtr, out MiniMapMarkerTextCache cached) &&
+                !ReferenceEquals(cached.Txt, null) &&
+                cached.Txt != null &&
+                !ReferenceEquals(cached.Go, null) &&
+                cached.Go != null)
             {
-                return cached;
+                txtGo = cached.Go;
+                return cached.Txt;
             }
 
-            Transform parentTr = entry.img.transform;
+            Transform parentTr = entryImg.transform;
             if (parentTr == null)
                 return null;
 
@@ -372,11 +412,16 @@ namespace EasyRed2HumanAI
                 UnityEngine.UI.Outline outline = go.AddComponent<UnityEngine.UI.Outline>();
                 outline.effectColor = new Color(0f, 0f, 0f, 0.92f);
                 outline.effectDistance = new Vector2(1.0f, -1.0f);
+                txtGo = go;
+            }
+            else
+            {
+                txtGo = txt.gameObject;
             }
 
             if (_marker3DEntryTexts.Count > 128)
                 _marker3DEntryTexts.Clear();
-            _marker3DEntryTexts[entryPtr] = txt;
+            _marker3DEntryTexts[entryPtr] = new MiniMapMarkerTextCache { Txt = txt, Go = txtGo };
             return txt;
         }
 
@@ -391,13 +436,14 @@ namespace EasyRed2HumanAI
                     if (__result != null)
                     {
                         IntPtr entryPtr = __result.Pointer;
-                        if (_marker3DEntryTexts.TryGetValue(entryPtr, out UnityEngine.UI.Text existing) &&
-                            !ReferenceEquals(existing, null) &&
-                            existing != null &&
-                            existing.gameObject != null &&
-                            existing.gameObject.activeSelf)
+                        if (_marker3DEntryTexts.TryGetValue(entryPtr, out MiniMapMarkerTextCache existing) &&
+                            !ReferenceEquals(existing.Txt, null) &&
+                            existing.Txt != null &&
+                            !ReferenceEquals(existing.Go, null) &&
+                            existing.Go != null &&
+                            existing.Go.activeSelf)
                         {
-                            existing.gameObject.SetActive(false);
+                            existing.Go.SetActive(false);
                         }
                         if (_marker3DEntryOwnerByEntryPtr.TryGetValue(entryPtr, out IntPtr prevOwner))
                         {
@@ -456,15 +502,22 @@ namespace EasyRed2HumanAI
 
                     if (!_squad3DMarkerEntries.TryGetValue(keyPtr, out Marker3DGUI.Entry entry) ||
                         entry == null ||
-                        entry.img == null ||
-                        entry.img.gameObject == null ||
-                        !entry.img.gameObject.activeInHierarchy ||
-                        !_marker3DEntryOwnerByEntryPtr.TryGetValue(entry.Pointer, out IntPtr ownerPtr) ||
-                        ownerPtr != keyPtr ||
                         entry.lastFrame != Time.frameCount)
                     {
                         return;
                     }
+
+                    IntPtr entryPtr = entry.Pointer;
+                    if (!_marker3DEntryOwnerByEntryPtr.TryGetValue(entryPtr, out IntPtr ownerPtr) ||
+                        ownerPtr != keyPtr)
+                    {
+                        return;
+                    }
+
+                    UnityEngine.UI.RawImage entryImg = entry.img;
+                    GameObject entryImgGo = !ReferenceEquals(entryImg, null) && entryImg != null ? entryImg.gameObject : null;
+                    if (ReferenceEquals(entryImgGo, null) || entryImgGo == null || !entryImgGo.activeInHierarchy)
+                        return;
 
                     Squad sq = __0.TryCast<Squad>();
                     if (sq == null ||
@@ -472,26 +525,28 @@ namespace EasyRed2HumanAI
                         !VisionConfig.EnableMapSquadLabels.Value ||
                         !IsFriendlySquadToLocalPlayer(sq))
                     {
-                        if (_marker3DEntryTexts.TryGetValue(entry.Pointer, out UnityEngine.UI.Text existing) &&
-                            existing != null &&
-                            existing.gameObject != null &&
-                            existing.gameObject.activeSelf)
+                        if (_marker3DEntryTexts.TryGetValue(entryPtr, out MiniMapMarkerTextCache existing) &&
+                            !ReferenceEquals(existing.Txt, null) &&
+                            existing.Txt != null &&
+                            !ReferenceEquals(existing.Go, null) &&
+                            existing.Go != null &&
+                            existing.Go.activeSelf)
                         {
-                            existing.gameObject.SetActive(false);
+                            existing.Go.SetActive(false);
                         }
-                        _activeSquad3DLabels.Remove(entry.Pointer);
+                        _activeSquad3DLabels.Remove(entryPtr);
                         return;
                     }
 
                     string sqName = sq.squadName;
                     if (string.IsNullOrEmpty(sqName))
                     {
-                        _activeSquad3DLabels.Remove(entry.Pointer);
+                        _activeSquad3DLabels.Remove(entryPtr);
                         return;
                     }
 
-                    UnityEngine.UI.Text txt = GetOrCreateMarker3DSquadText(entry);
-                    if (txt == null || txt.gameObject == null)
+                    UnityEngine.UI.Text txt = GetOrCreateMarker3DSquadText(entry, entryImg, out GameObject txtGo);
+                    if (txt == null || ReferenceEquals(txtGo, null) || txtGo == null)
                         return;
 
                     string letter = sqName.Length == 1 ? sqName : sqName.Substring(0, 1);
@@ -500,10 +555,21 @@ namespace EasyRed2HumanAI
 
                     float alpha = Mathf.Clamp01(entry.alpha * 1.15f);
                     txt.color = GetSquadLetterColor(sq, alpha);
-                    if (!txt.gameObject.activeSelf)
-                        txt.gameObject.SetActive(true);
+                    if (!txtGo.activeSelf)
+                        txtGo.SetActive(true);
 
-                    _activeSquad3DLabels[entry.Pointer] = (entry, txt);
+                    if (!_activeSquad3DLabels.TryGetValue(entryPtr, out ActiveSquad3DLabel lbl) || lbl == null)
+                    {
+                        lbl = new ActiveSquad3DLabel();
+                        _activeSquad3DLabels[entryPtr] = lbl;
+                    }
+                    lbl.Entry = entry;
+                    lbl.Img = entryImg;
+                    lbl.ImgGo = entryImgGo;
+                    lbl.Txt = txt;
+                    lbl.TxtGo = txtGo;
+                    lbl.LastAlpha = alpha;
+                    lbl.LastActive = true;
                 }
                 catch { }
             }
@@ -519,22 +585,25 @@ namespace EasyRed2HumanAI
                 {
                     if (VisionConfig.EnableMod.Value)
                     {
-                        PlayerController pcHud = PlayerController.currentController;
-                        IntPtr curVehPtr = (pcHud != null && pcHud.ControlledVehicle != null)
-                            ? pcHud.ControlledVehicle.Pointer
-                            : IntPtr.Zero;
-                        Squad hudSq = PlayerGUI.squad;
-                        IntPtr curTaskPtr = (curVehPtr != IntPtr.Zero && hudSq != null && hudSq.currentTask != null)
-                            ? hudSq.currentTask.Pointer
-                            : IntPtr.Zero;
-
-                        if (curVehPtr != _lastLocalHudVehiclePtr ||
-                            (curVehPtr != IntPtr.Zero && curTaskPtr != _lastLocalHudVehicleTaskPtr))
+                        float uNow = Time.unscaledTime;
+                        if (uNow >= _nextLocalHudVehicleCheckTime || uNow < _nextLocalHudVehicleCheckTime - 2.0f)
                         {
-                            _lastLocalHudVehiclePtr = curVehPtr;
-                            _lastLocalHudVehicleTaskPtr = curTaskPtr;
-                            if (PlayerGUI.instance != null)
-                                PlayerGUI.UpdateSquadGUI();
+                            _nextLocalHudVehicleCheckTime = uNow + 0.15f;
+                            PlayerController pcHud = PlayerController.currentController;
+                            Vehicle ctrlVeh = !ReferenceEquals(pcHud, null) && pcHud != null ? pcHud.ControlledVehicle : null;
+                            IntPtr curVehPtr = !ReferenceEquals(ctrlVeh, null) && ctrlVeh != null ? ctrlVeh.Pointer : IntPtr.Zero;
+                            Squad hudSq = curVehPtr != IntPtr.Zero ? PlayerGUI.squad : null;
+                            SquadTask curTask = !ReferenceEquals(hudSq, null) && hudSq != null ? hudSq.currentTask : null;
+                            IntPtr curTaskPtr = !ReferenceEquals(curTask, null) && curTask != null ? curTask.Pointer : IntPtr.Zero;
+
+                            if (curVehPtr != _lastLocalHudVehiclePtr ||
+                                (curVehPtr != IntPtr.Zero && curTaskPtr != _lastLocalHudVehicleTaskPtr))
+                            {
+                                _lastLocalHudVehiclePtr = curVehPtr;
+                                _lastLocalHudVehicleTaskPtr = curTaskPtr;
+                                if (PlayerGUI.instance != null)
+                                    PlayerGUI.UpdateSquadGUI();
+                            }
                         }
                     }
 
@@ -544,28 +613,48 @@ namespace EasyRed2HumanAI
                     bool show = VisionConfig.EnableMod.Value && VisionConfig.EnableMapSquadLabels.Value;
                     foreach (var kv in _activeSquad3DLabels)
                     {
-                        Marker3DGUI.Entry entry = kv.Value.Entry;
-                        UnityEngine.UI.Text txt = kv.Value.Txt;
-                        if (ReferenceEquals(txt, null) || txt == null || txt.gameObject == null)
+                        ActiveSquad3DLabel lbl = kv.Value;
+                        if (lbl == null)
                             continue;
 
+                        Marker3DGUI.Entry entry = lbl.Entry;
+                        UnityEngine.UI.Text txt = lbl.Txt;
+                        GameObject txtGo = lbl.TxtGo;
+                        if (ReferenceEquals(txt, null) || txt == null || ReferenceEquals(txtGo, null) || txtGo == null)
+                            continue;
+
+                        GameObject imgGo = lbl.ImgGo;
                         bool entryVisible = show &&
                                             entry != null &&
-                                            entry.img != null &&
-                                            entry.img.gameObject != null &&
-                                            entry.img.gameObject.activeSelf &&
+                                            !ReferenceEquals(lbl.Img, null) &&
+                                            lbl.Img != null &&
+                                            !ReferenceEquals(imgGo, null) &&
+                                            imgGo != null &&
+                                            imgGo.activeSelf &&
                                             entry.alpha > 0.01f;
                         if (!entryVisible)
                         {
-                            if (txt.gameObject.activeSelf)
-                                txt.gameObject.SetActive(false);
+                            if (lbl.LastActive)
+                            {
+                                lbl.LastActive = false;
+                                if (txtGo.activeSelf)
+                                    txtGo.SetActive(false);
+                            }
                             continue;
                         }
 
-                        Color c = txt.color;
-                        float targetAlpha = Mathf.Clamp01(entry.alpha * 1.15f);
-                        if (Mathf.Abs(c.a - targetAlpha) > 0.01f)
+                        if (!lbl.LastActive)
                         {
+                            lbl.LastActive = true;
+                            if (!txtGo.activeSelf)
+                                txtGo.SetActive(true);
+                        }
+
+                        float targetAlpha = Mathf.Clamp01(entry.alpha * 1.15f);
+                        if (Mathf.Abs(lbl.LastAlpha - targetAlpha) > 0.01f)
+                        {
+                            lbl.LastAlpha = targetAlpha;
+                            Color c = txt.color;
                             c.a = targetAlpha;
                             txt.color = c;
                         }
@@ -587,12 +676,14 @@ namespace EasyRed2HumanAI
                 _insideMiniMapUpdate = true;
                 _lastUsedUnitMarkerIndex = -1;
                 _lastUnitMarkerTextComp = null;
+                _lastUnitMarkerTextGo = null;
             }
 
             public static void Postfix(MiniMapGUI __instance)
             {
                 _insideMiniMapUpdate = false;
                 _lastUnitMarkerTextComp = null;
+                _lastUnitMarkerTextGo = null;
                 long profStart = HitchProfiler.BeginModScope();
                 try
                 {
@@ -611,6 +702,7 @@ namespace EasyRed2HumanAI
                     UnityEngine.UI.Image img = __instance.GetNextUnitMarker(badge, true);
                     UnityEngine.UI.Text badgeTxt = _lastUnitMarkerTextComp;
                     _lastUnitMarkerTextComp = null;
+                    _lastUnitMarkerTextGo = null;
                     if (img == null || img.rectTransform == null)
                         return;
 

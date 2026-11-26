@@ -33,6 +33,8 @@ namespace EasyRed2HumanAI
                 _lastDamageByVictim.Clear();
                 _pendingRemoteDeathByViewId.Clear();
                 _lastRemoteAttrSendTimeByPtr.Clear();
+                if (_expPreStateTop > 0)
+                    Array.Clear(_expPreStates, 0, _expPreStateTop);
                 _expPreStateTop = 0;
                 _deathPanelVictimViewId = 0;
                 _deathPanelVictimRef = null;
@@ -96,7 +98,7 @@ namespace EasyRed2HumanAI
             public bool HitPartRecorded;
         }
 
-        private static readonly ExplosionPlayerPreState[] _expPreStates = new ExplosionPlayerPreState[32];
+        private static ExplosionPlayerPreState[] _expPreStates = new ExplosionPlayerPreState[32];
         private static int _expPreStateTop;
 
         public struct ExplosionPatchState
@@ -731,10 +733,13 @@ namespace EasyRed2HumanAI
 
         private static void TryCaptureExplosionPreState(Soldier s, Vector3 expPos, float maxDistSq, ref ExplosionPatchState state)
         {
-            if (s == null || s.Pointer == IntPtr.Zero || _expPreStateTop >= _expPreStates.Length)
+            if (s == null || s.Pointer == IntPtr.Zero)
                 return;
 
             if ((s.GetCenterOfUnit() - expPos).sqrMagnitude > maxDistSq)
+                return;
+
+            if (!AiCore.TryEnsureArrayCapacity(ref _expPreStates, _expPreStateTop + 1, 512))
                 return;
 
             _expPreStates[_expPreStateTop++] = new ExplosionPlayerPreState
@@ -1063,6 +1068,8 @@ namespace EasyRed2HumanAI
                 catch { }
                 finally
                 {
+                    if (_expPreStateTop > __state.SnapStart)
+                        Array.Clear(_expPreStates, __state.SnapStart, _expPreStateTop - __state.SnapStart);
                     _expPreStateTop = __state.SnapStart;
                     _activeExplosionWeaponName = __state.PrevWeaponName;
                     _activeExplosionIsArtillery = __state.PrevIsArtillery;

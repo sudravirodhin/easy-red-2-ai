@@ -1327,12 +1327,12 @@ namespace EasyRed2HumanAI
             return false;
         }
 
-        private static bool HasClearLineOfFireAtHeight(Soldier soldier, Vector3 targetPos, float dist, float lowerBarrelHeight, float upperBarrelHeight, float maxRayDist)
+        private static bool HasClearLineOfFireAtHeight(Soldier soldier, Vector3 targetPos, float dist, float lowerBarrelHeight, float upperBarrelHeight, float maxRayDist, bool targetIsVehicle = false)
         {
             if (soldier == null || dist <= 1.5f)
                 return false;
 
-            return HasClearLineOfFireFromPosition(soldier.transform.position, soldier.transform.root, targetPos, dist, lowerBarrelHeight, upperBarrelHeight, maxRayDist);
+            return HasClearLineOfFireFromPosition(soldier.transform.position, soldier.transform.root, targetPos, dist, lowerBarrelHeight, upperBarrelHeight, maxRayDist, targetIsVehicle);
         }
 
         private static bool HasClearLineOfFireFromPosition(
@@ -1342,7 +1342,8 @@ namespace EasyRed2HumanAI
             float dist,
             float lowerBarrelHeight,
             float upperBarrelHeight,
-            float maxRayDist)
+            float maxRayDist,
+            bool targetIsVehicle = false)
         {
             if (dist <= 1.5f)
                 return false;
@@ -1357,7 +1358,7 @@ namespace EasyRed2HumanAI
             float checkDistLower = Mathf.Min(lenLower - 0.50f, maxRayDist);
             if (checkDistLower > 0.35f)
             {
-                if (AiCore.RaycastEnvironment(lowerOrigin - dirLower * 0.10f, dirLower, checkDistLower + 0.10f, ignoreRoot, out _))
+                if (AiCore.RaycastEnvironment(lowerOrigin - dirLower * 0.10f, dirLower, checkDistLower + 0.10f, ignoreRoot, out _, ignoreVehicles: targetIsVehicle))
                     return false;
             }
 
@@ -1370,7 +1371,7 @@ namespace EasyRed2HumanAI
                 float checkDistUpper = Mathf.Min(lenUpper - 0.50f, maxRayDist);
                 if (checkDistUpper > 0.35f)
                 {
-                    if (AiCore.RaycastEnvironment(upperOrigin - dirUpper * 0.10f, dirUpper, checkDistUpper + 0.10f, ignoreRoot, out _))
+                    if (AiCore.RaycastEnvironment(upperOrigin - dirUpper * 0.10f, dirUpper, checkDistUpper + 0.10f, ignoreRoot, out _, ignoreVehicles: targetIsVehicle))
                         return false;
                 }
             }
@@ -1393,9 +1394,10 @@ namespace EasyRed2HumanAI
             float upperBarrelHeight,
             float maxRayDist,
             float eyeHeight,
-            float maxEyeLintelDist)
+            float maxEyeLintelDist,
+            bool targetIsVehicle = false)
         {
-            if (!HasClearLineOfFireFromPosition(basePos, ignoreRoot, targetPos, dist, lowerBarrelHeight, upperBarrelHeight, maxRayDist))
+            if (!HasClearLineOfFireFromPosition(basePos, ignoreRoot, targetPos, dist, lowerBarrelHeight, upperBarrelHeight, maxRayDist, targetIsVehicle))
                 return false;
 
             if (maxEyeLintelDist > 0.25f)
@@ -1410,7 +1412,7 @@ namespace EasyRed2HumanAI
                     Vector3 dirEye = toSpot / lenEye;
                     float checkEyeDist = Mathf.Min(lenEye - 0.50f, maxEyeLintelDist);
                     if (checkEyeDist > 0.30f &&
-                        AiCore.RaycastEnvironment(eyeOrigin - dirEye * 0.08f, dirEye, checkEyeDist + 0.08f, ignoreRoot, out _))
+                        AiCore.RaycastEnvironment(eyeOrigin - dirEye * 0.08f, dirEye, checkEyeDist + 0.08f, ignoreRoot, out _, ignoreVehicles: targetIsVehicle))
                     {
                         return false;
                     }
@@ -1420,12 +1422,12 @@ namespace EasyRed2HumanAI
             return true;
         }
 
-        private static bool HasClearLineOfFireFromProne(Soldier soldier, Vector3 targetPos, float dist)
+        private static bool HasClearLineOfFireFromProne(Soldier soldier, Vector3 targetPos, float dist, bool targetIsVehicle = false)
         {
-            return HasClearLineOfFireAtHeight(soldier, targetPos, dist, 0.22f, 0.32f, 15.0f);
+            return HasClearLineOfFireAtHeight(soldier, targetPos, dist, 0.22f, 0.32f, 15.0f, targetIsVehicle);
         }
 
-        private static bool HasClearLineOfFireFromCrouch(Soldier soldier, Vector3 targetPos, float dist)
+        private static bool HasClearLineOfFireFromCrouch(Soldier soldier, Vector3 targetPos, float dist, bool targetIsVehicle = false)
         {
             if (soldier == null || dist <= 1.5f)
                 return false;
@@ -1439,10 +1441,22 @@ namespace EasyRed2HumanAI
                 0.78f,
                 18.0f,
                 1.04f,
-                2.8f);
+                2.8f,
+                targetIsVehicle);
         }
 
-        private static bool HasClearLineOfFireFromStanding(Soldier soldier, Vector3 targetPos, float dist)
+        private static Vector3 GetOverWallPeekTarget(Spottable target, Vector3 torsoPos)
+        {
+            if (target == null || target.IsWheeledVehicleOrTank() || target.IsAirVehicle())
+                return torsoPos;
+
+            Vector3 spotPos = target.SpotPosition();
+            return spotPos.y > torsoPos.y + 0.14f
+                ? Vector3.Lerp(torsoPos, spotPos, 0.80f)
+                : torsoPos;
+        }
+
+        private static bool HasClearLineOfFireFromStanding(Soldier soldier, Vector3 targetPos, float dist, bool targetIsVehicle = false)
         {
             if (soldier == null || dist <= 1.5f)
                 return false;
@@ -1452,14 +1466,15 @@ namespace EasyRed2HumanAI
                 soldier.transform.root,
                 targetPos,
                 dist,
-                1.22f,
+                1.26f,
                 1.36f,
                 18.0f,
                 1.56f,
-                3.5f);
+                3.5f,
+                targetIsVehicle);
         }
 
-        private static bool TrySidestepWallObstruction(SoldierAI ai, Soldier soldier, Vector3 targetPos, float dist)
+        private static bool TrySidestepWallObstruction(SoldierAI ai, Soldier soldier, Vector3 targetPos, float dist, Vector3 altTargetPos = default, bool targetIsVehicle = false)
         {
             if (ai == null || soldier == null || soldier.Pointer == IntPtr.Zero || soldier.transform == null)
                 return false;
@@ -1482,6 +1497,7 @@ namespace EasyRed2HumanAI
             Transform myRoot = soldier.transform.root;
             bool preferRight = (AiCore.GetDeterministicHash(ptr, 61) & 1) == 0;
             bool startIndoors = AiCore.HasLowCeilingOverhead(curPos, 5.5f);
+            bool hasAlt = altTargetPos.sqrMagnitude > 0.01f && altTargetPos != targetPos;
 
             int envMask = AiCore.GetSolidEnvironmentMask();
             for (int dIdx = 0; dIdx < 3; dIdx++)
@@ -1509,9 +1525,11 @@ namespace EasyRed2HumanAI
                     if (startIndoors && !AiCore.HasLowCeilingOverhead(stepPos, 5.5f))
                         continue;
 
-                    bool crouchStepClear = HasClearLineOfFireAndSightFromPosition(stepPos, myRoot, targetPos, dist, 0.64f, 0.78f, 18.0f, 1.04f, 2.8f);
+                    bool crouchStepClear = HasClearLineOfFireAndSightFromPosition(stepPos, myRoot, targetPos, dist, 0.64f, 0.78f, 18.0f, 1.04f, 2.8f, targetIsVehicle) ||
+                                           (hasAlt && HasClearLineOfFireAndSightFromPosition(stepPos, myRoot, altTargetPos, dist, 0.64f, 0.78f, 18.0f, 1.04f, 2.8f, targetIsVehicle));
                     bool standStepClear = !crouchStepClear &&
-                                          HasClearLineOfFireAndSightFromPosition(stepPos, myRoot, targetPos, dist, 1.22f, 1.36f, 18.0f, 1.56f, 3.5f);
+                                          (HasClearLineOfFireAndSightFromPosition(stepPos, myRoot, targetPos, dist, 1.26f, 1.36f, 18.0f, 1.56f, 3.5f, targetIsVehicle) ||
+                                           (hasAlt && HasClearLineOfFireAndSightFromPosition(stepPos, myRoot, altTargetPos, dist, 1.26f, 1.36f, 18.0f, 1.56f, 3.5f, targetIsVehicle)));
                     if (crouchStepClear || standStepClear)
                     {
                         sh.Stance.LocalCoverProtectedUntil = Time.time + 6.5f;
@@ -1541,7 +1559,8 @@ namespace EasyRed2HumanAI
             Soldier soldier,
             Vector3 aimPos,
             float dist,
-            out Soldier.LeanDirection leanDir)
+            out Soldier.LeanDirection leanDir,
+            bool targetIsVehicle = false)
         {
             leanDir = Soldier.LeanDirection.NotLeaning;
             if (soldier == null ||
@@ -1573,7 +1592,7 @@ namespace EasyRed2HumanAI
             }
             else
             {
-                lowerH = 1.22f;
+                lowerH = 1.26f;
                 upperH = 1.36f;
                 eyeH = 1.56f;
                 clearH = 1.55f;
@@ -1597,7 +1616,8 @@ namespace EasyRed2HumanAI
                         upperH,
                         maxCheckDist,
                         eyeH,
-                        2.8f))
+                        2.8f,
+                        targetIsVehicle))
                 {
                     leanDir = tryRight ? Soldier.LeanDirection.Right : Soldier.LeanDirection.Left;
                     return true;
@@ -2007,7 +2027,11 @@ namespace EasyRed2HumanAI
                 }
             }
 
-            if (soldier.m_pose != SoldierPose.Idle && (isOnBridge || soldier.IsOnCover() || soldier.IsTowardWall() || IsMuzzleBlockedByWall(soldier, targetPos, dist)))
+            if (soldier.m_pose != SoldierPose.Idle &&
+                (isOnBridge ||
+                 soldier.IsOnCover() ||
+                 soldier.IsTowardWall() ||
+                 IsMuzzleBlockedByWall(soldier, targetPos, dist, ai.visibleTarget != null && ai.visibleTarget.IsWheeledVehicleOrTank())))
             {
                 Vector3 standAnchor = Vector3.zero;
                 Collider standSupport = null;
@@ -2049,7 +2073,8 @@ namespace EasyRed2HumanAI
                                     !soldier.IsOnCover() &&
                                     !soldier.IsTowardWall();
 
-            if (dist > 8.5f && canTryProneBipod && HasClearLineOfFireFromProne(soldier, targetPos, dist))
+            if (dist > 8.5f && canTryProneBipod &&
+                HasClearLineOfFireFromProne(soldier, targetPos, dist, ai.visibleTarget != null && ai.visibleTarget.IsWheeledVehicleOrTank()))
             {
                 if (soldier.m_pose == SoldierPose.Prone)
                 {
@@ -2096,7 +2121,7 @@ namespace EasyRed2HumanAI
                 bool runVanilla = true;
                 try
                 {
-                    if (!VisionConfig.EnableMod.Value || ReferenceEquals(__instance, null))
+                    if (!VisionConfig.EnableMod.Value || ReferenceEquals(__instance, null) || Time.timeScale <= 0.01f)
                         return true;
 
                     AiCore.SoldierFastHandles h = AiCore.GetOrCreateSoldierHandlesByAi(__instance);
@@ -2257,7 +2282,7 @@ namespace EasyRed2HumanAI
                         soldier.isBleeding = true;
                     }
 
-                    if (!VisionConfig.EnableMod.Value || h == null || soldier == null || h.Tr == null || !soldier.IsAlive || AiCore.IsAnyHumanPlayerSoldier(soldier))
+                    if (!VisionConfig.EnableMod.Value || Time.timeScale <= 0.01f || h == null || soldier == null || h.Tr == null || !soldier.IsAlive || AiCore.IsAnyHumanPlayerSoldier(soldier))
                         return;
 
                     if (__state.SkippedForPing || AiCore.ShouldSkipBotCycleForNetworkPing())
@@ -2445,7 +2470,8 @@ namespace EasyRed2HumanAI
                             Vector3 peekTargetPos = AiCore.TryGetSpottableCenter(__instance.visibleTarget, out Vector3 validPeekPos)
                                 ? validPeekPos
                                 : (soldier.transform.position + soldier.transform.forward * Mathf.Max(__instance.distFromTarget, 15f));
-                            bool crouchClearNow = HasClearLineOfFireFromCrouch(soldier, peekTargetPos, __instance.distFromTarget);
+                            bool peekTargetIsVeh = __instance.visibleTarget != null && __instance.visibleTarget.IsWheeledVehicleOrTank();
+                            bool crouchClearNow = HasClearLineOfFireFromCrouch(soldier, peekTargetPos, __instance.distFromTarget, peekTargetIsVeh);
                             bool calmIndoorWindow = !crouchClearNow &&
                                                     curSuppNow < 12f &&
                                                     AiCore.HasLowCeilingOverhead(soldier.transform.position, 4.2f);
@@ -2498,13 +2524,14 @@ namespace EasyRed2HumanAI
                             TryThrowNormalGrenadeAtVehicle(soldier, targetVeh, __instance.distFromTarget);
                             bool hasStowedAtReady = TryEquipOrHoldStowedAtWeaponAgainstVehicle(soldier, targetVeh, __instance.distFromTarget);
 
-                            if (TryEvaluateVehicleTarget(
+                            bool canEngageVehicle = TryEvaluateVehicleTarget(
                                 soldier,
                                 targetVeh,
                                 __instance.distFromTarget,
                                 out Soldier exposedCrew,
                                 out _,
-                                out _))
+                                out _);
+                            if (canEngageVehicle)
                             {
                                 if (exposedCrew != null)
                                 {
@@ -2533,7 +2560,7 @@ namespace EasyRed2HumanAI
                             {
                                 TryStalkTankBlindFlank(__instance, soldier, targetVeh, soldier.transform.position, __instance.distFromTarget, Time.time);
                             }
-                            else if (!hasStowedAtReady)
+                            else if (!canEngageVehicle && !hasStowedAtReady)
                             {
                                 // Switch any rifleman, MG gunner, or dry AT unit away from an invulnerable tank
                                 // to visible enemy infantry advancing with the tank — BUT if the enemy tank is close (<= 52m),
@@ -2882,8 +2909,13 @@ namespace EasyRed2HumanAI
                                     ? validStandTargetPos
                                     : (soldier.transform.position + soldier.transform.forward * Mathf.Max(dist, 15f));
 
-                                bool crouchClear = HasClearLineOfFireFromCrouch(soldier, targetPos, dist);
-                                bool standClear = !crouchClear && HasClearLineOfFireFromStanding(soldier, targetPos, dist);
+                                bool standTargetIsVeh = __instance.visibleTarget != null && __instance.visibleTarget.IsWheeledVehicleOrTank();
+                                Vector3 overWallPeekPos = GetOverWallPeekTarget(__instance.visibleTarget, targetPos);
+                                bool crouchClear = HasClearLineOfFireFromCrouch(soldier, targetPos, dist, standTargetIsVeh) ||
+                                                   (overWallPeekPos != targetPos && HasClearLineOfFireFromCrouch(soldier, overWallPeekPos, dist, standTargetIsVeh));
+                                bool standClear = !crouchClear &&
+                                                  (HasClearLineOfFireFromStanding(soldier, targetPos, dist, standTargetIsVeh) ||
+                                                   (overWallPeekPos != targetPos && HasClearLineOfFireFromStanding(soldier, overWallPeekPos, dist, standTargetIsVeh)));
                                 bool canPeekNow = Time.time >= h.Stance.NextPeekAllowedTime;
                                 bool mustStandToClearWall = canPeekNow &&
                                                             !crouchClear &&
@@ -2902,7 +2934,7 @@ namespace EasyRed2HumanAI
                                         AutoPeeksTriggered++;
                                     }
                                 }
-                                else if (canPeekNow && !crouchClear && soldier.m_pose == SoldierPose.Idle && suppression < 32f && !soldier.IsReloading)
+                                else if (canPeekNow && !crouchClear && soldier.m_pose == SoldierPose.Idle && suppression < maxPeekSupp && !soldier.IsReloading)
                                 {
                                     __instance.actualPose = SoldierPose.Idle;
                                 }
@@ -2920,7 +2952,7 @@ namespace EasyRed2HumanAI
                                     SoldierPose combatPose = SoldierPose.Crouch;
                                     if (shouldBeProne &&
                                         canGoProne &&
-                                        HasClearLineOfFireFromProne(soldier, targetPos, dist))
+                                        HasClearLineOfFireFromProne(soldier, targetPos, dist, standTargetIsVeh))
                                     {
                                         combatPose = SoldierPose.Prone;
                                     }
@@ -3160,6 +3192,7 @@ namespace EasyRed2HumanAI
                             Vector3 laneAimPos = Vector3.zero;
                             float laneDist = 0f;
                             bool hasLane = false;
+                            bool laneTargetIsVeh = false;
 
                             if (__instance.visibleTarget != null &&
                                 AiCore.TryGetSpottableCenter(__instance.visibleTarget, out Vector3 visCenter))
@@ -3167,6 +3200,7 @@ namespace EasyRed2HumanAI
                                 laneAimPos = visCenter;
                                 laneDist = dist > 1.0f ? dist : Vector3.Distance(leanOriginPos, laneAimPos);
                                 hasLane = laneDist >= 2.2f && laneDist <= 85.0f;
+                                laneTargetIsVeh = __instance.visibleTarget.IsWheeledVehicleOrTank();
                             }
                             else if (h.Vision.LastKnownTarget.LastSeenTime > 0f &&
                                      (nowLean - h.Vision.LastKnownTarget.LastSeenTime) <= 12.0f)
@@ -3195,7 +3229,7 @@ namespace EasyRed2HumanAI
                                     Vector3 laneDir = flatLane.normalized;
                                     float centerH = soldier.m_pose == SoldierPose.Crouch ? 0.90f : 1.42f;
                                     if (AiCore.RaycastEnvironment(leanOriginPos + Vector3.up * centerH, laneDir, 2.2f, h.RootTr, out _) &&
-                                        TryFindCornerLeanDirection(soldier, laneAimPos, laneDist, out Soldier.LeanDirection laneLean))
+                                        TryFindCornerLeanDirection(soldier, laneAimPos, laneDist, out Soldier.LeanDirection laneLean, laneTargetIsVeh))
                                     {
                                         h.Stance.DesiredLean = laneLean;
                                         h.Stance.LeanHoldUntil = nowLean + GetJitteredPeekDuration(ptr, 3.2f);
@@ -3206,6 +3240,11 @@ namespace EasyRed2HumanAI
                                 }
                             }
                         }
+                    }
+
+                    if (!inPointBlankMelee && !isPeeking && !isCornerLeaning && !__instance.IsMoving())
+                    {
+                        TryApplyAntiStackSpacingStep(__instance, soldier, h, h.Tr.position, isOnBridge, Time.time, 3.5f);
                     }
 
                     // Stabilize upper-body aiming posture (pointGunEndTime) vs wall proximity (isTowardWallTps):
@@ -3220,7 +3259,7 @@ namespace EasyRed2HumanAI
                             ? Mathf.Min(__state.PrevPointGunEndTime, Time.time)
                             : __state.PrevPointGunEndTime;
                     }
-                    else if (!isWallBlockedNow && soldier.isTowardWallTps && (!soldier.IsTowardWall() || isCornerLeaning))
+                    else if (!isWallBlockedNow && soldier.isTowardWallTps)
                     {
                         soldier.isTowardWallTps = false;
                     }
@@ -3548,6 +3587,20 @@ namespace EasyRed2HumanAI
                         }
                     }
 
+                    Vector3 rawTargetPos = __0;
+                    bool hasVehicleCustomTarget = hasCustomTarget;
+                    if (!hasCustomTarget &&
+                        now < h.Stance.ExposedAimUntil &&
+                        h.Stance.ExposedAimYOffset > 0.01f &&
+                        __instance.visibleTarget != null &&
+                        !__instance.visibleTarget.IsWheeledVehicleOrTank() &&
+                        !__instance.visibleTarget.IsAirVehicle())
+                    {
+                        __0 = new Vector3(__0.x, __0.y + h.Stance.ExposedAimYOffset, __0.z);
+                        hasCustomTarget = true;
+                        customTargetPos = __0;
+                    }
+
                     float vet01 = GetVeterancy01(soldier);
                     bool blockFire = false;
                     bool wallBlocked = false;
@@ -3701,6 +3754,7 @@ namespace EasyRed2HumanAI
                         }
                     }
 
+                    bool rotateTargetIsVeh = __instance.visibleTarget != null && __instance.visibleTarget.IsWheeledVehicleOrTank();
                     if (!isMoving &&
                         !inPointBlankMelee &&
                         VisionConfig.NeverShootStandingInOpen.Value &&
@@ -3713,11 +3767,12 @@ namespace EasyRed2HumanAI
                         if (soldier.m_pose == SoldierPose.Idle && dist > 11.0f && dist < 220f)
                         {
                             float curSupp = soldier.GetSuppressionValue();
-                            bool canCheckCrouchLof = curSupp >= 32f || now >= h.Stance.NextStandCrouchLofCheckTime;
+                            float forceCrouchSupp = soldier.IsOnCover() ? 52f : 48f;
+                            bool canCheckCrouchLof = curSupp >= forceCrouchSupp || now >= h.Stance.NextStandCrouchLofCheckTime;
                             if (canCheckCrouchLof)
                             {
                                 h.Stance.NextStandCrouchLofCheckTime = now + 0.25f;
-                                if (curSupp >= 32f || HasClearLineOfFireFromCrouch(soldier, __0, dist))
+                                if (curSupp >= forceCrouchSupp || HasClearLineOfFireFromCrouch(soldier, __0, dist, rotateTargetIsVeh))
                                 {
                                     bool canGoProne = now >= h.Stance.NoProneUntil &&
                                                       !soldier.IsOnCover() &&
@@ -3726,7 +3781,7 @@ namespace EasyRed2HumanAI
                                     SoldierPose fightPose = SoldierPose.Crouch;
                                     if ((curSupp >= 62f || (isGunner && !soldier.IsOnCover() && dist >= 28f)) &&
                                         canGoProne &&
-                                        HasClearLineOfFireFromProne(soldier, __0, dist))
+                                        HasClearLineOfFireFromProne(soldier, __0, dist, rotateTargetIsVeh))
                                     {
                                         fightPose = SoldierPose.Prone;
                                     }
@@ -3784,11 +3839,70 @@ namespace EasyRed2HumanAI
 
                         if (now >= h.Stance.NextWallCheckTime)
                         {
-                            float angleToTarget = AiCore.HorizontalAngleToDirection(soldier, __0 - myPos);
+                            float angleToTarget = AiCore.HorizontalAngleToDirection(soldier, rawTargetPos - myPos);
                             if (angleToTarget <= 35f)
                             {
                                 h.Stance.NextWallCheckTime = now + 0.15f;
-                                if (IsMuzzleBlockedByWall(soldier, __0, dist))
+                                bool targetIsVehicle = __instance.visibleTarget != null && __instance.visibleTarget.IsWheeledVehicleOrTank();
+                                bool blockedAtRaw = IsMuzzleBlockedByWall(soldier, rawTargetPos, dist, targetIsVehicle);
+
+                                // If the immediate muzzle is clear, still lift aim to exposed head/shoulders when the
+                                // enemy's torso is behind a wall downrange (CanSee sees SpotPosition head-to-head!).
+                                if (!blockedAtRaw &&
+                                    !hasVehicleCustomTarget &&
+                                    __instance.visibleTarget != null &&
+                                    !__instance.visibleTarget.IsWheeledVehicleOrTank() &&
+                                    !__instance.visibleTarget.IsAirVehicle())
+                                {
+                                    bool torsoOccluded = false;
+                                    if (dist > 3.5f)
+                                    {
+                                        Vector3 shOrigin = myPos + Vector3.up * AiCore.GetBarrelHeightForPose(soldier.m_pose);
+                                        if (Mathf.Abs(soldier.LeanAngle) > 0.15f)
+                                            shOrigin += h.Tr.right * (soldier.LeanAngle * 0.40f);
+                                        Vector3 toRaw = rawTargetPos - shOrigin;
+                                        float rawLen = toRaw.magnitude;
+                                        if (rawLen > 1.2f &&
+                                            AiCore.RaycastEnvironment(shOrigin, toRaw / rawLen, rawLen - 0.35f, h.RootTr, out _))
+                                        {
+                                            torsoOccluded = true;
+                                        }
+                                    }
+
+                                    if (torsoOccluded &&
+                                        TryResolveExposedOverWallAim(soldier, __instance.visibleTarget, rawTargetPos, dist, out Vector3 farExposed))
+                                    {
+                                        __0 = farExposed;
+                                        hasCustomTarget = true;
+                                        customTargetPos = __0;
+                                        h.Stance.ExposedAimYOffset = Mathf.Clamp(farExposed.y - rawTargetPos.y, 0f, 0.72f);
+                                        h.Stance.ExposedAimUntil = now + 0.32f;
+                                        h.Stance.WallBlockedUntil = 0f;
+                                    }
+                                    else if (!torsoOccluded)
+                                    {
+                                        __0 = rawTargetPos;
+                                        hasCustomTarget = false;
+                                        customTargetPos = rawTargetPos;
+                                        h.Stance.ExposedAimUntil = 0f;
+                                        h.Stance.ExposedAimYOffset = 0f;
+                                    }
+                                }
+
+                                if (blockedAtRaw &&
+                                    __instance.visibleTarget != null &&
+                                    TryResolveExposedOverWallAim(soldier, __instance.visibleTarget, rawTargetPos, dist, out Vector3 nearExposed))
+                                {
+                                    __0 = nearExposed;
+                                    hasCustomTarget = true;
+                                    customTargetPos = __0;
+                                    h.Stance.ExposedAimYOffset = Mathf.Clamp(nearExposed.y - rawTargetPos.y, 0f, 0.72f);
+                                    h.Stance.ExposedAimUntil = now + 0.32f;
+                                    h.Stance.WallBlockedUntil = 0f;
+                                    blockedAtRaw = false;
+                                }
+
+                                if (blockedAtRaw)
                                 {
                                     h.Stance.WallBlockedUntil = now + 0.28f;
                                     WallsBlocked++;
@@ -3805,10 +3919,14 @@ namespace EasyRed2HumanAI
                                         !soldier.IsReloading &&
                                         !soldier.isInBodyAnimation &&
                                         !soldier.UsingBipod() &&
-                                        angleToTarget <= 25f)
+                                        angleToTarget <= 35f)
                                     {
-                                        bool crouchClear = HasClearLineOfFireFromCrouch(soldier, __0, dist);
-                                        bool standClear = !crouchClear && HasClearLineOfFireFromStanding(soldier, __0, dist);
+                                        Vector3 upperPeekPos = GetOverWallPeekTarget(__instance.visibleTarget, rawTargetPos);
+                                        bool hasUpperPeek = upperPeekPos != rawTargetPos;
+                                        bool crouchClear = HasClearLineOfFireFromCrouch(soldier, rawTargetPos, dist, targetIsVehicle) ||
+                                                           (hasUpperPeek && HasClearLineOfFireFromCrouch(soldier, upperPeekPos, dist, targetIsVehicle));
+                                        bool standClear = HasClearLineOfFireFromStanding(soldier, rawTargetPos, dist, targetIsVehicle) ||
+                                                          (hasUpperPeek && HasClearLineOfFireFromStanding(soldier, upperPeekPos, dist, targetIsVehicle));
                                         bool isStaffingStaticGun = IsActivelyHeadingToEmplacement(soldier, now);
                                         // Allow short lateral jamb/embrasure sidestep even when snapped to cover once both crouch & standing shots are blocked!
                                         bool canSidestep = !soldier.IsCharging() && !isOnBridge && !isStaffingStaticGun;
@@ -3816,7 +3934,8 @@ namespace EasyRed2HumanAI
 
                                         if (soldier.m_pose != SoldierPose.Prone &&
                                             h.Stance.DesiredLean == Soldier.LeanDirection.NotLeaning &&
-                                            TryFindCornerLeanDirection(soldier, __0, dist, out Soldier.LeanDirection cornerLean))
+                                            (TryFindCornerLeanDirection(soldier, rawTargetPos, dist, out Soldier.LeanDirection cornerLean, targetIsVehicle) ||
+                                             (hasUpperPeek && TryFindCornerLeanDirection(soldier, upperPeekPos, dist, out cornerLean, targetIsVehicle))))
                                         {
                                             h.Stance.DesiredLean = cornerLean;
                                             h.Stance.LeanHoldUntil = now + peekDur;
@@ -3824,8 +3943,7 @@ namespace EasyRed2HumanAI
                                             soldier.LeanState = cornerLean;
                                             AutoPeeksTriggered++;
                                         }
-                                        else if (soldier.m_pose == SoldierPose.Prone &&
-                                                 !HasClearLineOfFireFromProne(soldier, __0, dist))
+                                        else if (soldier.m_pose == SoldierPose.Prone)
                                         {
                                             if (crouchClear)
                                             {
@@ -3852,10 +3970,10 @@ namespace EasyRed2HumanAI
                                             }
                                             else if (canSidestep)
                                             {
-                                                TrySidestepWallObstruction(__instance, soldier, __0, dist);
+                                                TrySidestepWallObstruction(__instance, soldier, rawTargetPos, dist, upperPeekPos, targetIsVehicle);
                                             }
                                         }
-                                        else if (soldier.m_pose == SoldierPose.Crouch && !crouchClear)
+                                        else if (soldier.m_pose == SoldierPose.Crouch)
                                         {
                                             if (standClear)
                                             {
@@ -3873,12 +3991,12 @@ namespace EasyRed2HumanAI
                                             }
                                             else if (canSidestep)
                                             {
-                                                TrySidestepWallObstruction(__instance, soldier, __0, dist);
+                                                TrySidestepWallObstruction(__instance, soldier, rawTargetPos, dist, upperPeekPos, targetIsVehicle);
                                             }
                                         }
                                         else if (soldier.m_pose == SoldierPose.Idle && canSidestep)
                                         {
-                                            TrySidestepWallObstruction(__instance, soldier, __0, dist);
+                                            TrySidestepWallObstruction(__instance, soldier, rawTargetPos, dist, upperPeekPos, targetIsVehicle);
                                         }
                                     }
                                 }
@@ -3887,6 +4005,10 @@ namespace EasyRed2HumanAI
                                 {
                                     h.Stance.WallBlockedUntil = now + 0.22f;
                                     WallsBlocked++;
+                                }
+                                else
+                                {
+                                    h.Stance.WallBlockedUntil = 0f;
                                 }
                             }
                         }
@@ -3920,31 +4042,9 @@ namespace EasyRed2HumanAI
                         }
                     }
 
-                    if (VisionConfig.EnableAntiStacking.Value &&
-                        !isMoving &&
-                        !isOnBridge &&
-                        soldier.m_pose != SoldierPose.Prone &&
-                        !soldier.IsOnVehicle() &&
-                        !soldier.IsOnCover() &&
-                        !soldier.IsTowardWall() &&
-                        !soldier.UsingBipod() &&
-                        !soldier.isInBodyAnimation)
+                    if (!isMoving)
                     {
-                        if (now >= h.Combat.NextAntiStackTime)
-                        {
-                            h.Combat.NextAntiStackTime = now + 2.5f;
-                            if (TryGetAntiStackPush(soldier, out Vector3 pushDir))
-                            {
-                                Vector3 pushTarget = myPos + pushDir * 1.40f;
-                                if (!AiCore.IsMovementBlockedByObstacle(myPos + Vector3.up * 0.48f, pushDir, 1.65f) &&
-                                    Physics.Raycast(pushTarget + Vector3.up * 0.85f, Vector3.down, 2.2f, AiCore.GetSolidEnvironmentMask(), QueryTriggerInteraction.Ignore))
-                                {
-                                    __instance.MoveDirectlyToward(pushTarget, 0.80f);
-                                    h.Combat.NextAntiStackTime = now + 6.0f;
-                                    AntiStackNudges++;
-                                }
-                            }
-                        }
+                        TryApplyAntiStackSpacingStep(__instance, soldier, h, myPos, isOnBridge, now, 2.5f);
                     }
 
                     bool clampDistForEmplacementShoot =
@@ -3995,7 +4095,7 @@ namespace EasyRed2HumanAI
                         __instance.distFromTarget = 1.65f;
                     }
 
-                    if (soldier.isTowardWallTps && !soldier.IsTowardWall())
+                    if (soldier.isTowardWallTps)
                     {
                         soldier.isTowardWallTps = false;
                     }
@@ -4323,7 +4423,7 @@ namespace EasyRed2HumanAI
             float taskRadius = Mathf.Max(8.0f, task.GetTaskAreaRadius());
             MissionTask mt = task.TryCast<MissionTask>();
             isBoxTask = mt != null && mt.shape == ObjectiveShape.Box;
-            if (!isBoxTask && taskRadius < 16.0f)
+            if (!isBoxTask && taskRadius < 10.0f)
                 return false;
 
             int hash = AiCore.GetDeterministicHash(sq.Pointer, 313);
@@ -4336,8 +4436,8 @@ namespace EasyRed2HumanAI
             if (distSq > (taskRadius * 0.85f) * (taskRadius * 0.85f))
             {
                 baseDir = fromCenter / Mathf.Sqrt(distSq);
-                int slot = (int)((uint)hash % 5u) - 2;
-                angleDeg = slot * 21.0f;
+                int slot = (int)((uint)hash % 9u) - 4;
+                angleDeg = slot * 14.0f;
             }
             else
             {
@@ -4357,9 +4457,10 @@ namespace EasyRed2HumanAI
             dir.Normalize();
 
             bool hasWater = AiCore.TryGetActiveWaterLevel(out float waterY);
+            float primaryFrac = 0.42f + (((hash >> 4) & 3) * 0.10f);
             for (int p = 0; p < 3; p++)
             {
-                float frac = p == 0 ? 0.66f : (p == 1 ? 0.48f : 0.32f);
+                float frac = p == 0 ? primaryFrac : (p == 1 ? 0.48f : 0.30f);
                 Vector3 raw = center + dir * (taskRadius * frac);
                 if (!task.IsInsideTaskArea(raw, 0.88f))
                     continue;
@@ -4371,7 +4472,7 @@ namespace EasyRed2HumanAI
                     continue;
 
                 sectorAnchor = snapped;
-                sectorRadius = isBoxTask ? Mathf.Max(taskRadius, 18.0f) : Mathf.Clamp(taskRadius * 0.48f, 10.5f, 20.0f);
+                sectorRadius = isBoxTask ? Mathf.Max(taskRadius, 18.0f) : Mathf.Clamp(taskRadius * 0.52f, 8.5f, 20.0f);
                 return true;
             }
 

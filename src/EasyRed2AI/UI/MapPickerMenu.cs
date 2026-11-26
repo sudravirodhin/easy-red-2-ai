@@ -2015,8 +2015,10 @@ namespace EasyRed2HumanAI
                     out short pAllies,
                     out short pAxis);
 
-                string mpCapNote = (Photon.Pun.PhotonNetwork.InRoom && !Photon.Pun.PhotonNetwork.OfflineMode)
-                    ? $"  [MP PC Cap: {VeteranAndTacticsPatches.GetOnlineMaxUnitsPerFaction()}/side]"
+                bool isMpCapActive = !Photon.Pun.PhotonNetwork.OfflineMode &&
+                                     (Photon.Pun.PhotonNetwork.InRoom || (curMd != null && curMd.isMultiplayer));
+                string mpCapNote = isMpCapActive
+                    ? $"  [MP Cap: {VeteranAndTacticsPatches.GetOnlineMaxUnitsPerFaction(curMd)}/side]"
                     : "";
                 GUI.color = new Color(0.80f, 0.90f, 0.98f, 0.96f);
                 GUI.Label(new Rect(panelX + 20f, panelY + 532f, panelW - 40f, 20f),
@@ -2475,9 +2477,10 @@ namespace EasyRed2HumanAI
                         unitPreviewText += $"   |   Next Map Queue: currently {nextMb.maxAllies}/{nextMb.maxAxis} (preview {nScaledA}/{nScaledX})";
                     }
                 }
-                if (Photon.Pun.PhotonNetwork.InRoom && !Photon.Pun.PhotonNetwork.OfflineMode)
+                if (!Photon.Pun.PhotonNetwork.OfflineMode &&
+                    (Photon.Pun.PhotonNetwork.InRoom || (curMd != null && curMd.isMultiplayer)))
                 {
-                    unitPreviewText += $"  [MP PC Cap: {VeteranAndTacticsPatches.GetOnlineMaxUnitsPerFaction()}/side]";
+                    unitPreviewText += $"  [MP Cap: {VeteranAndTacticsPatches.GetOnlineMaxUnitsPerFaction(curMd)}/side]";
                 }
                 GUI.color = new Color(0.76f, 0.88f, 0.96f, 0.95f);
                 GUI.Label(new Rect(panelX + 20f, previewY, panelW - 40f, 20f), unitPreviewText);

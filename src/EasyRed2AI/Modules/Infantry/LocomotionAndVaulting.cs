@@ -252,10 +252,11 @@ namespace EasyRed2HumanAI
 
                     // Evaluate clear kneeling LOF strictly ONCE at the Dash -> Halt phase boundary (zero per-frame raycasts)
                     bool clearToKneelAndFire = false;
-                    if (AiCore.TryGetSpottableCenter(__instance.visibleTarget, out Vector3 tPos))
+                    if (AiCore.TryGetVisibleTargetCenterFast(__instance, out Vector3 tPos))
                     {
-                        clearToKneelAndFire = HasClearLineOfFireFromCrouch(soldier, tPos, targetDist) ||
-                                              (!VisionConfig.NeverShootStandingInOpen.Value && HasClearLineOfFireFromStanding(soldier, tPos, targetDist));
+                        bool targetIsVeh = __instance.visibleTarget != null && __instance.visibleTarget.IsWheeledVehicleOrTank();
+                        clearToKneelAndFire = HasClearLineOfFireFromCrouch(soldier, tPos, targetDist, targetIsVeh) ||
+                                              (!VisionConfig.NeverShootStandingInOpen.Value && HasClearLineOfFireFromStanding(soldier, tPos, targetDist, targetIsVeh));
                     }
 
                     if (!clearToKneelAndFire)
@@ -756,7 +757,7 @@ namespace EasyRed2HumanAI
                     }
 
                     Soldier soldier = h.Ref;
-                    TryPopVerticalDeadzonePathNode(__instance, h, soldier);
+                    TryPopVerticalDeadzonePathNode(__instance, h, soldier, now);
 
                     if (now < h.Combat.NextVaultCheckTime)
                         return;
@@ -825,8 +826,13 @@ namespace EasyRed2HumanAI
 
             // Native SoldierAI.nodeReachedDist (0.30m) is 3D Euclidean; when terrain/rubble/trenches cause
             // a >=0.22m..1.40m height difference at a node, pop it horizontally so bots do not orbit.
-            private static void TryPopVerticalDeadzonePathNode(SoldierAI ai, AiCore.SoldierFastHandles h, Soldier soldier)
+            private static void TryPopVerticalDeadzonePathNode(SoldierAI ai, AiCore.SoldierFastHandles h, Soldier soldier, float now)
             {
+                if (now < h.Combat.NextDeadzoneNodeCheckTime && now >= h.Combat.NextDeadzoneNodeCheckTime - 2.0f)
+                    return;
+
+                h.Combat.NextDeadzoneNodeCheckTime = now + 0.10f;
+
                 if (h.Tr == null ||
                     !ai.IsMoving() ||
                     soldier.isInBodyAnimation ||
@@ -837,7 +843,7 @@ namespace EasyRed2HumanAI
                     return;
                 }
 
-                A.d path = ai.path;
+                A.d path = AiCore.GetCachedAiPath(h, ai);
                 if (ReferenceEquals(path, null) || path.Pointer == IntPtr.Zero || path.NodesCount <= 0)
                     return;
 
@@ -857,7 +863,7 @@ namespace EasyRed2HumanAI
                     return;
 
                 path.A(ai.Cast<AIUsingPath>());
-                A.d postPath = ai.path;
+                A.d postPath = AiCore.GetCachedAiPath(h, ai);
                 if (!ReferenceEquals(postPath, null) && postPath.Pointer != IntPtr.Zero && postPath.NodesCount > 0)
                 {
                     A.g nextNode = postPath.CurrentNode;
