@@ -5,6 +5,17 @@ For pre-compiled downloads, see **[GitHub Releases](https://github.com/sudraviro
 
 ---
 
+## `v0.10.8` — Player-Parity Gunfire, Turret & Enemy Tank/Vehicle Engine Acoustics + Rain & Combat Masking
+* **Player-Parity Gunfire, Turret & Near-Miss Acoustics (`VisionRangeAndCamo.cs`, `ThreatMemoryAndWatchSectors.cs`, `StanceAndCoverTactics.cs`, `TeamNetAndSquadCommand.cs`)**:
+  * Raised small-arms hearing to `200m` (`80%` of ER2's `250m` `GenericGun.audioSource.maxDistance`), scaled turret cannon/MG hearing dynamically from live `TurretGun.audioSource.maxDistance` (`200m` / `260m` / `340m` vs `250m` / `350m` / `500m`), raised explosion hearing to `235m` / `290m`, raised cover/TeamNet dominant gunfire queries to `200m`, and matched near-miss bullet cracks (`9.5m` / `12m`) to ER2 `BulletInstance.CheckFlybyIfNeeded` flyby ranges.
+* **Enemy Tank & Ground Vehicle Engine Hearing (`AiCore.cs`, `AiCore.WorldQuery.cs`, `VisionRangeAndCamo.cs`, `ThreatMemoryAndWatchSectors.cs`, `StanceAndCoverTactics.cs`)**:
+  * Added a `10 Hz` cached audible-vehicle array in `AiCore.WorldQuery` (`ActiveAudibleGroundVehicles[32]`, caching `MovableVehicle.MaxSoundDistance` once on `VehicleFastHandles.CachedEngineMaxSoundDist` with zero new static dicts) strictly capped below player hearing (`<= 74%` / `155m` moving tanks, `<= 36%` / `55m` idling tanks, `<= 65%` / `95m` moving light vehicles, `<= 28%` / `32m` idling light vehicles, always `<= 0.85 * playerCap`).
+  * Wired enemy engine hearing into stationary watch sectors (`<= 155m`), moving-bot watch orientation (`<= 75m` plus `<= 70m` nearby gunfire), and cover threat orientation (`<= 90m`).
+* **Rain & Heavy-Combat Acoustic Masking (`VisionRangeAndCamo.cs`, `AiCore.WorldQuery.cs`, `ThreatMemoryAndWatchSectors.cs`)**:
+  * Added `ComputeGunfireRainMaskMultiplier(RainIntensity01)` (`1.0x -> 0.78x` in heavy rain) across gunfire and near-miss hearing, and damped vehicle engine hearing under heavy rain (`0.65x`) and nearby explosions/gunfire (`0.62x`, `0.38x` combined floor).
+* **Verification (`VerifyPhysicsAndAcoustics.ps1`)**:
+  * Expanded `VerifyPhysicsAndAcoustics.ps1` with `Section 11K` (`696` total assertions, `0` failures) and static anti-regression source guards for `VisionRangeAndCamo.cs`, `AiCore.WorldQuery.cs`, and `ThreatMemoryAndWatchSectors.cs`.
+
 ## `v0.10.7` — Tactical Stealth-Crouch & Aircraft-Overhead Prone, H.A.R.M. Prone-for-Safety, Blind-Smoke High-Risk Assessment, Medic Enemy-Heal Safety, Large-Group Grenade FF Overhaul, Co-op Snapshot Parity & MP Hitch Reduction
 * **Tactical Stealth-Crouch, Enemy Aircraft-Overhead Prone & Quiet Crouch-Walk (`AiCore.cs`, `AiCore.WorldQuery.cs`, `VisionRangeAndCamo.cs`, `StanceAndCoverTactics.cs`, `SoldierGoapExecution.cs`, `ThreatMemoryAndWatchSectors.cs`)**:
   * Added `SoldierStanceState.StealthCrouchUntil` and `EvaluateTacticalStealthCrouch` / `ShouldBotStealthCrouch` so flanking/creeping squads drop into crouched stealth when closing on unalerted threats, and tracked `WorldAirSquadIndices[32]` (`IsEnemyAircraftOverhead`) so stationary open-ground infantry drop `Prone` when enemy aircraft pass overhead.

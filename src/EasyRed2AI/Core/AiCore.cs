@@ -475,6 +475,8 @@ namespace EasyRed2HumanAI
             public float NextApcDismountCooldown;
             public bool HasCachedExtents;
             public Vector4 CachedExtents;
+            public float CachedEngineMaxSoundDist;
+            public bool EngineSoundDistChecked;
             public float NextPedestrianScanTime;
             public float YieldUntilTime;
             public float ContinuousYieldStart;

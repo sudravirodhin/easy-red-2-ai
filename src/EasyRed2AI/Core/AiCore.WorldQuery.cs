@@ -2060,6 +2060,20 @@ namespace EasyRed2HumanAI
         public static int ActiveVehicleDangerCorridorCount;
         private static float _nextVehicleDangerCorridorRefreshTime;
 
+        public struct AudibleGroundVehicle
+        {
+            public IntPtr VehiclePtr;
+            public string Faction;
+            public Vector3 Pos;
+            public float MaxSoundDistance;
+            public float SpeedMs;
+            public bool IsTank;
+            public bool IsMoving;
+        }
+
+        public static AudibleGroundVehicle[] ActiveAudibleGroundVehicles = new AudibleGroundVehicle[32];
+        public static int ActiveAudibleGroundVehicleCount;
+
         public static void EnsureVehicleDangerCorridorsUpdated(float now)
         {
             if (now < _nextVehicleDangerCorridorRefreshTime && now >= _nextVehicleDangerCorridorRefreshTime - 2.0f)
@@ -2068,6 +2082,8 @@ namespace EasyRed2HumanAI
             _nextVehicleDangerCorridorRefreshTime = now + 0.10f;
             int prevCount = ActiveVehicleDangerCorridorCount;
             ActiveVehicleDangerCorridorCount = 0;
+            int prevAudibleCount = ActiveAudibleGroundVehicleCount;
+            ActiveAudibleGroundVehicleCount = 0;
 
             try
             {
@@ -2162,6 +2178,29 @@ namespace EasyRed2HumanAI
                                 hullPivoting = true;
                         }
 
+                        if (!vh.EngineSoundDistChecked && mv != null)
+                        {
+                            vh.EngineSoundDistChecked = true;
+                            int msd = mv.MaxSoundDistance;
+                            vh.CachedEngineMaxSoundDist = msd > 10 ? (float)msd : (vh.IsTank ? 150.0f : 90.0f);
+                        }
+
+                        bool isVehMoving = effSpeed >= 0.45f || hullPivoting;
+                        bool engineRunning = mv != null && (isVehMoving || (v.HasDriver() && (mv.engineStarted || mv.engineStarting || mv.engine_looping)));
+                        if (engineRunning && TryEnsureArrayCapacity(ref ActiveAudibleGroundVehicles, ActiveAudibleGroundVehicleCount + 1, 256))
+                        {
+                            ActiveAudibleGroundVehicles[ActiveAudibleGroundVehicleCount++] = new AudibleGroundVehicle
+                            {
+                                VehiclePtr = v.Pointer,
+                                Faction = vehFaction,
+                                Pos = vWorldPos,
+                                MaxSoundDistance = vh.CachedEngineMaxSoundDist > 10f ? vh.CachedEngineMaxSoundDist : (vh.IsTank ? 150f : 90f),
+                                SpeedMs = effSpeed,
+                                IsTank = vh.IsTank,
+                                IsMoving = isVehMoving
+                            };
+                        }
+
                         if (effSpeed < 0.45f && !isHumanControlled && !aiMovingIntent && !hullPivoting)
                             continue;
 
@@ -2213,6 +2252,8 @@ namespace EasyRed2HumanAI
 
             if (prevCount > ActiveVehicleDangerCorridorCount)
                 Array.Clear(ActiveVehicleDangerCorridors, ActiveVehicleDangerCorridorCount, prevCount - ActiveVehicleDangerCorridorCount);
+            if (prevAudibleCount > ActiveAudibleGroundVehicleCount)
+                Array.Clear(ActiveAudibleGroundVehicles, ActiveAudibleGroundVehicleCount, prevAudibleCount - ActiveAudibleGroundVehicleCount);
         }
 
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
@@ -2290,6 +2331,71 @@ namespace EasyRed2HumanAI
             signedLateral = 0f;
             clearStepDir = Vector3.zero;
             return false;
+        }
+
+        public static bool TryGetNearestAudibleEnemyVehicle(
+            Vector3 observerPos,
+            string observerFaction,
+            float maxQueryRadius,
+            float now,
+            out Vector3 vehiclePos,
+            out float vehicleDist,
+            out bool isTank,
+            out bool isMoving)
+        {
+            vehiclePos = Vector3.zero;
+            vehicleDist = -1f;
+            isTank = false;
+            isMoving = false;
+            if (string.IsNullOrEmpty(observerFaction) || maxQueryRadius <= 0f)
+                return false;
+
+            EnsureVehicleDangerCorridorsUpdated(now);
+            int count = ActiveAudibleGroundVehicleCount;
+            if (count <= 0)
+                return false;
+
+            float rain01 = RainIntensity01;
+            bool loudCombatNear = VisionPatches.HasAnyLoudEventNear(observerPos, 38.0f, 3.0f, now);
+            float bestRankSq = float.MaxValue;
+            float bestTrueDistSq = 0f;
+            bool found = false;
+
+            for (int i = 0; i < count; i++)
+            {
+                ref AudibleGroundVehicle av = ref ActiveAudibleGroundVehicles[i];
+                if (!AreEnemyFactions(observerFaction, av.Faction))
+                    continue;
+
+                float dx = av.Pos.x - observerPos.x;
+                float dy = av.Pos.y - observerPos.y;
+                float dz = av.Pos.z - observerPos.z;
+                float distSq = dx * dx + dy * dy + dz * dz;
+                if (distSq <= 0.25f)
+                    continue;
+
+                float audibleR = VisionPatches.ComputeVehicleEngineAudibleRadius(av.MaxSoundDistance, av.IsTank, av.IsMoving, rain01, loudCombatNear);
+                float effR = Mathf.Min(maxQueryRadius, audibleR);
+                if (distSq > effR * effR)
+                    continue;
+
+                float rankSq = distSq * (av.IsTank ? (av.IsMoving ? 0.72f : 1.05f) : (av.IsMoving ? 0.95f : 1.25f));
+                if (rankSq < bestRankSq)
+                {
+                    bestRankSq = rankSq;
+                    bestTrueDistSq = distSq;
+                    vehiclePos = av.Pos;
+                    isTank = av.IsTank;
+                    isMoving = av.IsMoving;
+                    found = true;
+                }
+            }
+
+            if (!found)
+                return false;
+
+            vehicleDist = Mathf.Sqrt(bestTrueDistSq);
+            return true;
         }
         private static Camera _cachedMainCamera;
         private static float _nextMainCameraLookupTime;
@@ -3819,6 +3925,9 @@ namespace EasyRed2HumanAI
             if (ActiveVehicleDangerCorridorCount > 0)
                 Array.Clear(ActiveVehicleDangerCorridors, 0, ActiveVehicleDangerCorridorCount);
             ActiveVehicleDangerCorridorCount = 0;
+            if (ActiveAudibleGroundVehicleCount > 0)
+                Array.Clear(ActiveAudibleGroundVehicles, 0, ActiveAudibleGroundVehicleCount);
+            ActiveAudibleGroundVehicleCount = 0;
             _nextVehicleDangerCorridorRefreshTime = 0f;
             _cachedMainCamera = null;
             _nextMainCameraLookupTime = 0f;

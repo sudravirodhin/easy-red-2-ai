@@ -323,7 +323,9 @@ namespace EasyRed2HumanAI
 
             var soldiers = AiCore.WorldSoldiers;
             Vector3 impactPos = hit.point;
-            float footRadiusSq = (isHeavy || directHitFootPtr != IntPtr.Zero) ? (10.5f * 10.5f) : (8.0f * 8.0f);
+            float rainBulletMult = VisionPatches.ComputeGunfireRainMaskMultiplier(AiCore.RainIntensity01);
+            float footR = ((isHeavy || directHitFootPtr != IntPtr.Zero) ? 12.0f : 9.5f) * rainBulletMult;
+            float footRadiusSq = footR * footR;
             float vehRadiusSq = isHeavy ? (11.0f * 11.0f) : (6.0f * 6.0f);
             int footAlerted = 0;
             int vehAlerted = 0;
@@ -1527,10 +1529,22 @@ namespace EasyRed2HumanAI
                 }
             }
 
-            // Acoustic Ring Buffer: distant small arms (~140m), tank cannons / emplacements (~210m), and artillery/explosions (~260m)
+            // Acoustic Ring Buffer: distant small arms (~200m), tank cannons / emplacements (~260-340m), and artillery/explosions (~235-290m)
             if (VisionPatches.TryGetAudibleBattleDirection(myPos, myFaction, 9.0f, 11.0f, out Vector3 audibleVec, out float audibleEffDistSq))
             {
                 InsertClosestContact(audibleVec, audibleEffDistSq, ref contactCount, ref c0, ref d0, ref c1, ref d1, ref c2, ref d2, ref c3, ref d3);
+            }
+
+            if (AiCore.TryGetNearestAudibleEnemyVehicle(myPos, myFaction, 155.0f, now, out Vector3 vehSoundPos, out _, out bool vehIsTank, out bool vehIsMoving))
+            {
+                Vector3 toVehSound = vehSoundPos - myPos;
+                toVehSound.y = 0f;
+                float vSq = toVehSound.sqrMagnitude;
+                if (vSq > 0.25f)
+                {
+                    float wMult = vehIsTank ? (vehIsMoving ? 0.80f : 1.15f) : (vehIsMoving ? 1.05f : 1.30f);
+                    InsertClosestContact(toVehSound, vSq * wMult, ref contactCount, ref c0, ref d0, ref c1, ref d1, ref c2, ref d2, ref c3, ref d3);
+                }
             }
 
             AiCore.EnsureWorldSnapshot();
@@ -2223,13 +2237,17 @@ namespace EasyRed2HumanAI
                             }
                             else if (now >= h.Vision.StationaryWatch.NextEvalTime)
                             {
-                                h.Vision.StationaryWatch.NextEvalTime = now + 0.15f;
+                                h.Vision.StationaryWatch.NextEvalTime = now + 0.18f;
                                 string obsFac = AiCore.GetCachedFaction(h, now);
-                                if (!string.IsNullOrEmpty(obsFac) &&
-                                    VisionPatches.TryGetNearestCloseAcousticThreat(obsPos, obsFac, now, out Vector3 mAcousticPos, out float mAcousticDist, out _) &&
-                                    mAcousticDist <= 16.0f)
+                                Vector3 mSoundPos = Vector3.zero;
+                                bool hasMovingAcoustic = !string.IsNullOrEmpty(obsFac) &&
+                                    ((VisionPatches.TryGetNearestCloseAcousticThreat(obsPos, obsFac, now, out mSoundPos, out float mAcousticDist, out _) &&
+                                      mAcousticDist <= 18.0f) ||
+                                     VisionPatches.TryGetNearestEnemyGunfirePosition(obsPos, obsFac, 70.0f, 3.0f, out mSoundPos) ||
+                                     AiCore.TryGetNearestAudibleEnemyVehicle(obsPos, obsFac, 75.0f, now, out mSoundPos, out _, out _, out _));
+                                if (hasMovingAcoustic)
                                 {
-                                    Vector3 toSound = mAcousticPos - obsPos;
+                                    Vector3 toSound = mSoundPos - obsPos;
                                     toSound.y = 0f;
                                     if (toSound.sqrMagnitude > 0.04f)
                                     {

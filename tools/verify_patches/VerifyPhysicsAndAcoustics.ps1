@@ -214,6 +214,22 @@ if ($vetRaw -notmatch 'Soldier_Throw_Patch[\s\S]*?AiCore\.TryGetThrowablePrefabI
 if ($wqRaw -match 'EnsureWorldSnapshot[\s\S]*?(?:IsPlayer\s*=\s*u\.IsPlayer\(\)|bool\s+isHuman\s*=\s*u\.IsPlayer\(\))') {
     throw "Regression: AiCore.WorldQuery.cs EnsureWorldSnapshot must use IsAnyHumanPlayerSoldier(...) instead of raw u.IsPlayer()!"
 }
+if ($visRaw -notmatch 'ComputeGunfireRainMaskMultiplier\(' -or
+    $visRaw -notmatch 'ComputeVehicleEngineAudibleRadius\(' -or
+    $visRaw -notmatch 'RecordSoldierFired[\s\S]*?200\.0f' -or
+    $visRaw -notmatch 'RecordTurretFired[\s\S]*?gun\.audioSource') {
+    throw "Regression: VisionRangeAndCamo.cs must define rain/engine acoustic helpers, 200m soldier gunfire cap, and TurretGun.audioSource lookup!"
+}
+if ($wqRaw -notmatch 'ActiveAudibleGroundVehicles' -or
+    $wqRaw -notmatch 'ClearSpatialCaches[\s\S]*?ActiveAudibleGroundVehicles' -or
+    $wqRaw -notmatch 'TryGetNearestAudibleEnemyVehicle\(') {
+    throw "Regression: AiCore.WorldQuery.cs must track/reset ActiveAudibleGroundVehicles and expose TryGetNearestAudibleEnemyVehicle!"
+}
+if ($thmRaw -notmatch 'TryGetNearestAudibleEnemyVehicle\(' -or
+    $thmRaw -notmatch 'TryGetNearestEnemyGunfirePosition\(' -or
+    $thmRaw -notmatch 'NotifyProjectileImpactReaction[\s\S]*?ComputeGunfireRainMaskMultiplier\(') {
+    throw "Regression: ThreatMemoryAndWatchSectors.cs must wire vehicle/gunfire hearing into watch orientation and apply rain masking to near-miss cracks!"
+}
 function Extract-CqbFloat {
     param([string]$Text, [string]$Pattern, [string]$Label)
     $m = [regex]::Match($Text, $Pattern)
@@ -747,6 +763,7 @@ namespace EasyRed2HumanAI
 
         public static Dictionary<IntPtr, SoldierFastHandles> MockHandles = new Dictionary<IntPtr, SoldierFastHandles>();
         public static float NightDarkness01 = 0f;
+        public static float RainIntensity01 = 0f;
         public static int BattleTheaterGeneration = 1;
         public static BattleTheaterSnapshot CurrentTheater;
         public static BattleTheaterSnapshot GetBattleTheaterSnapshot() => CurrentTheater;
@@ -2306,12 +2323,57 @@ $locVaultArcPart
                             friendlyIsHumanPlayer: false, friendlyMovingTowardTarget: false,
                             baseAiSafeRadius: 16.0f, basePlayerSafeRadius: 16.0f),
                         "11J Heavy satchel/demo scaled radius (16.0m) must block friendly at 15.0m and allow at 18.0m!");
+
+                    // 11K. Player-parity gunfire/tank engine acoustics & rain/combat masking
+                    Assert(Mathf.Abs(VisionPatches.ComputeGunfireRainMaskMultiplier(0f) - 1.0f) < 1e-4f &&
+                           Mathf.Abs(VisionPatches.ComputeGunfireRainMaskMultiplier(0.5f) - 0.89f) < 1e-4f &&
+                           Mathf.Abs(VisionPatches.ComputeGunfireRainMaskMultiplier(1.0f) - 0.78f) < 1e-4f,
+                        "11K Gunfire rain mask multiplier must interpolate cleanly from 1.0x down to 0.78x in heavy rain!");
+
+                    float mvTank = VisionPatches.ComputeVehicleEngineAudibleRadius(150f, isTank: true, isMoving: true, rain01: 0f, loudCombatNear: false);
+                    float idleTank = VisionPatches.ComputeVehicleEngineAudibleRadius(150f, isTank: true, isMoving: false, rain01: 0f, loudCombatNear: false);
+                    float mvTruck = VisionPatches.ComputeVehicleEngineAudibleRadius(90f, isTank: false, isMoving: true, rain01: 0f, loudCombatNear: false);
+                    float idleTruck = VisionPatches.ComputeVehicleEngineAudibleRadius(90f, isTank: false, isMoving: false, rain01: 0f, loudCombatNear: false);
+                    Assert(mvTank > 100f && mvTank < 150f &&
+                           idleTank > 45f && idleTank <= 55f && idleTank < mvTank &&
+                           Mathf.Abs(mvTruck - 58.5f) < 1e-3f && mvTruck < 90f &&
+                           idleTruck > 20f && idleTruck <= 32f && idleTruck < mvTruck,
+                        "11K Bots must hear moving/idling tanks & trucks proportionally while staying strictly below player MaxSoundDistance!");
+
+                    float rainTank = VisionPatches.ComputeVehicleEngineAudibleRadius(150f, isTank: true, isMoving: true, rain01: 1.0f, loudCombatNear: false);
+                    float combatTank = VisionPatches.ComputeVehicleEngineAudibleRadius(150f, isTank: true, isMoving: true, rain01: 0f, loudCombatNear: true);
+                    float bothTank = VisionPatches.ComputeVehicleEngineAudibleRadius(150f, isTank: true, isMoving: true, rain01: 1.0f, loudCombatNear: true);
+                    Assert(Mathf.Abs(rainTank - mvTank * 0.65f) < 0.05f &&
+                           Mathf.Abs(combatTank - mvTank * 0.62f) < 0.05f &&
+                           bothTank >= mvTank * 0.38f - 0.01f && bothTank < rainTank && bothTank < combatTank,
+                        "11K Heavy rain (~0.65x), nearby explosions (~0.62x), and combined masking (>=0.38x) must dampen tank engine range!");
+
+                    float extremeTank = VisionPatches.ComputeVehicleEngineAudibleRadius(300f, isTank: true, isMoving: true, rain01: 0f, loudCombatNear: false);
+                    float extremeTruck = VisionPatches.ComputeVehicleEngineAudibleRadius(300f, isTank: false, isMoving: true, rain01: 0f, loudCombatNear: false);
+                    Assert(extremeTank <= 155f + 1e-3f && extremeTruck <= 95f + 1e-3f,
+                        "11K Moving tank/truck acoustic hearing must honor hard 155m / 95m ceiling!");
+
+                    VisionPatches.ClearRing();
+                    Time.time = 200f;
+                    AiCore.RainIntensity01 = 0f;
+                    VisionPatches.InjectGunfire(new IntPtr(9101), new Vector3(0f, 0f, 185f), "Hungary_axis", 199.5f, 200.0f);
+                    Assert(VisionPatches.TryGetNearestEnemyGunfirePosition(Vector3.zero, "Ussr_allies", 250f, 5f, out _) &&
+                           VisionPatches.TryGetDominantEnemyGunfireDirection(Vector3.zero, "Ussr_allies", 250f, 5f, out _, out _) &&
+                           VisionPatches.TryGetAudibleBattleDirection(Vector3.zero, "Ussr_allies", 9f, 11f, out _, out _),
+                        "11K Clear-weather 200m gunfire cap must detect enemy shot at 185m across all gunfire/watch queries!");
+                    AiCore.RainIntensity01 = 1.0f;
+                    Assert(!VisionPatches.TryGetNearestEnemyGunfirePosition(Vector3.zero, "Ussr_allies", 250f, 5f, out _) &&
+                           !VisionPatches.TryGetDominantEnemyGunfireDirection(Vector3.zero, "Ussr_allies", 250f, 5f, out _, out _) &&
+                           !VisionPatches.TryGetAudibleBattleDirection(Vector3.zero, "Ussr_allies", 9f, 11f, out _, out _),
+                        "11K Heavy rain (RainIntensity01=1.0) must mask 200m rifle report down to 156m so 185m shot is no longer localized!");
+                    AiCore.RainIntensity01 = 0f;
                 }
                 finally
                 {
                     Physics.UseSceneWalls = false;
                     Physics.SceneWalls.Clear();
                     AiCore.MockHasWater = false;
+                    AiCore.RainIntensity01 = 0f;
                 }
             }
             Console.WriteLine($"  -> Verified 11-Suite Physics/Geometry/Vision/Armor Matrix: {_passed} assertions passed (0 failures)");

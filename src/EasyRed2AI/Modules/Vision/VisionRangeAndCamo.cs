@@ -116,7 +116,7 @@ namespace EasyRed2HumanAI
             };
         }
 
-        private static bool HasAnyLoudEventNear(Vector3 observerPos, float maxRadius, float maxAgeSeconds, float now)
+        internal static bool HasAnyLoudEventNear(Vector3 observerPos, float maxRadius, float maxAgeSeconds, float now)
         {
             float maxDistSq = maxRadius * maxRadius;
             for (int i = 0; i < GunfireRingSize; i++)
@@ -152,6 +152,9 @@ namespace EasyRed2HumanAI
             if (string.IsNullOrEmpty(observerFaction))
                 return false;
 
+            float gunRainMult = ComputeGunfireRainMaskMultiplier(AiCore.RainIntensity01);
+            float maxGunR = 20.0f * gunRainMult;
+            float maxGunRSq = maxGunR * maxGunR;
             float bestDistSq = 20.0f * 20.0f + 1.0f;
             bool found = false;
 
@@ -172,7 +175,7 @@ namespace EasyRed2HumanAI
                 float dx = e.Pos.x - observerPos.x;
                 float dz = e.Pos.z - observerPos.z;
                 float distSq = dx * dx + dy * dy + dz * dz;
-                if (distSq > 20.0f * 20.0f || distSq >= bestDistSq)
+                if (distSq > maxGunRSq || distSq >= bestDistSq)
                     continue;
 
                 if (!AiCore.AreEnemyFactions(observerFaction, e.Faction))
@@ -241,7 +244,7 @@ namespace EasyRed2HumanAI
 
             Vector3 pos = h.Tr.position;
             string fac = AiCore.GetCachedFaction(h, now);
-            RecordAcousticEventInternal(ptr, pos, fac, now, 140.0f, false);
+            RecordAcousticEventInternal(ptr, pos, fac, now, 200.0f, false);
         }
 
         public static void RecordTurretFired(TurretGun gun, Vehicle rootVeh, Soldier gunner)
@@ -276,7 +279,16 @@ namespace EasyRed2HumanAI
             if (tr == null)
                 return;
 
-            RecordAcousticEventInternal(gun.Pointer, tr.position, fac, now, 210.0f, false);
+            float playerAudDist = 250.0f;
+            try
+            {
+                AudioSource src = gun.audioSource;
+                if (src != null && src.Pointer != IntPtr.Zero && src.maxDistance >= 100.0f)
+                    playerAudDist = src.maxDistance;
+            }
+            catch { }
+            float audibleRadius = playerAudDist >= 400.0f ? 340.0f : (playerAudDist >= 300.0f ? 260.0f : 200.0f);
+            RecordAcousticEventInternal(gun.Pointer, tr.position, fac, now, audibleRadius, false);
         }
 
         public static void RecordExplosionSound(Vector3 pos, float blastRadius, Soldier attacker, string fallbackFaction = null)
@@ -288,7 +300,7 @@ namespace EasyRed2HumanAI
             string fac = (!ReferenceEquals(attacker, null) && attacker != null && attacker.Pointer != IntPtr.Zero)
                 ? AiCore.GetCachedFaction(attacker)
                 : (!string.IsNullOrEmpty(fallbackFaction) ? AiCore.InternFaction(fallbackFaction) : null);
-            float audibleRadius = blastRadius >= 6.0f ? 260.0f : 225.0f;
+            float audibleRadius = blastRadius >= 6.0f ? 290.0f : 235.0f;
 
             // Coalesce multi-rocket/mortar salvos landing within 12m & 0.85s so a barrage doesn't evict live shooters
             for (int i = 0; i < GunfireRingSize; i++)
@@ -353,6 +365,43 @@ namespace EasyRed2HumanAI
             };
         }
 
+        public static float ComputeGunfireRainMaskMultiplier(float rain01)
+        {
+            return rain01 > 0.05f ? Mathf.Lerp(1.0f, 0.78f, Mathf.Clamp01(rain01)) : 1.0f;
+        }
+
+        public static float ComputeVehicleEngineAudibleRadius(
+            float vehicleMaxSoundDist,
+            bool isTank,
+            bool isMoving,
+            float rain01,
+            bool loudCombatNear)
+        {
+            float playerCap = vehicleMaxSoundDist > 10.0f
+                ? Mathf.Clamp(vehicleMaxSoundDist, 25.0f, 300.0f)
+                : (isTank ? 150.0f : 90.0f);
+
+            float rawRadius;
+            if (isMoving)
+            {
+                float frac = isTank ? 0.74f : 0.65f;
+                rawRadius = Mathf.Min(playerCap * frac, isTank ? 155.0f : 95.0f);
+            }
+            else
+            {
+                float frac = isTank ? 0.36f : 0.28f;
+                rawRadius = Mathf.Min(playerCap * frac, isTank ? 55.0f : 32.0f);
+            }
+
+            // Strictly guarantee bots never hear an engine farther than a human player can
+            rawRadius = Mathf.Min(rawRadius, playerCap * 0.85f);
+
+            float rainMult = rain01 > 0.05f ? Mathf.Lerp(1.0f, 0.65f, Mathf.Clamp01(rain01)) : 1.0f;
+            float combatMult = loudCombatNear ? 0.62f : 1.0f;
+            float maskMult = Mathf.Max(0.38f, rainMult * combatMult);
+            return rawRadius * maskMult;
+        }
+
         /// <summary>
         /// Pure L1-cache scan over the 64 most recent weapon shooters (zero IL2CPP calls, zero heap allocations).
         /// Strictly excludes explosion impact points so nearby shell craters never masquerade as close enemy riflemen
@@ -391,6 +440,7 @@ namespace EasyRed2HumanAI
                 return false;
 
             float now = Time.time;
+            float rainMult = ComputeGunfireRainMaskMultiplier(AiCore.RainIntensity01);
             float maxDistSq = maxRadius * maxRadius;
             float bestDistSq = maxDistSq + 1f;
             bool found = false;
@@ -405,7 +455,7 @@ namespace EasyRed2HumanAI
                 if (age < 0f || age > maxAgeSeconds)
                     continue;
 
-                float entryCap = e.MaxAudibleRadius > 0f ? e.MaxAudibleRadius : 140.0f;
+                float entryCap = (e.MaxAudibleRadius > 0f ? e.MaxAudibleRadius : 200.0f) * rainMult;
                 float allowedSq = Mathf.Min(maxDistSq, entryCap * entryCap);
 
                 float dx = e.Pos.x - observerPos.x;
@@ -473,6 +523,7 @@ namespace EasyRed2HumanAI
                 return false;
 
             float now = Time.time;
+            float rainMult = ComputeGunfireRainMaskMultiplier(AiCore.RainIntensity01);
             float maxDistSq = maxRadius * maxRadius;
             float bestDistSq = maxDistSq + 1f;
             Vector3 weightedSum = Vector3.zero;
@@ -493,7 +544,7 @@ namespace EasyRed2HumanAI
                 if (age < 0f || age > maxAgeSeconds)
                     continue;
 
-                float entryCap = e.MaxAudibleRadius > 0f ? e.MaxAudibleRadius : 140.0f;
+                float entryCap = (e.MaxAudibleRadius > 0f ? e.MaxAudibleRadius : 200.0f) * rainMult;
                 float allowedSq = Mathf.Min(maxDistSq, entryCap * entryCap);
 
                 float dx = e.Pos.x - observerPos.x;
@@ -614,6 +665,7 @@ namespace EasyRed2HumanAI
                 return false;
 
             float now = Time.time;
+            float rainMult = ComputeGunfireRainMaskMultiplier(AiCore.RainIntensity01);
             bool found = false;
 
             for (int i = 0; i < GunfireRingSize; i++)
@@ -630,7 +682,7 @@ namespace EasyRed2HumanAI
                 float dx = e.Pos.x - observerPos.x;
                 float dz = e.Pos.z - observerPos.z;
                 float horizSq = dx * dx + dz * dz;
-                float cap = e.MaxAudibleRadius > 0f ? e.MaxAudibleRadius : 140.0f;
+                float cap = (e.MaxAudibleRadius > 0f ? e.MaxAudibleRadius : 200.0f) * rainMult;
                 if (horizSq > cap * cap || horizSq < (e.IsExplosionImpact ? 36.0f * 36.0f : 1.0f))
                     continue;
 

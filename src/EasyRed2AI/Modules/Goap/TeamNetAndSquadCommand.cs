@@ -1058,7 +1058,7 @@ namespace EasyRed2HumanAI
             }
 
             string fac = h != null ? AiCore.GetCachedFaction(h, now) : soldier.faction;
-            if (VisionPatches.TryGetDominantEnemyGunfireDirection(myPos, fac, 145.0f, 4.0f, out Vector3 gunDir, out float gunDist, out _) &&
+            if (VisionPatches.TryGetDominantEnemyGunfireDirection(myPos, fac, 200.0f, 4.0f, out Vector3 gunDir, out float gunDist, out _) &&
                 gunDir.sqrMagnitude > 0.01f)
             {
                 threatPos = myPos + gunDir.normalized * Mathf.Clamp(gunDist, 12.0f, 35.0f);
@@ -2929,7 +2929,7 @@ namespace EasyRed2HumanAI
                     if (toLast.sqrMagnitude > 1.0f)
                         activeSectorDir = toLast.normalized;
                 }
-                else if (VisionPatches.TryGetDominantEnemyGunfireDirection(board.SquadCenter, leader.faction, 175.0f, 6.0f, out Vector3 gfDir, out _, out _))
+                else if (VisionPatches.TryGetDominantEnemyGunfireDirection(board.SquadCenter, leader.faction, 200.0f, 6.0f, out Vector3 gfDir, out _, out _))
                 {
                     activeSectorDir = gfDir;
                 }

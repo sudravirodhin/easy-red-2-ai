@@ -1231,7 +1231,7 @@ namespace EasyRed2HumanAI
                 Vector3 threatOrigin3D;
                 if (ai.visibleTarget != null && AiCore.TryGetSpottableCenter(ai.visibleTarget, out Vector3 visPos))
                     threatOrigin3D = visPos;
-                else if (VisionPatches.TryGetNearestEnemyGunfirePosition(myPos, myFaction, 140f, 4.0f, out Vector3 gfPos))
+                else if (VisionPatches.TryGetNearestEnemyGunfirePosition(myPos, myFaction, 200f, 4.0f, out Vector3 gfPos))
                     threatOrigin3D = gfPos + Vector3.up * 1.4f;
                 else
                     threatOrigin3D = myPos + threatDir * 28.0f + Vector3.up * 1.8f;
@@ -1898,7 +1898,7 @@ namespace EasyRed2HumanAI
             bool hasLiveGunfire = VisionPatches.TryGetDominantEnemyGunfireDirection(
                 referencePos,
                 faction,
-                145.0f,
+                200.0f,
                 3.8f,
                 out Vector3 gunfireDir,
                 out float gunfireDist,
@@ -1969,6 +1969,15 @@ namespace EasyRed2HumanAI
 
             if (hasLiveGunfire)
                 return gunfireDir;
+
+            if (AiCore.TryGetNearestAudibleEnemyVehicle(referencePos, faction, 90.0f, Time.time, out Vector3 nearVehPos, out _, out bool nearVehIsTank, out bool nearVehMoving) &&
+                (nearVehIsTank || nearVehMoving))
+            {
+                Vector3 toVeh = nearVehPos - referencePos;
+                toVeh.y = 0f;
+                if (toVeh.sqrMagnitude > 0.25f)
+                    return toVeh.normalized;
+            }
 
             if (VisionConfig.EnableThreatSectorConcentration.Value &&
                 soldier != null &&
