@@ -43,6 +43,22 @@ namespace EasyRed2HumanAI
         private static GameObject _lastUnitMarkerTextGo;
         internal static int _lastUsedUnitMarkerIndex = -1;
         internal static bool _insideMiniMapUpdate;
+        private static Sprite _cachedMkrTankBlue;
+        private static Sprite _cachedMkrTankRed;
+        private static Sprite _cachedMkrPlaneBlue;
+        private static Sprite _cachedMkrPlaneRed;
+        private static Sprite _cachedMkrMechBlue;
+        private static Sprite _cachedMkrMechRed;
+
+        internal static void ResetVehicleMarkerSpriteCache()
+        {
+            _cachedMkrTankBlue = null;
+            _cachedMkrTankRed = null;
+            _cachedMkrPlaneBlue = null;
+            _cachedMkrPlaneRed = null;
+            _cachedMkrMechBlue = null;
+            _cachedMkrMechRed = null;
+        }
 
         [HarmonyPatch(typeof(MiniMapGUI), nameof(MiniMapGUI.GetNextUnitMarker))]
         public static class MiniMapGUI_GetNextUnitMarker_Patch
@@ -110,10 +126,60 @@ namespace EasyRed2HumanAI
             }
         }
 
+        private static byte ResolveLiveVehicleMarkerKind(Squad sq)
+        {
+            if (sq == null || sq.Pointer == IntPtr.Zero)
+                return AiCore.VehicleMarkerKindNone;
+
+            if (AiCore.TryGetSquadSnapshot(sq.Pointer, out AiCore.SquadSnapshot sqSnap))
+                return sqSnap.ActiveVehicleMarkerKind;
+
+            Soldier ldr = sq.Leader;
+            if (ldr != null && ldr.IsAlive && ldr.IsOnVehicle())
+            {
+                Vehicle v = ldr.GetCurrentVehicle();
+                if (v != null && v.Pointer != IntPtr.Zero && !v.IsDisabled())
+                    return AiCore.GetVehicleMarkerKind(v);
+            }
+            return AiCore.VehicleMarkerKindNone;
+        }
+
+        private static Sprite GetOrLoadSquadIcon(ref Sprite cached, string squadCode, bool isFriendly)
+        {
+            if (!ReferenceEquals(cached, null) && cached != null)
+                return cached;
+            cached = SquadEditorScene.GetSquadIcon(squadCode, isFriendly);
+            return cached;
+        }
+
+        private static Sprite GetCachedVehicleOverrideMarkerSprite(byte vehicleMarkerKind, bool isFriendly)
+        {
+            switch (vehicleMarkerKind)
+            {
+                case AiCore.VehicleMarkerKindPlane:
+                    return isFriendly
+                        ? GetOrLoadSquadIcon(ref _cachedMkrPlaneBlue, "pilot_crew", true)
+                        : GetOrLoadSquadIcon(ref _cachedMkrPlaneRed, "pilot_crew", false);
+
+                case AiCore.VehicleMarkerKindTank:
+                    return isFriendly
+                        ? GetOrLoadSquadIcon(ref _cachedMkrTankBlue, "tank_crew", true)
+                        : GetOrLoadSquadIcon(ref _cachedMkrTankRed, "tank_crew", false);
+
+                case AiCore.VehicleMarkerKindMechanized:
+                    return isFriendly
+                        ? GetOrLoadSquadIcon(ref _cachedMkrMechBlue, "mechanized_section", true)
+                        : GetOrLoadSquadIcon(ref _cachedMkrMechRed, "mechanized_section", false);
+
+                default:
+                    return null;
+            }
+        }
+
         [HarmonyPatch(typeof(Squad), nameof(Squad.GetMarkerIcon))]
         public static class Squad_GetMarkerIcon_Patch
         {
-            public static void Postfix(Squad __instance, bool __0)
+            public static void Postfix(Squad __instance, bool __0, ref Sprite __result)
             {
                 try
                 {
@@ -121,6 +187,29 @@ namespace EasyRed2HumanAI
                     GameObject txtGo = _lastUnitMarkerTextGo;
                     _lastUnitMarkerTextComp = null;
                     _lastUnitMarkerTextGo = null;
+
+                    if (VisionConfig.EnableMod.Value && __instance != null && __instance.Pointer != IntPtr.Zero)
+                    {
+                        byte liveVehKind = ResolveLiveVehicleMarkerKind(__instance);
+                        if (liveVehKind != AiCore.VehicleMarkerKindNone)
+                        {
+                            string overrideCode = null;
+                            if (liveVehKind == AiCore.VehicleMarkerKindPlane)
+                                overrideCode = "pilot_crew";
+                            else if (liveVehKind == AiCore.VehicleMarkerKindTank)
+                                overrideCode = "tank_crew";
+                            else if (liveVehKind == AiCore.VehicleMarkerKindMechanized)
+                                overrideCode = "mechanized_section";
+
+                            if (overrideCode != null && !string.Equals(__instance.squadCode, overrideCode, StringComparison.Ordinal))
+                            {
+                                Sprite vehSprite = GetCachedVehicleOverrideMarkerSprite(liveVehKind, __0);
+                                if (!ReferenceEquals(vehSprite, null) && vehSprite != null)
+                                    __result = vehSprite;
+                            }
+                        }
+                    }
+
                     if (!_insideMiniMapUpdate ||
                         !__0 ||
                         !VisionConfig.EnableMod.Value ||

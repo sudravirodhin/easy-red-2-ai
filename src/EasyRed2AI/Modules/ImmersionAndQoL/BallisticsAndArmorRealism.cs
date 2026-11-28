@@ -479,6 +479,7 @@ namespace EasyRed2HumanAI
                         return true;
 
                     VeteranAndTacticsPatches.NotifyProjectileImpactReaction(__instance, hitDirection, bulletData, hit);
+                    VeteranAndTacticsPatches.TryRecordRemoteVisualProjectileHitOnLocalPlayer(__instance, bulletData, hit);
 
                     // Prevent diving aircraft AP cannons/HMGs from falsely ricocheting off simplified
                     // tank hull/turret box colliders before VehicleDamagablePart.TryPenetrateArmor runs,
@@ -1168,6 +1169,9 @@ namespace EasyRed2HumanAI
                 public bool ModifiedCrewSpall;
                 public IntPtr PrevAttackerPtr;
                 public bool RestoreAttackerPtr;
+                public int ArmorCrewSnapStart;
+                public bool HasArmorCrewAttr;
+                public bool ArmorCrewUnwound;
             }
 
             private static bool IsImpactNearSeatedAirCrew(Vehicle airVeh, Vector3 impactPos, float maxDistSq)
@@ -1221,6 +1225,12 @@ namespace EasyRed2HumanAI
                             if (hitRootVeh != null && hitRootVeh.Pointer != IntPtr.Zero)
                                 RecordLocalPlayerDamagedVehicle(hitRootVeh.Pointer);
                         }
+                    }
+
+                    if (__instance != null && __instance.Pointer != IntPtr.Zero && __instance.rootVeh != null)
+                    {
+                        __state.ArmorCrewSnapStart = BeginArmorPenetrationCrewAttribution(__instance.rootVeh, __5, __0, __1, __2);
+                        __state.HasArmorCrewAttr = true;
                     }
 
                     if (!VisionConfig.EnableRealisticVehicleArmorAndTopAttack.Value ||
@@ -1293,8 +1303,22 @@ namespace EasyRed2HumanAI
                 catch { }
             }
 
+            public static void Postfix(ref ArmorPenetrationPatchState __state)
+            {
+                if (__state.HasArmorCrewAttr && !__state.ArmorCrewUnwound)
+                {
+                    __state.ArmorCrewUnwound = true;
+                    EndArmorPenetrationCrewAttribution(__state.ArmorCrewSnapStart, allowConfirm: true);
+                }
+            }
+
             public static void Finalizer(VehicleDamagablePart __instance, ArmorPenetrationPatchState __state)
             {
+                if (__state.HasArmorCrewAttr && !__state.ArmorCrewUnwound)
+                {
+                    EndArmorPenetrationCrewAttribution(__state.ArmorCrewSnapStart, allowConfirm: false);
+                }
+
                 if (__state.RestoreAttackerPtr)
                     _activeDamageAttackerPtr = __state.PrevAttackerPtr;
 

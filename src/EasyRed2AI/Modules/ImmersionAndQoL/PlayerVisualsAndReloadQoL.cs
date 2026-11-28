@@ -567,6 +567,224 @@ namespace EasyRed2HumanAI
             }
         }
 
+        // ============================================================================
+        // 4b. CALM AUTO BATTLE CAMERA (CameraDirector ANTI-THRASH & SMOOTHING)
+        //  - Enforces a 3.5s minimum shot hold & 1.5s cut cooldown on reactive cuts.
+        //  - Bypasses vanilla's 0-grace 0.8s lookahead raycast and instant TwoShot
+        //    enemy-drop aborts while letting TwoShot linger ~2s on the victor.
+        //  - Extends shotDurationRange (10-16s), blockedGraceSeconds (1.35s), and
+        //    too-close grace (1.0s), while softening damping & handheld jitter.
+        //  - Drives vehicle/plane Auto Camera smoothly on every LateUpdate render frame.
+        // ============================================================================
+        private const float CalmAutoCamMinHoldSeconds = 3.5f;
+        private const float CalmAutoCamCutCooldownSeconds = 1.5f;
+        private const float CalmAutoCamTooCloseGraceSeconds = 1.0f;
+        private const float CalmAutoCamHoverSuppressSeconds = 4.5f;
+
+        private static IntPtr _calmAutoCamDirectorPtr;
+        private static bool _calmAutoCamApplied;
+        private static float _calmAutoCamTooCloseHold;
+        private static float _calmAutoCamNextCutAllowedT;
+
+        private static bool IsCalmAutoCameraEnabled()
+        {
+            return VisionConfig.EnableMod.Value &&
+                   VisionConfig.EnableCalmAutoCamera != null &&
+                   VisionConfig.EnableCalmAutoCamera.Value;
+        }
+
+        private static void SyncCalmAutoCameraSettings(CameraDirector dir, bool forceResetTracker = false)
+        {
+            if (dir == null || dir.Pointer == IntPtr.Zero)
+                return;
+
+            if (forceResetTracker || dir.Pointer != _calmAutoCamDirectorPtr)
+            {
+                _calmAutoCamDirectorPtr = dir.Pointer;
+                _calmAutoCamApplied = false;
+                _calmAutoCamTooCloseHold = 0f;
+                _calmAutoCamNextCutAllowedT = 0f;
+            }
+
+            if (IsCalmAutoCameraEnabled())
+            {
+                IShotTarget subj = dir._subject;
+                bool isAir = subj != null && subj.IsAirTarget();
+
+                dir.shotDurationRange = new Vector2(10.0f, 16.0f);
+                dir.deathHoldSeconds = 2.6f;
+                dir.blockedGraceSeconds = 1.35f;
+                dir.cameraProbeRadius = 0.25f;
+                dir.handheldPosAmp = 0.012f;
+                dir.handheldRotAmpDeg = 0.20f;
+                dir.handheldFrequency = 0.55f;
+                dir.firingKickBoost = 1.10f;
+                dir.posSmooth = isAir ? 6.0f : 4.2f;
+                dir.rotSmooth = isAir ? 5.5f : 4.2f;
+                _calmAutoCamApplied = true;
+            }
+            else if (_calmAutoCamApplied)
+            {
+                dir.shotDurationRange = new Vector2(5.0f, 9.0f);
+                dir.deathHoldSeconds = 2.2f;
+                dir.blockedGraceSeconds = 0.30f;
+                dir.cameraProbeRadius = 0.30f;
+                dir.handheldPosAmp = 0.035f;
+                dir.handheldRotAmpDeg = 0.60f;
+                dir.handheldFrequency = 1.10f;
+                dir.firingKickBoost = 1.35f;
+                dir.posSmooth = 8.0f;
+                dir.rotSmooth = 9.0f;
+                _calmAutoCamApplied = false;
+                _calmAutoCamTooCloseHold = 0f;
+                _calmAutoCamNextCutAllowedT = 0f;
+            }
+        }
+
+        [HarmonyPatch(typeof(CameraDirector), nameof(CameraDirector.Awake))]
+        public static class CameraDirector_Awake_Patch
+        {
+            public static void Prefix(CameraDirector __instance)
+            {
+                try
+                {
+                    SyncCalmAutoCameraSettings(__instance, forceResetTracker: true);
+                }
+                catch { }
+            }
+        }
+
+        [HarmonyPatch(typeof(CameraDirector), nameof(CameraDirector.Update))]
+        public static class CameraDirector_Update_Patch
+        {
+            public static void Prefix(CameraDirector __instance)
+            {
+                try
+                {
+                    SyncCalmAutoCameraSettings(__instance);
+                    if (!IsCalmAutoCameraEnabled() || __instance == null)
+                        return;
+
+                    float now = Time.time;
+                    IShotTarget subj = __instance._subject;
+                    if (subj != null && subj.IsValidSubject())
+                    {
+                        // Gate off 0-grace 0.8s lookahead cuts and 0-grace TwoShot enemy-drop aborts;
+                        // live LOS occlusion still accumulates under blockedGraceSeconds (1.35s).
+                        if (__instance._nextRetryT < now + 0.25f)
+                            __instance._nextRetryT = now + 0.25f;
+
+                        if (__instance._collisionTooClose)
+                            _calmAutoCamTooCloseHold += Time.deltaTime;
+                        else
+                            _calmAutoCamTooCloseHold = 0f;
+
+                        if (_calmAutoCamTooCloseHold < CalmAutoCamTooCloseGraceSeconds)
+                            __instance._tooCloseT = 0f;
+
+                        if (__instance._shot.type == CameraDirector.ShotType.TwoShot &&
+                            !AiCore.IsValidAliveSpottable(__instance._twoShotEnemy))
+                        {
+                            CameraDirector.Shot s = __instance._shot;
+                            float targetEnd = Mathf.Max(s.startTime + CalmAutoCamMinHoldSeconds, now + 2.0f);
+                            if (s.endTime > targetEnd)
+                            {
+                                s.endTime = targetEnd;
+                                __instance._shot = s;
+                            }
+                        }
+                    }
+                    else
+                    {
+                        _calmAutoCamTooCloseHold = 0f;
+                        if (__instance._nextRetryT > now + 1.0f)
+                            __instance._nextRetryT = now;
+                    }
+                }
+                catch { }
+            }
+        }
+
+        [HarmonyPatch(typeof(CameraDirector), nameof(CameraDirector.CutOrRetryLater))]
+        public static class CameraDirector_CutOrRetryLater_Patch
+        {
+            public static bool Prefix(CameraDirector __instance)
+            {
+                try
+                {
+                    if (!IsCalmAutoCameraEnabled() || __instance == null)
+                        return true;
+
+                    float now = Time.time;
+                    float elapsed = now - __instance._shot.startTime;
+                    if (elapsed < CalmAutoCamMinHoldSeconds || now < _calmAutoCamNextCutAllowedT)
+                        return false;
+
+                    _calmAutoCamNextCutAllowedT = now + CalmAutoCamCutCooldownSeconds;
+                    _calmAutoCamTooCloseHold = 0f;
+                }
+                catch { }
+                return true;
+            }
+        }
+
+        [HarmonyPatch(typeof(CameraDirector), nameof(CameraDirector.FixedUpdate))]
+        public static class CameraDirector_FixedUpdate_Patch
+        {
+            public static bool Prefix()
+            {
+                return !IsCalmAutoCameraEnabled();
+            }
+        }
+
+        [HarmonyPatch(typeof(CameraDirector), nameof(CameraDirector.LateUpdate))]
+        public static class CameraDirector_LateUpdate_Patch
+        {
+            public static bool Prefix(CameraDirector __instance)
+            {
+                if (!IsCalmAutoCameraEnabled() || __instance == null)
+                    return true;
+
+                try
+                {
+                    __instance._appliedInFixed = false;
+                    __instance.ApplyShotPose();
+                    return false;
+                }
+                catch
+                {
+                    return true;
+                }
+            }
+        }
+
+        [HarmonyPatch(typeof(CameraDirector), nameof(CameraDirector.RefreshBrowsingSuppression))]
+        public static class CameraDirector_RefreshBrowsingSuppression_Patch
+        {
+            public static void Prefix(out float __state)
+            {
+                __state = CameraDirector._hoverSuppressedUntil;
+            }
+
+            public static void Postfix(float __state)
+            {
+                try
+                {
+                    if (!IsCalmAutoCameraEnabled())
+                        return;
+
+                    // Only extend when vanilla mutated _hoverSuppressedUntil on this frame (pointer over UI).
+                    if (Mathf.Abs(CameraDirector._hoverSuppressedUntil - __state) > 0.0001f)
+                    {
+                        float targetUntil = Time.time + CalmAutoCamHoverSuppressSeconds;
+                        if (CameraDirector._hoverSuppressedUntil < targetUntil)
+                            CameraDirector._hoverSuppressedUntil = targetUntil;
+                    }
+                }
+                catch { }
+            }
+        }
+
         // Native MissionStatusGUI.LateUpdate (0x1804AB520) sets guiEnabled = false (skipping RefreshData) whenever
         // ControlledCharacter == null, and unconditionally calls panel.SetActive(false) whenever cinematicCameraEnabled
         // is true! Keep the Objective Bar live at 4 Hz in Free Cam & Auto-Spectator (unless CleanCinema is selected)

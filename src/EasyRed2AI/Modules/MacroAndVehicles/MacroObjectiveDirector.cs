@@ -789,7 +789,7 @@ namespace EasyRed2HumanAI
                                 {
                                     quietSquadCount++;
                                     // Never strip player squads, recently reassigned squads, or squads in active local firefights
-                                    if (sq.IsPlayerInSquad() ||
+                                    if (AiCore.HasAnyHumanPlayerInSquad(sq) ||
                                         (_squadTaskCommittedUntil.TryGetValue(sq.Pointer, out float qCommit) && now < qCommit && primaryThreatSq > 55f * 55f) ||
                                         (_squadBlackboards.TryGetValue(sq.Pointer, out SquadBlackboard qBoard) && qBoard.HasActiveThreat))
                                     {
@@ -1077,7 +1077,7 @@ namespace EasyRed2HumanAI
             if (sq.InChargeTime() || _squadOrderedToVehicle.ContainsKey(sq.Pointer))
                 return false;
 
-            float minSafePivotDist = sq.IsPlayerInSquad() ? 42.0f : 30.0f;
+            float minSafePivotDist = AiCore.HasAnyHumanPlayerInSquad(sq) ? 42.0f : 30.0f;
             if ((sq.Leader.transform.position - stalledPos).sqrMagnitude <= minSafePivotDist * minSafePivotDist)
                 return false;
 
@@ -1125,9 +1125,9 @@ namespace EasyRed2HumanAI
             if (!IsSquadTaskInObjectiveList(sq, validObjectives))
                 return false;
 
-            // When the Human Player is a subordinate member of an AI-led squad, keep the AI Squad Leader
+            // When a Human Player is a subordinate member of an AI-led squad, keep the AI Squad Leader
             // committed to the current active objective until it is actually captured or lost!
-            if (sq.IsPlayerInSquad())
+            if (AiCore.HasAnyHumanPlayerInSquad(sq))
                 return true;
 
             if (_squadTaskCommittedUntil.TryGetValue(sq.Pointer, out float commitUntil) && now < commitUntil)
@@ -1419,7 +1419,7 @@ namespace EasyRed2HumanAI
             bool needsGarrisonHold = isGarrisonHold && !IsSquadProperlyHoldingGarrison(sq, obj, newTaskPtr);
             SquadTask squadTask = obj.missionTask.Cast<SquadTask>();
             sq.currentTask = squadTask;
-            _squadTaskCommittedUntil[sq.Pointer] = now + (sq.IsPlayerInSquad() ? Mathf.Max(commitDuration, 65.0f) : commitDuration);
+            _squadTaskCommittedUntil[sq.Pointer] = now + (AiCore.HasAnyHumanPlayerInSquad(sq) ? Mathf.Max(commitDuration, 65.0f) : commitDuration);
 
             if (_squadBlackboards.TryGetValue(sq.Pointer, out SquadBlackboard clrBoard) && clrBoard.IsOuterScreenSquad)
             {
@@ -2539,7 +2539,7 @@ namespace EasyRed2HumanAI
             for (int s = 0; s < eligibleSquads.Count; s++)
             {
                 Squad cand = eligibleSquads[s];
-                if (cand == null || cand.Leader == null || cand.Leader.transform == null || cand.IsPlayerInSquad())
+                if (cand == null || cand.Leader == null || cand.Leader.transform == null || AiCore.HasAnyHumanPlayerInSquad(cand))
                     continue;
                 if (garrisonSquads != null && garrisonSquads.Contains(cand.Pointer))
                     continue;
@@ -2644,7 +2644,7 @@ namespace EasyRed2HumanAI
                 for (int s = 0; s < eligibleSquads.Count; s++)
                 {
                     Squad sq = eligibleSquads[s];
-                    if (sq == null || sq.Pointer == closestInner.Pointer || sq.IsPlayerInSquad() || sq.Leader == null || sq.Leader.transform == null)
+                    if (sq == null || sq.Pointer == closestInner.Pointer || AiCore.HasAnyHumanPlayerInSquad(sq) || sq.Leader == null || sq.Leader.transform == null)
                         continue;
                     if (sq.currentTask == null || sq.currentTask.Pointer != taskPtr)
                         continue;
@@ -2748,7 +2748,7 @@ namespace EasyRed2HumanAI
                 if (cand.currentTask != null && cand.currentTask.Pointer == targetTaskPtr)
                     continue;
 
-                if (cand.IsPlayerInSquad())
+                if (AiCore.HasAnyHumanPlayerInSquad(cand))
                     continue;
 
                 if (!urgentUndefendedRescue)

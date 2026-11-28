@@ -1623,6 +1623,7 @@ namespace EasyRed2HumanAI
                         // Clear suppressionValue when downed so BattleManager.SurrenderUnitsOnMissionAreas skips this casualty,
                         // clear Animator "Surrended", and force Injured/LayerWeight(1, 0f) even when downed in a vehicle seat.
                         __instance.suppressionValue = 0;
+                        MarkPlayerAttributionIncapacitated(__instance);
                         VeteranAndTacticsPatches.NotifyFriendlyHitOrCasualty(__instance, Vector3.zero, false, isFatalOrDown: true);
                         VeteranAndTacticsPatches.NotifySquadLeaderLost(__instance, Time.time);
                         if (__instance.m_Animator != null)
@@ -2487,12 +2488,41 @@ namespace EasyRed2HumanAI
                 try
                 {
                     if (!VisionConfig.EnableMod.Value ||
-                        !VisionConfig.EnableLiveGrenadeReflexes.Value ||
                         __instance == null ||
                         __instance.Pointer == IntPtr.Zero)
                     {
                         return;
                     }
+
+                    // Prevent fast-thrown/kicked grenades from tunneling through thin walls, doors, or sandbags,
+                    // and pull back grenades whose rightHand spawn point clipped through a wall from the thrower's chest.
+                    Rigidbody grenRb = __instance.RB;
+                    if (grenRb != null && !grenRb.isKinematic)
+                    {
+                        grenRb.collisionDetectionMode = CollisionDetectionMode.ContinuousDynamic;
+                    }
+
+                    if (__0 != null && __0.Pointer != IntPtr.Zero && __0.transform != null && __instance.transform != null)
+                    {
+                        float originH = __0.m_pose == SoldierPose.Prone ? 0.45f : (__0.m_pose == SoldierPose.Crouch ? 1.00f : 1.35f);
+                        Vector3 originPos = __0.transform.position + Vector3.up * originH;
+                        Vector3 grenPos = __instance.transform.position;
+                        Vector3 delta = grenPos - originPos;
+                        float distSq = delta.sqrMagnitude;
+                        if (distSq > 0.04f && distSq <= 1.9f * 1.9f &&
+                            AiCore.LinecastEnvironment(originPos, grenPos, __0.transform.root, out RaycastHit wallHit, ignoreVehicles: false))
+                        {
+                            Vector3 safePos = wallHit.point + wallHit.normal * 0.14f;
+                            if ((safePos - originPos).sqrMagnitude > distSq)
+                                safePos = Vector3.Lerp(originPos, wallHit.point, 0.72f);
+                            __instance.transform.position = safePos;
+                            if (grenRb != null && !grenRb.isKinematic)
+                                grenRb.position = safePos;
+                        }
+                    }
+
+                    if (!VisionConfig.EnableLiveGrenadeReflexes.Value)
+                        return;
 
                     if (__instance.grenadeType == GrenadeType.smokeGrenade)
                         return;
@@ -2922,7 +2952,11 @@ namespace EasyRed2HumanAI
                 LiveGrenadeEntry target = _activeLiveGrenades[bestIdx];
                 Rigidbody rb = target.Ref.RB;
                 if (rb != null)
+                {
+                    if (!rb.isKinematic)
+                        rb.collisionDetectionMode = CollisionDetectionMode.ContinuousDynamic;
                     rb.velocity = kickVel;
+                }
 
                 if (kickerViewId > 0)
                 {

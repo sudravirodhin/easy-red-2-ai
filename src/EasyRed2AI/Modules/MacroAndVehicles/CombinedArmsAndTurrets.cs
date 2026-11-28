@@ -129,6 +129,7 @@ namespace EasyRed2HumanAI
             _playerBalkedFlankPos = Vector3.zero;
             _spawnRescueScatterCounter = 0;
             _minimapMarkerTextByImgPtr.Clear();
+            ResetVehicleMarkerSpriteCache();
             _lastUnitMarkerTextComp = null;
             _lastUsedUnitMarkerIndex = -1;
             _insideMiniMapUpdate = false;
@@ -713,6 +714,14 @@ namespace EasyRed2HumanAI
             if (playerInVeh && gunner == null)
                 return;
 
+            if (gunner != null && AiCore.IsAnyHumanPlayerSoldier(gunner))
+                return;
+
+            bool isAiSecondaryInPlayerVeh = playerInVeh &&
+                                            gunner != null &&
+                                            !traits.IsCommanderTurret &&
+                                            (traits.IsSecondaryTurret || !traits.CanShoot360);
+
             string myFaction = GetVehicleCrewFaction(veh, turret);
             if (string.IsNullOrEmpty(myFaction))
                 return;
@@ -838,7 +847,7 @@ namespace EasyRed2HumanAI
                 }
             }
 
-            if (playerInVeh && !hasActiveUnderFire)
+            if (playerInVeh && !hasActiveUnderFire && !isAiSecondaryInPlayerVeh)
                 return;
 
             bool isEnclosedArmorGun = vh != null &&
@@ -849,9 +858,17 @@ namespace EasyRed2HumanAI
 
             bool hasInternalSpotter = true;
             bool hasInfantryEscort = false;
-            if (!playerInVeh && isEnclosedArmorGun)
+            if ((!playerInVeh || isAiSecondaryInPlayerVeh) && isEnclosedArmorGun)
             {
-                AiCore.GetCachedVehicleSpotterStatus(vh, myFaction, now, out hasInternalSpotter, out hasInfantryEscort);
+                if (playerInVeh)
+                {
+                    hasInternalSpotter = true;
+                    hasInfantryEscort = false;
+                }
+                else
+                {
+                    AiCore.GetCachedVehicleSpotterStatus(vh, myFaction, now, out hasInternalSpotter, out hasInfantryEscort);
+                }
                 if (!hasInternalSpotter && !hasInfantryEscort)
                 {
                     // Lone buttoned-up tank with dead/missing commander and no nearby friendly infantry escort:
@@ -923,7 +940,7 @@ namespace EasyRed2HumanAI
             if (!VisionConfig.EnableCombinedArmsPrioritySupport.Value && !hasCommanderCupolaSpot && !hasActiveUnderFire)
                 return;
 
-            if (!playerInVeh && VisionConfig.EnableCombinedArmsPrioritySupport.Value)
+            if ((!playerInVeh || isAiSecondaryInPlayerVeh) && VisionConfig.EnableCombinedArmsPrioritySupport.Value)
                 RefreshCombinedArmsIntelIfNeeded();
 
             turret.CheckBullets(out bool hasHe, out bool hasAp, out bool hasFire, out _);
@@ -1004,7 +1021,7 @@ namespace EasyRed2HumanAI
                 }
             }
 
-            if (playerInVeh)
+            if (playerInVeh && !isAiSecondaryInPlayerVeh)
             {
                 if (bestCandidate != null && (curTarget == null || bestCandidate.Pointer != curTarget.Pointer))
                 {
@@ -1245,6 +1262,9 @@ namespace EasyRed2HumanAI
                 }
                 return;
             }
+
+            if (playerInVeh)
+                return;
 
             // Fix vanilla RefreshTargets quirk (0x180832b3e): allow on-map HE/Smoke artillery/howitzers/mortars and tanks
             // to answer friendly Team Net radio support requests both when idle (curTarget == null) and when only
@@ -1822,7 +1842,7 @@ namespace EasyRed2HumanAI
                         __1 &&
                         __instance != null &&
                         __instance.Pointer != IntPtr.Zero &&
-                        !__instance.IsPlayerInSquad())
+                        !AiCore.HasAnyHumanPlayerInSquad(__instance))
                     {
                         float now = Time.time;
                         IntPtr sqPtr = __instance.Pointer;

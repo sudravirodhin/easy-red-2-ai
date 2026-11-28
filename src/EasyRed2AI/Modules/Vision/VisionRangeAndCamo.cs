@@ -1354,6 +1354,20 @@ namespace EasyRed2HumanAI
                     Vehicle turretVeh = traits.RootVehicle;
                     AiCore.VehicleFastHandles obsVehH = traits.VehHandles;
 
+                    bool isSecondaryOrLimitedEnclosed = obsVehH != null &&
+                                                        obsVehH.IsWheeledOrTank &&
+                                                        !traits.IsCommanderTurret &&
+                                                        !traits.IsExposedCrewSeat &&
+                                                        !traits.IsAA &&
+                                                        (!traits.CanShoot360 || traits.IsSecondaryTurret);
+                    float visionAngle = angle;
+                    if (isSecondaryOrLimitedEnclosed && !traits.CanShoot360 && turret.transform != null)
+                    {
+                        float mountAngle = Vector3.Angle(toTarget, turret.transform.forward);
+                        if (mountAngle < visionAngle)
+                            visionAngle = mountAngle;
+                    }
+
                     if (!traits.IsCommanderTurret &&
                         isWheeledOrTank &&
                         targetVehH != null &&
@@ -1435,6 +1449,20 @@ namespace EasyRed2HumanAI
                                     allowedTurretHalfFov = Mathf.Lerp(closeSlit, midSlit, (dist - 10.0f) / 35.0f);
                                 else
                                     allowedTurretHalfFov = Mathf.Lerp(midSlit, farSlit, Mathf.Clamp01((dist - 45.0f) / 165.0f));
+
+                                if (isSecondaryOrLimitedEnclosed)
+                                {
+                                    if (!traits.CanShoot360)
+                                    {
+                                        float mountViewport = Mathf.Min(traits.YawBondDeg + 8.0f, dist <= 55.0f ? 48.0f : 36.0f);
+                                        if (mountViewport > allowedTurretHalfFov)
+                                            allowedTurretHalfFov = mountViewport;
+                                    }
+                                    else
+                                    {
+                                        allowedTurretHalfFov += dist <= 55.0f ? 8.0f : 5.0f;
+                                    }
+                                }
                             }
                             else if (traits.IsAA)
                             {
@@ -1470,7 +1498,10 @@ namespace EasyRed2HumanAI
                                 targetSoldier.m_pose >= SoldierPose.Crouch &&
                                 !HasFiredRecently(targetSoldier, 3.2f))
                             {
-                                if (dist <= 11.5f && angle > 20.0f)
+                                float closeDeadZoneAngle = (isSecondaryOrLimitedEnclosed && !traits.CanShoot360)
+                                    ? Mathf.Max(20.0f, traits.YawBondDeg)
+                                    : 20.0f;
+                                if (dist <= 11.5f && visionAngle > closeDeadZoneAngle)
                                 {
                                     BlockedByFOV++;
                                     __result = false;
@@ -1478,11 +1509,14 @@ namespace EasyRed2HumanAI
                                 }
                                 if (targetSoldier.m_pose == SoldierPose.Prone && dist <= 38.0f)
                                 {
-                                    allowedTurretHalfFov *= 0.55f;
+                                    float proneScale = allowedTurretHalfFov * 0.55f;
+                                    allowedTurretHalfFov = (isSecondaryOrLimitedEnclosed && !traits.CanShoot360)
+                                        ? Mathf.Max(proneScale, Mathf.Min(traits.YawBondDeg, 18.0f))
+                                        : proneScale;
                                 }
                             }
 
-                            if (angle > allowedTurretHalfFov)
+                            if (visionAngle > allowedTurretHalfFov)
                             {
                                 BlockedByFOV++;
                                 __result = false;

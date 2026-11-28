@@ -16,7 +16,7 @@ namespace EasyRed2HumanAI
     {
         public const string PluginGuid = "com.antigravity.easyred2.humanai";
         public const string PluginName = "Easy Red 2 - Battle Hardened";
-        public const string PluginVersion = "0.10.9";
+        public const string PluginVersion = "0.10.10";
 
         internal static Plugin Instance;
         internal static new ManualLogSource Log;
@@ -110,6 +110,10 @@ namespace EasyRed2HumanAI
             SafePatch(typeof(VeteranAndTacticsPatches.Squad_UnitCanChangeCover_Patch));
             SafePatch(typeof(VeteranAndTacticsPatches.Squad_SendUnitsToVehicle_Patch));
             SafePatch(typeof(VeteranAndTacticsPatches.Squad_OrderLeaveVehicle_Patch));
+            SafePatch(typeof(VeteranAndTacticsPatches.Squad_OrderRepairVehicle_Patch));
+            SafePatch(typeof(VeteranAndTacticsPatches.Squad_GetMechanic_Patch));
+            SafePatch(typeof(VeteranAndTacticsPatches.PlayerController_OpenOrdersMenu_Patch));
+            SafePatch(typeof(VeteranAndTacticsPatches.InventoryManager_ReceiveNetInventory_Patch));
             SafePatch(typeof(VeteranAndTacticsPatches.Squad_OrderLeaveAllVehiclesAndCovers_Patch));
             SafePatch(typeof(VeteranAndTacticsPatches.Vehicle_IsCoverAvailable_Patch));
             SafePatch(typeof(VeteranAndTacticsPatches.Vehicle_IsCoverOccupied_Patch));
@@ -119,6 +123,7 @@ namespace EasyRed2HumanAI
             SafePatch(typeof(VeteranAndTacticsPatches.VehicleDamagablePart_GetInteractions_Patch));
             SafePatch(typeof(VeteranAndTacticsPatches.Vehicle_HasSpace_Patch));
             SafePatch(typeof(VeteranAndTacticsPatches.Vehicle_GetOnVehicleBestPos_Patch));
+            SafePatch(typeof(VeteranAndTacticsPatches.VehicleWithWheels_GetOnVehicleBestPos_Patch));
             SafePatch(typeof(VeteranAndTacticsPatches.Vehicle_GetOnVehicle_Patch));
             SafePatch(typeof(VeteranAndTacticsPatches.VehicleSpawner_SpawnVehicle_Patch));
             SafePatch(typeof(VeteranAndTacticsPatches.VehicleSpawner_IsAvailable_Patch));
@@ -218,6 +223,9 @@ namespace EasyRed2HumanAI
             SafePatch(typeof(VeteranAndTacticsPatches.BodyPart_HitPart_Patch));
             SafePatch(typeof(VeteranAndTacticsPatches.Soldier_DamageWithAnimation_Patch));
             SafePatch(typeof(VeteranAndTacticsPatches.LoadBalancingClient_OnEvent_Patch));
+            SafePatch(typeof(VeteranAndTacticsPatches.PhotonNetwork_ExecuteRpc_Patch));
+            SafePatch(typeof(VeteranAndTacticsPatches.SyncSoldier_UpdateSoldierLife_Patch));
+            SafePatch(typeof(VeteranAndTacticsPatches.SyncSoldier_SyncDeath_Patch));
             SafePatch(typeof(VeteranAndTacticsPatches.ResourcesManager_FactionCanDamageFaction_Patch));
             SafePatch(typeof(VeteranAndTacticsPatches.BodyPart_TryDamageWithExplosion_Patch));
             SafePatch(typeof(VeteranAndTacticsPatches.ItemGrenade_ActivateGrenade_Patch));
@@ -234,6 +242,12 @@ namespace EasyRed2HumanAI
             SafePatch(typeof(VeteranAndTacticsPatches.PlayerController_ShakeCameraRoutine_Patch));
             SafePatch(typeof(VeteranAndTacticsPatches.CinematicCameraController_TrackingRigidbody_Patch));
             SafePatch(typeof(VeteranAndTacticsPatches.CinematicCameraController_MoveAndRotateCamera_Patch));
+            SafePatch(typeof(VeteranAndTacticsPatches.CameraDirector_Awake_Patch));
+            SafePatch(typeof(VeteranAndTacticsPatches.CameraDirector_Update_Patch));
+            SafePatch(typeof(VeteranAndTacticsPatches.CameraDirector_CutOrRetryLater_Patch));
+            SafePatch(typeof(VeteranAndTacticsPatches.CameraDirector_FixedUpdate_Patch));
+            SafePatch(typeof(VeteranAndTacticsPatches.CameraDirector_LateUpdate_Patch));
+            SafePatch(typeof(VeteranAndTacticsPatches.CameraDirector_RefreshBrowsingSuppression_Patch));
             SafePatch(typeof(VeteranAndTacticsPatches.MissionStatusGUI_LateUpdate_Patch));
             SafePatch(typeof(VeteranAndTacticsPatches.ObjectiveGUI_LateUpdate_Patch));
             SafePatch(typeof(VeteranAndTacticsPatches.MissionTaskScripted_GetTaskCompletationColor_Patch));

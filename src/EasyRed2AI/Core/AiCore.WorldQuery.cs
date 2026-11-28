@@ -2837,6 +2837,7 @@ namespace EasyRed2HumanAI
             public bool HasIntrinsicRadio;
             public bool HasRadioOrRelay;
             public bool IsSpottedOrAware;
+            public byte ActiveVehicleMarkerKind;
         }
 
         public struct SoldierSnapshot
@@ -2991,6 +2992,7 @@ namespace EasyRed2HumanAI
                         bool hasAliveRadiomanNear = false;
                         float maxRadDistSq = isPlayerInSq ? (95f * 95f) : (60f * 60f);
                         Vector3 leaderPos = leaderAlive ? leaderHandles.Tr.position : Vector3.zero;
+                        byte activeVehMarkerKind = VehicleMarkerKindNone;
 
                         for (int i = 0; i < uCount; i++)
                         {
@@ -3038,6 +3040,14 @@ namespace EasyRed2HumanAI
                             Vector3 uPos = uHandles.Tr.position;
                             bool isHuman = IsAnyHumanPlayerSoldier(uHandles);
                             bool isOnVeh = u.IsOnVehicle();
+                            Vehicle uVeh = isOnVeh ? u.GetCurrentVehicle() : null;
+                            VehicleFastHandles uVh = uVeh != null ? GetOrCreateVehicleHandles(uVeh) : null;
+                            if (uVeh != null && uVh != null && !uVeh.IsDisabled())
+                            {
+                                byte vKind = GetVehicleMarkerKind(uVeh, uVh);
+                                if (vKind > activeVehMarkerKind)
+                                    activeVehMarkerKind = vKind;
+                            }
                             if (isHuman)
                             {
                                 if (u.IsPlayer())
@@ -3058,15 +3068,10 @@ namespace EasyRed2HumanAI
                                     uHandles.LastHumanActiveYaw = curYaw;
                                     uHandles.LastHumanActiveTime = now;
                                 }
-                                if (vehActive)
+                                if (vehActive && uVh != null)
                                 {
-                                    Vehicle curV = u.GetCurrentVehicle();
-                                    VehicleFastHandles curVh = GetOrCreateVehicleHandles(curV);
-                                    if (curVh != null)
-                                    {
-                                        curVh.LastHumanOccupant = u;
-                                        curVh.LastHumanInsideTime = now;
-                                    }
+                                    uVh.LastHumanOccupant = u;
+                                    uVh.LastHumanInsideTime = now;
                                 }
                             }
                             bool uSurr = IsTrueSurrenderedPrisoner(u, uHandles);
@@ -3164,7 +3169,8 @@ namespace EasyRed2HumanAI
                             RefOnPlane = refOnPlane,
                             HasIntrinsicRadio = hasIntrinsicRadio,
                             HasRadioOrRelay = hasIntrinsicRadio,
-                            IsSpottedOrAware = spottedOrAware
+                            IsSpottedOrAware = spottedOrAware,
+                            ActiveVehicleMarkerKind = activeVehMarkerKind
                         };
 
                         if (refOnPlane && WorldAirSquadCount < WorldAirSquadIndices.Length)

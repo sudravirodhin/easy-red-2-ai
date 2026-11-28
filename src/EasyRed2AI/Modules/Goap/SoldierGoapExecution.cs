@@ -2379,7 +2379,7 @@ namespace EasyRed2HumanAI
                 soldier.IsSquadLeader() ||
                 soldier.UsingBipod() ||
                 soldier.IsBipodTransitioning() ||
-                sq.IsPlayerInSquad() ||
+                AiCore.HasAnyHumanPlayerInSquad(sq) ||
                 IsSoldierBailedOutVehicleCrew(soldier, sq) ||
                 IsPilotOrVehicleCrewPersonality(personality) ||
                 IsActivelyHeadingToEmplacement(soldier, now) ||
@@ -3228,7 +3228,7 @@ namespace EasyRed2HumanAI
             float bestDistSq = maxRadius * maxRadius;
             Vehicle bestVeh = null;
             string myFaction = soldier.faction;
-            bool mySqIsPlayerSquad = sq != null && sq.IsPlayerInSquad();
+            bool mySqIsPlayerSquad = sq != null && AiCore.HasAnyHumanPlayerInSquad(sq);
 
             for (int i = 0; i < vCount; i++)
             {

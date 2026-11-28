@@ -129,6 +129,7 @@ namespace EasyRed2HumanAI
         public static ConfigEntry<bool> EnableSpectatorHudRetention;
         public static ConfigEntry<bool> EnableFriendlyBlastWarnings;
         public static ConfigEntry<bool> EnableSpectatorBotInspector;
+        public static ConfigEntry<bool> EnableCalmAutoCamera;
         public static ConfigEntry<bool> EnableObjectiveBarFactionNames;
         public static ConfigEntry<bool> EnableBloodSmokeWaterOcclusion;
         public static ConfigEntry<bool> EnableTacticalReloadAndBipodCancel;
@@ -801,6 +802,12 @@ namespace EasyRed2HumanAI
                 "EnableSpectatorBotInspector",
                 true,
                 "Display a live Spectator Bot Inspector readout (Bot #ID matching BotActionTrace.jsonl, Role/Personality, Veterancy, Net/Squad Order, GOAP Goal -> Actions, and Combat Vitals) below the top Objective Bar when aiming near a bot in Free Camera.");
+
+            EnableCalmAutoCamera = config.Bind(
+                "8. Ballistics & Immersion",
+                "EnableCalmAutoCamera",
+                true,
+                "Smooth, cinematic Auto Battle Camera: enforces a 3.5s minimum shot hold, removes 0-grace 0.8s lookahead chain-cutting, extends shot duration (10-16s), softens damping/handheld jitter, fixes 50Hz vehicle/plane render stutter, and calms respawn-menu mouse hover flickering.");
 
             EnableObjectiveBarFactionNames = config.Bind(
                 "8. Ballistics & Immersion",

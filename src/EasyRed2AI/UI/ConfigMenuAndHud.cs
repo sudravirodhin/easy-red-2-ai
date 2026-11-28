@@ -852,6 +852,7 @@ namespace EasyRed2HumanAI
                             VisionConfig.EnableObjectiveBarFactionNames,
                             VisionConfig.EnableSpectatorHudRetention,
                             VisionConfig.EnableSpectatorBotInspector,
+                            VisionConfig.EnableCalmAutoCamera,
                             VisionConfig.EnableExtendedRoomNames,
                             VisionConfig.EnableLobbyJoinMotd,
                             VisionConfig.EnableTacticalReloadAndBipodCancel,
@@ -863,6 +864,7 @@ namespace EasyRed2HumanAI
                         DrawToggleButton(colRightX, ref yR, colW, rowH, "Objective Bar Faction + Side Names", VisionConfig.EnableObjectiveBarFactionNames);
                         DrawToggleButton(colRightX, ref yR, colW, rowH, "Spectator Tactical HUD + Overhead Net (F Cycles)", VisionConfig.EnableSpectatorHudRetention);
                         DrawToggleButton(colRightX, ref yR, colW, rowH, "Spectator Hovered-Bot H.A.R.M./GOAP Inspector (F Cycles)", VisionConfig.EnableSpectatorBotInspector);
+                        DrawToggleButton(colRightX, ref yR, colW, rowH, "Calm Auto Battle Camera (Anti-Thrash & Smooth)", VisionConfig.EnableCalmAutoCamera);
                         DrawToggleButton(colRightX, ref yR, colW, rowH, "64-Char Multiplayer Room Names", VisionConfig.EnableExtendedRoomNames);
                         DrawToggleButton(colRightX, ref yR, colW, rowH, "Host Lobby Welcome MOTD (Joiners)", VisionConfig.EnableLobbyJoinMotd);
                         DrawToggleButton(colRightX, ref yR, colW, rowH, "Tactical Reload & Bipod Animation Cancel", VisionConfig.EnableTacticalReloadAndBipodCancel);

@@ -180,7 +180,7 @@ namespace EasyRed2HumanAI
                 return;
             }
 
-            if (!AiCore.IsLocallyOwnedVehicle(veh) && !veh.PlayerIsInside())
+            if (!AiCore.IsLocallyOwnedVehicle(veh) && !AiCore.IsAnyHumanPlayerInsideVehicle(veh))
                 return;
 
             AiCore.VehicleFastHandles vh = AiCore.GetOrCreateVehicleHandles(veh);

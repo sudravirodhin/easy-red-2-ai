@@ -532,7 +532,7 @@ namespace EasyRed2HumanAI
             if (sq.RadioRequestActiveAndConfirmed())
                 return true;
 
-            bool isPlayerSq = sq.IsPlayerInSquad();
+            bool isPlayerSq = AiCore.HasAnyHumanPlayerInSquad(sq);
             Soldier leader = sq.Leader;
             bool leaderAlive = leader != null && leader.IsAlive && leader.transform != null;
 
@@ -929,7 +929,7 @@ namespace EasyRed2HumanAI
                 return;
             }
 
-            if (sq.isChargeSquad || sq.IsPlayerInSquad())
+            if (sq.isChargeSquad || AiCore.HasAnyHumanPlayerInSquad(sq))
                 return;
 
             FactionCommandProfile profile = GetFactionCommandProfile(leader.faction);
@@ -1527,7 +1527,10 @@ namespace EasyRed2HumanAI
                 int addSupp = Mathf.Min(addCapBase, Mathf.Max(0, 58 - Mathf.RoundToInt(s.Ref.GetSuppressionValue())));
                 if (addSupp > 0)
                 {
+                    float savedSuppressEnd = s.Ref.suppress_time_end;
+                    s.Ref.suppress_time_end = now + 10.0f;
                     s.Ref.Suppress(addSupp, null);
+                    s.Ref.suppress_time_end = savedSuppressEnd;
                 }
 
                 ah.Emergent.NextPlanTime = Mathf.Min(ah.Emergent.NextPlanTime, now + 0.08f + (i % 5) * 0.05f);

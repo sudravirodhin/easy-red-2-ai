@@ -182,6 +182,7 @@ namespace EasyRed2HumanAI
             public bool CachedHasSmoke;
             public bool CachedHasFrag;
             public bool CachedHasUsableSmallArms;
+            public float NextCoopOrderRelayTime;
 
             internal BotMoveOverrideState MoveOverride;
             internal SoldierVeterancyState Veterancy;
@@ -410,6 +411,11 @@ namespace EasyRed2HumanAI
             }
         }
 
+        public const byte VehicleMarkerKindNone = 0;
+        public const byte VehicleMarkerKindMechanized = 1;
+        public const byte VehicleMarkerKindTank = 2;
+        public const byte VehicleMarkerKindPlane = 3;
+
         public sealed class VehicleFastHandles
         {
             public IntPtr Ptr;
@@ -427,6 +433,8 @@ namespace EasyRed2HumanAI
             public bool IsPlane;
             public bool IsParachute;
             public bool IsStaticEmplacement;
+            public byte CachedMarkerVehicleKind;
+            public bool MarkerVehicleKindChecked;
 
             public bool CommanderSeatChecked;
             public int CommanderSeatIndex = -1;
@@ -548,6 +556,9 @@ namespace EasyRed2HumanAI
             public bool IsExposedCrewSeat;
             public bool IsAA;
             public bool IsIndirectOrArty;
+            public bool CanShoot360;
+            public bool IsSecondaryTurret;
+            public float YawBondDeg;
             public float AimFov;
         }
 
@@ -1807,6 +1818,57 @@ namespace EasyRed2HumanAI
             return h;
         }
 
+        /// <summary>
+        /// Classifies a vehicle into its cached NATO map/3D marker category (<see cref="VehicleMarkerKindPlane"/>,
+        /// <see cref="VehicleMarkerKindTank"/>, <see cref="VehicleMarkerKindMechanized"/>, or
+        /// <see cref="VehicleMarkerKindNone"/>) so squad markers reflect the combat vehicle they actually crew.
+        /// </summary>
+        public static byte GetVehicleMarkerKind(Vehicle veh, VehicleFastHandles vh = null)
+        {
+            if (ReferenceEquals(veh, null) || veh == null || veh.Pointer == IntPtr.Zero)
+                return VehicleMarkerKindNone;
+
+            if (vh == null)
+                vh = GetOrCreateVehicleHandles(veh);
+            if (vh == null)
+                return VehicleMarkerKindNone;
+
+            if (vh.MarkerVehicleKindChecked)
+                return vh.CachedMarkerVehicleKind;
+
+            byte kind = VehicleMarkerKindNone;
+            if (vh.IsPlane)
+            {
+                // VehiclePlane (fighters/bombers/attack planes); excludes CargoPlane, Glider, and VehicleParachute.
+                kind = VehicleMarkerKindPlane;
+            }
+            else if (vh.IsTank)
+            {
+                // Tracked tanks, tankettes, SPGs, StuGs, tank destroyers.
+                kind = VehicleMarkerKindTank;
+            }
+            else if (vh.IsWheeledOrTank &&
+                     !vh.IsAir &&
+                     !vh.IsParachute &&
+                     !vh.IsStaticEmplacement &&
+                     veh.TryCast<AutoTransportVehicle>() == null)
+            {
+                float hullArmorMm = VeteranAndTacticsPatches.GetVehicleMaxHullArmorMm(veh);
+                if (hullArmorMm >= 6.0f)
+                {
+                    // Armored combat cars / wheeled TDs (!IsTransportVehicle) -> armor oval (mkr_tank);
+                    // Armored halftracks / APCs (IsTransportVehicle) -> mechanized oval+X (mkr_mechanized).
+                    kind = !veh.IsTransportVehicle()
+                        ? VehicleMarkerKindTank
+                        : VehicleMarkerKindMechanized;
+                }
+            }
+
+            vh.CachedMarkerVehicleKind = kind;
+            vh.MarkerVehicleKindChecked = true;
+            return kind;
+        }
+
         public static bool TryGetVehicleHandles(IntPtr ptr, out VehicleFastHandles h)
         {
             return _vehicleHandlesByPtr.TryGetValue(ptr, out h) && h != null;
@@ -2600,6 +2662,38 @@ namespace EasyRed2HumanAI
             }
             catch { }
             return false;
+        }
+
+        /// <summary>
+        /// Returns an accurate velocity vector for both locally simulated vehicles (<c>rb.velocity</c>)
+        /// and remote Co-op client vehicles whose Rigidbodies are driven via network transform updates
+        /// (<see cref="SyncVehicle.last_speed_update"/> / <see cref="SyncVehiclePlane.synchedSpeed"/>).
+        /// </summary>
+        public static Vector3 GetEffectiveVehicleVelocity(Vehicle veh)
+        {
+            if (ReferenceEquals(veh, null) || veh == null || veh.Pointer == IntPtr.Zero)
+                return Vector3.zero;
+
+            try
+            {
+                MovableVehicle mv = veh.TryCast<MovableVehicle>();
+                if (mv != null && mv.rb != null && mv.rb.velocity.sqrMagnitude > 0.04f)
+                    return mv.rb.velocity;
+
+                SyncVehicle sv = veh.vehicleSyncher;
+                if (sv != null && sv.Pointer != IntPtr.Zero)
+                {
+                    SyncVehiclePlane svp = sv.TryCast<SyncVehiclePlane>();
+                    if (svp != null && svp.synchedSpeed.sqrMagnitude > 0.04f)
+                        return svp.synchedSpeed;
+
+                    float spd = sv.last_speed_update;
+                    if (Mathf.Abs(spd) > 0.2f && veh.transform != null)
+                        return veh.transform.forward * spd;
+                }
+            }
+            catch { }
+            return Vector3.zero;
         }
 
         public static bool IsHumanSoldierAfk(Soldier player, float now, float afkSeconds = 25.0f)
@@ -3948,9 +4042,13 @@ namespace EasyRed2HumanAI
                 : string.Empty;
         }
 
+        private static readonly int[] _remoteRttSampleScratch = new int[32];
+
         private static void ResetCoopRpcNetworkState()
         {
-            _botRpcNormalTokens = 2.5f;
+            BotRpcBudgetGrantedCount = 0;
+            BotRpcBudgetThrottledCount = 0;
+            _botRpcNormalTokens = 3.0f;
             _botRpcNormalLastRefillTime = 0f;
             _nextAllowedLowPriorityBotRpcTime = 0f;
             _nextCoopNetHealthSampleTime = 0f;
@@ -4015,6 +4113,7 @@ namespace EasyRed2HumanAI
             {
                 int localRelayPing = Mathf.Max(0, PhotonNetwork.GetPing());
                 int maxRemoteOneWayMs = -1;
+                int remoteCount = 0;
 
                 var room = PhotonNetwork.CurrentRoom;
                 var playersMap = room != null ? room.Players : null;
@@ -4026,15 +4125,33 @@ namespace EasyRed2HumanAI
                         if (p == null || p.IsLocal)
                             continue;
 
-                        if (TryReadPlayerPingMs(p, out short pPing) && pPing >= 0 && pPing <= 5000 && pPing > maxRemoteOneWayMs)
-                            maxRemoteOneWayMs = pPing;
+                        if (TryReadPlayerPingMs(p, out short pPing) && pPing >= 0 && pPing <= 5000)
+                        {
+                            if (pPing > maxRemoteOneWayMs)
+                                maxRemoteOneWayMs = pPing;
+                            if (remoteCount < _remoteRttSampleScratch.Length)
+                                _remoteRttSampleScratch[remoteCount++] = pPing * 2;
+                        }
                     }
                 }
 
+                for (int i = 1; i < remoteCount; i++)
+                {
+                    int key = _remoteRttSampleScratch[i];
+                    int j = i - 1;
+                    while (j >= 0 && _remoteRttSampleScratch[j] > key)
+                    {
+                        _remoteRttSampleScratch[j + 1] = _remoteRttSampleScratch[j];
+                        j--;
+                    }
+                    _remoteRttSampleScratch[j + 1] = key;
+                }
+                int medianRemoteRtt = remoteCount > 0 ? _remoteRttSampleScratch[(remoteCount - 1) / 2] : -1;
+
                 CachedMaxRemotePingMs = maxRemoteOneWayMs;
-                int effectiveRtt = maxRemoteOneWayMs >= 0
-                    ? Mathf.Max(maxRemoteOneWayMs * 2, localRelayPing)
-                    : localRelayPing * 2;
+                int effectiveRtt = remoteCount > 0
+                    ? Mathf.Max(medianRemoteRtt, localRelayPing)
+                    : localRelayPing;
                 CachedEffectiveMaxRttMs = effectiveRtt;
 
                 if (effectiveRtt > 0)
@@ -4062,37 +4179,37 @@ namespace EasyRed2HumanAI
                 _lastSampledResentReliableCommands = curResends;
 
                 float rttInflation = _coopBaselineRttMs > 0f ? Mathf.Max(0f, effectiveRtt - _coopBaselineRttMs) : 0f;
-                float inflationScale = rttInflation <= 50f
+                float inflationScale = rttInflation <= 80f
                     ? 1.0f
-                    : (1.0f + Mathf.Clamp01((rttInflation - 50f) / 150f) * 1.5f);
+                    : (1.0f + Mathf.Clamp01((rttInflation - 80f) / 200f) * 1.5f);
 
-                float absRttScale;
-                if (effectiveRtt <= 160)
-                    absRttScale = 1.0f;
-                else if (effectiveRtt <= 320)
-                    absRttScale = 1.0f + ((effectiveRtt - 160f) / 160f) * 0.8f;
+                float hostRelayScale;
+                if (localRelayPing <= 140)
+                    hostRelayScale = 1.0f;
+                else if (localRelayPing <= 320)
+                    hostRelayScale = 1.0f + ((localRelayPing - 140f) / 180f) * 1.0f;
                 else
-                    absRttScale = 1.8f + Mathf.Clamp01((effectiveRtt - 320f) / 180f) * 1.7f;
+                    hostRelayScale = 2.0f + Mathf.Clamp01((localRelayPing - 320f) / 220f) * 1.0f;
 
-                float resendScale = _coopRecentResendsPerSec <= 0.5f
+                float resendScale = _coopRecentResendsPerSec <= 1.0f
                     ? 1.0f
-                    : (1.0f + Mathf.Clamp01((_coopRecentResendsPerSec - 0.5f) / 3.5f) * 2.5f);
+                    : (1.0f + Mathf.Clamp01((_coopRecentResendsPerSec - 1.0f) / 4.0f) * 2.0f);
 
                 CachedCoopRpcCongestionScale = Mathf.Clamp(
-                    Mathf.Max(inflationScale, Mathf.Max(absRttScale, resendScale)),
+                    Mathf.Max(inflationScale, Mathf.Max(hostRelayScale, resendScale)),
                     1.0f,
-                    4.0f);
+                    3.5f);
             }
             catch
             {
-                CachedCoopRpcCongestionScale = Mathf.Clamp(CachedCoopRpcCongestionScale, 1.0f, 4.0f);
+                CachedCoopRpcCongestionScale = Mathf.Clamp(CachedCoopRpcCongestionScale, 1.0f, 3.5f);
             }
         }
 
         /// <summary>
-        /// Two-lane Co-op RPC pacer scaled by room fan-out, remote RTT spikes, and Photon resends.
-        /// Normal priority grants combat/order actions up to ~8/s in clean 2-player Co-op via a token bucket;
-        /// Low priority isolates ambient doors/chat/voice and sheds immediately under congestion.
+        /// Two-lane Co-op RPC pacer scaled by Photon Cloud room fan-out, median RTT inflation,
+        /// host relay latency, and reliable command resends. Guarantees a Normal-priority combat/order
+        /// floor (&gt;= 2/s) while isolating Low-priority ambient doors/chat/voice to shed only on real congestion.
         /// </summary>
         public static bool TryConsumeBotRpcBudget(float minInterval = 0.35f, BotRpcPriority priority = BotRpcPriority.Normal)
         {
@@ -4112,13 +4229,13 @@ namespace EasyRed2HumanAI
             RefreshCoopNetworkHealthIfDue();
 
             int remotePlayers = Mathf.Max(1, players - 1);
-            float fanoutScale = 1.0f + Mathf.Min(remotePlayers - 1, 12) * 0.35f;
-            float congestion = Mathf.Clamp(CachedCoopRpcCongestionScale, 1.0f, 4.0f);
+            float fanoutScale = 1.0f + Mathf.Min(remotePlayers - 1, 8) * 0.15f;
+            float congestion = Mathf.Clamp(CachedCoopRpcCongestionScale, 1.0f, 3.5f);
             float now = Time.unscaledTime;
 
             if (priority == BotRpcPriority.Low)
             {
-                if (congestion >= 1.60f)
+                if (congestion >= 2.25f)
                 {
                     BotRpcBudgetThrottledCount++;
                     return false;
@@ -4138,8 +4255,8 @@ namespace EasyRed2HumanAI
                 return true;
             }
 
-            float maxBurst = congestion <= 1.25f ? 2.5f : 1.0f;
-            float tokensPerSec = 1.0f / (0.125f * fanoutScale * congestion);
+            float maxBurst = congestion <= 1.50f ? 3.0f : 1.5f;
+            float tokensPerSec = Mathf.Max(2.0f, 1.0f / (0.125f * fanoutScale * congestion));
 
             if (_botRpcNormalLastRefillTime <= 0f || now < _botRpcNormalLastRefillTime || (now - _botRpcNormalLastRefillTime) > 10.0f)
             {
@@ -4202,6 +4319,22 @@ namespace EasyRed2HumanAI
             Seats seat = null;
             try { seat = turret.GetSeat(); } catch { }
 
+            bool can360 = false;
+            float yawBondDeg = 180.0f;
+            bool isSecondary = false;
+            try
+            {
+                can360 = turret.CanShoot360;
+                int rawBond = turret.yAxisBond;
+                yawBondDeg = can360 ? 180.0f : Mathf.Clamp(rawBond > 0 ? (float)rawBond : 25.0f, 10.0f, 179.0f);
+                if (rootVeh != null)
+                {
+                    Turret mainTurret = rootVeh.GetMainTurret(false);
+                    isSecondary = mainTurret != null && mainTurret.Pointer != ptr;
+                }
+            }
+            catch { }
+
             traits = new TurretFastTraits
             {
                 RootVehicle = rootVeh,
@@ -4210,6 +4343,9 @@ namespace EasyRed2HumanAI
                 IsExposedCrewSeat = seat != null && seat.showUnitSet,
                 IsAA = turret.isAA,
                 IsIndirectOrArty = turret.IsUpIndirectFire() || turret.IsArtillery(),
+                CanShoot360 = can360,
+                IsSecondaryTurret = isSecondary,
+                YawBondDeg = yawBondDeg,
                 AimFov = turret.GetAimingFOV()
             };
 

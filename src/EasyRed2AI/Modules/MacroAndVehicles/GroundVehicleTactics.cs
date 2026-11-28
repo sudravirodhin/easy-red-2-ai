@@ -741,8 +741,8 @@ namespace EasyRed2HumanAI
             // 2. Closing hull moving toward the soldier within 24m
             if (dist3D <= 24.0f)
             {
-                MovableVehicle mv = tankVeh.TryCast<MovableVehicle>();
-                if (mv != null && mv.rb != null && Vector3.Dot(mv.rb.velocity, dir3D) > 1.2f)
+                Vector3 tankVel = AiCore.GetEffectiveVehicleVelocity(tankVeh);
+                if (Vector3.Dot(tankVel, dir3D) > 1.2f)
                     return true;
             }
 
@@ -980,6 +980,7 @@ namespace EasyRed2HumanAI
 
                     if (VisionConfig.EnableEmergentDecisionEngine != null &&
                         VisionConfig.EnableEmergentDecisionEngine.Value &&
+                        (__0.joinedSquad == null || !AiCore.HasAnyHumanPlayerInSquad(__0.joinedSquad)) &&
                         __instance.vehToRepair != null &&
                         EmergentRuntimeBridge.TryEvaluateEmergentVehicleCrew(__instance.vehToRepair, out _, out _))
                     {

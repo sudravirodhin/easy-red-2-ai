@@ -1175,9 +1175,9 @@ namespace EasyRed2HumanAI
                 Vector3 leadOffset = Vector3.zero;
                 if (airVeh != null)
                 {
-                    MovableVehicle airMv = airVeh.TryCast<MovableVehicle>();
-                    if (airMv != null && airMv.rb != null && airMv.rb.velocity.sqrMagnitude > 4f)
-                        leadOffset = airMv.rb.velocity * Mathf.Clamp(airDist / 95.0f, 0.15f, 1.35f);
+                    Vector3 airVel = AiCore.GetEffectiveVehicleVelocity(airVeh);
+                    if (airVel.sqrMagnitude > 4f)
+                        leadOffset = airVel * Mathf.Clamp(airDist / 95.0f, 0.15f, 1.35f);
                     else if (airVeh.transform != null)
                         leadOffset = airVeh.transform.forward * 12.0f;
                 }

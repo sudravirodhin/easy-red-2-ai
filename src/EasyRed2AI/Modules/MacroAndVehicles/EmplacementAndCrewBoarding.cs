@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Globalization;
 using HarmonyLib;
 using UnityEngine;
 
@@ -1354,23 +1355,180 @@ namespace EasyRed2HumanAI
             return false;
         }
 
-        private static bool TryGetAvailableDriverSeatIndex(Vehicle veh, out int driverSeatIndex)
+        private static int GetVehicleSeatPriorityRank(
+            Vehicle veh,
+            Seats seat,
+            Seats mainTurretSeat,
+            Turret mainTurret)
         {
-            driverSeatIndex = -1;
-            if (veh == null || veh.seats == null)
+            if (seat == null)
+                return 99;
+
+            if (seat.isDriver)
+                return 0;
+
+            if ((mainTurretSeat != null && seat.Pointer == mainTurretSeat.Pointer) ||
+                (seat.hasTurret &&
+                 seat.connectedTurret != null &&
+                 mainTurret != null &&
+                 seat.connectedTurret.Pointer == mainTurret.Pointer))
+            {
+                return 1;
+            }
+
+            if (seat.hasTurret &&
+                seat.connectedTurret != null &&
+                seat.connectedTurret.TryCast<TurretCommander>() == null &&
+                seat.connectedTurret.WeaponsCount() > 0)
+            {
+                return 2;
+            }
+
+            if ((seat.hasTurret &&
+                 seat.connectedTurret != null &&
+                 seat.connectedTurret.TryCast<TurretCommander>() != null) ||
+                seat.HasPeriscope())
+            {
+                return 3;
+            }
+
+            return 4;
+        }
+
+        private static bool TryGetBestPriorityVehicleSeatIndex(Vehicle veh, out int bestSeatIndex, int excludeSeatIdx = -1)
+        {
+            bestSeatIndex = -1;
+            if (veh == null || veh.Pointer == IntPtr.Zero || veh.seats == null)
                 return false;
 
             var seats = veh.seats;
             int count = seats.Length;
+            if (count == 0)
+                return false;
+
+            Seats mainSeat = veh.MainTurretSeat;
+            Turret mainTurret = veh.GetMainTurret(false);
+            int bestRank = int.MaxValue;
+
+            for (int i = 0; i < count; i++)
+            {
+                if (i == excludeSeatIdx)
+                    continue;
+
+                Seats s = seats[i];
+                if (s == null || s.hasUnitSet)
+                    continue;
+
+                int rank = GetVehicleSeatPriorityRank(veh, s, mainSeat, mainTurret);
+                if (rank < bestRank)
+                {
+                    bestRank = rank;
+                    bestSeatIndex = i;
+                }
+            }
+
+            return bestSeatIndex >= 0;
+        }
+
+        private static bool TryBoardAiByVehicleSeatPriority(Vehicle veh, Soldier soldier, out bool boarded)
+        {
+            boarded = false;
+            if (!VisionConfig.EnableMod.Value ||
+                veh == null ||
+                veh.Pointer == IntPtr.Zero ||
+                soldier == null ||
+                soldier.Pointer == IntPtr.Zero ||
+                !soldier.IsAI() ||
+                veh.TryCast<MovableVehicle>() == null ||
+                veh.TryCast<AutoTransportVehicle>() != null)
+            {
+                return false;
+            }
+
+            if (TryGetBestPriorityVehicleSeatIndex(veh, out int bestSeatIdx))
+            {
+                veh.SetFaction(soldier.faction);
+                veh.GetOnVehicle(bestSeatIdx, soldier);
+                boarded = true;
+            }
+            return true;
+        }
+
+        private static bool TryPromoteVehicleCrewSeats(Vehicle veh)
+        {
+            if (veh == null ||
+                veh.Pointer == IntPtr.Zero ||
+                veh.IsDisabled() ||
+                veh.IsCoverDestroyed() ||
+                veh.IsLocked() ||
+                veh.TryCast<MovableVehicle>() == null ||
+                veh.TryCast<AutoTransportVehicle>() != null ||
+                veh.seats == null ||
+                veh.seats.Length < 2)
+            {
+                return false;
+            }
+
+            var seats = veh.seats;
+            int count = seats.Length;
+            Seats mainSeat = veh.MainTurretSeat;
+            Turret mainTurret = veh.GetMainTurret(false);
+
+            Seats bestEmptySeat = null;
+            int bestEmptyRank = int.MaxValue;
+            Soldier worstAi = null;
+            int worstAiRank = -1;
+
             for (int i = 0; i < count; i++)
             {
                 Seats s = seats[i];
-                if (s != null && s.isDriver && !s.hasUnitSet)
+                if (s == null)
+                    continue;
+
+                int rank = GetVehicleSeatPriorityRank(veh, s, mainSeat, mainTurret);
+                Soldier u = s.hasUnitSet ? s.unitSet : null;
+                bool isFree = !s.hasUnitSet ||
+                              u == null ||
+                              u.Pointer == IntPtr.Zero ||
+                              (!u.IsAlive && !u.IsInjured && !AiCore.IsAnyHumanPlayerSoldier(u));
+
+                if (isFree)
                 {
-                    driverSeatIndex = i;
-                    return true;
+                    if (rank < bestEmptyRank)
+                    {
+                        bestEmptyRank = rank;
+                        bestEmptySeat = s;
+                    }
+                }
+                else if (u.IsAlive &&
+                         !u.IsInjured &&
+                         !u.HasSurrended() &&
+                         u.IsAI() &&
+                         !AiCore.IsAnyHumanPlayerSoldier(u) &&
+                         AiCore.IsLocallyOwnedBot(u) &&
+                         u.CanSwicthSeat())
+                {
+                    if (rank >= worstAiRank)
+                    {
+                        worstAiRank = rank;
+                        worstAi = u;
+                    }
                 }
             }
+
+            if (bestEmptySeat != null && worstAi != null && bestEmptyRank < worstAiRank)
+            {
+                worstAi.SwitchSeat(bestEmptySeat);
+                if (VisionConfig.DebugLogging.Value)
+                {
+                    AiCore.LogDebug(
+                        "CrewSeatPriority",
+                        $"Promoted AI crewman in '{veh.name}' from rank {worstAiRank} -> {bestEmptyRank}.",
+                        3.0f);
+                }
+                return true;
+            }
+
             return false;
         }
 
@@ -1461,6 +1619,8 @@ namespace EasyRed2HumanAI
                     AiCore.VehicleFastHandles vehH = AiCore.GetOrCreateVehicleHandles(__0);
                     if (vehH != null && vehH.BoardingWaitUntil < now + 10.0f)
                         vehH.BoardingWaitUntil = now + 10.0f;
+
+                    TrySendCoopVehicleOrderToHost(__instance, __0, 0, false);
                 }
                 catch { }
             }
@@ -1469,16 +1629,558 @@ namespace EasyRed2HumanAI
         [HarmonyPatch(typeof(Squad), nameof(Squad.OrderLeaveVehicle))]
         public static class Squad_OrderLeaveVehicle_Patch
         {
-            public static void Postfix(Squad __instance)
+            public static void Postfix(Squad __instance, Vehicle __0, bool __1)
             {
                 try
                 {
                     if (__instance != null && __instance.Pointer != IntPtr.Zero)
                     {
                         _squadOrderedToVehicle.Remove(__instance.Pointer);
+                        TrySendCoopVehicleOrderToHost(__instance, __0, 1, __1);
                     }
                 }
                 catch { }
+            }
+        }
+
+        // =====================================================================
+        // Co-op Inventory Role Sync Fix & Client -> Host Vehicle Squad Orders
+        // =====================================================================
+        internal const byte CoopVehicleOrderPhotonEventCode = 196;
+
+        [ThreadStatic]
+        private static bool _inLocalOpenOrdersMenu;
+        private static float _lastCoopVehicleOrderSentTime;
+
+        [HarmonyPatch(typeof(InventoryManager), nameof(InventoryManager.ReceiveNetInventory))]
+        public static class InventoryManager_ReceiveNetInventory_Patch
+        {
+            public static void Postfix(InventoryManager __instance)
+            {
+                try
+                {
+                    if (!VisionConfig.EnableMod.Value ||
+                        __instance == null ||
+                        __instance.Pointer == IntPtr.Zero)
+                    {
+                        return;
+                    }
+
+                    Soldier sol = __instance.GetComponent<Soldier>();
+                    if (sol != null && sol.Pointer != IntPtr.Zero && sol.IsAlive)
+                    {
+                        sol.DetectAndUpdateRole();
+                    }
+                }
+                catch { }
+            }
+        }
+
+        [HarmonyPatch(typeof(PlayerController), nameof(PlayerController.OpenOrdersMenu))]
+        public static class PlayerController_OpenOrdersMenu_Patch
+        {
+            public static void Prefix()
+            {
+                _inLocalOpenOrdersMenu = true;
+            }
+
+            public static Exception Finalizer(Exception __exception)
+            {
+                _inLocalOpenOrdersMenu = false;
+                return __exception;
+            }
+        }
+
+        [HarmonyPatch(typeof(Squad), nameof(Squad.GetMechanic))]
+        public static class Squad_GetMechanic_Patch
+        {
+            public static void Postfix(Squad __instance, ref Soldier __result)
+            {
+                try
+                {
+                    if (!_inLocalOpenOrdersMenu ||
+                        __result != null ||
+                        !VisionConfig.EnableMod.Value ||
+                        !Photon.Pun.PhotonNetwork.InRoom ||
+                        Photon.Pun.PhotonNetwork.IsMasterClient ||
+                        __instance == null ||
+                        __instance.Pointer == IntPtr.Zero ||
+                        !__instance.IsPlayerInSquad())
+                    {
+                        return;
+                    }
+
+                    var units = __instance.units;
+                    if (units == null)
+                        return;
+
+                    Soldier fallbackRemoteBot = null;
+                    int count = units.Count;
+                    for (int i = 0; i < count; i++)
+                    {
+                        Soldier u = units[i];
+                        if (u == null || u.Pointer == IntPtr.Zero || !u.IsAlive || u.IsInjured || u.HasSurrended() || u.IsPlayer())
+                            continue;
+
+                        if (u.hasTools)
+                        {
+                            __result = u;
+                            return;
+                        }
+
+                        if (fallbackRemoteBot == null)
+                        {
+                            SyncSoldier syn = u.soldierSyncher;
+                            if (syn != null && !syn.OwnSyncher)
+                                fallbackRemoteBot = u;
+                        }
+                    }
+
+                    if (fallbackRemoteBot != null)
+                        __result = fallbackRemoteBot;
+                }
+                catch { }
+            }
+        }
+
+        [HarmonyPatch(typeof(Squad), nameof(Squad.OrderRepairVehicle))]
+        public static class Squad_OrderRepairVehicle_Patch
+        {
+            public static void Prefix(Squad __instance, out bool __state)
+            {
+                __state = false;
+                try
+                {
+                    if (VisionConfig.EnableMod.Value && __instance != null && __instance.Pointer != IntPtr.Zero)
+                        __state = __instance.GetMechanic() != null;
+                }
+                catch { }
+            }
+
+            public static void Postfix(Squad __instance, Vehicle __0, bool __state)
+            {
+                try
+                {
+                    if (!VisionConfig.EnableMod.Value ||
+                        __state ||
+                        __instance == null ||
+                        __instance.Pointer == IntPtr.Zero ||
+                        __0 == null ||
+                        __0.Pointer == IntPtr.Zero ||
+                        __0.IsLocked())
+                    {
+                        return;
+                    }
+
+                    if (TrySendCoopVehicleOrderToHost(__instance, __0, 2, false))
+                    {
+                        Soldier leader = __instance.Leader;
+                        if (leader != null && leader.IsAlive)
+                        {
+                            leader.Say(VoiceManager.VoiceClip.getOut, 0f, -1, null);
+                            leader.SyncSay(VoiceManager.VoiceClip.getOut, -1);
+                            leader.PlayOrderAnimSynched("order_anim_getIn", 1);
+                        }
+                    }
+                }
+                catch { }
+            }
+        }
+
+        private static bool TrySendCoopVehicleOrderToHost(Squad sq, Vehicle veh, int orderKind, bool exitForced)
+        {
+            try
+            {
+                if (!VisionConfig.EnableMod.Value ||
+                    !Photon.Pun.PhotonNetwork.InRoom ||
+                    Photon.Pun.PhotonNetwork.IsMasterClient ||
+                    sq == null ||
+                    sq.Pointer == IntPtr.Zero ||
+                    veh == null ||
+                    veh.Pointer == IntPtr.Zero ||
+                    !sq.IsPlayerInSquad())
+                {
+                    return false;
+                }
+
+                Soldier leader = sq.Leader;
+                if (leader == null || leader.Pointer == IntPtr.Zero || !leader.IsAlive || !leader.IsPlayer())
+                    return false;
+
+                var units = sq.units;
+                if (units == null)
+                    return false;
+
+                bool hasRemoteOwnedBot = false;
+                int uCount = units.Count;
+                for (int i = 0; i < uCount; i++)
+                {
+                    Soldier u = units[i];
+                    if (u == null || u.Pointer == IntPtr.Zero || !u.IsAlive || u.IsInjured || u.HasSurrended() || u.IsPlayer())
+                        continue;
+
+                    SyncSoldier uSyn = u.soldierSyncher;
+                    if (uSyn != null && !uSyn.OwnSyncher)
+                    {
+                        hasRemoteOwnedBot = true;
+                        break;
+                    }
+                }
+
+                if (!hasRemoteOwnedBot)
+                    return false;
+
+                float now = Time.time;
+                if (now < _lastCoopVehicleOrderSentTime - 1.0f)
+                    _lastCoopVehicleOrderSentTime = 0f;
+                if (now < _lastCoopVehicleOrderSentTime + 0.55f)
+                    return false;
+
+                SyncVehicle vSyn = veh.vehicleSyncher ?? veh.GetSyncher();
+                SyncSoldier lSyn = leader.soldierSyncher;
+                int vehViewId = vSyn != null ? vSyn.ViewID : 0;
+                int leaderViewId = lSyn != null ? lSyn.ViewID : 0;
+                if (vehViewId <= 0 || leaderViewId <= 0)
+                    return false;
+
+                _lastCoopVehicleOrderSentTime = now;
+                var payload = new Il2CppInterop.Runtime.InteropTypes.Arrays.Il2CppStringArray(new string[]
+                {
+                    orderKind.ToString(CultureInfo.InvariantCulture),
+                    vehViewId.ToString(CultureInfo.InvariantCulture),
+                    leaderViewId.ToString(CultureInfo.InvariantCulture),
+                    exitForced ? "1" : "0"
+                });
+
+                var opts = new Photon.Realtime.RaiseEventOptions
+                {
+                    Receivers = Photon.Realtime.ReceiverGroup.MasterClient
+                };
+
+                Photon.Pun.PhotonNetwork.RaiseEvent(
+                    CoopVehicleOrderPhotonEventCode,
+                    payload.Cast<Il2CppSystem.Object>(),
+                    opts,
+                    ExitGames.Client.Photon.SendOptions.SendReliable);
+                return true;
+            }
+            catch (Exception ex)
+            {
+                AiCore.ReportPatchException("CoopVehOrder.Send", ex);
+                return false;
+            }
+        }
+
+        private static Soldier ResolveSoldierByViewId(int viewId)
+        {
+            if (viewId <= 0)
+                return null;
+
+            Photon.Pun.PhotonView pv = Photon.Pun.PhotonView.Find(viewId);
+            if (pv != null && pv.Pointer != IntPtr.Zero)
+            {
+                Soldier s = pv.GetComponent<Soldier>();
+                if (s != null && s.Pointer != IntPtr.Zero)
+                    return s;
+            }
+
+            AiCore.EnsureWorldSnapshot();
+            int count = AiCore.WorldSoldierCount;
+            var soldiers = AiCore.WorldSoldiers;
+            for (int i = 0; i < count; i++)
+            {
+                Soldier s = soldiers[i].Ref;
+                if (s == null || s.Pointer == IntPtr.Zero)
+                    continue;
+                SyncSoldier syn = s.soldierSyncher;
+                if (syn != null && syn.ViewID == viewId)
+                    return s;
+            }
+            return null;
+        }
+
+        private static Vehicle ResolveVehicleByViewId(int viewId)
+        {
+            if (viewId <= 0)
+                return null;
+
+            Photon.Pun.PhotonView pv = Photon.Pun.PhotonView.Find(viewId);
+            if (pv != null && pv.Pointer != IntPtr.Zero)
+            {
+                Vehicle v = pv.GetComponent<Vehicle>();
+                if (v != null && v.Pointer != IntPtr.Zero)
+                    return v;
+            }
+
+            var allVehicles = Vehicle.allVehicles;
+            if (allVehicles != null)
+            {
+                int count = allVehicles.Count;
+                for (int i = 0; i < count; i++)
+                {
+                    Vehicle v = allVehicles[i];
+                    if (v == null || v.Pointer == IntPtr.Zero)
+                        continue;
+                    SyncVehicle syn = v.vehicleSyncher ?? v.GetSyncher();
+                    if (syn != null && syn.ViewID == viewId)
+                        return v;
+                }
+            }
+            return null;
+        }
+
+        internal static void HandleCoopVehicleOrderPhotonEvent(ExitGames.Client.Photon.EventData ev)
+        {
+            try
+            {
+                if (!VisionConfig.EnableMod.Value ||
+                    !Photon.Pun.PhotonNetwork.InRoom ||
+                    !Photon.Pun.PhotonNetwork.IsMasterClient ||
+                    ev == null ||
+                    ev.CustomData == null)
+                {
+                    return;
+                }
+
+                var arr = ev.CustomData.TryCast<Il2CppInterop.Runtime.InteropTypes.Arrays.Il2CppStringArray>();
+                if (arr == null || arr.Length < 4)
+                    return;
+
+                if (!int.TryParse(arr[0], NumberStyles.Integer, CultureInfo.InvariantCulture, out int orderKind) ||
+                    !int.TryParse(arr[1], NumberStyles.Integer, CultureInfo.InvariantCulture, out int vehViewId) ||
+                    !int.TryParse(arr[2], NumberStyles.Integer, CultureInfo.InvariantCulture, out int leaderViewId) ||
+                    orderKind < 0 || orderKind > 2 ||
+                    vehViewId <= 0 || leaderViewId <= 0)
+                {
+                    return;
+                }
+
+                bool exitForced = arr[3] == "1";
+                Soldier leader = ResolveSoldierByViewId(leaderViewId);
+                if (leader == null ||
+                    leader.Pointer == IntPtr.Zero ||
+                    !leader.IsAlive ||
+                    !AiCore.IsAnyHumanPlayerSoldier(leader) ||
+                    leader.transform == null)
+                {
+                    return;
+                }
+
+                Squad sq = leader.joinedSquad;
+                if (sq == null || sq.Pointer == IntPtr.Zero || sq.units == null)
+                    return;
+
+                int senderActor = ev.Sender;
+                SyncSoldier leaderSyn = leader.soldierSyncher;
+                if (senderActor > 0 && leaderSyn != null && leaderSyn.OwnerActorNr > 0 && leaderSyn.OwnerActorNr != senderActor)
+                    return;
+
+                float now = Time.time;
+                AiCore.SoldierFastHandles leaderH = AiCore.GetOrCreateSoldierHandles(leader);
+                if (leaderH != null)
+                {
+                    if (now < leaderH.NextCoopOrderRelayTime - 2.0f)
+                        leaderH.NextCoopOrderRelayTime = 0f;
+                    if (now < leaderH.NextCoopOrderRelayTime)
+                        return;
+                    leaderH.NextCoopOrderRelayTime = now + 0.45f;
+                }
+
+                Vehicle veh = ResolveVehicleByViewId(vehViewId);
+                if (veh == null ||
+                    veh.Pointer == IntPtr.Zero ||
+                    veh.IsLocked() ||
+                    veh.IsCoverDestroyed() ||
+                    veh.transform == null)
+                {
+                    return;
+                }
+
+                if ((veh.transform.position - leader.transform.position).sqrMagnitude > 165.0f * 165.0f)
+                    return;
+
+                string vehFac = veh.GetVehicleFaction();
+                if (!string.IsNullOrEmpty(vehFac) && !AiCore.AreSameSideFactions(leader.faction, vehFac))
+                    return;
+
+                var units = sq.units;
+                int uCount = units.Count;
+                IntPtr vehPtr = veh.Pointer;
+                IntPtr sqPtr = sq.Pointer;
+
+                if (orderKind == 0)
+                {
+                    if (veh.IsDisabled() || !veh.HasSpace() || veh.seats == null)
+                        return;
+
+                    int freeSeats = 0;
+                    var seats = veh.seats;
+                    for (int i = 0; i < seats.Length; i++)
+                    {
+                        if (seats[i] != null && !seats[i].hasUnitSet)
+                            freeSeats++;
+                    }
+                    if (freeSeats <= 0)
+                        return;
+
+                    _squadOrderedToVehicle[sqPtr] = vehPtr;
+                    AiCore.VehicleFastHandles vehH = AiCore.GetOrCreateVehicleHandles(veh);
+                    if (vehH != null && vehH.BoardingWaitUntil < now + 10.0f)
+                        vehH.BoardingWaitUntil = now + 10.0f;
+
+                    int voiceIdx = 0;
+                    for (int i = 0; i < uCount && freeSeats > 0; i++)
+                    {
+                        Soldier u = units[i];
+                        if (u == null ||
+                            u.Pointer == IntPtr.Zero ||
+                            u.Pointer == leader.Pointer ||
+                            !u.IsAlive ||
+                            u.IsInjured ||
+                            u.HasSurrended() ||
+                            !u.IsAI() ||
+                            u.IsOnVehicle() ||
+                            !AiCore.IsLocallyOwnedBot(u))
+                        {
+                            continue;
+                        }
+
+                        u.CoverPosition(veh.Cast<AiDestination>());
+                        _assignedEmplacementUntil[u.Pointer] = now + 22.0f;
+                        _assignedEmplacementVehicle[u.Pointer] = vehPtr;
+                        if (AiCore.TryGetSoldierHandles(u.Pointer, out var uh))
+                            uh.Stance.CombatCrouchLockUntil = 0f;
+                        if (u.aiController != null)
+                            SetBotPose(u.aiController, u, SoldierPose.Idle, true);
+
+                        u.Say(VoiceManager.VoiceClip.yesSir, 1.0f + 0.5f * voiceIdx, -1, null);
+                        voiceIdx++;
+                        freeSeats--;
+                    }
+                }
+                else if (orderKind == 1)
+                {
+                    _squadOrderedToVehicle.Remove(sqPtr);
+                    int voiceIdx = 0;
+
+                    var seats = veh.seats;
+                    if (seats != null)
+                    {
+                        for (int i = 0; i < seats.Length; i++)
+                        {
+                            Seats s = seats[i];
+                            if (s == null || !s.hasUnitSet || s.unitSet == null)
+                                continue;
+
+                            Soldier u = s.unitSet;
+                            if (u.Pointer == IntPtr.Zero ||
+                                u.Pointer == leader.Pointer ||
+                                u.joinedSquad == null ||
+                                u.joinedSquad.Pointer != sqPtr ||
+                                !u.IsAlive ||
+                                !u.IsAI() ||
+                                !AiCore.IsLocallyOwnedBot(u))
+                            {
+                                continue;
+                            }
+
+                            if (!exitForced && u.IsInjured)
+                                continue;
+
+                            u.Say(VoiceManager.VoiceClip.yesSir, 1.0f + 0.5f * voiceIdx, -1, null);
+                            voiceIdx++;
+                            veh.GetOffVehicle(u);
+                            u.CoverPosition(null);
+                            _assignedEmplacementUntil.Remove(u.Pointer);
+                            _assignedEmplacementVehicle.Remove(u.Pointer);
+                        }
+                    }
+
+                    for (int i = 0; i < uCount; i++)
+                    {
+                        Soldier u = units[i];
+                        if (u == null ||
+                            u.Pointer == IntPtr.Zero ||
+                            u.Pointer == leader.Pointer ||
+                            !u.IsAlive ||
+                            !u.IsAI() ||
+                            !AiCore.IsLocallyOwnedBot(u))
+                        {
+                            continue;
+                        }
+
+                        if (u.HasDestinationAssigned && u.targetDestination != null && u.targetDestination.Pointer == vehPtr)
+                        {
+                            u.CoverPosition(null);
+                            _assignedEmplacementUntil.Remove(u.Pointer);
+                            _assignedEmplacementVehicle.Remove(u.Pointer);
+                        }
+                    }
+                }
+                else if (orderKind == 2)
+                {
+                    if (!veh.CanBeRepaired())
+                        return;
+
+                    Soldier bestMech = null;
+                    float bestScore = float.MaxValue;
+                    Vector3 vehPos = veh.transform.position;
+
+                    for (int i = 0; i < uCount; i++)
+                    {
+                        Soldier u = units[i];
+                        if (u == null ||
+                            u.Pointer == IntPtr.Zero ||
+                            u.Pointer == leader.Pointer ||
+                            !u.IsAlive ||
+                            u.IsInjured ||
+                            u.HasSurrended() ||
+                            !u.IsAI() ||
+                            !AiCore.IsLocallyOwnedBot(u))
+                        {
+                            continue;
+                        }
+
+                        if (!u.hasTools && u.GetRepairTools() == null)
+                            continue;
+
+                        Vehicle curV = u.IsOnVehicle() ? u.GetCurrentVehicle() : null;
+                        bool insideTarget = curV != null && curV.Pointer == vehPtr;
+                        float distSq = u.transform != null ? (u.transform.position - vehPos).sqrMagnitude : 9999f;
+                        float score = insideTarget ? -1000f : distSq;
+                        if (score < bestScore)
+                        {
+                            bestScore = score;
+                            bestMech = u;
+                        }
+                    }
+
+                    if (bestMech == null)
+                        return;
+
+                    if (!bestMech.hasTools)
+                        bestMech.DetectAndUpdateRole();
+
+                    Vehicle mechVeh = bestMech.IsOnVehicle() ? bestMech.GetCurrentVehicle() : null;
+                    bool getOnAfter = (mechVeh != null && mechVeh.Pointer == vehPtr) ||
+                                      (bestMech.HasDestinationAssigned &&
+                                       bestMech.targetDestination != null &&
+                                       bestMech.targetDestination.Pointer == vehPtr);
+
+                    bestMech.Say(VoiceManager.VoiceClip.yesSir, 1.0f, -1, null);
+                    if (mechVeh != null)
+                        mechVeh.GetOffVehicle(bestMech);
+
+                    _assignedEmplacementUntil.Remove(bestMech.Pointer);
+                    _assignedEmplacementVehicle.Remove(bestMech.Pointer);
+
+                    var repairTask = new VehicleRepairTask(veh, getOnAfter);
+                    bestMech.CoverPosition(repairTask.Cast<AiDestination>());
+                }
+            }
+            catch (Exception ex)
+            {
+                AiCore.ReportPatchException("CoopVehOrder.Handle", ex);
             }
         }
 
@@ -1500,7 +2202,7 @@ namespace EasyRed2HumanAI
                         __0 || !__1 || __2 ||
                         __instance == null ||
                         __instance.Pointer == IntPtr.Zero ||
-                        __instance.IsPlayerInSquad())
+                        AiCore.HasAnyHumanPlayerInSquad(__instance))
                     {
                         return true;
                     }
@@ -1675,8 +2377,8 @@ namespace EasyRed2HumanAI
         ///   2. Bots on per-soldier bailout cooldown (`_unreachableEmplacementUntil`) or actively bleeding/suppressed
         ///      cannot be pushed straight back onto a static gun by vanilla cover pickers.
         ///   3. Static emplacements fill the Gunner seat first, then the Loader/Assistant seat (`TryGetAvailableEmplacementOrTurretSeatIndex`).
-        ///   4. Bailed-out Vehicle Crews (`sq.IsVehicleCrew`) re-mounting an unmanned combat vehicle always fill
-        ///      the driver seat first (`TryGetAvailableDriverSeatIndex`), then turret seats.
+        ///   4. Movable ground vehicles, transports, and aircraft always fill seats by strict combat priority
+        ///      (<see cref="TryGetBestPriorityVehicleSeatIndex"/>): Driver/Pilot &gt; Main Gunner &gt; Machine Gunner &gt; Commander &gt; Loader/Passenger.
         /// </summary>
         [HarmonyPatch(typeof(Vehicle), nameof(Vehicle.OnCoverReached))]
         public static class Vehicle_OnCoverReached_Patch
@@ -1700,12 +2402,11 @@ namespace EasyRed2HumanAI
                     if (isPlayerSquad)
                     {
                         ClearEmplacementAssignment(__0.Pointer, markUnreachable: false);
-                        bool isExplicitRemount = sq != null &&
-                                                 _squadOrderedToVehicle.TryGetValue(sq.Pointer, out IntPtr rVehPtr) &&
-                                                 rVehPtr == __instance.Pointer;
-                        if (isExplicitRemount && __instance.TryCast<MovableVehicle>() != null && !__instance.HasDriver() && TryGetAvailableDriverSeatIndex(__instance, out int pDriverIdx))
+                        if (__instance.TryCast<MovableVehicle>() != null &&
+                            __instance.TryCast<AutoTransportVehicle>() == null &&
+                            TryGetBestPriorityVehicleSeatIndex(__instance, out int pSeatIdx))
                         {
-                            __instance.GetOnVehicle(pDriverIdx, __0);
+                            __instance.GetOnVehicle(pSeatIdx, __0);
                             return false;
                         }
                         return true;
@@ -1745,10 +2446,11 @@ namespace EasyRed2HumanAI
 
                     if (isVehicleCrew && isMovable)
                     {
-                        if (!__instance.HasDriver() && TryGetAvailableDriverSeatIndex(__instance, out int driverIdx))
+                        if (__instance.TryCast<AutoTransportVehicle>() == null &&
+                            TryGetBestPriorityVehicleSeatIndex(__instance, out int crewSeatIdx))
                         {
                             ClearEmplacementAssignment(__0.Pointer, markUnreachable: false);
-                            __instance.GetOnVehicle(driverIdx, __0);
+                            __instance.GetOnVehicle(crewSeatIdx, __0);
                             return false;
                         }
                         if (TryGetAvailableTurretSeatIndex(__instance, out int crewTurretIdx))
@@ -1764,6 +2466,13 @@ namespace EasyRed2HumanAI
                     if (isExplicitBoardOrder)
                     {
                         ClearEmplacementAssignment(__0.Pointer, markUnreachable: false);
+                        if (isMovable &&
+                            __instance.TryCast<AutoTransportVehicle>() == null &&
+                            TryGetBestPriorityVehicleSeatIndex(__instance, out int orderedSeatIdx))
+                        {
+                            __instance.GetOnVehicle(orderedSeatIdx, __0);
+                            return false;
+                        }
                         return true;
                     }
 
@@ -1811,9 +2520,12 @@ namespace EasyRed2HumanAI
         }
 
         /// <summary>
-        /// 1) Pauses native static <c>AIVehicle.SwitchSeatAi(bool requiresDriver, Vehicle veh)</c> (0x18057C740)
-        ///    whenever a human player is inside the vehicle so AI crewmen never hijack seats.
-        /// 2) When a 1-man combat vehicle scans for targets from the driver seat, bypasses the frozen empty
+        /// 1) Replaces native static <c>AIVehicle.SwitchSeatAi(bool requiresDriver, Vehicle veh)</c> (0x18057C740)
+        ///    for movable ground vehicles, transports, and aircraft with deterministic combat-role seat promotion
+        ///    (<see cref="TryPromoteVehicleCrewSeats"/>): Driver/Pilot &gt; Main Gunner &gt; Machine Gunner &gt; Commander &gt; Loader/Passenger,
+        ///    both for pure-AI crews and for AI crewmen sharing a vehicle/aircraft occupied by human players.
+        /// 2) Pauses seat promotion when a nearby active human stepped outside (e.g. repairing/spotting).
+        /// 3) When a 1-man combat vehicle scans for targets from the driver seat, bypasses the frozen empty
         ///    turret's narrow bore slit via driver hull-forward awareness, and holds the lone survivor in
         ///    <c>MainTurretSeat</c> for 10s while armed so they fight instead of bouncing back to drive circles.
         /// </summary>
@@ -1828,8 +2540,16 @@ namespace EasyRed2HumanAI
                     if (!VisionConfig.EnableMod.Value || __1 == null || __1.Pointer == IntPtr.Zero)
                         return true;
 
-                    if (AiCore.IsVehicleReservedByNearbyActiveHuman(__1, Time.time))
+                    float now = Time.time;
+                    bool humanInside = AiCore.IsAnyHumanPlayerInsideVehicle(__1);
+                    if (!humanInside && AiCore.IsVehicleReservedByNearbyActiveHuman(__1, now))
                         return false;
+
+                    if (humanInside)
+                    {
+                        TryPromoteVehicleCrewSeats(__1);
+                        return false;
+                    }
 
                     if (!AiCore.IsLocallyOwnedVehicle(__1))
                         return true;
@@ -1837,7 +2557,6 @@ namespace EasyRed2HumanAI
                     AiCore.VehicleFastHandles vh = AiCore.GetOrCreateVehicleHandles(__1);
                     if (vh != null && vh.IsWheeledOrTank && __1.peopleInside == 1 && !__1.IsTransportVehicle())
                     {
-                        float now = Time.time;
                         Seats mainSeat = __1.MainTurretSeat;
                         if (mainSeat != null && mainSeat.hasUnitSet && !mainSeat.isDriver)
                         {
@@ -1864,6 +2583,14 @@ namespace EasyRed2HumanAI
                                 __state = true;
                             }
                         }
+                    }
+
+                    if (!__state &&
+                        __1.TryCast<MovableVehicle>() != null &&
+                        __1.TryCast<AutoTransportVehicle>() == null)
+                    {
+                        TryPromoteVehicleCrewSeats(__1);
+                        return false;
                     }
                 }
                 catch { }
@@ -2070,6 +2797,20 @@ namespace EasyRed2HumanAI
         [HarmonyPatch(typeof(Vehicle), nameof(Vehicle.GetOnVehicleBestPos))]
         public static class Vehicle_GetOnVehicleBestPos_Patch
         {
+            public static bool Prefix(Vehicle __instance, Soldier __0, ref bool __result)
+            {
+                try
+                {
+                    if (TryBoardAiByVehicleSeatPriority(__instance, __0, out bool boarded))
+                    {
+                        __result = boarded;
+                        return false;
+                    }
+                }
+                catch { }
+                return true;
+            }
+
             public static void Postfix(Vehicle __instance, Soldier __0, ref bool __result)
             {
                 if (__result || !VisionConfig.EnableMod.Value || __instance == null || __0 == null || __0.IsAI())
@@ -2084,6 +2825,24 @@ namespace EasyRed2HumanAI
                     }
                 }
                 catch { }
+            }
+        }
+
+        [HarmonyPatch(typeof(VehicleWithWheels), nameof(VehicleWithWheels.GetOnVehicleBestPos))]
+        public static class VehicleWithWheels_GetOnVehicleBestPos_Patch
+        {
+            public static bool Prefix(VehicleWithWheels __instance, Soldier __0, ref bool __result)
+            {
+                try
+                {
+                    if (TryBoardAiByVehicleSeatPriority(__instance, __0, out bool boarded))
+                    {
+                        __result = boarded;
+                        return false;
+                    }
+                }
+                catch { }
+                return true;
             }
         }
 
@@ -2134,14 +2893,7 @@ namespace EasyRed2HumanAI
 
                     if (oldIdx < 0)
                     {
-                        for (int i = 0; i < seats.Length; i++)
-                        {
-                            if (i != __0 && seats[i] != null && !seats[i].hasUnitSet)
-                            {
-                                oldIdx = i;
-                                break;
-                            }
-                        }
+                        TryGetBestPriorityVehicleSeatIndex(__instance, out oldIdx, excludeSeatIdx: __0);
                     }
 
                     if (oldIdx < 0)
@@ -2214,6 +2966,7 @@ namespace EasyRed2HumanAI
         internal static void ResetSpawnerReservations()
         {
             _spawnerReserveUntil.Clear();
+            _lastCoopVehicleOrderSentTime = 0f;
         }
 
         [HarmonyPatch(typeof(VehicleSpawner), nameof(VehicleSpawner.SpawnVehicle))]

@@ -5,6 +5,22 @@ For pre-compiled downloads, see **[GitHub Releases](https://github.com/sudraviro
 
 ---
 
+## `v0.10.10` — Calm Auto Camera, Live Vehicle-Aware Squad Icons, Death Attribution Overhaul, Universal Crew Seat Priority, Co-op Desync & High-Ping `BotRPC` Starvation Fix
+* **Co-op High-Ping `BotRPC` Starvation Fix (`AiCore.cs`)**:
+  * Diagnosed from a 7-match live Co-op session (`BotRPC: 3218/109398`, `98.8%–99.6%` throttled whenever overseas players with `175–400ms` one-way ping joined) where static geographic distance locked `absRttScale` at `2.3x–3.5x` and hard-killed `Low`-priority door/voice RPCs even with zero packet loss.
+  * Switched congestion scaling to median remote RTT inflation + Host relay ping + `PhotonNetwork.ResentReliableCommands` (`_coopRecentResendsPerSec`), trimmed Photon Cloud server-side fan-out scaling (`+0.15x`, max `2.2x`), raised `Low`-priority congestion shed (`1.60x -> 2.25x`), guaranteed a `>= 2.0/s` `Normal` bot RPC floor, and reset `BotRPC` granted/throttled counters per match inside `ResetCoopRpcNetworkState()`.
+* **Co-op Desync & Universal Vehicle/Plane Crew Seat Priority (`AiCore.cs`, `AiCore.WorldQuery.cs`, `EmplacementAndCrewBoarding.cs`, `CombinedArmsAndTurrets.cs`, `GroundVehicleTactics.cs`, `AircraftTactics.cs`, `MacroObjectiveDirector.cs`, `VisionRangeAndCamo.cs`, `TeamNetAndSquadCommand.cs`, `SoldierGoapExecution.cs`, `BattlefieldScavengingAndWeight.cs`, `ThreatMemoryAndWatchSectors.cs`)**:
+  * Added Co-op remote-owned vehicle velocity estimation (`GetEffectiveVehicleVelocity`), secondary tank gunner awareness/turret tracking, vehicle repair & orders menu relay (`Event 196` Co-op vehicle orders), continuous grenade collision check, and subordinate human-player squad leader protection.
+  * Enforced universal crew seat priority (`Driver/Pilot > Main Gunner > Machine Gunner / Secondary Turret > Commander / Observer > Loader / Passenger`) across tanks, wheeled vehicles, and aircraft (`Vehicle.GetOnVehicleBestPos`, `VehicleWithWheels.GetOnVehicleBestPos`).
+* **Death-Screen `"Killed in Action"` Attribution Overhaul & `[PlayerDeath]` Telemetry (`DeathScreenAndAttribution.cs`, `BallisticsAndArmorRealism.cs`, `CloseCombatAndSupport.cs`, `Plugin.cs`)**:
+  * Resolved all `5` remaining generic `"Killed in Action"` fallback cases (armor-penetration crew attribution snapshots, remote Co-op projectile visual/RPC attribution via `PhotonNetwork.ExecuteRpc` + `SyncSoldier.UpdateSoldierLife`/`SyncDeath`, incapacitated-to-fatal attribution carry-through, live death-panel attribution upgrade, and generic fallback protection) plus 1-line `[PlayerDeath]` logging.
+* **Live Vehicle-Aware Squad Map & 3D Marker Icons (`SquadMapAndWorldMarkers.cs`, `AiCore.cs`, `AiCore.WorldQuery.cs`, `CombinedArmsAndTurrets.cs`)**:
+  * Dynamically overrides both friendly and enemy squad map (`M`) and 3D marker icons (`Squad.GetMarkerIcon`) from live mounted vehicles (`mkr_plane` for combat aircraft, `mkr_tank` for tanks & armored non-transport combat wheeled vehicles `>= 6mm`, `mkr_mechanized` for armored APCs/halftracks `>= 6mm`).
+* **Calm Auto Battle Camera (`PlayerVisualsAndReloadQoL.cs`, `VisionConfig.cs`, `ConfigMenuAndHud.cs`, `Plugin.cs`)**:
+  * Added toggleable `EnableCalmAutoCamera` (`F6 -> 5. Optimizations & QoL`, default `ON`, `6` `shared=1` `CameraDirector` patches): enforces a `3.5s` minimum shot hold + `1.5s` cut cooldown, gates off vanilla's `0`-grace `0.8s` lookahead obstacle pre-cuts and instant `TwoShot` enemy-drop aborts (lingers `~2s` on the victor), extends `shotDurationRange` (`10–16s`), `blockedGraceSeconds` (`1.35s`), and too-close grace (`1.0s`), softens damping/handheld jitter (tuned separately for ground vs. air targets), eliminates 50Hz vehicle/plane render stutter via `LateUpdate`, and extends respawn-menu hover suppression (`1.5s -> 4.5s`).
+* **Engine Limits Documentation (`docs/er2-engine-limits.md`)**:
+  * Documented vanilla's incapacitated human player bleed-out skip (`Soldier.FixedUpdate` early return when `IsPlayer()` && `life_total < 80`) under untouched vanilla/modded parity notes.
+
 ## `v0.10.9` — Hitch Elimination, .NET 6 / IL2CPP Wrapper Churn Reduction & Phase Memory Profiling
 * **Eliminated Mid-Match `LoadBattle()` Stutters (`MapPickerMenu.cs`)**:
   * Stopped `StepBackgroundPreloadCatalog` from deserializing `215+` missions every `6` frames during live gameplay when the `F5` map picker is closed (removing `25–103ms` `ModBMUpdate` frame spikes).

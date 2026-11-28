@@ -1529,7 +1529,7 @@ namespace EasyRed2HumanAI
 
             if (!g0RealPrimary && !g1RealPrimary && !g2RealPrimary && !hasInventoryRealPrimary)
             {
-                bool isPlayerSquad = sq != null && sq.IsPlayerInSquad();
+                bool isPlayerSquad = sq != null && AiCore.HasAnyHumanPlayerInSquad(sq);
                 bool isRetreatingCrew = onRetreatTask && sq != null && AiCore.IsTrueVehicleCrewSquad(sq) && !isPlayerSquad;
                 if (!isRetreatingCrew && (!onRetreatTask || isPlayerSquad || board.HasActiveThreat || soldier.GetSuppressionValue() >= 8))
                     needUrgentPrimary = true;
