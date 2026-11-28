@@ -548,6 +548,7 @@ namespace EasyRed2HumanAI
                         return;
 
                     AiCore.SoldierFastHandles h = AiCore.GetOrCreateSoldierHandles(__instance);
+                    AiCore.InvalidateSoldierInventoryCache(h);
                     SoldierAI ai = h != null ? h.Ai : __instance.aiController;
                     if (ai != null)
                     {

@@ -41,6 +41,8 @@ namespace EasyRed2HumanAI
             new Dictionary<string, ThrowablePrefabInfo>(64, StringComparer.OrdinalIgnoreCase);
         private static readonly HashSet<IntPtr> _nonMineSpawnedItemPtrs = new HashSet<IntPtr>(512);
         private static float _nextActiveMineScanTime;
+        private static int _activeMineScanCursor;
+        private static float _nextActiveMineChunkTime;
 
         private static readonly HashSet<IntPtr> _confirmedVehicleCrewSquads = new HashSet<IntPtr>(64);
         private static readonly HashSet<IntPtr> _confirmedPlaneCrewSquads = new HashSet<IntPtr>(32);
@@ -1493,7 +1495,7 @@ namespace EasyRed2HumanAI
             if (ignoreRootPtr == IntPtr.Zero && !ignoreVehicles)
                 return true;
 
-            if (!ShouldIgnoreEnvCollider(envHit.collider, ignoreRootPtr, ignoreVehicles))
+            if (!ShouldIgnoreEnvColliderHit(in envHit, ignoreRootPtr, ignoreVehicles))
                 return true;
 
             if (_envRayScratch == null)
@@ -1506,7 +1508,7 @@ namespace EasyRed2HumanAI
             for (int i = 0; i < hitCount; i++)
             {
                 RaycastHit cand = _envRayScratch[i];
-                if (ShouldIgnoreEnvCollider(cand.collider, ignoreRootPtr, ignoreVehicles))
+                if (ShouldIgnoreEnvColliderHit(in cand, ignoreRootPtr, ignoreVehicles))
                     continue;
 
                 float dSq = (cand.point - origin).sqrMagnitude;
@@ -1675,14 +1677,51 @@ namespace EasyRed2HumanAI
             return meta;
         }
 
-        private static bool ShouldIgnoreEnvCollider(Collider col, IntPtr ignoreRootPtr, bool ignoreAllVehicles)
+        private static ColliderEnvMeta GetColliderEnvMetaFromHit(in RaycastHit hit)
         {
-            if ((!ignoreAllVehicles && ignoreRootPtr == IntPtr.Zero) || ReferenceEquals(col, null) || col == null)
+            int colId = hit.colliderInstanceID;
+            if (colId != 0 && _vehicleColliderCacheById.TryGetValue(colId, out ColliderEnvMeta cached))
+                return cached;
+
+            ColliderEnvMeta meta = GetColliderEnvMeta(hit.collider);
+            if (colId != 0)
+            {
+                if (_vehicleColliderCacheById.Count > 1024)
+                    _vehicleColliderCacheById.Clear();
+                _vehicleColliderCacheById[colId] = meta;
+            }
+            return meta;
+        }
+
+        private static bool ShouldIgnoreEnvColliderHit(in RaycastHit hit, IntPtr ignoreRootPtr, bool ignoreAllVehicles)
+        {
+            if (!ignoreAllVehicles && ignoreRootPtr == IntPtr.Zero)
                 return false;
 
-            ColliderEnvMeta meta = GetColliderEnvMeta(col);
+            ColliderEnvMeta meta = GetColliderEnvMetaFromHit(in hit);
             return (ignoreAllVehicles && meta.IsVehicle) ||
                    (ignoreRootPtr != IntPtr.Zero && meta.RootPtr == ignoreRootPtr);
+        }
+
+        /// <summary>
+        /// Non-allocating octree query backed by a cleared reusable IL2CPP list.
+        /// Callers must finish reading results before calling this helper again.
+        /// </summary>
+        public static Il2CppSystem.Collections.Generic.List<AiDestination> GetNearbyCoversNonAlloc(
+            PointOctree<AiDestination> octree,
+            Vector3 pos,
+            float radius)
+        {
+            if (octree == null)
+                return null;
+
+            if (_sharedOctreeCoverResults == null)
+                _sharedOctreeCoverResults = new Il2CppSystem.Collections.Generic.List<AiDestination>(64);
+            else
+                _sharedOctreeCoverResults.Clear();
+
+            octree.GetNearbyNonAlloc(pos, radius, _sharedOctreeCoverResults);
+            return _sharedOctreeCoverResults;
         }
 
         /// <summary>
@@ -1690,6 +1729,12 @@ namespace EasyRed2HumanAI
         /// or chassis so foot bots never vault onto, or snap walkable ground destinations onto, vehicle roofs.
         /// </summary>
         public static bool IsVehicleCollider(Collider col) => GetColliderEnvMeta(col).IsVehicle;
+
+        /// <summary>
+        /// Zero-allocation <see cref="RaycastHit.colliderInstanceID"/> overload of <see cref="IsVehicleCollider"/>.
+        /// </summary>
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        public static bool IsVehicleColliderHit(in RaycastHit hit) => GetColliderEnvMetaFromHit(in hit).IsVehicle;
 
         /// <summary>
         /// Returns <c>true</c> if a dismounted foot bot's feet are currently resting on top of a <see cref="Vehicle"/> collider.
@@ -1703,7 +1748,7 @@ namespace EasyRed2HumanAI
                        1.15f,
                        GetSolidEnvironmentMask(),
                        QueryTriggerInteraction.Ignore) &&
-                   IsVehicleCollider(hit.collider);
+                   GetColliderEnvMetaFromHit(in hit).IsVehicle;
         }
 
         private static readonly Vector3 BridgeDiagNE = new Vector3(0.70710678f, 0f, 0.70710678f);
@@ -2143,10 +2188,10 @@ namespace EasyRed2HumanAI
                         right.y = 0f;
                         right = right.sqrMagnitude > 0.001f ? right.normalized : new Vector3(fwd.z, 0f, -fwd.x);
 
-                        MovableVehicle mv = v.TryCast<MovableVehicle>();
+                        MovableVehicle mv = vh.Movable;
                         float speedMs = mv != null ? Mathf.Abs(mv.GetCurrentSpeed()) : 0f;
-                        Rigidbody rb = mv != null ? mv.rb : null;
-                        Vector3 rbVel = (rb != null && rb.Pointer != IntPtr.Zero) ? rb.velocity : Vector3.zero;
+                        Rigidbody rb = GetCachedVehicleRb(vh);
+                        Vector3 rbVel = rb != null ? rb.velocity : Vector3.zero;
                         float rbFlatSpeed = Mathf.Sqrt(rbVel.x * rbVel.x + rbVel.z * rbVel.z);
 
                         Vector3 estVel = vh.EstimatedFlatVel;
@@ -2162,18 +2207,21 @@ namespace EasyRed2HumanAI
                         bool isReversing = (aiVeh != null && aiVeh.going_in_retro) ||
                                            (bestVelSpeed >= 0.35f && Vector3.Dot(new Vector3(bestVel.x / bestVelSpeed, 0f, bestVel.z / bestVelSpeed), fwd) < -0.35f) ||
                                            (isPlayerDriven && v.movingDir.y < -0.10f);
+                        A.d vehPath = aiVeh != null && !aiVeh.placingInUnstuck && !isReversing && !aiVeh.stopToShoot
+                            ? GetCachedAiVehiclePath(vh, aiVeh)
+                            : null;
                         bool aiMovingIntent = aiVeh != null &&
                                               !aiVeh.placingInUnstuck &&
                                               (isReversing ||
                                                (!aiVeh.stopToShoot &&
-                                                aiVeh.path != null &&
-                                                aiVeh.path.NodesCount > 0 &&
+                                                vehPath != null &&
+                                                vehPath.NodesCount > 0 &&
                                                 now >= aiVeh.resumeDriveTime - 0.50f));
 
                         bool hullPivoting = false;
                         if (vh.IsTank && effSpeed < 0.45f)
                         {
-                            VehicleTank tank = v.TryCast<VehicleTank>();
+                            VehicleTank tank = vh.Tank;
                             if (tank != null && Mathf.Abs(tank.curRotationSpeed) >= 0.15f)
                                 hullPivoting = true;
                         }
@@ -2911,6 +2959,8 @@ namespace EasyRed2HumanAI
             WorldSoldierCount = 0;
             WorldInjuredSoldierCount = 0;
             WorldAirSquadCount = 0;
+            CachedLocalPlayerHandles = null;
+            CachedLocalPlayerSquadPtr = IntPtr.Zero;
             _worldSquadIndexByPtr.Clear();
             _seenWorldSoldierPtrs.Clear();
 
@@ -2990,6 +3040,11 @@ namespace EasyRed2HumanAI
                             bool isOnVeh = u.IsOnVehicle();
                             if (isHuman)
                             {
+                                if (u.IsPlayer())
+                                {
+                                    CachedLocalPlayerHandles = uHandles;
+                                    CachedLocalPlayerSquadPtr = sq.Pointer;
+                                }
                                 float curYaw = uHandles.Tr.eulerAngles.y;
                                 bool vehActive = isOnVeh && (!u.IsPlayer() || !u.IsAI());
                                 if (uHandles.LastHumanActiveTime <= 0f ||
@@ -3707,10 +3762,15 @@ namespace EasyRed2HumanAI
         /// </summary>
         public static VirtualItem FindThrowableGrenadeInInventory(Soldier s, bool findAtGrenade, bool findFragGrenade)
         {
-            if (s == null || s.inventory == null || s.inventory.inventory == null)
+            if (ReferenceEquals(s, null) || s == null || s.Pointer == IntPtr.Zero)
                 return null;
 
-            var items = s.inventory.inventory.items;
+            SoldierFastHandles sh = GetOrCreateSoldierHandles(s);
+            InventoryManager invMgr = sh != null ? GetCachedInventory(sh) : s.inventory;
+            if (invMgr == null || invMgr.inventory == null)
+                return null;
+
+            var items = invMgr.inventory.items;
             if (items == null)
                 return null;
 
@@ -3722,13 +3782,17 @@ namespace EasyRed2HumanAI
                 if (ReferenceEquals(vi, null) || vi == null || vi.Pointer == IntPtr.Zero)
                     continue;
 
-                if (IsPressureMineItem(vi, out _))
-                    continue;
-
                 if (vi.TryCast<VirtualSmokeGrenade>() != null)
                     continue;
 
                 bool isAt = vi.TryCast<VirtualATGrenade>() != null;
+                bool isGren = isAt || vi.TryCast<VirtualGrenade>() != null;
+                if (!isGren)
+                    continue;
+
+                if (IsPressureMineItem(vi, out _))
+                    continue;
+
                 if (isAt)
                 {
                     if (findAtGrenade)
@@ -3736,19 +3800,16 @@ namespace EasyRed2HumanAI
                     continue;
                 }
 
-                if (vi.TryCast<VirtualGrenade>() != null)
+                if (findFragGrenade)
+                    return vi;
+                if (findAtGrenade && fallbackAt == null &&
+                    TryGetThrowablePrefabInfo(vi, out ThrowablePrefabInfo info) &&
+                    (info.Type == GrenadeType.ATGrenade ||
+                     info.Type == GrenadeType.phosporusGrenade ||
+                     info.MaxPenetration >= 16.0f ||
+                     info.IsSatchelOrHeavyDemo))
                 {
-                    if (findFragGrenade)
-                        return vi;
-                    if (findAtGrenade && fallbackAt == null &&
-                        TryGetThrowablePrefabInfo(vi, out ThrowablePrefabInfo info) &&
-                        (info.Type == GrenadeType.ATGrenade ||
-                         info.Type == GrenadeType.phosporusGrenade ||
-                         info.MaxPenetration >= 16.0f ||
-                         info.IsSatchelOrHeavyDemo))
-                    {
-                        fallbackAt = vi;
-                    }
+                    fallbackAt = vi;
                 }
             }
 
@@ -3790,46 +3851,71 @@ namespace EasyRed2HumanAI
         public static void RefreshActiveLandMinesIfDue()
         {
             float now = Time.time;
-            if (now < _nextActiveMineScanTime && now >= _nextActiveMineScanTime - 2.0f)
+            bool runTrackedRefresh = now >= _nextActiveMineScanTime || now < _nextActiveMineScanTime - 2.0f;
+            bool runSpawnedChunk = now >= _nextActiveMineChunkTime || now < _nextActiveMineChunkTime - 2.5f;
+            if (!runTrackedRefresh && !runSpawnedChunk)
                 return;
 
-            _nextActiveMineScanTime = now + 0.50f;
-            int prevCount = ActiveLandMineCount;
-            int writeIdx = 0;
-
-            // Keep recently registered or still-live tracked mines up front, culling detonated/expired entries
-            for (int i = 0; i < prevCount; i++)
+            if (runTrackedRefresh)
             {
-                ActiveLandMine m = ActiveLandMines[i];
-                if (now > m.ExpireTime)
-                    continue;
+                _nextActiveMineScanTime = now + 0.50f;
+                int prevCount = ActiveLandMineCount;
+                int writeIdx = 0;
 
-                if (!ReferenceEquals(m.Ref, null))
+                // Keep recently registered or still-live tracked mines up front, culling detonated/expired entries
+                for (int i = 0; i < prevCount; i++)
                 {
-                    if (m.Ref == null || m.Ref.Pointer == IntPtr.Zero || m.Ref.exploded)
+                    ActiveLandMine m = ActiveLandMines[i];
+                    if (now > m.ExpireTime)
                         continue;
 
-                    if (m.Ref.transform != null)
-                        m.Pos = m.Ref.transform.position;
-                }
+                    if (!ReferenceEquals(m.Ref, null))
+                    {
+                        if (m.Ref == null || m.Ref.Pointer == IntPtr.Zero || m.Ref.exploded)
+                            continue;
 
-                ActiveLandMines[writeIdx++] = m;
+                        if (m.Ref.transform != null)
+                            m.Pos = m.Ref.transform.position;
+                    }
+
+                    ActiveLandMines[writeIdx++] = m;
+                }
+                if (prevCount > writeIdx)
+                    Array.Clear(ActiveLandMines, writeIdx, prevCount - writeIdx);
+                ActiveLandMineCount = writeIdx;
             }
-            if (prevCount > writeIdx)
-                Array.Clear(ActiveLandMines, writeIdx, prevCount - writeIdx);
-            ActiveLandMineCount = writeIdx;
+
+            if (!runSpawnedChunk)
+                return;
 
             try
             {
                 var spawned = ItemObject.spawnedItems;
                 if (spawned == null)
+                {
+                    _activeMineScanCursor = 0;
+                    _nextActiveMineChunkTime = now + 1.0f;
                     return;
+                }
 
                 if (_nonMineSpawnedItemPtrs.Count > 4096)
                     _nonMineSpawnedItemPtrs.Clear();
 
                 int count = spawned.Count;
-                for (int i = 0; i < count; i++)
+                if (count <= 0)
+                {
+                    _activeMineScanCursor = 0;
+                    _nextActiveMineChunkTime = now + 1.0f;
+                    return;
+                }
+
+                if (_activeMineScanCursor < 0 || _activeMineScanCursor >= count)
+                    _activeMineScanCursor = 0;
+
+                const int MaxItemsPerChunk = 64;
+                int start = _activeMineScanCursor;
+                int end = Math.Min(count, start + MaxItemsPerChunk);
+                for (int i = start; i < end; i++)
                 {
                     ItemObject io = spawned[i];
                     if (ReferenceEquals(io, null) || io == null || io.Pointer == IntPtr.Zero)
@@ -3852,8 +3938,23 @@ namespace EasyRed2HumanAI
 
                     RegisterPlacedMine(ig.transform.position, ig, ig.fuseType == FuseType.VehiclePressionFuse);
                 }
+
+                if (end >= count)
+                {
+                    _activeMineScanCursor = 0;
+                    _nextActiveMineChunkTime = now + 1.0f;
+                }
+                else
+                {
+                    _activeMineScanCursor = end;
+                    _nextActiveMineChunkTime = now + 0.12f;
+                }
             }
-            catch { }
+            catch
+            {
+                _activeMineScanCursor = 0;
+                _nextActiveMineChunkTime = now + 1.0f;
+            }
         }
 
         public static bool TryGetNearbyKnownMine(Vector3 pos, float maxRadius, bool vehiclesOnly, out Vector3 minePos)
@@ -3894,6 +3995,12 @@ namespace EasyRed2HumanAI
             _bridgeCellCache.Clear();
             _terrainColliderCache.Clear();
             _vehicleColliderCache.Clear();
+            _vehicleColliderCacheById.Clear();
+            if (_sharedOctreeCoverResults != null)
+                _sharedOctreeCoverResults.Clear();
+            CachedLocalPlayerHandles = null;
+            CachedLocalPlayerSquadPtr = IntPtr.Zero;
+            ClearAliveCreaturesCache();
             _sameSideFactionCache.Clear();
             _enemyFactionCache.Clear();
             _enemySpawnDirCache.Clear();
@@ -3937,6 +4044,8 @@ namespace EasyRed2HumanAI
                 Array.Clear(ActiveLandMines, 0, ActiveLandMineCount);
             ActiveLandMineCount = 0;
             _nextActiveMineScanTime = 0f;
+            _activeMineScanCursor = 0;
+            _nextActiveMineChunkTime = 0f;
             WorldSquadCount = 0;
             WorldSoldierCount = 0;
             WorldInjuredSoldierCount = 0;
@@ -4108,10 +4217,7 @@ namespace EasyRed2HumanAI
 
         public static bool IsCombatCoverIntact(CombatCover cc)
         {
-            if (cc == null || cc.Pointer == IntPtr.Zero || cc.destroyed || !cc.enabled)
-                return false;
-            GameObject go = cc.gameObject;
-            return go != null && go.activeInHierarchy;
+            return !ReferenceEquals(cc, null) && cc != null && cc.Pointer != IntPtr.Zero && !cc.destroyed && cc.isActiveAndEnabled;
         }
 
         public static void AssignBotCoverOrDestination(

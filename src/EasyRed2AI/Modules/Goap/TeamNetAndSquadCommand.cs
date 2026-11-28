@@ -1151,6 +1151,7 @@ namespace EasyRed2HumanAI
                 ? preferredTarget
                 : soldier.Cast<Spottable>();
             soldier.Throw(smokeItem, safeTarget);
+            AiCore.InvalidateSoldierInventoryCache(h);
             return true;
         }
 
@@ -1266,11 +1267,12 @@ namespace EasyRed2HumanAI
             var octree = CoverManager.staticCovers;
             if (octree != null)
             {
-                var nearby = octree.GetNearby(searchAnchor, 14.0f);
-                if (nearby != null && nearby.Length > 0)
+                var nearby = AiCore.GetNearbyCoversNonAlloc(octree, searchAnchor, 14.0f);
+                if (nearby != null && nearby.Count > 0)
                 {
                     float bestCovDistSq = float.MaxValue;
-                    for (int i = 0; i < nearby.Length; i++)
+                    int nearbyCount = nearby.Count;
+                    for (int i = 0; i < nearbyCount; i++)
                     {
                         AiDestination d = nearby[i];
                         CombatCover cc = d != null ? d.TryCast<CombatCover>() : null;
@@ -2280,15 +2282,15 @@ namespace EasyRed2HumanAI
                 return;
 
             Vector3 midPoint = Vector3.Lerp(squadCenter, threatPos, 0.45f);
-            var nearby = octree.GetNearby(midPoint, 22.0f);
-            if (nearby == null || nearby.Length == 0)
+            var nearby = AiCore.GetNearbyCoversNonAlloc(octree, midPoint, 22.0f);
+            if (nearby == null || nearby.Count == 0)
                 return;
 
             Vector3 rightPerp = new Vector3(threatDir.z, 0f, -threatDir.x);
             float bestLeftScore = -999f;
             float bestRightScore = -999f;
 
-            int count = nearby.Length;
+            int count = nearby.Count;
             for (int i = 0; i < count; i++)
             {
                 AiDestination dest = nearby[i];

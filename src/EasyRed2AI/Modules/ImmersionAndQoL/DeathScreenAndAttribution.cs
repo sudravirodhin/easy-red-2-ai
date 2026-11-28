@@ -163,6 +163,14 @@ namespace EasyRed2HumanAI
             if (!VisionConfig.EnableMod.Value || !VisionConfig.EnableQuickTapSpot.Value || menuOpen)
                 return;
 
+            VirtualGamepad gpad = GamepadsAPI.GetGamepad(0);
+            if (gpad == null || !gpad.GetButtonUp(GameInput.OrdersMenu, out float heldDuration, 0))
+                return;
+
+            float holdThreshold = PlayerController.holdButtonDuration > 0.05f ? PlayerController.holdButtonDuration : 0.25f;
+            if (heldDuration <= 0f || heldDuration >= holdThreshold)
+                return;
+
             PlayerController pc = PlayerController.currentController;
             Soldier player = pc != null ? pc.ControlledCharacter : null;
             if (pc != null &&
@@ -172,15 +180,7 @@ namespace EasyRed2HumanAI
                 !player.HasSurrended() &&
                 player.joinedSquad != null)
             {
-                VirtualGamepad gpad = GamepadsAPI.GetGamepad(0);
-                if (gpad != null && gpad.GetButtonUp(GameInput.OrdersMenu, out float heldDuration, 0))
-                {
-                    float holdThreshold = PlayerController.holdButtonDuration > 0.05f ? PlayerController.holdButtonDuration : 0.25f;
-                    if (heldDuration > 0f && heldDuration < holdThreshold)
-                    {
-                        PlayerController.TrySpotInLookDirection();
-                    }
-                }
+                PlayerController.TrySpotInLookDirection();
             }
         }
 

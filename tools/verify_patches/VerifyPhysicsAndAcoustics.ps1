@@ -50,7 +50,7 @@ $visThinWallPart = Slice-LinesBetween $visLines '^\s*internal static bool IsObse
 
 $wqLines  = Get-Content $wqFile
 $wqEnvPart = Slice-LinesBetween $wqLines '^\s*public static bool RaycastEnvironment\(' '^\s*public static bool HasLowCeilingOverhead\(' -2
-$wqIgnoreColPart = Slice-LinesBetween $wqLines '^\s*private static bool ShouldIgnoreEnvCollider\(' '^\s*public static bool IsVehicleCollider\(' -5
+$wqIgnoreColPart = Slice-LinesBetween $wqLines '^\s*private static ColliderEnvMeta GetColliderEnvMetaFromHit\(' '^\s*public static Il2CppSystem\.Collections\.Generic\.List' -4
 $wqSnapProbe  = Slice-LinesBetween $wqLines '^\s*public static bool TrySnapWalkableGroundProbe\(' 'snappedGroundPos = gHit\.point;\s*$' 2
 $wqBarrelPart = Slice-LinesBetween $wqLines '^\s*public static float GetBarrelHeightForPose\(' '^\s*return 1\.24f;' 2
 $wqSmokeRiskPart = Slice-LinesBetween $wqLines '^\s*public static bool EvaluateBlindSmokeTraversalRisk\(' '^\s*public static bool IsBlindSmokePathHighRisk\(' -2
@@ -337,6 +337,7 @@ namespace UnityEngine
         public Vector3 normal;
         internal Collider _collider;
         public static int ColliderAccessCount;
+        public int colliderInstanceID => _collider != null ? System.Runtime.CompilerServices.RuntimeHelpers.GetHashCode(_collider) : 0;
         public Collider collider
         {
             get { ColliderAccessCount++; return _collider; }
@@ -729,6 +730,7 @@ namespace EasyRed2HumanAI
         {
             public Soldier Ref;
             public Transform Tr;
+            public Transform RootTr;
             public GoapStub Goap;
         }
 
@@ -769,6 +771,7 @@ namespace EasyRed2HumanAI
         public static BattleTheaterSnapshot GetBattleTheaterSnapshot() => CurrentTheater;
 
         public static bool TryGetSoldierHandles(IntPtr ptr, out SoldierFastHandles h) => MockHandles.TryGetValue(ptr, out h);
+        public static SoldierFastHandles GetOrCreateSoldierHandles(Soldier s) => s != null && MockHandles.TryGetValue(s.Pointer, out SoldierFastHandles h) ? h : null;
 
         public static int GetDeterministicHash(IntPtr ptr, int salt)
         {
@@ -808,6 +811,7 @@ namespace EasyRed2HumanAI
             public bool IsVehicle;
             public IntPtr RootPtr;
         }
+        private static readonly Dictionary<int, ColliderEnvMeta> _vehicleColliderCacheById = new Dictionary<int, ColliderEnvMeta>(64);
         private static Il2CppInterop.Runtime.InteropTypes.Arrays.Il2CppStructArray<RaycastHit> _envRayScratch;
         public static int GetSolidEnvironmentMask() => 1;
         public static int GetMovementObstacleMask() => 3;

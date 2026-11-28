@@ -101,12 +101,16 @@ namespace EasyRed2HumanAI
         /// Catches rifle/SMG barrels clipping through thin walls (including leaning around corners into a wall)
         /// without falsely blocking legitimate shots over waist-high sandbags or window sills where face-to-muzzle is clear.
         /// </summary>
-        internal static bool IsBotGunClippedThroughWall(Soldier shooter, bool targetIsVehicle = false)
+        internal static bool IsBotGunClippedThroughWall(
+            Soldier shooter,
+            bool targetIsVehicle = false,
+            GenericGun preloadedGun = null,
+            AiCore.SoldierFastHandles shooterH = null)
         {
             if (shooter == null || AiCore.IsSoldierInVehicleOrTransition(shooter))
                 return false;
 
-            GenericGun heldGun = shooter.GetHeldGun();
+            GenericGun heldGun = preloadedGun ?? shooter.GetHeldGun();
             if (heldGun == null)
                 return false;
 
@@ -114,8 +118,12 @@ namespace EasyRed2HumanAI
             if (muzzlePos.sqrMagnitude < 0.01f)
                 muzzlePos = shooter.GunPosition();
 
-            Transform myRoot = shooter.transform != null ? shooter.transform.root : null;
-            Vector3 basePos = shooter.transform.position;
+            AiCore.SoldierFastHandles sh = shooterH ?? AiCore.GetOrCreateSoldierHandles(shooter);
+            Transform tr = (sh != null && !ReferenceEquals(sh.Tr, null) && sh.Tr != null) ? sh.Tr : shooter.transform;
+            if (tr == null)
+                return false;
+            Transform myRoot = (sh != null && !ReferenceEquals(sh.RootTr, null) && sh.RootTr != null) ? sh.RootTr : tr.root;
+            Vector3 basePos = tr.position;
             Vector3 unleanedTorso = basePos + Vector3.up * AiCore.GetBarrelHeightForPose(shooter.m_pose);
             Vector3 facePos = shooter.FacePosition();
             Vector3 leanedTorso = new Vector3(facePos.x, unleanedTorso.y, facePos.z);
@@ -160,24 +168,30 @@ namespace EasyRed2HumanAI
             if (shooter == null || distToTarget <= 0.30f)
                 return false;
 
-            if (AiCore.HorizontalAngleToDirection(shooter, targetPos - shooter.transform.position) > 35f)
+            AiCore.SoldierFastHandles sh = AiCore.GetOrCreateSoldierHandles(shooter);
+            Transform tr = (sh != null && !ReferenceEquals(sh.Tr, null) && sh.Tr != null) ? sh.Tr : shooter.transform;
+            if (tr == null)
+                return false;
+            Transform myRoot = (sh != null && !ReferenceEquals(sh.RootTr, null) && sh.RootTr != null) ? sh.RootTr : tr.root;
+            Vector3 soldierPos = tr.position;
+
+            if (AiCore.HorizontalAngleToDirection(shooter, targetPos - soldierPos) > 35f)
                 return false;
 
             float leanAngle = shooter.LeanAngle;
             bool activelyLeaning = Mathf.Abs(leanAngle) >= 0.45f;
+            GenericGun heldGun = shooter.GetHeldGun();
 
-            if (IsBotGunClippedThroughWall(shooter, targetIsVehicle))
+            if (IsBotGunClippedThroughWall(shooter, targetIsVehicle, heldGun, sh))
                 return true;
 
-            Transform myRoot = shooter.transform.root;
-            Vector3 soldierPos = shooter.transform.position;
             float barrelH = AiCore.GetBarrelHeightForPose(shooter.m_pose);
 
             float midLowWallDist = distToTarget > 3.5f ? Mathf.Min(12.0f, distToTarget * 0.45f) : (distToTarget - 0.35f);
             Vector3 spineAtBarrel = soldierPos + Vector3.up * barrelH;
-            if (Mathf.Abs(leanAngle) > 0.15f && shooter.transform != null)
+            if (Mathf.Abs(leanAngle) > 0.15f)
             {
-                spineAtBarrel += shooter.transform.right * (leanAngle * 0.40f);
+                spineAtBarrel += tr.right * (leanAngle * 0.40f);
             }
             Vector3 toTargetFromSpine = targetPos - spineAtBarrel;
             if (toTargetFromSpine.sqrMagnitude > 0.04f)
@@ -207,7 +221,6 @@ namespace EasyRed2HumanAI
             if (!shooter.isInBodyAnimation && !shooter.IsReloading && shooter.pointingGun)
             {
                 Vector3 gunPos = shooter.GunPosition();
-                GenericGun heldGun = shooter.GetHeldGun();
                 Vector3 receiverPos = (heldGun != null && heldGun.transform != null) ? heldGun.transform.position : gunPos;
 
                 // Only clamp against sub-ground-plane bone anomalies; never lift rays up over low walls.
@@ -306,12 +319,12 @@ namespace EasyRed2HumanAI
             string myFaction = shooterH != null ? AiCore.GetCachedFaction(shooterH, now) : AiCore.InternFaction(shooter.faction);
             IntPtr myPtr = shooter.Pointer;
 
-            Soldier player = Soldier.CurrentControlledSoldierOrNull();
+            AiCore.LocalPlayerFastHandles lp = AiCore.GetCachedLocalPlayerHandles();
+            Soldier player = lp.HasPlayer ? lp.Soldier : null;
             if (player != null &&
-                player.IsAlive &&
                 player.Pointer != myPtr)
             {
-                string pFaction = AiCore.GetCachedFaction(player);
+                string pFaction = lp.Faction;
                 if (!string.IsNullOrEmpty(pFaction) && AiCore.AreSameSideFactions(myFaction, pFaction))
                 {
                     if (CheckSingleFriendlyInCone(gunPos, fireDir, maxCheckDist, allowedConeDeg, corridorWidth, shooter, player, out sidestepDir))
@@ -322,30 +335,12 @@ namespace EasyRed2HumanAI
                 }
             }
 
-            Squad mySquad = shooter.joinedSquad;
-            if (mySquad != null && mySquad.units != null)
-            {
-                var units = mySquad.units;
-                int c = units.Count;
-                for (int i = 0; i < c; i++)
-                {
-                    Soldier f = units[i];
-                    if (ReferenceEquals(f, null) || f == null || !f.IsAlive || f.Pointer == myPtr) continue;
-                    if (CheckSingleFriendlyInCone(gunPos, fireDir, maxCheckDist, allowedConeDeg, corridorWidth, shooter, f, out sidestepDir))
-                    {
-                        blockingFriend = f;
-                        return true;
-                    }
-                }
-            }
-
-            // Scan flat WorldSoldiers directly so detached vehicle crewmen, remote Co-op human players,
+            // Scan flat WorldSoldiers directly so squadmates, detached vehicle crewmen, remote Co-op human players,
             // and allied sub-factions are all protected with pure C# L1-cache spatial culling.
             AiCore.EnsureWorldSnapshot();
             int solCount = AiCore.WorldSoldierCount;
             if (solCount > 0)
             {
-                IntPtr mySqPtr = mySquad != null ? mySquad.Pointer : IntPtr.Zero;
                 IntPtr playerPtr = player != null ? player.Pointer : IntPtr.Zero;
                 float maxDistWithMarginSq = (maxCheckDist + 3.0f) * (maxCheckDist + 3.0f);
                 var soldiers = AiCore.WorldSoldiers;
@@ -353,7 +348,7 @@ namespace EasyRed2HumanAI
                 for (int i = 0; i < solCount; i++)
                 {
                     ref AiCore.SoldierSnapshot solSnap = ref soldiers[i];
-                    if (solSnap.Ptr == myPtr || solSnap.Ptr == playerPtr || (mySqPtr != IntPtr.Zero && solSnap.SquadPtr == mySqPtr))
+                    if (solSnap.Ptr == myPtr || solSnap.Ptr == playerPtr)
                         continue;
 
                     // Pure C# L1-cache spatial cull BEFORE any string/IL2CPP boundary crossing

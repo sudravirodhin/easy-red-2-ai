@@ -750,8 +750,8 @@ namespace EasyRed2HumanAI
             if (vehOctree == null || soldier == null)
                 return false;
 
-            var nearbyVehs = vehOctree.GetNearby(myPos, 17.5f);
-            if (nearbyVehs == null || nearbyVehs.Length == 0)
+            var nearbyVehs = AiCore.GetNearbyCoversNonAlloc(vehOctree, myPos, 17.5f);
+            if (nearbyVehs == null || nearbyVehs.Count == 0)
                 return false;
 
             threatDir.y = 0f;
@@ -764,7 +764,7 @@ namespace EasyRed2HumanAI
             float bestScore = float.MaxValue;
             bool found = false;
 
-            int count = nearbyVehs.Length;
+            int count = nearbyVehs.Count;
             for (int i = 0; i < count; i++)
             {
                 AiDestination dest = nearbyVehs[i];
@@ -1027,8 +1027,8 @@ namespace EasyRed2HumanAI
             if (octree == null)
                 return false;
 
-            var nearby = octree.GetNearby(myPos, 18.5f);
-            if (nearby == null || nearby.Length == 0)
+            var nearby = AiCore.GetNearbyCoversNonAlloc(octree, myPos, 18.5f);
+            if (nearby == null || nearby.Count == 0)
                 return false;
 
             string myFaction = AiCore.GetCachedFaction(h, now);
@@ -1040,7 +1040,7 @@ namespace EasyRed2HumanAI
             CombatCover bestVantage = null;
             float bestScore = float.MaxValue;
 
-            int count = nearby.Length;
+            int count = nearby.Count;
             for (int i = 0; i < count; i++)
             {
                 AiDestination dest = nearby[i];
@@ -1140,8 +1140,8 @@ namespace EasyRed2HumanAI
 
             float phaseAngle = ((int)(now / 22f) + (AiCore.GetDeterministicHash(h.Ptr, 521) & 7)) * 0.785398f;
             Vector3 patrolAnchor = objCenter + new Vector3(Mathf.Cos(phaseAngle), 0f, Mathf.Sin(phaseAngle)) * (objRad * 0.65f);
-            var nearby = octree.GetNearby(patrolAnchor, 14.0f);
-            if (nearby == null || nearby.Length == 0)
+            var nearby = AiCore.GetNearbyCoversNonAlloc(octree, patrolAnchor, 14.0f);
+            if (nearby == null || nearby.Count == 0)
                 return false;
 
             string fac = AiCore.GetCachedFaction(h, now);
@@ -1151,7 +1151,7 @@ namespace EasyRed2HumanAI
 
             CombatCover bestPatrolCover = null;
             float bestScore = float.MaxValue;
-            int count = nearby.Length;
+            int count = nearby.Count;
             for (int i = 0; i < count; i++)
             {
                 AiDestination dest = nearby[i];
@@ -1285,11 +1285,11 @@ namespace EasyRed2HumanAI
                 {
                     Vector3 coverSearchOrigin = inObjExposedDefender ? (myPos + threatDir * 6.0f) : myPos;
                     float coverSearchRadius = inObjExposedDefender ? 26.0f : (wantsVantage ? 18.5f : 13.5f);
-                    var nearby = octree.GetNearby(coverSearchOrigin, coverSearchRadius);
-                    if (nearby != null && nearby.Length > 0)
+                    var nearby = AiCore.GetNearbyCoversNonAlloc(octree, coverSearchOrigin, coverSearchRadius);
+                    if (nearby != null && nearby.Count > 0)
                     {
                         var unreachable = soldier.nonReachableCovers;
-                        int count = nearby.Length;
+                        int count = nearby.Count;
                         for (int i = 0; i < count; i++)
                         {
                             AiDestination dest = nearby[i];
@@ -2388,11 +2388,12 @@ namespace EasyRed2HumanAI
                         h.Combat.RotateFireFrame.Frame = -1;
                         if (h.Vision.LastKnownTarget.Target != null && h.Vision.LastKnownTarget.Target.Pointer == seqVisPtr)
                             h.Vision.LastKnownTarget = default;
+                        seqVisPtr = IntPtr.Zero;
                     }
 
-                    Spottable prevVis = __instance.visibleTarget;
+                    Spottable prevVis = seqVisPtr != IntPtr.Zero ? __instance.visibleTarget : null;
                     __state.PrevVisibleTarget = prevVis;
-                    __state.PrevVisibleTargetPtr = (!ReferenceEquals(prevVis, null) && prevVis != null) ? prevVis.Pointer : IntPtr.Zero;
+                    __state.PrevVisibleTargetPtr = (seqVisPtr != IntPtr.Zero && !ReferenceEquals(prevVis, null) && prevVis != null) ? prevVis.Pointer : IntPtr.Zero;
                     __state.PrevVisibleDist = __instance.distFromTarget;
                     __state.PrevNextAvailableShotFires = __instance.nextAvailableShotFires;
 
@@ -2403,7 +2404,7 @@ namespace EasyRed2HumanAI
                         __state.SkippedForPing = true;
                         if (AiCore.IsMultiplayerWithRemotePlayers() &&
                             Time.unscaledDeltaTime > 0.0205f &&
-                            (__instance.visibleTarget == null || __instance.distFromTarget > 35f))
+                            (seqVisPtr == IntPtr.Zero || __instance.distFromTarget > 35f))
                         {
                             // Also skip native SoldierAI.SequentialUpdate (pathfinding/octree cover queries)
                             // for bots not in close combat so the host frame finishes immediately.
@@ -2564,8 +2565,10 @@ namespace EasyRed2HumanAI
                     GetEffectivePeekParameters(soldier, vet01, out float maxPeekSupp, out float duckBackSupp, out float peekCooldown);
 
                     float nowTgtHold = Time.time;
-                    Spottable curVis = __instance.visibleTarget;
-                    IntPtr curVisPtr = (!ReferenceEquals(curVis, null) && curVis != null) ? curVis.Pointer : IntPtr.Zero;
+                    IntPtr curVisPtr = AiCore.GetRawVisibleTargetPtr(__instance);
+                    Spottable curVis = curVisPtr != IntPtr.Zero ? __instance.visibleTarget : null;
+                    if (curVisPtr != IntPtr.Zero && (ReferenceEquals(curVis, null) || curVis == null))
+                        curVisPtr = IntPtr.Zero;
 
                     // Target Commitment Hysteresis (Big Firefights):
                     // Native Soldier.GetBestVisibleEnemy (0x18074ADC0) wipes CurrentVisibleTarget and picks any enemy
@@ -2660,9 +2663,9 @@ namespace EasyRed2HumanAI
                     }
 
                     // Record visual contact for 15m Local Contact Callouts & Last-Known Suppression
-                    if (__instance.visibleTarget != null)
+                    if (curVis != null)
                     {
-                        RecordAndBroadcastVisualContact(soldier, __instance.visibleTarget);
+                        RecordAndBroadcastVisualContact(soldier, curVis);
                     }
 
                     // Lift any indoor or bridge soldier that vanilla AI placed into Prone
@@ -2708,10 +2711,10 @@ namespace EasyRed2HumanAI
                         bool timerExpiredAndCanCrouch = false;
                         if (!urgentDuck && Time.time > restoreAt)
                         {
-                            Vector3 peekTargetPos = AiCore.TryGetSpottableCenter(__instance.visibleTarget, out Vector3 validPeekPos)
+                            Vector3 peekTargetPos = AiCore.TryGetSpottableCenter(curVis, out Vector3 validPeekPos)
                                 ? validPeekPos
                                 : (soldier.transform.position + soldier.transform.forward * Mathf.Max(__instance.distFromTarget, 15f));
-                            bool peekTargetIsVeh = __instance.visibleTarget != null && __instance.visibleTarget.IsWheeledVehicleOrTank();
+                            bool peekTargetIsVeh = curVis != null && curVis.IsWheeledVehicleOrTank();
                             bool crouchClearNow = HasClearLineOfFireFromCrouch(soldier, peekTargetPos, __instance.distFromTarget, peekTargetIsVeh);
                             bool calmIndoorWindow = !crouchClearNow &&
                                                     curSuppNow < 12f &&
@@ -2756,10 +2759,10 @@ namespace EasyRed2HumanAI
 
                     bool isEvadingArmor = false;
                     if (VisionConfig.PreventSmallArmsFireAtTanks.Value &&
-                        __instance.visibleTarget != null &&
-                        __instance.visibleTarget.IsWheeledVehicleOrTank())
+                        curVis != null &&
+                        curVis.IsWheeledVehicleOrTank())
                     {
-                        Vehicle targetVeh = __instance.visibleTarget.TryCast<Vehicle>();
+                        Vehicle targetVeh = curVis.TryCast<Vehicle>();
                         if (targetVeh != null)
                         {
                             TryThrowNormalGrenadeAtVehicle(soldier, targetVeh, __instance.distFromTarget);
@@ -2780,6 +2783,8 @@ namespace EasyRed2HumanAI
                                     float crewDist = Vector3.Distance(soldier.transform.position, exposedCrew.transform.position);
                                     __instance.visibleTarget = crewSpottable;
                                     soldier.CurrentVisibleTarget = crewSpottable;
+                                    curVis = crewSpottable;
+                                    curVisPtr = crewSpottable != null ? crewSpottable.Pointer : IntPtr.Zero;
                                     __instance.distFromTarget = crewDist;
                                     GenericGun heldGun = soldier.GetHeldGun();
                                     bool inRange = heldGun == null || heldGun.DamageRange() >= crewDist;
@@ -2813,6 +2818,8 @@ namespace EasyRed2HumanAI
                                 {
                                     __instance.visibleTarget = altEnemy;
                                     soldier.CurrentVisibleTarget = altEnemy;
+                                    curVis = altEnemy;
+                                    curVisPtr = altEnemy != null ? altEnemy.Pointer : IntPtr.Zero;
                                     __instance.distFromTarget = altDist;
                                     GenericGun heldGun = soldier.GetHeldGun();
                                     bool inRange = heldGun != null && heldGun.DamageRange() >= altDist;
@@ -2833,6 +2840,8 @@ namespace EasyRed2HumanAI
                                     if (isEvadingArmor)
                                     {
                                         __instance.visibleTarget = null;
+                                        curVis = null;
+                                        curVisPtr = IntPtr.Zero;
                                     }
                                     if (Time.time >= h.Combat.NextTankDisciplineCountTime)
                                     {
@@ -2853,7 +2862,7 @@ namespace EasyRed2HumanAI
                             AiCore.HasUsableSmallArmsAmmo(soldier))
                         {
                             Vector3 myPosPrio = h.Tr.position;
-                            Spottable curVisPrio = __instance.visibleTarget;
+                            Spottable curVisPrio = curVis;
                             float curDistPrio = curVisPrio != null ? __instance.distFromTarget : 999f;
                             Spottable newPrioTarget = null;
                             float newPrioDist = curDistPrio;
@@ -2913,6 +2922,8 @@ namespace EasyRed2HumanAI
                             {
                                 __instance.visibleTarget = newPrioTarget;
                                 soldier.CurrentVisibleTarget = newPrioTarget;
+                                curVis = newPrioTarget;
+                                curVisPtr = newPrioTarget.Pointer;
                                 __instance.distFromTarget = newPrioDist;
                                 h.Combat.PriorityTargetLockUntil = prioNow + 0.80f;
                                 GenericGun heldGun = soldier.GetHeldGun();
@@ -2964,7 +2975,7 @@ namespace EasyRed2HumanAI
                         !isRepairingVehicle &&
                         VisionConfig.EnablePointBlankMelee.Value)
                     {
-                        bool hasTargetForBayonet = __instance.HasEnemyAndCanFireAtHim || __instance.visibleTarget != null;
+                        bool hasTargetForBayonet = __instance.HasEnemyAndCanFireAtHim || curVisPtr != IntPtr.Zero;
                         bool closeThreatForBayonet =
                             (hasTargetForBayonet && dist > 0.01f && dist <= 48f) ||
                             (Time.time < h.Vision.UnderFireUntil && h.Tr != null &&
@@ -2972,7 +2983,7 @@ namespace EasyRed2HumanAI
                         bool fanaticAssaultForBayonet =
                             soldier.isAlerted &&
                             (!hasTargetForBayonet || dist <= 85f) &&
-                            GetFactionCommandProfile(AiCore.GetCachedFaction(soldier)).BayonetBreachCostMult <= 0.78f;
+                            GetFactionCommandProfile(AiCore.GetCachedFaction(h, Time.time)).BayonetBreachCostMult <= 0.78f;
 
                         if (soldier.IsCharging() || closeThreatForBayonet || fanaticAssaultForBayonet)
                         {
@@ -3897,12 +3908,43 @@ namespace EasyRed2HumanAI
                     bool hasCustomTarget = false;
                     Vector3 customTargetPos = __0;
 
+                    Spottable visTarget = null;
+                    bool visTargetLoaded = false;
+                    Spottable GetVisTarget()
+                    {
+                        if (!visTargetLoaded)
+                        {
+                            visTargetLoaded = true;
+                            visTarget = curVisPtr != IntPtr.Zero ? __instance.visibleTarget : null;
+                        }
+                        return visTarget;
+                    }
+
+                    AiCore.VehicleFastHandles visVehH = null;
+                    bool visIsVeh = curVisPtr != IntPtr.Zero && AiCore.TryGetVehicleHandles(curVisPtr, out visVehH);
+                    bool visIsWheeledOrTank = visIsVeh && visVehH.IsWheeledOrTank;
+                    bool visIsAir = visIsVeh && visVehH.IsAir;
+                    if (curVisPtr != IntPtr.Zero && !visIsVeh && !AiCore.TryGetSoldierHandles(curVisPtr, out _))
+                    {
+                        Spottable fallbackVis = GetVisTarget();
+                        if (!ReferenceEquals(fallbackVis, null) && fallbackVis != null)
+                        {
+                            visIsWheeledOrTank = fallbackVis.IsWheeledVehicleOrTank();
+                            visIsAir = !visIsWheeledOrTank && fallbackVis.IsAirVehicle();
+                        }
+                        else
+                        {
+                            curVisPtr = IntPtr.Zero;
+                        }
+                    }
+
                     if (VisionConfig.PreventSmallArmsFireAtTanks.Value &&
-                        __instance.visibleTarget != null &&
-                        __instance.visibleTarget.IsWheeledVehicleOrTank() &&
+                        visIsWheeledOrTank &&
                         !soldier.IsOnVehicle())
                     {
-                        Vehicle targetVeh = __instance.visibleTarget.TryCast<Vehicle>();
+                        Vehicle targetVeh = (visIsVeh && visVehH != null && !ReferenceEquals(visVehH.Ref, null) && visVehH.Ref != null)
+                            ? visVehH.Ref
+                            : GetVisTarget()?.TryCast<Vehicle>();
                         if (targetVeh != null)
                         {
                             IntPtr vehPtr = targetVeh.Pointer;
@@ -3942,6 +3984,13 @@ namespace EasyRed2HumanAI
                             {
                                 __instance.visibleTarget = rotAltEnemy;
                                 soldier.CurrentVisibleTarget = rotAltEnemy;
+                                curVisPtr = rotAltEnemy.Pointer;
+                                visTarget = rotAltEnemy;
+                                visTargetLoaded = true;
+                                visIsVeh = false;
+                                visVehH = null;
+                                visIsWheeledOrTank = false;
+                                visIsAir = false;
                                 __instance.distFromTarget = rotAltDist;
                                 __instance.targetInWeaponRange = true;
                                 if (!soldier.HasMovementsSlowed())
@@ -3984,9 +4033,9 @@ namespace EasyRed2HumanAI
                     if (!hasCustomTarget &&
                         now < h.Stance.ExposedAimUntil &&
                         h.Stance.ExposedAimYOffset > 0.01f &&
-                        __instance.visibleTarget != null &&
-                        !__instance.visibleTarget.IsWheeledVehicleOrTank() &&
-                        !__instance.visibleTarget.IsAirVehicle())
+                        curVisPtr != IntPtr.Zero &&
+                        !visIsWheeledOrTank &&
+                        !visIsAir)
                     {
                         __0 = new Vector3(__0.x, __0.y + h.Stance.ExposedAimYOffset, __0.z);
                         hasCustomTarget = true;
@@ -4018,10 +4067,9 @@ namespace EasyRed2HumanAI
                     // rotates its body, shoulders its weapon, and acquires a sight picture BEFORE pulling the trigger!
                     if (VisionConfig.EnableDynamicHumanReactionTime.Value &&
                         dist > 6.0f &&
-                        __instance.visibleTarget != null &&
-                        __instance.visibleTarget.Pointer != IntPtr.Zero)
+                        curVisPtr != IntPtr.Zero)
                     {
-                        IntPtr curTgtPtr = __instance.visibleTarget.Pointer;
+                        IntPtr curTgtPtr = curVisPtr;
                         InfantrySightReactionState rState = h.Combat.SightReaction;
                         bool isNewTarget = curTgtPtr != rState.LastTargetPtr;
                         bool isColdReacquire = rState.LastSeenTime <= 0f || (now - rState.LastSeenTime) > 2.2f;
@@ -4146,7 +4194,7 @@ namespace EasyRed2HumanAI
                         }
                     }
 
-                    bool rotateTargetIsVeh = __instance.visibleTarget != null && __instance.visibleTarget.IsWheeledVehicleOrTank();
+                    bool rotateTargetIsVeh = visIsWheeledOrTank;
                     if (!isMoving &&
                         !inPointBlankMelee &&
                         VisionConfig.NeverShootStandingInOpen.Value &&
@@ -4243,16 +4291,16 @@ namespace EasyRed2HumanAI
                             if (angleToTarget <= 35f)
                             {
                                 h.Stance.NextWallCheckTime = now + 0.15f;
-                                bool targetIsVehicle = __instance.visibleTarget != null && __instance.visibleTarget.IsWheeledVehicleOrTank();
+                                bool targetIsVehicle = visIsWheeledOrTank;
                                 bool blockedAtRaw = IsMuzzleBlockedByWall(soldier, rawTargetPos, dist, targetIsVehicle);
 
                                 // If the immediate muzzle is clear, still lift aim to exposed head/shoulders when the
                                 // enemy's torso is behind a wall downrange (CanSee sees SpotPosition head-to-head!).
                                 if (!blockedAtRaw &&
                                     !hasVehicleCustomTarget &&
-                                    __instance.visibleTarget != null &&
-                                    !__instance.visibleTarget.IsWheeledVehicleOrTank() &&
-                                    !__instance.visibleTarget.IsAirVehicle())
+                                    curVisPtr != IntPtr.Zero &&
+                                    !visIsWheeledOrTank &&
+                                    !visIsAir)
                                 {
                                     bool torsoOccluded = false;
                                     if (dist > 3.5f)
@@ -4270,7 +4318,7 @@ namespace EasyRed2HumanAI
                                     }
 
                                     if (torsoOccluded &&
-                                        TryResolveExposedOverWallAim(soldier, __instance.visibleTarget, rawTargetPos, dist, out Vector3 farExposed))
+                                        TryResolveExposedOverWallAim(soldier, GetVisTarget(), rawTargetPos, dist, out Vector3 farExposed))
                                     {
                                         __0 = farExposed;
                                         hasCustomTarget = true;
@@ -4290,8 +4338,10 @@ namespace EasyRed2HumanAI
                                 }
 
                                 if (blockedAtRaw &&
-                                    __instance.visibleTarget != null &&
-                                    TryResolveExposedOverWallAim(soldier, __instance.visibleTarget, rawTargetPos, dist, out Vector3 nearExposed))
+                                    curVisPtr != IntPtr.Zero &&
+                                    !visIsWheeledOrTank &&
+                                    !visIsAir &&
+                                    TryResolveExposedOverWallAim(soldier, GetVisTarget(), rawTargetPos, dist, out Vector3 nearExposed))
                                 {
                                     __0 = nearExposed;
                                     hasCustomTarget = true;
@@ -4312,7 +4362,7 @@ namespace EasyRed2HumanAI
                                     GetEffectivePeekParameters(soldier, vet01, out float maxPeekSupp, out _, out _);
                                     // Only stand up / sidestep to peek when engaging an actual visible target (never during blind suppressive fire)
                                     if (!isMoving &&
-                                        __instance.visibleTarget != null &&
+                                        curVisPtr != IntPtr.Zero &&
                                         canPeekNow &&
                                         VisionConfig.EnableAutoPeekOverCover.Value &&
                                         soldier.GetSuppressionValue() < maxPeekSupp &&
@@ -4321,7 +4371,7 @@ namespace EasyRed2HumanAI
                                         !soldier.UsingBipod() &&
                                         angleToTarget <= 35f)
                                     {
-                                        Vector3 upperPeekPos = GetOverWallPeekTarget(__instance.visibleTarget, rawTargetPos);
+                                        Vector3 upperPeekPos = GetOverWallPeekTarget(GetVisTarget(), rawTargetPos);
                                         bool hasUpperPeek = upperPeekPos != rawTargetPos;
                                         bool crouchClear = HasClearLineOfFireFromCrouch(soldier, rawTargetPos, dist, targetIsVehicle) ||
                                                            (hasUpperPeek && HasClearLineOfFireFromCrouch(soldier, upperPeekPos, dist, targetIsVehicle));
@@ -4400,8 +4450,8 @@ namespace EasyRed2HumanAI
                                         }
                                     }
                                 }
-                                else if (__instance.visibleTarget != null &&
-                                         IsTargetFullyOccludedBySolidWall(soldier, __instance.visibleTarget, __0, dist))
+                                else if (curVisPtr != IntPtr.Zero &&
+                                         IsTargetFullyOccludedBySolidWall(soldier, GetVisTarget(), __0, dist))
                                 {
                                     h.Stance.WallBlockedUntil = now + 0.22f;
                                     WallsBlocked++;

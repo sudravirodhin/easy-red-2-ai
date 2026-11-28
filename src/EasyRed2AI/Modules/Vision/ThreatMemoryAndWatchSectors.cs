@@ -795,6 +795,7 @@ namespace EasyRed2HumanAI
                 sh.Vision.NextSuppressiveGrenadeTime = now + cooldownSeconds;
 
             thrower.Throw(fragItem, target);
+            AiCore.InvalidateSoldierInventoryCache(sh);
             if (sayVoice)
                 TrySayTacticalVoice(thrower, thrower.joinedSquad, VoiceManager.VoiceClip.granade, 0.05f);
             return true;
@@ -1466,6 +1467,8 @@ namespace EasyRed2HumanAI
                 }
             }
 
+            AiCore.EnsureWorldSnapshot();
+
             if (mySquad != null)
             {
                 if (mySquad.Pointer != IntPtr.Zero && _squadBlackboards.TryGetValue(mySquad.Pointer, out SquadBlackboard sqBoard))
@@ -1505,18 +1508,19 @@ namespace EasyRed2HumanAI
                     }
                 }
 
-                if (mySquad.units != null)
+                if (mySquad.Pointer != IntPtr.Zero &&
+                    AiCore.TryGetSquadSnapshot(mySquad.Pointer, out AiCore.SquadSnapshot mySqSnap) &&
+                    mySqSnap.UnitCount > 0)
                 {
-                    var units = mySquad.units;
-                    int uCount = units.Count;
-                    for (int i = 0; i < uCount; i++)
+                    var worldSoldiers = AiCore.WorldSoldiers;
+                    int uEnd = mySqSnap.UnitStartIndex + mySqSnap.UnitCount;
+                    for (int i = mySqSnap.UnitStartIndex; i < uEnd; i++)
                     {
-                        Soldier mate = units[i];
-                        if (ReferenceEquals(mate, null) || mate == null || !mate.IsAlive) continue;
-                        AiCore.SoldierFastHandles mateH = AiCore.GetOrCreateSoldierHandles(mate);
-                        if (mateH == null || ReferenceEquals(mateH.Ai, null) || mateH.Ai == null) continue;
-                        Spottable mateTarget = mateH.Ai.visibleTarget;
-                        if (!AiCore.TryGetSpottableCenter(mateTarget, out Vector3 mateEnemyPos) || mateTarget.IsAirVehicle()) continue;
+                        AiCore.SoldierFastHandles mateH = worldSoldiers[i].Handles;
+                        if (mateH == null || ReferenceEquals(mateH.Ai, null) || mateH.Ai == null)
+                            continue;
+                        if (!AiCore.TryGetVisibleTargetCenterFast(mateH.Ai, out Vector3 mateEnemyPos, ignoreAirVehicles: true))
+                            continue;
 
                         Vector3 toEnemy = mateEnemyPos - myPos;
                         toEnemy.y = 0f;
@@ -1547,7 +1551,6 @@ namespace EasyRed2HumanAI
                 }
             }
 
-            AiCore.EnsureWorldSnapshot();
             int sqCount = AiCore.WorldSquadCount;
             if (sqCount > 0)
             {
@@ -1606,29 +1609,29 @@ namespace EasyRed2HumanAI
                 }
             }
 
-            Soldier player = Soldier.CurrentControlledSoldierOrNull();
-            if (player != null && player.IsAlive)
+            AiCore.SoldierFastHandles pH = AiCore.CachedLocalPlayerHandles;
+            if (pH != null &&
+                pH.Ref != null &&
+                pH.Tr != null &&
+                pH.Ref.IsAlive &&
+                !AiCore.AreSameSideFactions(myFaction, AiCore.GetCachedFaction(pH, now)))
             {
-                AiCore.SoldierFastHandles pH = AiCore.GetOrCreateSoldierHandles(player);
-                if (pH != null && pH.Tr != null && !AiCore.AreSameSideFactions(myFaction, AiCore.GetCachedFaction(pH, now)))
+                Vector3 toPlayer = pH.Tr.position - myPos;
+                toPlayer.y = 0f;
+                float pDistSq = toPlayer.sqrMagnitude;
+                if (pDistSq <= 175f * 175f && pDistSq > 0.25f)
                 {
-                    Vector3 toPlayer = pH.Tr.position - myPos;
-                    toPlayer.y = 0f;
-                    float pDistSq = toPlayer.sqrMagnitude;
-                    if (pDistSq <= 175f * 175f && pDistSq > 0.25f)
-                    {
-                        bool playerIsKnown = player.IsSpotted ||
-                                             VisionPatches.HasFiredRecently(player, 4.5f) ||
-                                             (player.joinedSquad != null &&
-                                              (player.joinedSquad.IsEnemyAwareOfThisSquad ||
-                                               player.joinedSquad.isMarked ||
-                                               player.joinedSquad.isHalfMarked ||
-                                               player.joinedSquad.isMarkedPinPoint));
+                    Soldier player = pH.Ref;
+                    bool playerSquadAware = AiCore.CachedLocalPlayerSquadPtr != IntPtr.Zero &&
+                                            AiCore.TryGetSquadSnapshot(AiCore.CachedLocalPlayerSquadPtr, out AiCore.SquadSnapshot pSqSnap) &&
+                                            pSqSnap.IsSpottedOrAware;
+                    bool playerIsKnown = player.IsSpotted ||
+                                         VisionPatches.HasFiredRecently(player, 4.5f) ||
+                                         playerSquadAware;
 
-                        if (playerIsKnown)
-                        {
-                            InsertClosestContact(toPlayer, pDistSq, ref contactCount, ref c0, ref d0, ref c1, ref d1, ref c2, ref d2, ref c3, ref d3);
-                        }
+                    if (playerIsKnown)
+                    {
+                        InsertClosestContact(toPlayer, pDistSq, ref contactCount, ref c0, ref d0, ref c1, ref d1, ref c2, ref d2, ref c3, ref d3);
                     }
                 }
             }

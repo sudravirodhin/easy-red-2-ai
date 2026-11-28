@@ -203,6 +203,17 @@ namespace EasyRed2HumanAI
             if (ReferenceEquals(veh, null) || veh == null)
                 return null;
 
+            AiCore.VehicleFastHandles vh = AiCore.GetOrCreateVehicleHandles(veh);
+            float now = Time.time;
+            if (ReferenceEquals(turret, null) &&
+                vh != null &&
+                now < vh.NextCrewFactionCheckTime &&
+                now >= vh.NextCrewFactionCheckTime - 2.0f &&
+                !string.IsNullOrEmpty(vh.LastKnownFaction))
+            {
+                return vh.LastKnownFaction;
+            }
+
             string resolved = null;
 
             if (!ReferenceEquals(turret, null) && turret != null)
@@ -246,7 +257,6 @@ namespace EasyRed2HumanAI
                     resolved = vf;
             }
 
-            AiCore.VehicleFastHandles vh = AiCore.GetOrCreateVehicleHandles(veh);
             if (resolved == null && vh != null && !string.IsNullOrEmpty(vh.LastKnownFaction))
             {
                 resolved = vh.LastKnownFaction;
@@ -255,6 +265,8 @@ namespace EasyRed2HumanAI
             if (resolved != null && vh != null)
             {
                 vh.LastKnownFaction = resolved;
+                if (ReferenceEquals(turret, null))
+                    vh.NextCrewFactionCheckTime = now + 0.50f;
             }
 
             return resolved;

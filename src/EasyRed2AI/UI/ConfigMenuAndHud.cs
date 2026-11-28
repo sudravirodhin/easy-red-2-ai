@@ -279,15 +279,39 @@ namespace EasyRed2HumanAI
             public static void Postfix()
             {
                 long guiProfStart = HitchProfiler.BeginModScope(true);
-                Matrix4x4 oldGuiMatrix = GUI.matrix;
+                bool matrixSaved = false;
+                Matrix4x4 oldGuiMatrix = default;
                 try
                 {
+                    float uNow = Time.unscaledTime;
+                    bool menuOpen = _showConfigMenu || _showDogTagArchive || _showMapPicker;
+                    bool hasToast = uNow < _toastExpireTime && !string.IsNullOrEmpty(_toastMessage);
+                    bool hasDeathBanner = VisionConfig.EnableMod.Value &&
+                                          VisionConfig.EnableDeathScreenAttribution.Value &&
+                                          uNow < VeteranAndTacticsPatches.ActiveDeathAttributionExpireTime &&
+                                          !string.IsNullOrEmpty(VeteranAndTacticsPatches.ActiveDeathAttributionText);
+                    bool hasSpecHud = VeteranAndTacticsPatches.HasActiveSpectatorImGuiOverlay;
+                    bool hasPerfOverlay = HitchProfiler.PerfOverlayActive;
+                    bool isRepaint = Event.current != null && Event.current.type == EventType.Repaint;
+
+                    if (!menuOpen && !hasToast && !hasDeathBanner && !hasSpecHud && !hasPerfOverlay)
+                    {
+                        if (isRepaint)
+                            VeteranAndTacticsPatches.DrawInWorldSquadMemberNames();
+                        return;
+                    }
+
                     // Draw 3D in-world squad member overhead names BEFORE applying the 1080p virtual UI matrix
                     // because GuiExtension.OutlinedLabel uses raw Screen.width / Screen.height pixel coordinates
                     // matching PlayerController.OnGUI (0x1807CBD20).
-                    VeteranAndTacticsPatches.DrawInWorldSquadMemberNames();
-                    VeteranAndTacticsPatches.DrawSpectatorCommandNetWorldOverlay();
+                    if (isRepaint)
+                    {
+                        VeteranAndTacticsPatches.DrawInWorldSquadMemberNames();
+                        VeteranAndTacticsPatches.DrawSpectatorCommandNetWorldOverlay();
+                    }
 
+                    oldGuiMatrix = GUI.matrix;
+                    matrixSaved = true;
                     float uiScale = GetEffectiveImGuiScale(out float virtualW, out float virtualH);
                     if (Mathf.Abs(uiScale - 1.0f) > 0.001f)
                     {
@@ -295,7 +319,7 @@ namespace EasyRed2HumanAI
                     }
 
                     float toastBottomY = 0f;
-                    if (Time.unscaledTime < _toastExpireTime && !string.IsNullOrEmpty(_toastMessage))
+                    if (hasToast)
                     {
                         int lineCount = 1;
                         for (int i = 0; i < _toastMessage.Length; i++)
@@ -444,7 +468,8 @@ namespace EasyRed2HumanAI
                 }
                 finally
                 {
-                    GUI.matrix = oldGuiMatrix;
+                    if (matrixSaved)
+                        GUI.matrix = oldGuiMatrix;
                     HitchProfiler.EndModScope(HitchBucket.OnGUI, guiProfStart);
                 }
             }
@@ -1109,6 +1134,12 @@ namespace EasyRed2HumanAI
         private static string _specGoapLine = "";
         private static string _specVitalsLine = "";
 
+        internal static bool HasActiveSpectatorImGuiOverlay =>
+            _specCommandNetActive ||
+            (VisionConfig.EnableSpectatorBotInspector.Value &&
+             _specIsFreeCamera &&
+             ActiveSpectatorHudMode == SpectatorTacticalHudMode.FullTactical);
+
         internal static void DrawSpectatorBotInspectorGui(float virtualW, float virtualH, float toastBottomY)
         {
             if (ActiveSpectatorHudMode == SpectatorTacticalHudMode.CommandNetOverview)
@@ -1527,6 +1558,20 @@ namespace EasyRed2HumanAI
             _specVitalsLine = _specSb.ToString();
         }
 
+        private static Soldier _cachedVetHoverFriendly;
+        private static float _cachedVetHoverAlpha;
+        private static float _nextVetHoverScanTime;
+
+        private struct SquadNameDrawCandidate
+        {
+            public IntPtr Ptr;
+            public Soldier Ref;
+            public string DisplayName;
+            public Vector3 ScreenPos;
+            public float DistAlpha;
+        }
+        private static readonly SquadNameDrawCandidate[] _squadNameDrawScratch = new SquadNameDrawCandidate[16];
+
         public static void RenderVeteran3DMarkersAndCleanup()
         {
             bool modEnabled = VisionConfig.EnableMod.Value;
@@ -1557,13 +1602,26 @@ namespace EasyRed2HumanAI
             _cmdNetHasHoveredSquad = false;
 
             if (!modEnabled || !VisionConfig.EnableVeteranSystem.Value || !VisionConfig.ShowVeteran3DIcons.Value)
+            {
+                _cachedVetHoverFriendly = null;
+                _cachedVetHoverAlpha = 0f;
                 return;
+            }
 
             PlayerController pc = PlayerController.currentController;
-            if (pc == null) return;
+            if (pc == null)
+            {
+                _cachedVetHoverFriendly = null;
+                _cachedVetHoverAlpha = 0f;
+                return;
+            }
             Soldier player = pc.ControlledCharacter;
             if (player == null || !player.IsAlive)
+            {
+                _cachedVetHoverFriendly = null;
+                _cachedVetHoverAlpha = 0f;
                 return;
+            }
 
             if (SavableData.Settings == null ||
                 SavableData.Settings.system == null ||
@@ -1574,68 +1632,88 @@ namespace EasyRed2HumanAI
             }
 
             if (pc.IsAiming && !pc.IsLimitedAiming)
-                return;
-
-            var cursorSoldiers = pc.cursorSoldiers;
-            if (cursorSoldiers == null || cursorSoldiers.Count == 0)
-                return;
-
-            Camera cam = ResourcesManager.mainCamera;
-            if (cam == null) return;
-
-            Vector2 screenCenter = pc.screenCenter;
-            float maxHoverRadius = Screen.height * 0.20f;
-            if (maxHoverRadius <= 1f) return;
-
-            Soldier bestHoveredFriendly = null;
-            float bestAlpha = 0f;
-            string playerFac = AiCore.GetCachedFaction(player);
-
-            int count = cursorSoldiers.Count;
-            for (int i = 0; i < count; i++)
             {
-                CursorSoldierData csd = cursorSoldiers[i];
-                if (csd == null) continue;
-                Soldier s = csd.soldier;
-                if (s == null || !s.IsAlive || s.Pointer == player.Pointer) continue;
+                _cachedVetHoverFriendly = null;
+                _cachedVetHoverAlpha = 0f;
+                return;
+            }
 
-                if (!AiCore.AreSameSideFactions(playerFac, AiCore.GetCachedFaction(s)))
-                    continue;
+            float unscaledNow = Time.unscaledTime;
+            if (unscaledNow >= _nextVetHoverScanTime || unscaledNow < _nextVetHoverScanTime - 2.0f)
+            {
+                _nextVetHoverScanTime = unscaledNow + 0.066f;
+                _cachedVetHoverFriendly = null;
+                _cachedVetHoverAlpha = 0f;
 
-                if (s.IsOnVehicle() && player.IsOnVehicle())
-                    continue;
-
-                Vector3 uiPos = s.UINamePos();
-                if (Marker3DGUI.IsOccluded(s, 2, uiPos))
-                    continue;
-
-                Vector3 screenPos3 = cam.WorldToScreenPoint(uiPos);
-                if (screenPos3.z <= 0f)
-                    continue;
-
-                Vector2 screenPos2 = new Vector2(screenPos3.x, screenPos3.y);
-                float distToCursor = Vector2.Distance(screenPos2, screenCenter);
-                float alpha = (1.0f - (distToCursor / maxHoverRadius)) * 2.0f;
-                if (alpha > bestAlpha)
+                var cursorSoldiers = pc.cursorSoldiers;
+                if (cursorSoldiers != null && cursorSoldiers.Count > 0)
                 {
-                    bestAlpha = alpha;
-                    bestHoveredFriendly = s;
+                    Camera cam = ResourcesManager.mainCamera;
+                    float maxHoverRadius = Screen.height * 0.20f;
+                    if (cam != null && maxHoverRadius > 1f)
+                    {
+                        Vector2 screenCenter = pc.screenCenter;
+                        Soldier bestHoveredFriendly = null;
+                        float bestAlpha = 0f;
+                        string playerFac = AiCore.GetCachedFaction(player);
+                        bool playerOnVeh = player.IsOnVehicle();
+
+                        int count = cursorSoldiers.Count;
+                        for (int i = 0; i < count; i++)
+                        {
+                            CursorSoldierData csd = cursorSoldiers[i];
+                            if (csd == null) continue;
+                            Soldier s = csd.soldier;
+                            if (s == null || !s.IsAlive || s.Pointer == player.Pointer) continue;
+
+                            if (!AiCore.AreSameSideFactions(playerFac, AiCore.GetCachedFaction(s)))
+                                continue;
+
+                            if (playerOnVeh && s.IsOnVehicle())
+                                continue;
+
+                            Vector3 uiPos = s.UINamePos();
+                            if (Marker3DGUI.IsOccluded(s, 2, uiPos))
+                                continue;
+
+                            Vector3 screenPos3 = cam.WorldToScreenPoint(uiPos);
+                            if (screenPos3.z <= 0f)
+                                continue;
+
+                            Vector2 screenPos2 = new Vector2(screenPos3.x, screenPos3.y);
+                            float distToCursor = Vector2.Distance(screenPos2, screenCenter);
+                            float alpha = (1.0f - (distToCursor / maxHoverRadius)) * 2.0f;
+                            if (alpha > bestAlpha)
+                            {
+                                bestAlpha = alpha;
+                                bestHoveredFriendly = s;
+                            }
+                        }
+
+                        _cachedVetHoverFriendly = bestHoveredFriendly;
+                        _cachedVetHoverAlpha = bestAlpha;
+                    }
                 }
             }
 
-            if (bestHoveredFriendly != null && bestAlpha > 0.05f)
+            Soldier hoveredFriendly = _cachedVetHoverFriendly;
+            if (!ReferenceEquals(hoveredFriendly, null) &&
+                hoveredFriendly != null &&
+                hoveredFriendly.Pointer != IntPtr.Zero &&
+                hoveredFriendly.IsAlive &&
+                _cachedVetHoverAlpha > 0.05f)
             {
-                int tier = GetVeteranTier(bestHoveredFriendly);
+                int tier = GetVeteranTier(hoveredFriendly);
                 if (tier > 0)
                 {
                     EnsureBadgeTextures();
                     Texture2D tex = tier == 1 ? _texVet1 : (tier == 2 ? _texVet2 : _texVet3);
                     if (tex != null)
                     {
-                        Vector3 badgeWorldPos = bestHoveredFriendly.UINamePos() + new Vector3(0f, 0.26f, 0f);
-                        float clampedAlpha = Mathf.Clamp01(bestAlpha) * 0.92f;
+                        Vector3 badgeWorldPos = hoveredFriendly.UINamePos() + new Vector3(0f, 0.26f, 0f);
+                        float clampedAlpha = Mathf.Clamp01(_cachedVetHoverAlpha) * 0.92f;
                         float iconSize = tier == 3 ? 18f : 15f;
-                        Marker3DGUI.Draw(bestHoveredFriendly, 77, tex, badgeWorldPos, iconSize, clampedAlpha);
+                        Marker3DGUI.Draw(hoveredFriendly, 77, tex, badgeWorldPos, iconSize, clampedAlpha);
                     }
                 }
             }
@@ -1643,6 +1721,7 @@ namespace EasyRed2HumanAI
 
         public static void DrawInWorldSquadMemberNames()
         {
+            int candCount = 0;
             try
             {
                 if (!VisionConfig.EnableMod.Value || !VisionConfig.EnableInWorldSquadMemberNames.Value)
@@ -1661,7 +1740,8 @@ namespace EasyRed2HumanAI
                     return;
                 }
 
-                PlayerController pc = PlayerController.currentController;
+                AiCore.LocalPlayerFastHandles lp = AiCore.GetCachedLocalPlayerHandles();
+                PlayerController pc = lp.Controller;
                 if (pc == null)
                     return;
 
@@ -1671,12 +1751,14 @@ namespace EasyRed2HumanAI
                 if (pc.IsAiming || pc.IsLimitedAiming)
                     return;
 
-                Soldier player = pc.ControlledCharacter;
-                if (player == null || !player.IsAlive)
+                Soldier player = lp.HasPlayer ? lp.Soldier : null;
+                if (player == null)
                     return;
 
-                Squad playerSquad = player.joinedSquad;
-                if (playerSquad == null || playerSquad.Pointer == IntPtr.Zero)
+                float now = Time.time;
+                AiCore.SoldierFastHandles playerH = lp.SoldierHandles;
+                Squad playerSquad = lp.Squad;
+                if (playerSquad == null || lp.SquadPtr == IntPtr.Zero)
                     return;
 
                 var cursorSoldiers = pc.cursorSoldiers;
@@ -1688,52 +1770,101 @@ namespace EasyRed2HumanAI
                     return;
 
                 IntPtr playerPtr = player.Pointer;
-                IntPtr playerSquadPtr = playerSquad.Pointer;
+                IntPtr playerSquadPtr = lp.SquadPtr;
                 bool playerOnVehicle = player.IsOnVehicle();
-                Vehicle controlledVeh = pc.ControlledVehicle;
+                Vehicle controlledVeh = lp.ControlledVehicle;
                 IntPtr controlledVehPtr = controlledVeh != null ? controlledVeh.Pointer : IntPtr.Zero;
                 Vector2 screenCenter = pc.screenCenter;
-                float maxHoverRadius = Screen.height * 0.40f;
+                float screenH = Screen.height;
+                float maxHoverRadius = screenH * 0.40f;
 
-                // Pass 1: Identify the single center-hovered unit that vanilla PlayerController.OnGUI (0x1807CBD20)
-                // is already drawing so we never double-render on top of the hovered soldier.
+                // Single merged pass: identify the center-hovered unit that vanilla PlayerController.OnGUI renders
+                // AND collect visible AI squadmates so UINamePos/IsOccluded/WorldToScreenPoint each run once per unit.
                 IntPtr vanillaHoveredPtr = IntPtr.Zero;
                 float bestVanillaAlpha = 0f;
                 int count = cursorSoldiers.Count;
-                if (maxHoverRadius > 1f)
+
+                for (int i = 0; i < count; i++)
                 {
-                    for (int i = 0; i < count; i++)
+                    CursorSoldierData csd = cursorSoldiers[i];
+                    if (csd == null) continue;
+                    Soldier s = csd.soldier;
+                    if (s == null || !s.IsAlive || s.Pointer == playerPtr)
+                        continue;
+
+                    IntPtr sPtr = s.Pointer;
+                    AiCore.SoldierFastHandles sh = AiCore.GetOrCreateSoldierHandles(s);
+                    bool sOnVehicle = s.IsOnVehicle();
+                    bool skipVanillaHover = false;
+                    if (controlledVehPtr != IntPtr.Zero && sOnVehicle)
                     {
-                        CursorSoldierData csd = cursorSoldiers[i];
-                        if (csd == null) continue;
-                        Soldier s = csd.soldier;
-                        if (s == null || !s.IsAlive || s.Pointer == playerPtr)
-                            continue;
-                        if (controlledVehPtr != IntPtr.Zero &&
-                            s.IsOnVehicle() &&
-                            s.GetCurrentVehicle() != null &&
-                            s.GetCurrentVehicle().Pointer == controlledVehPtr)
-                        {
-                            continue;
-                        }
+                        AiCore.VehicleFastHandles svh = AiCore.GetCachedCurrentVehicleHandles(sh, now);
+                        if (svh != null && svh.Ptr == controlledVehPtr)
+                            skipVanillaHover = true;
+                    }
 
-                        Vector3 uiPos = s.UINamePos();
-                        if (Marker3DGUI.IsOccluded(s, 2, uiPos))
-                            continue;
+                    bool isEligibleSquadMate = (!playerOnVehicle || !sOnVehicle) &&
+                                               !s.IsPlayer() &&
+                                               candCount < _squadNameDrawScratch.Length;
+                    if (isEligibleSquadMate)
+                    {
+                        Squad sq = sh != null ? AiCore.GetCachedSquad(sh, now) : s.joinedSquad;
+                        if (sq == null || sq.Pointer != playerSquadPtr)
+                            isEligibleSquadMate = false;
+                    }
 
-                        Vector3 sp = cam.WorldToScreenPoint(uiPos);
-                        if (sp.z <= 0f)
-                            continue;
+                    bool checkVanillaHover = !skipVanillaHover && maxHoverRadius > 1f;
+                    if (!checkVanillaHover && !isEligibleSquadMate)
+                        continue;
 
+                    Vector3 uiPos = s.UINamePos();
+                    if (Marker3DGUI.IsOccluded(s, 2, uiPos))
+                        continue;
+
+                    Vector3 sp = cam.WorldToScreenPoint(uiPos);
+                    if (sp.z <= 0f)
+                        continue;
+
+                    if (checkVanillaHover)
+                    {
                         float distToCursor = Vector2.Distance(new Vector2(sp.x, sp.y), screenCenter);
                         float alpha = (1.0f - (distToCursor / maxHoverRadius)) * 3.0f;
                         if (alpha > bestVanillaAlpha)
                         {
                             bestVanillaAlpha = alpha;
-                            vanillaHoveredPtr = s.Pointer;
+                            vanillaHoveredPtr = sPtr;
                         }
                     }
+
+                    if (isEligibleSquadMate && sp.z > 0.5f && sp.z <= 65.0f)
+                    {
+                        float distAlpha = Mathf.Clamp01((65.0f - sp.z) / 20.0f) * 0.88f;
+                        if (distAlpha <= 0.05f)
+                            continue;
+
+                        string dispName = sh != null ? sh.CachedFullName : null;
+                        if (string.IsNullOrEmpty(dispName))
+                        {
+                            dispName = s.name_surname;
+                            if (sh != null && !string.IsNullOrEmpty(dispName))
+                                sh.CachedFullName = dispName;
+                        }
+                        if (string.IsNullOrEmpty(dispName))
+                            continue;
+
+                        _squadNameDrawScratch[candCount++] = new SquadNameDrawCandidate
+                        {
+                            Ptr = sPtr,
+                            Ref = s,
+                            DisplayName = dispName,
+                            ScreenPos = sp,
+                            DistAlpha = distAlpha
+                        };
+                    }
                 }
+
+                if (candCount == 0)
+                    return;
 
                 GUIStyle lblStyle = GUI.skin != null ? GUI.skin.label : null;
                 TextAnchor oldAlign = TextAnchor.UpperLeft;
@@ -1742,41 +1873,10 @@ namespace EasyRed2HumanAI
 
                 try
                 {
-                    float screenH = Screen.height;
-                    for (int i = 0; i < count; i++)
+                    for (int i = 0; i < candCount; i++)
                     {
-                        CursorSoldierData csd = cursorSoldiers[i];
-                        if (csd == null) continue;
-                        Soldier s = csd.soldier;
-                        if (s == null || !s.IsAlive || s.Pointer == playerPtr || s.Pointer == vanillaHoveredPtr)
-                            continue;
-
-                        // Human Co-op players already have their nickname rendered by vanilla PlayerController.OnGUI
-                        if (s.IsPlayer())
-                            continue;
-
-                        // Strictly restrict always-visible 3D overhead names to members of the player's own squad!
-                        Squad sq = s.joinedSquad;
-                        if (sq == null || sq.Pointer != playerSquadPtr)
-                            continue;
-
-                        if (playerOnVehicle && s.IsOnVehicle())
-                            continue;
-
-                        string dispName = s.name_surname;
-                        if (string.IsNullOrEmpty(dispName))
-                            continue;
-
-                        Vector3 uiPos = s.UINamePos();
-                        if (Marker3DGUI.IsOccluded(s, 2, uiPos))
-                            continue;
-
-                        Vector3 sp = cam.WorldToScreenPoint(uiPos);
-                        if (sp.z <= 0.5f || sp.z > 65.0f)
-                            continue;
-
-                        float distAlpha = Mathf.Clamp01((65.0f - sp.z) / 20.0f) * 0.88f;
-                        if (distAlpha <= 0.05f)
+                        ref readonly SquadNameDrawCandidate cand = ref _squadNameDrawScratch[i];
+                        if (cand.Ptr == vanillaHoveredPtr)
                             continue;
 
                         if (!restoredStyle && lblStyle != null)
@@ -1786,13 +1886,13 @@ namespace EasyRed2HumanAI
                             restoredStyle = true;
                         }
 
-                        if (s.IsInjured || s.isBleeding)
-                            GUI.color = new Color(1.0f, 0.42f, 0.42f, distAlpha);
+                        if (cand.Ref.IsInjured || cand.Ref.isBleeding)
+                            GUI.color = new Color(1.0f, 0.42f, 0.42f, cand.DistAlpha);
                         else
-                            GUI.color = new Color(0.58f, 1.0f, 0.64f, distAlpha);
+                            GUI.color = new Color(0.58f, 1.0f, 0.64f, cand.DistAlpha);
 
-                        Rect rect = new Rect(sp.x - 150f, (screenH - sp.y) - 25f, 300f, 50f);
-                        GuiExtension.OutlinedLabel(rect, dispName, 1);
+                        Rect rect = new Rect(cand.ScreenPos.x - 150f, (screenH - cand.ScreenPos.y) - 25f, 300f, 50f);
+                        GuiExtension.OutlinedLabel(rect, cand.DisplayName, 1);
                     }
                 }
                 finally
@@ -1803,6 +1903,11 @@ namespace EasyRed2HumanAI
                 }
             }
             catch { }
+            finally
+            {
+                if (candCount > 0)
+                    Array.Clear(_squadNameDrawScratch, 0, candCount);
+            }
         }
 
         private static GameObject _squadHeaderGo;
@@ -1947,13 +2052,14 @@ namespace EasyRed2HumanAI
 
                 if (!PlayerGUI.IsSelectingSquad())
                 {
-                    Soldier localPlayer = Soldier.CurrentControlledSoldierOrNull();
-                    if (localPlayer != null && localPlayer.Pointer != IntPtr.Zero && localPlayer.IsAlive)
+                    AiCore.LocalPlayerFastHandles lp = AiCore.GetCachedLocalPlayerHandles();
+                    Soldier localPlayer = lp.HasPlayer ? lp.Soldier : null;
+                    if (localPlayer != null)
                     {
                         GetOrCreateRecord(localPlayer);
-                        Squad pSq = localPlayer.joinedSquad;
+                        Squad pSq = lp.Squad;
                         IntPtr curLpPtr = localPlayer.Pointer;
-                        IntPtr curSqPtr = pSq != null ? pSq.Pointer : IntPtr.Zero;
+                        IntPtr curSqPtr = lp.SquadPtr;
                         bool curIsSl = curSqPtr != IntPtr.Zero && localPlayer.IsSquadLeader();
                         bool becameActingSl = curLpPtr == _lastTrackedLocalPlayerPtr &&
                                               curSqPtr == _lastTrackedLocalSquadPtr &&
@@ -2116,6 +2222,9 @@ namespace EasyRed2HumanAI
                 _lastTrackedLocalPlayerPtr = IntPtr.Zero;
                 _lastTrackedLocalSquadPtr = IntPtr.Zero;
                 _lastTrackedLocalPlayerWasSl = false;
+                _cachedVetHoverFriendly = null;
+                _cachedVetHoverAlpha = 0f;
+                _nextVetHoverScanTime = 0f;
                 _coverExposureCache.Clear();
                 _medicPatientClaims.Clear();
                 _barbedWireColliderCache.Clear();

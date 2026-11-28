@@ -1090,9 +1090,12 @@ namespace EasyRed2HumanAI
             }
 
             // Amortizes IBattle / BattleData metadata loading (battle_id, previousMission_id, SaveDataId, factions)
-            // in the background before F5 is opened AND prioritizes the active selected campaign while F5 is open.
+            // lazily ONLY while the F5 Campaign & Map Picker menu is open (zero mid-match LoadBattle() hitches).
             internal static void StepBackgroundPreloadCatalog()
             {
+                if (!_showMapPicker)
+                    return;
+
                 if (!_mapPickerInitialized)
                 {
                     if (Time.realtimeSinceStartup < 3.5f)
@@ -1116,25 +1119,12 @@ namespace EasyRed2HumanAI
                 if (_mapPickerCampaigns.Count == 0)
                     return;
 
-                if (_showMapPicker)
-                {
-                    StepResolveCampaignBattlesAtIndex(
-                        _selectedCampaignIdx,
-                        _battlePage * MapPickerRowsPerPage,
-                        maxPerFrame: 3,
-                        budgetTicks: System.Diagnostics.Stopwatch.Frequency / 666, // 1.5ms budget
-                        updateSelection: true);
-                }
-                else
-                {
-                    if (Time.timeSinceLevelLoad < 12.0f ||
-                        (Time.frameCount % 6) != 0 ||
-                        AiCore.IsHeavyWorkFrame() ||
-                        Time.unscaledDeltaTime > 0.0175f)
-                    {
-                        return;
-                    }
-                }
+                StepResolveCampaignBattlesAtIndex(
+                    _selectedCampaignIdx,
+                    _battlePage * MapPickerRowsPerPage,
+                    maxPerFrame: 3,
+                    budgetTicks: System.Diagnostics.Stopwatch.Frequency / 666, // 1.5ms budget
+                    updateSelection: true);
 
                 if (_allCampaignsPreloaded)
                     return;
@@ -1148,7 +1138,7 @@ namespace EasyRed2HumanAI
                     _bgPreloadCampaignIdx = (idx + 1) % totalCamps;
                     checkedCamps++;
 
-                    if (_showMapPicker && idx == _selectedCampaignIdx)
+                    if (idx == _selectedCampaignIdx)
                         continue;
 
                     PickerCampaignEntry camp = _mapPickerCampaigns[idx];

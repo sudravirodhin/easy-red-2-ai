@@ -804,6 +804,7 @@ namespace EasyRed2HumanAI
 
                         soldier.SetGunTriggerPressed(false);
                         soldier.Throw(vi, demoTarget);
+                        AiCore.InvalidateSoldierInventoryCache(specH);
                         if (specH != null)
                             specH.Goap.NextSpecialMunitionTime = now + 12.0f;
                         AiCore.SpecialMunitionsUsedCount++;
@@ -862,6 +863,7 @@ namespace EasyRed2HumanAI
 
                         soldier.SetGunTriggerPressed(false);
                         soldier.Throw(mineItem, null);
+                        AiCore.InvalidateSoldierInventoryCache(specH);
                         // RefreshActiveLandMinesIfDue tracks the real landed ItemGrenade transform automatically
                         // (no fake 1.15m assumption or janky 6.5m backward SapperStepBack sprint needed!).
                         if (specH != null)
@@ -2088,6 +2090,7 @@ namespace EasyRed2HumanAI
                         shGoap.Goap.Scavenge = default;
                     if (looted)
                     {
+                        AiCore.InvalidateSoldierInventoryCache(shGoap);
                         if (ai.moveDirectlyToward_end > now)
                             ai.moveDirectlyToward_end = 0f;
                         GoapPlansExecutedCount++;
@@ -2614,14 +2617,14 @@ namespace EasyRed2HumanAI
             if (octree != null)
             {
                 Vector3 searchCenter = myPos + threatDir * 12.0f;
-                var nearby = octree.GetNearby(searchCenter, 14.0f);
-                if (nearby != null && nearby.Length > 0)
+                var nearby = AiCore.GetNearbyCoversNonAlloc(octree, searchCenter, 14.0f);
+                if (nearby != null && nearby.Count > 0)
                 {
                     float myDistToThreatSq = (threatPos - myPos).sqrMagnitude;
                     var unreachable = soldier.nonReachableCovers;
                     float bestScore = -999f;
 
-                    int count = nearby.Length;
+                    int count = nearby.Count;
                     for (int i = 0; i < count; i++)
                     {
                         AiDestination dest = nearby[i];

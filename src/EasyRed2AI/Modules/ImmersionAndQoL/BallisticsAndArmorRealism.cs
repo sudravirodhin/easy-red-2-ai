@@ -108,7 +108,16 @@ namespace EasyRed2HumanAI
                     if (__instance == null || __instance.Pointer == IntPtr.Zero)
                         return;
 
-                    AudioSource src = __instance.engine_source;
+                    AiCore.VehicleFastHandles vh = AiCore.GetOrCreateVehicleHandles(__instance);
+                    if (vh == null)
+                        return;
+
+                    if (!vh.EngineSourceChecked)
+                    {
+                        vh.EngineSourceChecked = true;
+                        vh.CachedEngineSource = __instance.engine_source;
+                    }
+                    AudioSource src = vh.CachedEngineSource;
                     if (src == null || !src.isPlaying)
                         return;
 
@@ -130,27 +139,32 @@ namespace EasyRed2HumanAI
                         };
                     }
 
-                    AudioClip clip = src.clip;
-                    if (clip != null && clip.Pointer != IntPtr.Zero)
+                    float t = Time.unscaledTime;
+                    if (t >= vh.NextPlaneAudioClipCheckTime || t < vh.NextPlaneAudioClipCheckTime - 2.0f)
                     {
-                        if (clip.Pointer != state.LastClipPtr)
+                        vh.NextPlaneAudioClipCheckTime = t + 0.25f;
+                        AudioClip clip = src.clip;
+                        if (clip != null && clip.Pointer != IntPtr.Zero)
                         {
-                            state.LastClipPtr = clip.Pointer;
-                            AudioClip startClip = __instance.engine_start;
-                            bool isStartupClip = __instance.engineStarting ||
-                                                 (startClip != null && startClip.Pointer == clip.Pointer);
-
-                            // Never seek compressed FMOD startup streams or the local player's own cockpit audio
-                            // (prevents synchronous decode hitches on plane entry and preserves startup sound).
-                            if (!isStartupClip && !__instance.PlayerIsInside())
+                            if (clip.Pointer != state.LastClipPtr)
                             {
-                                float len = clip.length;
-                                if (len > 0.45f && src.time < 0.08f)
+                                state.LastClipPtr = clip.Pointer;
+                                AudioClip startClip = __instance.engine_start;
+                                bool isStartupClip = __instance.engineStarting ||
+                                                     (startClip != null && startClip.Pointer == clip.Pointer);
+
+                                // Never seek compressed FMOD startup streams or the local player's own cockpit audio
+                                // (prevents synchronous decode hitches on plane entry and preserves startup sound).
+                                if (!isStartupClip && !__instance.PlayerIsInside())
                                 {
-                                    float targetTime = ((state.PhaseOffset + Time.unscaledTime * 0.29f) % 0.82f + 0.08f) * len;
-                                    src.time = Mathf.Clamp(targetTime, 0.05f, len - 0.05f);
-                                    PlaneAudioLoopsDesyncedCount++;
-                                    AiCore.LogDebug("PlaneAudio", $"Desynchronized plane motor loop '{clip.name}' to {src.time:F2}s/{len:F2}s (detune={state.PitchDetune:+0.000;-0.000}).", 8.0f);
+                                    float len = clip.length;
+                                    if (len > 0.45f && src.time < 0.08f)
+                                    {
+                                        float targetTime = ((state.PhaseOffset + t * 0.29f) % 0.82f + 0.08f) * len;
+                                        src.time = Mathf.Clamp(targetTime, 0.05f, len - 0.05f);
+                                        PlaneAudioLoopsDesyncedCount++;
+                                        AiCore.LogDebug("PlaneAudio", $"Desynchronized plane motor loop '{clip.name}' to {src.time:F2}s/{len:F2}s (detune={state.PitchDetune:+0.000;-0.000}).", 8.0f);
+                                    }
                                 }
                             }
                         }
@@ -165,7 +179,7 @@ namespace EasyRed2HumanAI
                     // 2. Bank-angle aerodynamic load
                     // 3. Incommensurate dual-sine governor micro-drift so consecutive loop wraps never fall on identical cadence
                     float flightLoadPitch = 0f;
-                    Rigidbody rb = __instance.rb;
+                    Rigidbody rb = AiCore.GetCachedVehicleRb(vh);
                     if (rb != null)
                     {
                         float vy = rb.velocity.y;
@@ -173,7 +187,6 @@ namespace EasyRed2HumanAI
                     }
                     flightLoadPitch += Mathf.Clamp(Mathf.Abs(__instance.rollAngle) * 0.0004f, 0f, 0.02f);
 
-                    float t = Time.unscaledTime;
                     float phase = state.PhaseOffset * 6.283185f;
                     float rpmDrift = Mathf.Sin(t * 1.37f + phase) * 0.015f + Mathf.Sin(t * 3.11f + phase * 1.7f) * 0.010f;
 

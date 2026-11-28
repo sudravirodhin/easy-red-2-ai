@@ -55,6 +55,24 @@ namespace EasyRed2HumanAI
             public IntPtr RootPtr;
         }
         private static readonly Dictionary<IntPtr, ColliderEnvMeta> _vehicleColliderCache = new Dictionary<IntPtr, ColliderEnvMeta>(256);
+        private static readonly Dictionary<int, ColliderEnvMeta> _vehicleColliderCacheById = new Dictionary<int, ColliderEnvMeta>(256);
+        private static Il2CppSystem.Collections.Generic.List<AiDestination> _sharedOctreeCoverResults;
+        public static SoldierFastHandles CachedLocalPlayerHandles;
+        public static IntPtr CachedLocalPlayerSquadPtr;
+        public struct LocalPlayerFastHandles
+        {
+            public PlayerController Controller;
+            public Soldier Soldier;
+            public SoldierFastHandles SoldierHandles;
+            public Vehicle ControlledVehicle;
+            public Squad Squad;
+            public IntPtr SquadPtr;
+            public string Faction;
+            public bool HasControlledCharacter;
+            public bool HasPlayer;
+        }
+        private static int _localPlayerCacheFrame = -1;
+        private static LocalPlayerFastHandles _cachedLocalPlayerState;
         private static Il2CppInterop.Runtime.InteropTypes.Arrays.Il2CppStructArray<RaycastHit> _envRayScratch;
         private static readonly Dictionary<string, float> _debugLogCooldowns = new Dictionary<string, float>(32);
         private static readonly Dictionary<int, (bool HasMod, float ExpireTime)> _playerModdedCache = new Dictionary<int, (bool HasMod, float ExpireTime)>(16);
@@ -155,6 +173,15 @@ namespace EasyRed2HumanAI
             public float NextInSmokeCheckTime;
             public float CachedVoiceBasePitch;
             public uint VoiceLineCounter;
+            public LookParameters CachedLookRot;
+            public bool LookRotChecked;
+            public InventoryManager CachedInventory;
+            public bool InventoryChecked;
+            public float NextInventoryItemsCacheTime;
+            public bool CachedHasBandage;
+            public bool CachedHasSmoke;
+            public bool CachedHasFrag;
+            public bool CachedHasUsableSmallArms;
 
             internal BotMoveOverrideState MoveOverride;
             internal SoldierVeterancyState Veterancy;
@@ -496,6 +523,20 @@ namespace EasyRed2HumanAI
             public bool AnsweringTankSupport;
             public byte CachedPersonality;
             public float CachedPersonalityExpireTime;
+            public MovableVehicle Movable;
+            public VehicleWithWheels Wheeled;
+            public VehiclePlane Plane;
+            public VehicleTank Tank;
+            public Rigidbody CachedRb;
+            public bool RbChecked;
+            public FloatingObject CachedFloating;
+            public bool FloatingChecked;
+            public AudioSource CachedEngineSource;
+            public bool EngineSourceChecked;
+            public float NextPlaneAudioClipCheckTime;
+            public IntPtr CachedAiVehPathPtr;
+            public A.d CachedAiVehPath;
+            public float NextCrewFactionCheckTime;
             internal EmergentEngine.VehicleEmergentState Emergent;
         }
 
@@ -1047,6 +1088,10 @@ namespace EasyRed2HumanAI
         private static int _offsetSoldierTargetDest = -1;
         private static int _offsetSoldierAiVisibleTarget = -1;
         private static int _offsetSoldierAiPath = -1;
+        private static int _offsetAiVehiclePath = -1;
+        private static int _offsetAiVehicleVeh = -1;
+        private static int _offsetAiPlaneVeh = -1;
+        private static int _offsetAiPlaneTargetToAttack = -1;
         private static int _offsetTurretAiCurrentVisibleTarget = -1;
         private static int _offsetTurretAiTurret = -1;
 
@@ -1079,6 +1124,10 @@ namespace EasyRed2HumanAI
             _offsetSoldierTargetDest = ResolveIl2CppFieldOffset<Soldier>("targetDestination");
             _offsetSoldierAiVisibleTarget = ResolveIl2CppFieldOffset<SoldierAI>("visibleTarget");
             _offsetSoldierAiPath = ResolveIl2CppFieldOffset<SoldierAI>("path");
+            _offsetAiVehiclePath = ResolveIl2CppFieldOffset<AIVehicle>("path");
+            _offsetAiVehicleVeh = ResolveIl2CppFieldOffset<AIVehicle>("veh");
+            _offsetAiPlaneVeh = ResolveIl2CppFieldOffset<AIPlane>("veh");
+            _offsetAiPlaneTargetToAttack = ResolveIl2CppFieldOffset<AIPlane>("targetToAttack");
             _offsetTurretAiCurrentVisibleTarget = ResolveIl2CppFieldOffset<TurretAI>("<CurrentVisibleTarget>k__BackingField");
             _offsetTurretAiTurret = ResolveIl2CppFieldOffset<TurretAI>("turret");
         }
@@ -1087,7 +1136,7 @@ namespace EasyRed2HumanAI
         {
             EnsureNativeFieldOffsetsResolved();
             string Fmt(int off) => off > 0 ? $"+0x{off:X}" : "fallback";
-            return $"targetDest={Fmt(_offsetSoldierTargetDest)}, visibleTarget={Fmt(_offsetSoldierAiVisibleTarget)}, path={Fmt(_offsetSoldierAiPath)}";
+            return $"targetDest={Fmt(_offsetSoldierTargetDest)}, visibleTarget={Fmt(_offsetSoldierAiVisibleTarget)}, path={Fmt(_offsetSoldierAiPath)}, vehPath={Fmt(_offsetAiVehiclePath)}, aiVeh={Fmt(_offsetAiVehicleVeh)}, aiPlane={Fmt(_offsetAiPlaneVeh)}, planeTgt={Fmt(_offsetAiPlaneTargetToAttack)}";
         }
 
         /// <summary>
@@ -1289,6 +1338,129 @@ namespace EasyRed2HumanAI
         }
 
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        public static IntPtr GetRawPlaneTargetToAttackPtr(AIPlane plane)
+        {
+            if (ReferenceEquals(plane, null))
+                return IntPtr.Zero;
+            IntPtr planePtr = plane.Pointer;
+            if (planePtr == IntPtr.Zero)
+                return IntPtr.Zero;
+
+            if (!_nativeFieldOffsetsResolved)
+                EnsureNativeFieldOffsetsResolved();
+
+            if (_offsetAiPlaneTargetToAttack > 0)
+                return Marshal.ReadIntPtr(planePtr + _offsetAiPlaneTargetToAttack);
+
+            Spottable tgt = plane.targetToAttack;
+            return (!ReferenceEquals(tgt, null) && tgt != null) ? tgt.Pointer : IntPtr.Zero;
+        }
+
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        public static VehicleFastHandles GetCachedVehicleHandlesForAiVehicle(AIVehicle aiVeh)
+        {
+            if (ReferenceEquals(aiVeh, null))
+                return null;
+            IntPtr aiVehPtr = aiVeh.Pointer;
+            if (aiVehPtr == IntPtr.Zero)
+                return null;
+
+            if (!_nativeFieldOffsetsResolved)
+                EnsureNativeFieldOffsetsResolved();
+
+            if (_offsetAiVehicleVeh > 0)
+            {
+                IntPtr rawVehPtr = Marshal.ReadIntPtr(aiVehPtr + _offsetAiVehicleVeh);
+                if (rawVehPtr == IntPtr.Zero)
+                    return null;
+                if (TryGetVehicleHandles(rawVehPtr, out VehicleFastHandles vh) &&
+                    !ReferenceEquals(vh.Ref, null) && vh.Ref != null)
+                {
+                    return vh;
+                }
+            }
+
+            return GetOrCreateVehicleHandles(aiVeh.veh);
+        }
+
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        public static VehicleFastHandles GetCachedVehicleHandlesForAiPlane(AIPlane plane)
+        {
+            if (ReferenceEquals(plane, null))
+                return null;
+            IntPtr planePtr = plane.Pointer;
+            if (planePtr == IntPtr.Zero)
+                return null;
+
+            if (!_nativeFieldOffsetsResolved)
+                EnsureNativeFieldOffsetsResolved();
+
+            if (_offsetAiPlaneVeh > 0)
+            {
+                IntPtr rawVehPtr = Marshal.ReadIntPtr(planePtr + _offsetAiPlaneVeh);
+                if (rawVehPtr == IntPtr.Zero)
+                    return null;
+                if (TryGetVehicleHandles(rawVehPtr, out VehicleFastHandles vh) &&
+                    !ReferenceEquals(vh.Ref, null) && vh.Ref != null)
+                {
+                    return vh;
+                }
+            }
+
+            return GetOrCreateVehicleHandles(plane.veh);
+        }
+
+        public static LocalPlayerFastHandles GetCachedLocalPlayerHandles()
+        {
+            int curFrame = Time.frameCount;
+            if (curFrame == _localPlayerCacheFrame &&
+                (_cachedLocalPlayerState.Soldier == null || _cachedLocalPlayerState.Soldier.Pointer != IntPtr.Zero))
+            {
+                return _cachedLocalPlayerState;
+            }
+
+            _localPlayerCacheFrame = curFrame;
+            LocalPlayerFastHandles res = default;
+            try
+            {
+                PlayerController pc = PlayerController.currentController;
+                if (!ReferenceEquals(pc, null) && pc != null && pc.Pointer != IntPtr.Zero)
+                {
+                    res.Controller = pc;
+                    Soldier s = pc.ControlledCharacter;
+                    if (!ReferenceEquals(s, null) && s != null && s.Pointer != IntPtr.Zero)
+                    {
+                        res.Soldier = s;
+                        res.HasControlledCharacter = true;
+                        bool isAlive = s.IsAlive;
+                        res.HasPlayer = isAlive;
+                        if (isAlive)
+                        {
+                            SoldierFastHandles sh = GetOrCreateSoldierHandles(s);
+                            res.SoldierHandles = sh;
+                            float now = Time.time;
+                            res.Faction = sh != null ? GetCachedFaction(sh, now) : InternFaction(s.faction);
+                            Squad sq = sh != null ? GetCachedSquad(sh, now) : s.joinedSquad;
+                            if (!ReferenceEquals(sq, null) && sq != null && sq.Pointer != IntPtr.Zero)
+                            {
+                                res.Squad = sq;
+                                res.SquadPtr = sq.Pointer;
+                            }
+                        }
+                    }
+
+                    Vehicle cv = (res.HasControlledCharacter && res.Soldier.IsOnVehicle()) ? pc.ControlledVehicle : null;
+                    if (!ReferenceEquals(cv, null) && cv != null && cv.Pointer != IntPtr.Zero)
+                        res.ControlledVehicle = cv;
+                }
+            }
+            catch { }
+
+            _cachedLocalPlayerState = res;
+            return res;
+        }
+
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
         public static VehicleFastHandles GetCachedCurrentVehicleHandles(SoldierFastHandles h, float now)
         {
             if (h == null || h.Ref == null || !h.Ref.IsOnVehicle())
@@ -1316,7 +1488,7 @@ namespace EasyRed2HumanAI
         }
 
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        public static bool TryGetVisibleTargetCenterFast(SoldierAI ai, out Vector3 center)
+        public static bool TryGetVisibleTargetCenterFast(SoldierAI ai, out Vector3 center, bool ignoreAirVehicles = false)
         {
             IntPtr visPtr = GetRawVisibleTargetPtr(ai);
             if (visPtr == IntPtr.Zero)
@@ -1343,11 +1515,22 @@ namespace EasyRed2HumanAI
                 !ReferenceEquals(vh.Tr, null) &&
                 vh.Tr != null)
             {
+                if (ignoreAirVehicles && vh.IsAir)
+                {
+                    center = Vector3.zero;
+                    return false;
+                }
                 center = vh.Tr.position + Vector3.up * 1.10f;
                 return true;
             }
 
-            return TryGetSpottableCenter(ai.visibleTarget, out center);
+            Spottable vis = ai.visibleTarget;
+            if (ignoreAirVehicles && !ReferenceEquals(vis, null) && vis != null && vis.IsAirVehicle())
+            {
+                center = Vector3.zero;
+                return false;
+            }
+            return TryGetSpottableCenter(vis, out center);
         }
 
         /// <summary>
@@ -1394,6 +1577,178 @@ namespace EasyRed2HumanAI
             return ai.path;
         }
 
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        public static A.d GetCachedAiVehiclePath(VehicleFastHandles vh, AIVehicle aiVeh)
+        {
+            if (ReferenceEquals(aiVeh, null))
+                return null;
+            IntPtr aiVehPtr = aiVeh.Pointer;
+            if (aiVehPtr == IntPtr.Zero)
+                return null;
+
+            if (!_nativeFieldOffsetsResolved)
+                EnsureNativeFieldOffsetsResolved();
+
+            if (_offsetAiVehiclePath <= 0)
+                return aiVeh.path;
+
+            IntPtr rawPathPtr = Marshal.ReadIntPtr(aiVehPtr + _offsetAiVehiclePath);
+            if (rawPathPtr == IntPtr.Zero)
+            {
+                if (vh != null && vh.CachedAiVehPathPtr != IntPtr.Zero)
+                {
+                    vh.CachedAiVehPathPtr = IntPtr.Zero;
+                    vh.CachedAiVehPath = null;
+                }
+                return null;
+            }
+
+            if (vh != null)
+            {
+                if (rawPathPtr == vh.CachedAiVehPathPtr && !ReferenceEquals(vh.CachedAiVehPath, null))
+                    return vh.CachedAiVehPath;
+
+                A.d resolved = aiVeh.path;
+                vh.CachedAiVehPathPtr = rawPathPtr;
+                vh.CachedAiVehPath = resolved;
+                return resolved;
+            }
+
+            return aiVeh.path;
+        }
+
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        public static Rigidbody GetCachedVehicleRb(VehicleFastHandles vh)
+        {
+            if (vh == null)
+                return null;
+            if (!vh.RbChecked && (ReferenceEquals(vh.CachedRb, null) || vh.CachedRb == null))
+            {
+                Rigidbody rb = vh.Movable != null
+                    ? vh.Movable.rb
+                    : (!ReferenceEquals(vh.Ref, null) && vh.Ref != null ? vh.Ref.GetRigidbody() : null);
+                vh.RbChecked = true;
+                if (!ReferenceEquals(rb, null) && rb != null && rb.Pointer != IntPtr.Zero)
+                {
+                    vh.CachedRb = rb;
+                }
+            }
+            return (!ReferenceEquals(vh.CachedRb, null) && vh.CachedRb != null && vh.CachedRb.Pointer != IntPtr.Zero)
+                ? vh.CachedRb
+                : null;
+        }
+
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        public static InventoryManager GetCachedInventory(SoldierFastHandles h)
+        {
+            if (h == null || h.Ref == null)
+                return null;
+            if (!h.InventoryChecked)
+            {
+                InventoryManager inv = h.Ref.inventory;
+                if (!ReferenceEquals(inv, null) && inv != null && inv.Pointer != IntPtr.Zero)
+                {
+                    h.CachedInventory = inv;
+                    h.InventoryChecked = true;
+                }
+            }
+            return h.CachedInventory;
+        }
+
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        public static void InvalidateSoldierInventoryCache(SoldierFastHandles h)
+        {
+            if (h != null)
+                h.NextInventoryItemsCacheTime = 0f;
+        }
+
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        public static void InvalidateSoldierInventoryCache(Soldier s)
+        {
+            if (ReferenceEquals(s, null) || s.Pointer == IntPtr.Zero)
+                return;
+            if (_soldierHandlesByPtr.TryGetValue(s.Pointer, out SoldierFastHandles h) && h != null)
+                h.NextInventoryItemsCacheTime = 0f;
+        }
+
+        public static void GetCachedInventoryFlags(
+            SoldierFastHandles h,
+            float now,
+            GenericGun heldGun,
+            out bool hasBandage,
+            out bool hasSmoke,
+            out bool hasFrag,
+            out bool hasUsableSmallArms)
+        {
+            hasBandage = false;
+            hasSmoke = false;
+            hasFrag = false;
+            hasUsableSmallArms = false;
+            if (h == null || h.Ref == null)
+                return;
+
+            if (now < h.NextInventoryItemsCacheTime && now >= h.NextInventoryItemsCacheTime - 2.0f)
+            {
+                hasBandage = h.CachedHasBandage;
+                hasSmoke = h.CachedHasSmoke;
+                hasFrag = h.CachedHasFrag;
+                hasUsableSmallArms = h.CachedHasUsableSmallArms ||
+                                     (heldGun != null && !heldGun.IsAtWeapon() && heldGun.GetCurrentAmmoCount() > 0);
+                return;
+            }
+
+            h.NextInventoryItemsCacheTime = now + 0.70f + (h.DiagId & 7) * 0.04f;
+            InventoryManager inv = GetCachedInventory(h);
+            var invInner = inv != null ? inv.inventory : null;
+            var items = invInner != null ? invInner.items : null;
+            if (items != null)
+            {
+                int count = items.Count;
+                for (int i = 0; i < count; i++)
+                {
+                    VirtualItem vi = items[i];
+                    if (ReferenceEquals(vi, null) || vi == null || vi.Pointer == IntPtr.Zero)
+                        continue;
+
+                    if (!hasBandage && vi.TryCast<VirtualBandages>() != null)
+                    {
+                        hasBandage = true;
+                        if (hasSmoke && hasFrag)
+                            break;
+                        continue;
+                    }
+
+                    if (!hasSmoke && vi.TryCast<VirtualSmokeGrenade>() != null)
+                    {
+                        hasSmoke = true;
+                        if (hasBandage && hasFrag)
+                            break;
+                        continue;
+                    }
+
+                    if (!hasFrag &&
+                        vi.TryCast<VirtualATGrenade>() == null &&
+                        vi.TryCast<VirtualGrenade>() != null &&
+                        !IsPressureMineItem(vi, out _))
+                    {
+                        hasFrag = true;
+                        if (hasBandage && hasSmoke)
+                            break;
+                    }
+                }
+            }
+
+            if (heldGun != null && !heldGun.IsAtWeapon() && heldGun.GetCurrentAmmoCount() > 0)
+                hasUsableSmallArms = true;
+            else
+                hasUsableSmallArms = HasUsableSmallArmsAmmo(h.Ref);
+
+            h.CachedHasBandage = hasBandage;
+            h.CachedHasSmoke = hasSmoke;
+            h.CachedHasFrag = hasFrag;
+            h.CachedHasUsableSmallArms = hasUsableSmallArms;
+        }
+
         public static VehicleFastHandles GetOrCreateVehicleHandles(Vehicle v)
         {
             if (ReferenceEquals(v, null))
@@ -1411,9 +1766,18 @@ namespace EasyRed2HumanAI
             Transform tr = v.transform;
             bool isAir = v.IsAirVehicle();
             bool isWheeledOrTank = !isAir && v.IsWheeledVehicleOrTank();
-            bool isPlane = isAir && v.TryCast<VehiclePlane>() != null;
-            bool isTank = isWheeledOrTank && v.TryCast<VehicleTank>() != null;
+            VehiclePlane plane = isAir ? v.TryCast<VehiclePlane>() : null;
+            bool isPlane = plane != null;
+            VehicleWithWheels wheeled = isWheeledOrTank ? v.TryCast<VehicleWithWheels>() : null;
+            VehicleTank tank = isWheeledOrTank ? v.TryCast<VehicleTank>() : null;
+            bool isTank = tank != null;
             bool isPara = !isPlane && !isTank && v.TryCast<VehicleParachute>() != null;
+            MovableVehicle movable = plane != null
+                ? plane.Cast<MovableVehicle>()
+                : (wheeled != null
+                    ? wheeled.Cast<MovableVehicle>()
+                    : (!isPara ? v.TryCast<MovableVehicle>() : null));
+            Rigidbody rb = movable != null ? movable.rb : v.GetRigidbody();
             bool inMp = IsInMultiplayerRoom();
             SyncVehicle syn = inMp ? v.vehicleSyncher : null;
             h = new VehicleFastHandles
@@ -1427,10 +1791,16 @@ namespace EasyRed2HumanAI
                 CreatedAtTime = Time.time,
                 IsAir = isAir,
                 IsWheeledOrTank = isWheeledOrTank,
-                IsPlane = isPlane,
                 IsTank = isTank,
+                IsPlane = isPlane,
                 IsParachute = isPara,
-                IsStaticEmplacement = !isAir && !isWheeledOrTank && !isPara && v.TryCast<MovableVehicle>() == null
+                IsStaticEmplacement = !isAir && !isWheeledOrTank && !isPara && movable == null,
+                Movable = movable,
+                Wheeled = wheeled,
+                Plane = plane,
+                Tank = tank,
+                CachedRb = rb,
+                RbChecked = rb != null
             };
 
             _vehicleHandlesByPtr[ptr] = h;
@@ -4033,23 +4403,33 @@ namespace EasyRed2HumanAI
                                     ai != null &&
                                     ai.HasEnemyAndCanFireAtHim;
 
-            var lookRot = s.lookRotation;
+            if (isActivelyAiming)
+            {
+                s.RotateToward(flatDir.normalized, deltaTime);
+                return;
+            }
+
+            LookParameters lookRot = h.CachedLookRot;
+            if (!h.LookRotChecked)
+            {
+                lookRot = s.lookRotation;
+                h.CachedLookRot = lookRot;
+                h.LookRotChecked = true;
+            }
+
             float prevLeftRight = lookRot != null ? lookRot.leftRight : 0f;
             float prevUpDown = lookRot != null ? lookRot.upDown : 0f;
 
             s.RotateToward(flatDir.normalized, deltaTime);
 
-            if (!isActivelyAiming)
-            {
-                s.pointGunEndTime = s.isTowardWallTps
-                    ? Mathf.Min(prevPointGunEnd, now)
-                    : prevPointGunEnd;
+            s.pointGunEndTime = s.isTowardWallTps
+                ? Mathf.Min(prevPointGunEnd, now)
+                : prevPointGunEnd;
 
-                if (lookRot != null)
-                {
-                    lookRot.leftRight = prevLeftRight;
-                    lookRot.upDown = prevUpDown;
-                }
+            if (lookRot != null)
+            {
+                lookRot.leftRight = prevLeftRight;
+                lookRot.upDown = prevUpDown;
             }
         }
 
@@ -4405,6 +4785,17 @@ namespace EasyRed2HumanAI
             _urgentUnderFireWakeQueue[_urgentUnderFireWakeCount++] = h;
         }
 
+        private static Il2CppSystem.Collections.Generic.List<Creature> _cachedAliveCreaturesList;
+        private static float _nextAliveCreaturesListRefreshTime;
+
+        internal static void ClearAliveCreaturesCache()
+        {
+            _cachedAliveCreaturesList = null;
+            _nextAliveCreaturesListRefreshTime = 0f;
+            _localPlayerCacheFrame = -1;
+            _cachedLocalPlayerState = default;
+        }
+
         [HarmonyPatch(typeof(Creature), nameof(Creature.ProcessSequentialUpdates))]
         public static class Creature_ProcessSequentialUpdates_Patch
         {
@@ -4438,12 +4829,50 @@ namespace EasyRed2HumanAI
                 long extraProfStart = HitchProfiler.BeginModScope();
                 try
                 {
-                    var list = Creature.aliveCreatures;
+                    float uNow = Time.unscaledTime;
+                    if (_cachedAliveCreaturesList == null ||
+                        uNow >= _nextAliveCreaturesListRefreshTime ||
+                        uNow < _nextAliveCreaturesListRefreshTime - 2.0f)
+                    {
+                        _cachedAliveCreaturesList = Creature.aliveCreatures;
+                        _nextAliveCreaturesListRefreshTime = uNow + 0.50f;
+                    }
+
+                    var list = _cachedAliveCreaturesList;
                     if (list == null)
                         return;
 
                     int count = list.Count;
                     if (count <= 1)
+                        return;
+
+                    int players = GetConnectedPlayerCount();
+                    int targetBgFootTicks;
+                    int maxScanSteps;
+
+                    if (players >= 4)
+                    {
+                        // Large multiplayer lobby (4-10+ players): strictly 1 active foot tick per frame
+                        // so Photon outgoing serialization queues never contend with player ping.
+                        targetBgFootTicks = 1;
+                        maxScanSteps = Mathf.Min(count - 1, 2);
+                    }
+                    else if (players > 1)
+                    {
+                        // Small Co-op session (2-3 players): allow 2 total ticks when 75+ units on smooth frames
+                        targetBgFootTicks = (count > 75 && dt < 0.0185f) ? 2 : 1;
+                        maxScanSteps = Mathf.Min(count - 1, 3);
+                    }
+                    else
+                    {
+                        // Singleplayer: only add a 2nd background foot tick above 75 creatures on smooth <17.5ms frames
+                        // (cuts redundant SequentialUpdate IL2CPP churn across 55-75 bot battles while urgent wakes stay instant).
+                        targetBgFootTicks = (count > 75 && dt < 0.0175f) ? 2 : 1;
+                        maxScanSteps = Mathf.Min(count - 1, 4);
+                    }
+
+                    bool hasUrgentWake = _urgentUnderFireWakeCount > 0 && players < 4 && dt < 0.020f;
+                    if (!hasUrgentWake && targetBgFootTicks <= 1)
                         return;
 
                     int lastIdx = Creature.sequentialUpdateIndex - 1;
@@ -4465,36 +4894,8 @@ namespace EasyRed2HumanAI
                         }
                     }
 
-                    int players = GetConnectedPlayerCount();
-                    int targetFootTicks;
-                    int maxScanSteps;
-
-                    if (players >= 4)
-                    {
-                        // Large multiplayer lobby (4-10+ players): strictly 1 active foot tick per frame
-                        // so Photon outgoing serialization queues never contend with player ping.
-                        targetFootTicks = 1;
-                        maxScanSteps = Mathf.Min(count - 1, 3);
-                    }
-                    else if (players > 1)
-                    {
-                        // Small Co-op session (2-3 players): allow 2 ticks on VSync/smooth 60fps frames (< 18.5ms)
-                        targetFootTicks = (count > 60 && dt < 0.0185f) ? 2 : 1;
-                        maxScanSteps = Mathf.Min(count - 1, 4);
-                    }
-                    else
-                    {
-                        // Singleplayer: cap at 2 active foot soldiers per frame (1 vanilla + at most 1 extra within 0.45ms CPU budget)
-                        // so multiple SquadLeaderRoutine octree/pathfinding bursts NEVER stack onto the same frame!
-                        targetFootTicks = (count > 55 && dt < 0.0175f) ? 2 : 1;
-                        maxScanSteps = Mathf.Min(count - 1, 6);
-                    }
-
-                    bool hasUrgentWake = _urgentUnderFireWakeCount > 0 && players < 4 && dt < 0.020f;
-                    if (hasUrgentWake && targetFootTicks < 2)
-                        targetFootTicks = 2;
-
-                    if (activeFootSoldiersTicked >= targetFootTicks)
+                    int urgentCap = hasUrgentWake ? Mathf.Max(targetBgFootTicks, 3) : targetBgFootTicks;
+                    if (activeFootSoldiersTicked >= urgentCap)
                         return;
 
                     _isRunningExtraTicks = true;
@@ -4503,44 +4904,49 @@ namespace EasyRed2HumanAI
                     long budgetTicks = (long)(Stopwatch.Frequency * 0.00045); // Strict 0.45ms ceiling for extra AI ticks
 
                     float nowWake = Time.time;
-                    for (int wi = _urgentUnderFireWakeCount - 1; wi >= 0; wi--)
+                    if (hasUrgentWake)
                     {
-                        SoldierFastHandles uh = _urgentUnderFireWakeQueue[wi];
-                        if (IsStaleUrgentWakeEntry(uh, nowWake))
+                        for (int wi = _urgentUnderFireWakeCount - 1; wi >= 0 && activeFootSoldiersTicked < urgentCap; wi--)
                         {
-                            if (uh != null)
-                                uh.Vision.UnderFireWakeAt = 0f;
-                            int last = --_urgentUnderFireWakeCount;
-                            _urgentUnderFireWakeQueue[wi] = _urgentUnderFireWakeQueue[last];
-                            _urgentUnderFireWakeQueue[last] = null;
-                            continue;
+                            if ((Stopwatch.GetTimestamp() - startStamp) >= budgetTicks)
+                                break;
+
+                            SoldierFastHandles uh = _urgentUnderFireWakeQueue[wi];
+                            if (IsStaleUrgentWakeEntry(uh, nowWake))
+                            {
+                                if (uh != null)
+                                    uh.Vision.UnderFireWakeAt = 0f;
+                                int last = --_urgentUnderFireWakeCount;
+                                _urgentUnderFireWakeQueue[wi] = _urgentUnderFireWakeQueue[last];
+                                _urgentUnderFireWakeQueue[last] = null;
+                                continue;
+                            }
+
+                            if (nowWake < uh.Vision.UnderFireWakeAt || !uh.Ref.isActiveAndEnabled)
+                                continue;
+
+                            bool isUrgentLeader = uh.Ref.IsSquadLeader();
+                            if (isUrgentLeader && squadLeaderTicked)
+                                continue;
+
+                            uh.Vision.UnderFireWakeAt = 0f;
+                            int lastIdxWake = --_urgentUnderFireWakeCount;
+                            _urgentUnderFireWakeQueue[wi] = _urgentUnderFireWakeQueue[lastIdxWake];
+                            _urgentUnderFireWakeQueue[lastIdxWake] = null;
+
+                            uh.Ref.SequentialUpdate();
+                            SoldierAI uAi = uh.Ai;
+                            if (!ReferenceEquals(uAi, null) && uAi != null && uAi.enabled)
+                                uAi.SequentialUpdate();
+
+                            activeFootSoldiersTicked++;
+                            TotalAdaptiveAiExtraTicks++;
+                            if (isUrgentLeader)
+                                squadLeaderTicked = true;
                         }
-
-                        if (nowWake < uh.Vision.UnderFireWakeAt || !uh.Ref.isActiveAndEnabled)
-                            continue;
-
-                        bool isUrgentLeader = uh.Ref.IsSquadLeader();
-                        if (isUrgentLeader && squadLeaderTicked)
-                            continue;
-
-                        uh.Vision.UnderFireWakeAt = 0f;
-                        int lastIdxWake = --_urgentUnderFireWakeCount;
-                        _urgentUnderFireWakeQueue[wi] = _urgentUnderFireWakeQueue[lastIdxWake];
-                        _urgentUnderFireWakeQueue[lastIdxWake] = null;
-
-                        uh.Ref.SequentialUpdate();
-                        SoldierAI uAi = uh.Ai;
-                        if (!ReferenceEquals(uAi, null) && uAi != null && uAi.enabled)
-                            uAi.SequentialUpdate();
-
-                        activeFootSoldiersTicked++;
-                        TotalAdaptiveAiExtraTicks++;
-                        if (isUrgentLeader)
-                            squadLeaderTicked = true;
-                        break;
                     }
 
-                    while (activeFootSoldiersTicked < targetFootTicks && scanned < maxScanSteps)
+                    while (activeFootSoldiersTicked < targetBgFootTicks && scanned < maxScanSteps)
                     {
                         if ((Stopwatch.GetTimestamp() - startStamp) >= budgetTicks)
                             break;

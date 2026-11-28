@@ -814,13 +814,18 @@ namespace EasyRed2HumanAI
                     if (!VisionConfig.EnableMod.Value || !VisionConfig.EnableWallShootingPrevention.Value || __instance == null)
                         return true;
 
-                    if (AiCore.IsAnyHumanPlayerSoldier(__instance) || AiCore.IsSoldierInVehicleOrTransition(__instance) || !AiCore.IsLocallyOwnedBot(__instance))
+                    AiCore.SoldierFastHandles h = AiCore.GetOrCreateSoldierHandles(__instance);
+                    if (AiCore.IsAnyHumanPlayerSoldier(h) || AiCore.IsSoldierInVehicleOrTransition(__instance) || !AiCore.IsLocallyOwnedBot(h))
                         return true;
 
-                    bool targetIsVehicle = __instance.aiController != null &&
-                                           __instance.aiController.visibleTarget != null &&
-                                           __instance.aiController.visibleTarget.IsWheeledVehicleOrTank();
-                    if (VeteranAndTacticsPatches.IsBotGunClippedThroughWall(__instance, targetIsVehicle))
+                    IntPtr visPtr = (h != null && h.Ai != null) ? AiCore.GetRawVisibleTargetPtr(h.Ai) : IntPtr.Zero;
+                    bool targetIsVehicle = visPtr != IntPtr.Zero &&
+                                           (AiCore.TryGetVehicleHandles(visPtr, out AiCore.VehicleFastHandles visVh)
+                                               ? visVh.IsWheeledOrTank
+                                               : (!AiCore.TryGetSoldierHandles(visPtr, out _) &&
+                                                  h.Ai.visibleTarget != null &&
+                                                  h.Ai.visibleTarget.IsWheeledVehicleOrTank()));
+                    if (VeteranAndTacticsPatches.IsBotGunClippedThroughWall(__instance, targetIsVehicle, shooterH: h))
                     {
                         __instance.SetGunTriggerPressed(false);
                         VeteranAndTacticsPatches.IncrementWallsBlocked();
@@ -856,11 +861,14 @@ namespace EasyRed2HumanAI
                         __instance == null ||
                         !__instance.IsAlive ||
                         AiCore.IsSoldierInVehicleOrTransition(__instance) ||
-                        __instance.HasSurrended() ||
-                        __instance.transform == null)
+                        __instance.HasSurrended())
                     {
                         return;
                     }
+
+                    AiCore.SoldierFastHandles stepH = AiCore.GetOrCreateSoldierHandles(__instance);
+                    if (stepH == null || stepH.Tr == null)
+                        return;
 
                     RecordSoldierFootstep(__instance);
                 }

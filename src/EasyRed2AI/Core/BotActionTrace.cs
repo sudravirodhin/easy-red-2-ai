@@ -238,12 +238,26 @@ namespace EasyRed2HumanAI
 
         private static int ResolveTargetDiagId(SoldierAI ai)
         {
-            if (ai == null || ai.visibleTarget == null)
-                return 0;
-            Soldier ts = ai.visibleTarget.TryCast<Soldier>();
-            if (ts != null && AiCore.TryGetSoldierHandles(ts.Pointer, out AiCore.SoldierFastHandles th))
+            IntPtr visPtr = AiCore.GetRawVisibleTargetPtr(ai);
+            if (visPtr != IntPtr.Zero && AiCore.TryGetSoldierHandles(visPtr, out AiCore.SoldierFastHandles th))
                 return th.DiagId;
             return 0;
+        }
+
+        private static string GetSquadDirectiveShortName(EmergentEngine.Tier2SquadDirective dir)
+        {
+            switch (dir)
+            {
+                case EmergentEngine.Tier2SquadDirective.AdvanceBound: return "AdvanceBound";
+                case EmergentEngine.Tier2SquadDirective.AnvilPin: return "AnvilPin";
+                case EmergentEngine.Tier2SquadDirective.HammerFlank: return "HammerFlank";
+                case EmergentEngine.Tier2SquadDirective.SquadSmokePush: return "SquadSmokePush";
+                case EmergentEngine.Tier2SquadDirective.CovertApproach: return "CovertApproach";
+                case EmergentEngine.Tier2SquadDirective.DecisiveBreach: return "DecisiveBreach";
+                case EmergentEngine.Tier2SquadDirective.LocalFallback: return "LocalFallback";
+                case EmergentEngine.Tier2SquadDirective.BalkNeedSupport: return "BalkNeedSupport";
+                default: return "AdvanceBound";
+            }
         }
 
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
@@ -330,7 +344,7 @@ namespace EasyRed2HumanAI
                 if (!VisionPatches.TryGetNearestEnemyGunfire(pos, fac, 25.0f, 3.0f, out gunfireDist))
                     gunfireDist = -1f;
             }
-            if (enemyDist < 0f && ai != null && ai.visibleTarget != null)
+            if (enemyDist < 0f && ai != null && AiCore.GetRawVisibleTargetPtr(ai) != IntPtr.Zero)
             {
                 enemyDist = ai.distFromTarget;
             }
@@ -522,7 +536,7 @@ namespace EasyRed2HumanAI
                 InCover = (byte)(soldier.IsOnCover() ? 1 : 0),
                 Suppression = (short)Mathf.Clamp(Mathf.RoundToInt(suppression), 0, 999),
                 Ammo = ammo,
-                EnemyDist = (ai != null && ai.visibleTarget != null) ? enemyDist : -1f,
+                EnemyDist = (ai != null && AiCore.GetRawVisibleTargetPtr(ai) != IntPtr.Zero) ? enemyDist : -1f,
                 GunfireDist = gfDist,
                 AcoustDist = VisionPatches.TryGetNearestCloseAcousticThreat(pos, fac, now, out _, out float ad, out _) ? ad : -1f,
                 Yaw = (short)(((int)Mathf.Round(h.Tr.eulerAngles.y) % 360 + 360) % 360),
@@ -532,7 +546,7 @@ namespace EasyRed2HumanAI
                 Faction = fac,
                 Name = h.CachedFullName,
                 Role = VeteranAndTacticsPatches.GetPersonalityShortLabel(personality),
-                Net = squadDir.ToString(),
+                Net = GetSquadDirectiveShortName(squadDir),
                 Goal = dec.Reflex != EmergentEngine.EmergentReflexKind.None ? ("Reflex:" + EmergentEngine.GetReflexShortName(dec.Reflex)) : "SurviveWin",
                 Act0 = EmergentEngine.GetActionShortName(dec.Step0),
                 Act1 = EmergentEngine.GetActionShortName(dec.Step1),
@@ -626,7 +640,7 @@ namespace EasyRed2HumanAI
                 sup = (short)Mathf.Clamp(Mathf.RoundToInt(victim.GetSuppressionValue()), 0, 999);
                 GenericGun heldGun = victim.GetHeldGun();
                 ammo = (short)(heldGun != null ? Mathf.Clamp(heldGun.GetCurrentAmmoCount(), 0, 999) : -1);
-                enemyDist = (ai != null && ai.visibleTarget != null) ? ai.distFromTarget : -1f;
+                enemyDist = (ai != null && AiCore.GetRawVisibleTargetPtr(ai) != IntPtr.Zero) ? ai.distFromTarget : -1f;
                 fac = AiCore.GetCachedFaction(h, now);
                 Squad sq = AiCore.GetCachedSquad(h, now);
                 sqId = sq != null ? AiCore.GetSquadDiagId(sq.Pointer) : 0;

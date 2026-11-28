@@ -70,60 +70,62 @@ namespace EasyRed2HumanAI
             return bestTarget;
         }
 
-        public static void TrySteerAircraftOrbitTowardKnownThreat(AIPlane plane)
+        public static void TrySteerAircraftOrbitTowardKnownThreat(AIPlane plane, AiCore.VehicleFastHandles vh = null)
         {
-            if (plane == null || plane.veh == null || plane.veh.Pointer == IntPtr.Zero || plane.transform == null)
+            if (plane == null)
                 return;
 
-            if (!AiCore.IsLocallyOwnedVehicle(plane.veh) || AiCore.IsAnyHumanPlayerInsideVehicle(plane.veh))
+            AiCore.VehicleFastHandles planeVh = vh ?? AiCore.GetCachedVehicleHandlesForAiPlane(plane);
+            VehiclePlane vp = planeVh != null ? planeVh.Plane : null;
+            Transform planeTr = (planeVh != null && !ReferenceEquals(planeVh.Tr, null) && planeVh.Tr != null) ? planeVh.Tr : plane.transform;
+            if (vp == null || planeVh.Ptr == IntPtr.Zero || planeTr == null)
                 return;
 
-            IntPtr vehPtr = plane.veh.Pointer;
+            if (!AiCore.IsLocallyOwnedVehicle(vp) || AiCore.IsAnyHumanPlayerInsideVehicle(vp))
+                return;
+
+            IntPtr vehPtr = planeVh.Ptr;
             float now = Time.time;
-            AiCore.VehicleFastHandles planeVh = AiCore.GetOrCreateVehicleHandles(plane.veh);
             AIPlane.PlaneAIState curPlaneState = plane.planeState;
 
-            if (planeVh != null)
+            if (curPlaneState == AIPlane.PlaneAIState.goingTorefill ||
+                curPlaneState == AIPlane.PlaneAIState.doingRefill)
             {
-                if (curPlaneState == AIPlane.PlaneAIState.goingTorefill ||
-                    curPlaneState == AIPlane.PlaneAIState.doingRefill)
+                if (planeVh.RefillStateEnteredAt <= 0f)
+                    planeVh.RefillStateEnteredAt = now;
+                else if (now - planeVh.RefillStateEnteredAt >= 38.0f || plane.nearestRepairStation == null)
                 {
-                    if (planeVh.RefillStateEnteredAt <= 0f)
-                        planeVh.RefillStateEnteredAt = now;
-                    else if (now - planeVh.RefillStateEnteredAt >= 38.0f || plane.nearestRepairStation == null)
-                    {
-                        // Escape infinite repair-ring circling if the trigger was missed or unreachable
-                        planeVh.RefillStateEnteredAt = 0f;
-                        planeVh.BombsDepletedAt = 0f;
-                        if (plane.veh.CanRefillAmmmo())
-                            plane.veh.RefillAllTurrets();
-                        if (plane.veh.CanRefillBombBay())
-                            plane.veh.RefillBombBaySynched();
-                        plane.ExitDive();
-                        curPlaneState = plane.planeState;
-                    }
-                }
-                else
-                {
+                    // Escape infinite repair-ring circling if the trigger was missed or unreachable
                     planeVh.RefillStateEnteredAt = 0f;
-                }
-
-                bool orbitingWithoutTarget =
-                    curPlaneState == AIPlane.PlaneAIState.flyingAroundArea &&
-                    (plane.targetToAttack == null || plane.targetToAttack.Pointer == IntPtr.Zero);
-                if (orbitingWithoutTarget)
-                {
-                    if (planeVh.FlyingAroundAreaSince <= 0f)
-                        planeVh.FlyingAroundAreaSince = now;
-                }
-                else
-                {
-                    planeVh.FlyingAroundAreaSince = 0f;
+                    planeVh.BombsDepletedAt = 0f;
+                    if (vp.CanRefillAmmmo())
+                        vp.RefillAllTurrets();
+                    if (vp.CanRefillBombBay())
+                        vp.RefillBombBaySynched();
+                    plane.ExitDive();
+                    curPlaneState = plane.planeState;
                 }
             }
+            else
+            {
+                planeVh.RefillStateEnteredAt = 0f;
+            }
 
-            if (planeVh != null &&
-                now < planeVh.UnderFireUntil &&
+            IntPtr rawTargetPtr = AiCore.GetRawPlaneTargetToAttackPtr(plane);
+            bool orbitingWithoutTarget =
+                curPlaneState == AIPlane.PlaneAIState.flyingAroundArea &&
+                rawTargetPtr == IntPtr.Zero;
+            if (orbitingWithoutTarget)
+            {
+                if (planeVh.FlyingAroundAreaSince <= 0f)
+                    planeVh.FlyingAroundAreaSince = now;
+            }
+            else
+            {
+                planeVh.FlyingAroundAreaSince = 0f;
+            }
+
+            if (now < planeVh.UnderFireUntil &&
                 now >= planeVh.NextUnderFireWakeTime &&
                 AiCore.IsValidAliveSpottable(planeVh.UnderFireAttacker) &&
                 (plane.PilotGunHasAnyAmmo() || plane.HasBombsToDeliver()) &&
@@ -139,7 +141,7 @@ namespace EasyRed2HumanAI
             {
                 planeVh.NextUnderFireWakeTime = now + 0.50f;
                 Spottable ufAtk = planeVh.UnderFireAttacker;
-                string ufFac = GetVehicleCrewFaction(plane.veh);
+                string ufFac = GetVehicleCrewFaction(vp);
                 if (!string.IsNullOrEmpty(ufFac))
                 {
                     if (ufAtk.IsAirVehicle())
@@ -151,30 +153,31 @@ namespace EasyRed2HumanAI
                             plane.PilotGunHasAnyAmmo())
                         {
                             Vector3 atkPos = atkPlane.transform != null ? atkPlane.transform.position : ufAtk.GetPosition();
+                            Vector3 planePos = planeTr.position;
                             bool shouldEngageAirAttacker =
                                 curPlaneState == AIPlane.PlaneAIState.flyingAroundArea ||
                                 curPlaneState == AIPlane.PlaneAIState.preparingDive;
                             if (!shouldEngageAirAttacker && curPlaneState == AIPlane.PlaneAIState.doingDive)
                             {
-                                Spottable diveTgt = plane.targetToAttack;
+                                Spottable diveTgt = rawTargetPtr != IntPtr.Zero ? plane.targetToAttack : null;
                                 if ((diveTgt == null || !diveTgt.IsAirVehicle()) &&
-                                    plane.transform.forward.y > -0.35f &&
-                                    (plane.transform.position.y - atkPos.y) > -600f)
+                                    planeTr.forward.y > -0.35f &&
+                                    (planePos.y - atkPos.y) > -600f)
                                 {
                                     shouldEngageAirAttacker = true;
                                 }
                             }
                             else if (!shouldEngageAirAttacker && curPlaneState == AIPlane.PlaneAIState.targetingPlane)
                             {
-                                Spottable curAirTgt = plane.targetToAttack;
+                                Spottable curAirTgt = rawTargetPtr != IntPtr.Zero ? plane.targetToAttack : null;
                                 if (curAirTgt == null || curAirTgt.Pointer == IntPtr.Zero)
                                 {
                                     shouldEngageAirAttacker = true;
                                 }
                                 else if (curAirTgt.Pointer != ufAtk.Pointer)
                                 {
-                                    float ufDist = Vector3.Distance(plane.transform.position, atkPos);
-                                    float curDist = Vector3.Distance(plane.transform.position, curAirTgt.GetPosition());
+                                    float ufDist = Vector3.Distance(planePos, atkPos);
+                                    float curDist = Vector3.Distance(planePos, curAirTgt.GetPosition());
                                     if (curDist > ufDist * 2.2f)
                                         shouldEngageAirAttacker = true;
                                 }
@@ -190,14 +193,16 @@ namespace EasyRed2HumanAI
                     }
                     else if (curPlaneState == AIPlane.PlaneAIState.flyingAroundArea)
                     {
-                        Spottable airThreat = FindBestAirborneEnemyAircraft(plane, ufFac, plane.transform.position, out bool anyEnemyAir, out float nearestAirDist, out bool bestAirBomber);
+                        Vector3 planePos = planeTr.position;
+                        Transform planeRoot = (planeVh.RootTr != null) ? planeVh.RootTr : planeTr.root;
+                        Spottable airThreat = FindBestAirborneEnemyAircraft(plane, ufFac, planePos, out bool anyEnemyAir, out float nearestAirDist, out bool bestAirBomber);
                         bool hasBombs = plane.HasBombsToDeliver();
                         bool hasApCannons = HasAircraftAntiArmorCannons(plane, out float bestPenMm);
                         bool emergentAirOn = VisionConfig.EnableEmergentDecisionEngine != null && VisionConfig.EnableEmergentDecisionEngine.Value;
                         if (CanAircraftCounterAttackGroundUnit(
                                 ufFac,
-                                plane.transform.position,
-                                plane.transform.root,
+                                planePos,
+                                planeRoot,
                                 ufAtk,
                                 hasBombs,
                                 hasApCannons,
@@ -231,13 +236,12 @@ namespace EasyRed2HumanAI
                 }
             }
 
-            if (planeVh != null && now < planeVh.NextPlaneOrbitSteerTime)
+            if (now < planeVh.NextPlaneOrbitSteerTime)
                 return;
 
-            if (planeVh != null)
-                planeVh.NextPlaneOrbitSteerTime = now + 2.0f;
+            planeVh.NextPlaneOrbitSteerTime = now + 2.0f;
 
-            string myFaction = GetVehicleCrewFaction(plane.veh);
+            string myFaction = GetVehicleCrewFaction(vp);
             if (string.IsNullOrEmpty(myFaction))
                 return;
 
@@ -246,14 +250,14 @@ namespace EasyRed2HumanAI
             // Fix vanilla AIPlane.Update (0x180575BD7) BomberDestination bug:
             // PlaneType.Bomber aircraft spawned via standard SpawnManagers lack BomberDestination,
             // causing AIPlane.Update to jump to SetFlyAroundConquerArea (planeState = 7) and circle forever!
-            if (plane.veh.planeType == PlaneType.Bomber &&
-                !plane.veh.BomberDestination.HasValue &&
-                plane.veh.CountBombs() > 0)
+            if (vp.planeType == PlaneType.Bomber &&
+                !vp.BomberDestination.HasValue &&
+                vp.CountBombs() > 0)
             {
-                var calcDest = plane.veh.CalculateBomberTarget(false);
+                var calcDest = vp.CalculateBomberTarget(false);
                 if (calcDest.HasValue)
                 {
-                    plane.veh.BomberDestination = calcDest;
+                    vp.BomberDestination = calcDest;
                 }
                 else if (_knownEnemyClusters.Count > 0)
                 {
@@ -262,8 +266,8 @@ namespace EasyRed2HumanAI
                         KnownEnemyCluster cl = _knownEnemyClusters[c];
                         if (!AiCore.AreSameSideFactions(cl.Faction, myFaction))
                         {
-                            float bAlt = Mathf.Max(plane.transform.position.y, cl.Position.y + 380.0f);
-                            plane.veh.BomberDestination = new Il2CppSystem.Nullable<Vector3>(
+                            float bAlt = Mathf.Max(planeTr.position.y, cl.Position.y + 380.0f);
+                            vp.BomberDestination = new Il2CppSystem.Nullable<Vector3>(
                                 new Vector3(cl.Position.x, bAlt, cl.Position.z));
                             break;
                         }
@@ -290,9 +294,9 @@ namespace EasyRed2HumanAI
                     if (AIPlane.fighterDogfightExtraLeash < 1800.0f)
                         AIPlane.fighterDogfightExtraLeash = 1800.0f;
 
-                    Spottable curAtk = plane.targetToAttack;
+                    Spottable curAtk = rawTargetPtr != IntPtr.Zero ? plane.targetToAttack : null;
                     bool alreadyTargetingAir = curAtk != null && curAtk.Pointer != IntPtr.Zero && curAtk.IsAirVehicle();
-                    if (!alreadyTargetingAir && plane.veh.planeType != PlaneType.Bomber && plane.PilotGunHasAnyAmmo())
+                    if (!alreadyTargetingAir && vp.planeType != PlaneType.Bomber && plane.PilotGunHasAnyAmmo())
                     {
                         planeVh.FlyingAroundAreaSince = 0f;
                         plane.DoAttackTarget(emergentTarget);
@@ -304,9 +308,8 @@ namespace EasyRed2HumanAI
                 }
                 else
                 {
-                    bool canLaunchCasBreakout = (plane.veh.planeType == PlaneType.Fighter || (!plane.veh.BomberDestination.HasValue && plane.HasBombsToDeliver())) &&
-                                                (plane.targetToAttack == null || plane.targetToAttack.Pointer == IntPtr.Zero) &&
-                                                planeVh != null &&
+                    bool canLaunchCasBreakout = (vp.planeType == PlaneType.Fighter || (!vp.BomberDestination.HasValue && plane.HasBombsToDeliver())) &&
+                                                rawTargetPtr == IntPtr.Zero &&
                                                 planeVh.FlyingAroundAreaSince > 0f &&
                                                 (now - planeVh.FlyingAroundAreaSince) >= 2.0f;
                     if (canLaunchCasBreakout)
@@ -319,7 +322,7 @@ namespace EasyRed2HumanAI
             }
 
             // Legacy Air Superiority First ("Clear Skies Only" Ground Support) when H.A.R.M. is toggled OFF:
-            Spottable bestEnemyAir = FindBestAirborneEnemyAircraft(plane, myFaction, plane.transform.position, out bool anyEnemyAirborne);
+            Spottable bestEnemyAir = FindBestAirborneEnemyAircraft(plane, myFaction, planeTr.position, out bool anyEnemyAirborne);
             if (anyEnemyAirborne)
             {
                 if (AIPlane.fighterDogfightExtraLeash < 1800.0f)
@@ -331,7 +334,7 @@ namespace EasyRed2HumanAI
                     plane.PilotGunHasAnyAmmo() &&
                     plane.planeState == AIPlane.PlaneAIState.flyingAroundArea)
                 {
-                    Spottable curAtk = plane.targetToAttack;
+                    Spottable curAtk = rawTargetPtr != IntPtr.Zero ? plane.targetToAttack : null;
                     bool alreadyTargetingAir = curAtk != null && curAtk.Pointer != IntPtr.Zero && curAtk.IsAirVehicle();
                     if (!alreadyTargetingAir)
                     {
@@ -353,10 +356,9 @@ namespace EasyRed2HumanAI
             // Break out of "vulture circling": if an armed fighter/CAS plane has been orbiting in flyingAroundArea
             // for >= 2.5s without acquiring a target (because vanilla's 200m tangential bank keeps the orbit center
             // 90 degrees off-bore!), directly select a valid ground target and initiate DoAttackTarget!
-            if (plane.veh.planeType == PlaneType.Fighter &&
-                (plane.targetToAttack == null || plane.targetToAttack.Pointer == IntPtr.Zero) &&
+            if (vp.planeType == PlaneType.Fighter &&
+                rawTargetPtr == IntPtr.Zero &&
                 (plane.PilotGunHasAnyAmmo() || plane.HasBombsToDeliver()) &&
-                planeVh != null &&
                 planeVh.FlyingAroundAreaSince > 0f &&
                 (now - planeVh.FlyingAroundAreaSince) >= 2.5f)
             {
@@ -881,38 +883,41 @@ namespace EasyRed2HumanAI
             return true;
         }
 
-        public static bool IsJapaneseKamikazeActive(AIPlane plane)
+        public static bool IsJapaneseKamikazeActive(AIPlane plane, AiCore.VehicleFastHandles vh = null)
         {
-            return plane != null &&
-                   plane.veh != null &&
-                   plane.veh.Pointer != IntPtr.Zero &&
-                   !plane.veh.isGrounded &&
-                   AiCore.TryGetVehicleHandles(plane.veh.Pointer, out AiCore.VehicleFastHandles vh) &&
-                   vh.IsActiveKamikaze;
+            if (plane == null)
+                return false;
+            AiCore.VehicleFastHandles resolvedVh = vh ?? AiCore.GetCachedVehicleHandlesForAiPlane(plane);
+            VehiclePlane vp = resolvedVh != null ? resolvedVh.Plane : null;
+            return vp != null &&
+                   resolvedVh.Ptr != IntPtr.Zero &&
+                   !vp.isGrounded &&
+                   resolvedVh.IsActiveKamikaze;
         }
 
-        private static bool IsJapaneseKamikazeCandidate(AIPlane plane, out string myFaction)
+        private static bool IsJapaneseKamikazeCandidate(AIPlane plane, out string myFaction, out AiCore.VehicleFastHandles resolvedVh, AiCore.VehicleFastHandles vh = null)
         {
             myFaction = null;
+            resolvedVh = vh ?? (plane != null ? AiCore.GetCachedVehicleHandlesForAiPlane(plane) : null);
+            VehiclePlane vp = resolvedVh != null ? resolvedVh.Plane : null;
+            Transform planeTr = (resolvedVh != null && !ReferenceEquals(resolvedVh.Tr, null) && resolvedVh.Tr != null) ? resolvedVh.Tr : (plane != null ? plane.transform : null);
             if (!VisionConfig.EnableMod.Value ||
                 !VisionConfig.EnableFactionNetDoctrines.Value ||
                 plane == null ||
-                plane.veh == null ||
-                plane.veh.Pointer == IntPtr.Zero ||
-                plane.transform == null)
+                vp == null ||
+                resolvedVh.Ptr == IntPtr.Zero ||
+                planeTr == null)
             {
                 return false;
             }
 
-            AiCore.VehicleFastHandles vh = AiCore.GetOrCreateVehicleHandles(plane.veh);
-            if (plane.veh.isGrounded ||
-                !plane.veh.CanFight() ||
+            if (vp.isGrounded ||
+                !vp.CanFight() ||
                 !plane.HasAIDriver ||
-                AiCore.IsAnyHumanPlayerInsideVehicle(plane.veh) ||
-                !AiCore.IsLocallyOwnedVehicle(plane.veh))
+                AiCore.IsAnyHumanPlayerInsideVehicle(vp) ||
+                !AiCore.IsLocallyOwnedVehicle(vp))
             {
-                if (vh != null)
-                    vh.IsActiveKamikaze = false;
+                resolvedVh.IsActiveKamikaze = false;
                 return false;
             }
 
@@ -924,40 +929,37 @@ namespace EasyRed2HumanAI
                 return false;
             }
 
-            myFaction = GetVehicleCrewFaction(plane.veh);
+            myFaction = GetVehicleCrewFaction(vp);
             if (string.IsNullOrEmpty(myFaction) ||
                 !myFaction.StartsWith("Japan", StringComparison.OrdinalIgnoreCase))
             {
                 return false;
             }
 
-            if (vh != null && vh.IsActiveKamikaze)
+            if (resolvedVh.IsActiveKamikaze)
                 return true;
 
             // Kamikaze is strictly a last-resort sacrifice for severely crippled Japanese aircraft:
             // dropping bombs or expending forward gun ammo NEVER triggers kamikaze (intact planes RTB/refill normally).
             bool severelyDamaged =
-                plane.veh.GetDamage() >= 80 ||
-                plane.veh.hasMissingParts ||
-                !plane.veh.useWingsL ||
-                !plane.veh.useWingsR;
+                vp.GetDamage() >= 80 ||
+                vp.hasMissingParts ||
+                !vp.useWingsL ||
+                !vp.useWingsR;
 
             if (!severelyDamaged)
                 return false;
 
-            if (vh != null && vh.KamikazeDecisionMade)
-                return vh.KamikazeCommitted;
+            if (resolvedVh.KamikazeDecisionMade)
+                return resolvedVh.KamikazeCommitted;
 
-            SoldierPersonality pilotPers = GetVehicleCrewPersonality(plane.veh);
+            SoldierPersonality pilotPers = GetVehicleCrewPersonality(vp);
             float chance = pilotPers == SoldierPersonality.Pilot_Disciplined
                 ? 0f
                 : (pilotPers == SoldierPersonality.Pilot_Daredevil ? 0.55f : 0.30f);
             bool committed = chance > 0f && UnityEngine.Random.value < chance;
-            if (vh != null)
-            {
-                vh.KamikazeDecisionMade = true;
-                vh.KamikazeCommitted = committed;
-            }
+            resolvedVh.KamikazeDecisionMade = true;
+            resolvedVh.KamikazeCommitted = committed;
             return committed;
         }
 
@@ -1118,35 +1120,37 @@ namespace EasyRed2HumanAI
             return bestTarget;
         }
 
-        public static void TryExecuteJapaneseKamikazeDive(AIPlane plane, bool isPostfix)
+        public static void TryExecuteJapaneseKamikazeDive(AIPlane plane, bool isPostfix, AiCore.VehicleFastHandles vh = null)
         {
-            if (!IsJapaneseKamikazeCandidate(plane, out string myFaction))
+            if (!IsJapaneseKamikazeCandidate(plane, out string myFaction, out AiCore.VehicleFastHandles resolvedVh, vh))
                 return;
 
-            AiCore.VehicleFastHandles vh = AiCore.GetOrCreateVehicleHandles(plane.veh);
+            VehiclePlane vp = resolvedVh.Plane;
+            Transform planeTr = (resolvedVh.Tr != null) ? resolvedVh.Tr : plane.transform;
+            Transform planeRoot = (resolvedVh.RootTr != null) ? resolvedVh.RootTr : planeTr.root;
             float now = Time.time;
 
-            if (vh != null && !vh.IsActiveKamikaze)
+            if (!resolvedVh.IsActiveKamikaze)
             {
-                vh.IsActiveKamikaze = true;
+                resolvedVh.IsActiveKamikaze = true;
                 KamikazeDivesTriggeredCount++;
                 if (VisionConfig.DebugLogging.Value)
                 {
                     AiCore.LogDebug(
                         "Kamikaze",
-                        $"Imperial Japanese aircraft (dmg:{plane.veh.GetDamage()}, missingParts:{plane.veh.hasMissingParts}) committed to final Tokkōtai kamikaze dive!");
+                        $"Imperial Japanese aircraft (dmg:{vp.GetDamage()}, missingParts:{vp.hasMissingParts}) committed to final Tokkōtai kamikaze dive!");
                 }
             }
 
-            Spottable target = plane.targetToAttack;
+            IntPtr rawTargetPtr = AiCore.GetRawPlaneTargetToAttackPtr(plane);
+            Spottable target = rawTargetPtr != IntPtr.Zero ? plane.targetToAttack : null;
             bool needNewTarget = !IsSpottableTargetValid(target);
 
             if (needNewTarget ||
                 (plane.planeState != AIPlane.PlaneAIState.doingDive &&
-                 (vh == null || now >= vh.NextKamikazeTargetSearchTime)))
+                 now >= resolvedVh.NextKamikazeTargetSearchTime))
             {
-                if (vh != null)
-                    vh.NextKamikazeTargetSearchTime = now + 1.5f;
+                resolvedVh.NextKamikazeTargetSearchTime = now + 1.5f;
                 Spottable bestTarget = FindBestKamikazeTarget(plane, myFaction);
                 if (bestTarget != null && bestTarget.Pointer != IntPtr.Zero)
                 {
@@ -1158,7 +1162,7 @@ namespace EasyRed2HumanAI
             if (!IsSpottableTargetValid(target))
                 return;
 
-            Vector3 planePos = plane.transform.position;
+            Vector3 planePos = planeTr.position;
             Vector3 targetPos = target.GetCenterOfUnit();
 
             if (target.IsAirVehicle())
@@ -1201,7 +1205,7 @@ namespace EasyRed2HumanAI
             bool losBlockedByRidge =
                 horizDist > 140.0f &&
                 dist3D > 16.0f &&
-                AiCore.RaycastEnvironment(planePos, toTarget3D / dist3D, dist3D - 12.0f, plane.transform.root, out _, ignoreVehicles: true);
+                AiCore.RaycastEnvironment(planePos, toTarget3D / dist3D, dist3D - 12.0f, planeRoot, out _, ignoreVehicles: true);
 
             if ((horizDist > 165.0f && heightAboveTarget < horizDist * 0.72f) ||
                 planePos.y < maxTerrainAheadY + 75.0f ||
@@ -1234,19 +1238,24 @@ namespace EasyRed2HumanAI
         /// and ensures pilot personalities apply strictly once per state transition instead of 60 Hz drift,
         /// without overwriting flyTargetPosition on top of vanilla flight control.
         /// </summary>
-        public static void UpdateAircraftDiveTerrainSafetyAndPersonality(AIPlane plane)
+        public static void UpdateAircraftDiveTerrainSafetyAndPersonality(AIPlane plane, AiCore.VehicleFastHandles vh = null)
         {
-            if (plane == null ||
-                plane.Pointer == IntPtr.Zero ||
-                plane.veh == null ||
-                plane.veh.Pointer == IntPtr.Zero ||
-                plane.transform == null ||
-                !AiCore.IsLocallyOwnedVehicle(plane.veh) ||
-                AiCore.IsAnyHumanPlayerInsideVehicle(plane.veh) ||
+            if (plane == null || plane.Pointer == IntPtr.Zero)
+                return;
+
+            AiCore.VehicleFastHandles planeVh = vh ?? AiCore.GetCachedVehicleHandlesForAiPlane(plane);
+            VehiclePlane vp = planeVh != null ? planeVh.Plane : null;
+            Transform planeTr = (planeVh != null && !ReferenceEquals(planeVh.Tr, null) && planeVh.Tr != null) ? planeVh.Tr : plane.transform;
+            Transform planeRoot = (planeVh != null && !ReferenceEquals(planeVh.RootTr, null) && planeVh.RootTr != null) ? planeVh.RootTr : (planeTr != null ? planeTr.root : null);
+            if (vp == null ||
+                planeVh.Ptr == IntPtr.Zero ||
+                planeTr == null ||
+                !AiCore.IsLocallyOwnedVehicle(vp) ||
+                AiCore.IsAnyHumanPlayerInsideVehicle(vp) ||
                 !plane.HasAIDriver ||
-                plane.veh.isGrounded ||
-                !plane.veh.CanFight() ||
-                IsJapaneseKamikazeActive(plane))
+                vp.isGrounded ||
+                !vp.CanFight() ||
+                IsJapaneseKamikazeActive(plane, planeVh))
             {
                 return;
             }
@@ -1256,15 +1265,15 @@ namespace EasyRed2HumanAI
 
             float now = Time.time;
             AIPlane.PlaneAIState curState = plane.planeState;
-            Vector3 pos = plane.transform.position;
-            Vector3 fwd = plane.transform.forward;
+            Vector3 pos = planeTr.position;
+            Vector3 fwd = planeTr.forward;
             Vector3 flatFwd = new Vector3(fwd.x, 0f, fwd.z);
             flatFwd = flatFwd.sqrMagnitude > 0.001f ? flatFwd.normalized : Vector3.forward;
 
             bool persEnabled = VisionConfig.EnableRolePersonalities.Value &&
                                VisionConfig.EnableVehicleAndPilotPersonalities.Value;
             SoldierPersonality pilotPers = persEnabled
-                ? GetVehicleCrewPersonality(plane.veh)
+                ? GetVehicleCrewPersonality(vp)
                 : SoldierPersonality.None;
 
             // One-shot Pilot_Ace decision cadence boost per vanilla nextUpdateCheck reset
@@ -1297,35 +1306,32 @@ namespace EasyRed2HumanAI
             // Flak / AA Self-Preservation Abort: if a non-Kamikaze, non-Daredevil aircraft takes heavy flak/AA damage
             // mid-dive (>= 12 damage spike or >= 50 total damage while taking hits), salvo-drop bombs if near target
             // (and not danger-close to a friendly squad) and immediately pull out of the dive via vanilla ExitDive!
-            string myFaction = GetVehicleCrewFaction(plane.veh);
-            AiCore.VehicleFastHandles planeVh = AiCore.GetOrCreateVehicleHandles(plane.veh);
-            if (planeVh != null)
+            string myFaction = GetVehicleCrewFaction(vp);
+            IntPtr atkTgtPtr = AiCore.GetRawPlaneTargetToAttackPtr(plane);
+            short curPlaneDmg = vp.GetDamage();
+            if ((curState == AIPlane.PlaneAIState.doingDive || curState == AIPlane.PlaneAIState.preparingDive) &&
+                pilotPers != SoldierPersonality.Pilot_Daredevil &&
+                curPlaneDmg > planeVh.LastObservedDamage &&
+                (curPlaneDmg - planeVh.LastObservedDamage >= 12 || curPlaneDmg >= 50))
             {
-                short curPlaneDmg = plane.veh.GetDamage();
-                if ((curState == AIPlane.PlaneAIState.doingDive || curState == AIPlane.PlaneAIState.preparingDive) &&
-                    pilotPers != SoldierPersonality.Pilot_Daredevil &&
-                    curPlaneDmg > planeVh.LastObservedDamage &&
-                    (curPlaneDmg - planeVh.LastObservedDamage >= 12 || curPlaneDmg >= 50))
+                Spottable atkTgt = atkTgtPtr != IntPtr.Zero ? plane.targetToAttack : null;
+                if (plane.HasBombsToDeliver() &&
+                    atkTgt != null &&
+                    atkTgt.Pointer != IntPtr.Zero)
                 {
-                    Spottable atkTgt = plane.targetToAttack;
-                    if (plane.HasBombsToDeliver() &&
-                        atkTgt != null &&
-                        atkTgt.Pointer != IntPtr.Zero)
+                    Vector3 tgtPos = atkTgt.GetPosition();
+                    Vector3 dTgt = tgtPos - pos;
+                    if (dTgt.x * dTgt.x + dTgt.z * dTgt.z <= 260.0f * 260.0f &&
+                        !IsAircraftTargetDangerCloseToFriendlySquad(myFaction, tgtPos, true))
                     {
-                        Vector3 tgtPos = atkTgt.GetPosition();
-                        Vector3 dTgt = tgtPos - pos;
-                        if (dTgt.x * dTgt.x + dTgt.z * dTgt.z <= 260.0f * 260.0f &&
-                            !IsAircraftTargetDangerCloseToFriendlySquad(myFaction, tgtPos, true))
-                        {
-                            plane.veh.DropBombs();
-                        }
+                        vp.DropBombs();
                     }
-
-                    plane.ExitDive();
-                    curState = plane.planeState;
                 }
-                planeVh.LastObservedDamage = curPlaneDmg;
+
+                plane.ExitDive();
+                curState = plane.planeState;
             }
+            planeVh.LastObservedDamage = curPlaneDmg;
 
             // Throttled (~8 Hz) danger-close wave-off & ground-proximity pull-up guard during dive/bombing runs
             if ((curState == AIPlane.PlaneAIState.doingDive ||
@@ -1349,13 +1355,14 @@ namespace EasyRed2HumanAI
                 }
                 else
                 {
-                    Spottable atkTgt = plane.targetToAttack;
+                    Spottable atkTgt = atkTgtPtr != IntPtr.Zero ? plane.targetToAttack : null;
                     if (atkTgt != null && atkTgt.Pointer != IntPtr.Zero && !atkTgt.IsAirVehicle())
                     {
                         Vector3 tgtPos = atkTgt.GetPosition();
                         if (IsAircraftTargetDangerCloseToFriendlySquad(myFaction, tgtPos, hasLiveBombs))
                         {
                             plane.targetToAttack = null;
+                            atkTgtPtr = IntPtr.Zero;
                             plane.ExitDive();
                             curState = plane.planeState;
                             FriendlyFirePrevented++;
@@ -1365,7 +1372,7 @@ namespace EasyRed2HumanAI
 
                 if (curState == AIPlane.PlaneAIState.doingDive)
                 {
-                    Rigidbody rb = plane.veh.GetRigidbody();
+                    Rigidbody rb = AiCore.GetCachedVehicleRb(planeVh);
                     Vector3 vel = rb != null ? rb.velocity : fwd * 75.0f;
                     float speed = Mathf.Max(45.0f, vel.magnitude);
                     float sinkRate = Mathf.Max(0f, -vel.y);
@@ -1384,13 +1391,13 @@ namespace EasyRed2HumanAI
                         pos,
                         velDir,
                         rayDist,
-                        plane.transform.root,
+                        planeRoot,
                         ignoreVehicles: true);
 
                     float minSafeAlt = maxGroundY + Mathf.Max(nativeLimitHeight, 52.0f + sinkRate * 1.15f);
                     if (pos.y <= minSafeAlt || rayHitObstacle)
                     {
-                        Spottable atkTgt = plane.targetToAttack;
+                        Spottable atkTgt = atkTgtPtr != IntPtr.Zero ? plane.targetToAttack : null;
                         if (plane.HasBombsToDeliver() &&
                             atkTgt != null &&
                             atkTgt.Pointer != IntPtr.Zero)
@@ -1400,7 +1407,7 @@ namespace EasyRed2HumanAI
                             if (dTgt.x * dTgt.x + dTgt.z * dTgt.z <= 240.0f * 240.0f &&
                                 !IsAircraftTargetDangerCloseToFriendlySquad(myFaction, tgtPos, true))
                             {
-                                plane.veh.DropBombs();
+                                vp.DropBombs();
                             }
                         }
 

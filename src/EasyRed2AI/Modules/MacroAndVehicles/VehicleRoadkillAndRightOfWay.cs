@@ -748,21 +748,30 @@ namespace EasyRed2HumanAI
         [HarmonyPatch(typeof(AIVehicle), nameof(AIVehicle.MovableVehicleRoutine))]
         public static class AIVehicle_MovableVehicleRoutine_Patch
         {
-            public static void Prefix(AIVehicle __instance, out long __state)
+            public struct MovableRoutineState
             {
-                __state = HitchProfiler.BeginTopLevel();
+                public long ProfStart;
+                public AiCore.VehicleFastHandles Vh;
+            }
+
+            public static void Prefix(AIVehicle __instance, out MovableRoutineState __state)
+            {
+                __state = new MovableRoutineState
+                {
+                    ProfStart = HitchProfiler.BeginTopLevel()
+                };
                 try
                 {
-                    if (!VisionConfig.EnableMod.Value ||
-                        !VisionConfig.EnableFriendlyVehicleRightOfWay.Value ||
-                        __instance == null ||
-                        __instance.placingInUnstuck)
-                    {
+                    if (!VisionConfig.EnableMod.Value || __instance == null)
                         return;
-                    }
 
-                    Vehicle veh = __instance.veh;
-                    if (veh == null || veh.Pointer == IntPtr.Zero)
+                    AiCore.VehicleFastHandles bvh = AiCore.GetCachedVehicleHandlesForAiVehicle(__instance);
+                    __state.Vh = bvh;
+                    if (!VisionConfig.EnableFriendlyVehicleRightOfWay.Value || __instance.placingInUnstuck)
+                        return;
+
+                    Vehicle veh = bvh != null ? bvh.Ref : null;
+                    if (veh == null || bvh.Ptr == IntPtr.Zero)
                         return;
 
                     float now = Time.time;
@@ -774,12 +783,11 @@ namespace EasyRed2HumanAI
                         return;
                     }
 
-                    AiCore.VehicleFastHandles bvh = AiCore.GetOrCreateVehicleHandles(veh);
-                    RepairStation st = bvh != null ? bvh.SeekingRepairStation : null;
-                    if (st != null && st.Pointer != IntPtr.Zero && st.transform != null && veh.transform != null)
+                    RepairStation st = bvh.SeekingRepairStation;
+                    if (st != null && st.Pointer != IntPtr.Zero && st.transform != null && bvh.Tr != null)
                     {
                         float r = Mathf.Max(5.0f, st.radius) * 0.85f;
-                        if ((veh.transform.position - st.transform.position).sqrMagnitude <= r * r)
+                        if ((bvh.Tr.position - st.transform.position).sqrMagnitude <= r * r)
                         {
                             float pauseUntil = Time.time + 0.35f;
                             if (__instance.resumeDriveTime < pauseUntil)
@@ -787,7 +795,7 @@ namespace EasyRed2HumanAI
                             return;
                         }
                     }
-                    if (bvh != null && Time.time < bvh.BoardingWaitUntil)
+                    if (Time.time < bvh.BoardingWaitUntil)
                     {
                         bool waitForBoarders = false;
                         if (!__instance.hasEnemy && veh.HasSpace())
@@ -800,8 +808,8 @@ namespace EasyRed2HumanAI
                                 {
                                     Soldier u = sq.units[ui];
                                     if (u != null && u.IsAlive && !u.IsOnVehicle() &&
-                                        u.HasDestinationAssigned && u.targetDestination != null &&
-                                        u.targetDestination.Pointer == veh.Pointer)
+                                        u.HasDestinationAssigned &&
+                                        AiCore.GetRawTargetDestinationPtr(u) == bvh.Ptr)
                                     {
                                         waitForBoarders = true;
                                         break;
@@ -821,7 +829,8 @@ namespace EasyRed2HumanAI
                     }
 
                     bool isReversing = __instance.going_in_retro;
-                    if (!isReversing && (__instance.path == null || __instance.path.NodesCount <= 0 || __instance.stopToShoot))
+                    A.d vehPath = !isReversing ? AiCore.GetCachedAiVehiclePath(bvh, __instance) : null;
+                    if (!isReversing && (vehPath == null || vehPath.NodesCount <= 0 || __instance.stopToShoot))
                         return;
 
                     if (ShouldYieldToFriendlyInfantry(__instance, veh, isReversing))
@@ -836,45 +845,40 @@ namespace EasyRed2HumanAI
                 catch { }
             }
 
-            public static void Postfix(AIVehicle __instance, long __state)
+            public static void Postfix(AIVehicle __instance, MovableRoutineState __state)
             {
                 try
                 {
                     if (!VisionConfig.EnableMod.Value || __instance == null)
                         return;
 
-                    Vehicle veh = __instance.veh;
-                    if (veh == null || veh.Pointer == IntPtr.Zero)
+                    AiCore.VehicleFastHandles vehH = __state.Vh ?? AiCore.GetCachedVehicleHandlesForAiVehicle(__instance);
+                    Vehicle veh = vehH != null ? vehH.Ref : null;
+                    if (veh == null || vehH.Ptr == IntPtr.Zero)
                         return;
 
-                    IntPtr vehPtr = veh.Pointer;
+                    IntPtr vehPtr = vehH.Ptr;
                     float now = Time.time;
                     _claimedVehicleDestinations[vehPtr] = __instance.setVehicleDestination;
 
-                    AiCore.VehicleFastHandles vehH = AiCore.GetOrCreateVehicleHandles(veh);
-                    if (vehH != null)
-                    {
-                        vehH.AiVeh = __instance;
-                        vehH.AiVehChecked = true;
-                    }
+                    vehH.AiVeh = __instance;
+                    vehH.AiVehChecked = true;
                     TryEvaluateLoneDriverCombatOrBailout(__instance, veh, vehH, now);
 
                     if (VisionConfig.EnableSmartApcDismount.Value)
                     {
-                        if (vehH == null || now >= vehH.NextApcCheckTime)
+                        if (now >= vehH.NextApcCheckTime)
                         {
-                            if (vehH != null)
-                                vehH.NextApcCheckTime = now + 0.75f;
+                            vehH.NextApcCheckTime = now + 0.75f;
                             TryDismountTransportUnderThreat(veh, __instance, false);
                         }
                     }
 
                     if (VisionConfig.EnableCombinedArmsPrioritySupport.Value)
                     {
-                        if (vehH == null || now >= vehH.NextSupportSteerTime)
+                        if (now >= vehH.NextSupportSteerTime)
                         {
-                            if (vehH != null)
-                                vehH.NextSupportSteerTime = now + 2.5f;
+                            vehH.NextSupportSteerTime = now + 2.5f;
                             TrySteerVehicleTowardKnownThreat(__instance, veh, now);
                         }
                     }
@@ -882,7 +886,7 @@ namespace EasyRed2HumanAI
                 catch { }
                 finally
                 {
-                    HitchProfiler.End(HitchBucket.GroundVehicles, __state);
+                    HitchProfiler.End(HitchBucket.GroundVehicles, __state.ProfStart);
                 }
             }
         }

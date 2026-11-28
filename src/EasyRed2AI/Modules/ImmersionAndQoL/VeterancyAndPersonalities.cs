@@ -764,6 +764,9 @@ namespace EasyRed2HumanAI
             {
                 s.name_surname = desiredName;
             }
+            AiCore.SoldierFastHandles sh = AiCore.GetOrCreateSoldierHandles(s);
+            if (sh != null)
+                sh.CachedFullName = desiredName;
 
             Soldier controlled = Soldier.CurrentControlledSoldierOrNull();
             if (controlled != null &&
@@ -835,6 +838,8 @@ namespace EasyRed2HumanAI
             public struct TurretRefreshState
             {
                 public long ProfStart;
+                public Turret Turret;
+                public IntPtr TurretPtr;
                 public Spottable PrevTarget;
                 public IntPtr PrevTargetPtr;
             }
@@ -847,12 +852,21 @@ namespace EasyRed2HumanAI
                 };
                 try
                 {
-                    if (__instance != null &&
-                        !ReferenceEquals(__instance.CurrentVisibleTarget, null) &&
-                        __instance.CurrentVisibleTarget != null)
+                    if (__instance != null)
                     {
-                        __state.PrevTarget = __instance.CurrentVisibleTarget;
-                        __state.PrevTargetPtr = __instance.CurrentVisibleTarget.Pointer;
+                        Turret t = AiCore.GetCachedTurretForAi(__instance);
+                        __state.Turret = t;
+                        __state.TurretPtr = (!ReferenceEquals(t, null) && t != null) ? t.Pointer : IntPtr.Zero;
+                        IntPtr prevPtr = AiCore.GetRawTurretVisibleTargetPtr(__instance);
+                        if (prevPtr != IntPtr.Zero)
+                        {
+                            Spottable prev = __instance.CurrentVisibleTarget;
+                            if (!ReferenceEquals(prev, null) && prev != null)
+                            {
+                                __state.PrevTarget = prev;
+                                __state.PrevTargetPtr = prev.Pointer;
+                            }
+                        }
                     }
                 }
                 catch { }
@@ -862,28 +876,33 @@ namespace EasyRed2HumanAI
             {
                 try
                 {
+                    Turret turretObj = __state.Turret ?? (__instance != null ? AiCore.GetCachedTurretForAi(__instance) : null);
+                    IntPtr turretPtr = __state.TurretPtr != IntPtr.Zero ? __state.TurretPtr : (!ReferenceEquals(turretObj, null) && turretObj != null ? turretObj.Pointer : IntPtr.Zero);
                     if (!__result ||
                         !VisionConfig.EnableMod.Value ||
                         __instance == null ||
-                        __instance.turret == null)
+                        turretObj == null ||
+                        turretPtr == IntPtr.Zero)
                     {
                         return;
                     }
 
-                    _turretAiByTurretPtr[__instance.turret.Pointer] = __instance;
+                    _turretAiByTurretPtr[turretPtr] = __instance;
 
-                    AiCore.TurretFastTraits traits = AiCore.GetCachedTurretTraits(__instance.turret);
-                    Vehicle veh = traits.VehHandles != null ? traits.VehHandles.Ref : AiCore.GetCachedTurretVehicle(__instance.turret);
+                    AiCore.TurretFastTraits traits = AiCore.GetCachedTurretTraits(turretObj);
+                    Vehicle veh = traits.VehHandles != null ? traits.VehHandles.Ref : AiCore.GetCachedTurretVehicle(turretObj);
                     bool ownedByGunner = __0 != null && AiCore.IsLocallyOwnedBot(__0);
                     if (!ownedByGunner && !AiCore.IsLocallyOwnedVehicle(veh))
                         return;
 
                     // Tank Commander Cupola / Periscope: stamp fresh spotted target onto VehHandles for intra-crew intercom handoff!
+                    IntPtr curVisPtr = AiCore.GetRawTurretVisibleTargetPtr(__instance);
+                    Spottable newTurretTarget = curVisPtr != IntPtr.Zero ? __instance.CurrentVisibleTarget : null;
                     if (traits.IsCommanderTurret)
                     {
-                        if (traits.VehHandles != null && AiCore.IsValidAliveSpottable(__instance.CurrentVisibleTarget))
+                        if (traits.VehHandles != null && AiCore.IsValidAliveSpottable(newTurretTarget))
                         {
-                            traits.VehHandles.CommanderSpottedTarget = __instance.CurrentVisibleTarget;
+                            traits.VehHandles.CommanderSpottedTarget = newTurretTarget;
                             traits.VehHandles.CommanderSpotTime = Time.time;
                         }
                         return;
@@ -892,7 +911,6 @@ namespace EasyRed2HumanAI
                     // Turret Infantry Target Commitment Hysteresis:
                     // Prevent vanilla TurretAI.FindBestTarget (0x180831A80) from oscillating between equally distant
                     // infantrymen in dense firefights (never blocks upgrading onto vehicles/aircraft or TryPrioritizeKnownTargetForTurret).
-                    Spottable newTurretTarget = __instance.CurrentVisibleTarget;
                     if (__state.PrevTargetPtr != IntPtr.Zero &&
                         !ReferenceEquals(newTurretTarget, null) &&
                         newTurretTarget != null &&
@@ -905,7 +923,6 @@ namespace EasyRed2HumanAI
                         if (prevIsInfantry && newIsInfantry)
                         {
                             float nowT = Time.time;
-                            Turret turretObj = __instance.turret;
                             Vector3 tFirePos = turretObj.GetFirePos();
                             Vector3 prevPos = prevT.GetCenterOfUnit();
                             Vector3 toPrev = prevPos - tFirePos;
@@ -913,7 +930,7 @@ namespace EasyRed2HumanAI
                             float newDist = Vector3.Distance(tFirePos, newTurretTarget.GetCenterOfUnit());
                             float prevOffBore = prevDist > 0.5f ? Vector3.Angle(turretObj.GetFireDir(), toPrev) : 0f;
 
-                            _turretSightReaction.TryGetValue(turretObj.Pointer, out TurretSightReactionState tReact);
+                            _turretSightReaction.TryGetValue(turretPtr, out TurretSightReactionState tReact);
                             bool turretCommitted = nowT < tReact.LockedUntil || prevOffBore <= 15.0f;
                             bool newIsCloseEmergency = newDist <= 22.0f && newDist < prevDist - 6.0f;
                             float tMargin = turretCommitted ? Mathf.Max(18.0f, prevDist * 0.30f) : Mathf.Max(8.0f, prevDist * 0.15f);
@@ -982,24 +999,25 @@ namespace EasyRed2HumanAI
             {
                 try
                 {
-                    if (!VisionConfig.EnableMod.Value ||
-                        __instance == null ||
-                        __instance.turret == null)
-                    {
+                    if (!VisionConfig.EnableMod.Value || __instance == null)
                         return;
-                    }
 
-                    Turret turret = __instance.turret;
+                    Turret turret = AiCore.GetCachedTurretForAi(__instance);
+                    if (turret == null || turret.Pointer == IntPtr.Zero)
+                        return;
+
                     IntPtr turretPtr = turret.Pointer;
                     _turretAiByTurretPtr[turretPtr] = __instance;
 
                     float now = Time.time;
-                    Spottable curTarget = __instance.CurrentVisibleTarget;
-                    if (!ReferenceEquals(curTarget, null) && curTarget != null && !AiCore.IsValidAliveSpottable(curTarget))
+                    IntPtr curTargetPtr = AiCore.GetRawTurretVisibleTargetPtr(__instance);
+                    Spottable curTarget = curTargetPtr != IntPtr.Zero ? __instance.CurrentVisibleTarget : null;
+                    if (curTargetPtr != IntPtr.Zero && (ReferenceEquals(curTarget, null) || curTarget == null || !AiCore.IsValidAliveSpottable(curTarget)))
                     {
                         __instance.CurrentVisibleTarget = null;
                         __instance.targetInWeaponRange = false;
                         curTarget = null;
+                        curTargetPtr = IntPtr.Zero;
                         turret.SetGunTriggerPressed(false, __0);
                     }
 
@@ -1027,11 +1045,11 @@ namespace EasyRed2HumanAI
                     // Native TurretAI.AutoPilot (0x180830802) returns immediately when CurrentVisibleTarget == null without
                     // ever calling TurretCommander.RotateToward or slewing main/coax/AA turrets toward incoming fire!
                     // Priority #0: slew toward active incoming attacker bearing when idle; otherwise commander scans gunfire / 360.
-                    if (owned && traits.IsCommanderTurret && (curTarget == null || curTarget.Pointer == IntPtr.Zero))
+                    if (owned && traits.IsCommanderTurret && curTargetPtr == IntPtr.Zero)
                     {
-                        string cmdFac = (__0 != null && !string.IsNullOrEmpty(__0.faction))
-                            ? __0.faction
-                            : GetVehicleCrewFaction(veh, turret);
+                        string cmdFac = __0 != null ? AiCore.GetCachedFaction(__0) : null;
+                        if (string.IsNullOrEmpty(cmdFac))
+                            cmdFac = GetVehicleCrewFaction(veh, turret);
                         Vector3 scanDir;
                         if (traits.VehHandles != null &&
                             now < traits.VehHandles.UnderFireUntil)
@@ -1057,7 +1075,7 @@ namespace EasyRed2HumanAI
                     else if (owned &&
                              !traits.IsCommanderTurret &&
                              (__0 == null || !AiCore.IsAnyHumanPlayerSoldier(__0)) &&
-                             (curTarget == null || curTarget.Pointer == IntPtr.Zero) &&
+                             curTargetPtr == IntPtr.Zero &&
                              !__instance.HasRadioSupportRequest &&
                              traits.VehHandles != null &&
                              now < traits.VehHandles.UnderFireUntil)
@@ -1082,16 +1100,18 @@ namespace EasyRed2HumanAI
                     // Native TurretAI.AutoPilot rotates toward CurrentVisibleTarget while holding trigger pull until
                     // Time.time > nextFireCheckTime (0x180830E26). Pre-sighted lanes react quickly (0.22s-0.38s),
                     // whereas flanked static AT/HMG emplacements and off-bore tank turrets require human sight-lay settle!
+                    IntPtr prevReactionTargetPtr = IntPtr.Zero;
                     if (VisionConfig.EnableDynamicHumanReactionTime.Value)
                     {
-                        if (owned && !traits.IsCommanderTurret && curTarget != null && curTarget.Pointer != IntPtr.Zero)
+                        if (owned && !traits.IsCommanderTurret && curTargetPtr != IntPtr.Zero && curTarget != null)
                         {
                             _turretSightReaction.TryGetValue(turretPtr, out TurretSightReactionState rState);
-                            if (curTarget.Pointer != rState.LastTargetPtr || (now - rState.LastSeenTime) > 2.4f)
+                            prevReactionTargetPtr = rState.LastTargetPtr;
+                            if (curTargetPtr != rState.LastTargetPtr || (now - rState.LastSeenTime) > 2.4f)
                             {
                                 float offBoreDeg = Vector3.Angle(turret.GetFireDir(), curTarget.GetCenterOfUnit() - turret.GetFirePos());
                                 float vet01 = __0 != null ? GetVeterancy01(__0) : 0f;
-                                float jitter = (AiCore.GetDeterministicHash(turretPtr, curTarget.Pointer.GetHashCode()) & 31) * 0.0055f;
+                                float jitter = (AiCore.GetDeterministicHash(turretPtr, curTargetPtr.GetHashCode()) & 31) * 0.0055f;
 
                                 float delay;
                                 if (offBoreDeg <= 12.0f)
@@ -1126,7 +1146,7 @@ namespace EasyRed2HumanAI
                                 rState.LockedUntil = now + 3.2f;
                             }
 
-                            rState.LastTargetPtr = curTarget.Pointer;
+                            rState.LastTargetPtr = curTargetPtr;
                             rState.LastSeenTime = now;
                             _turretSightReaction[turretPtr] = rState;
 
@@ -1149,14 +1169,21 @@ namespace EasyRed2HumanAI
                     if (!VisionConfig.EnableSmartVehicleAmmoSelection.Value)
                         return;
 
-                    if (curTarget != null && curTarget.Pointer != IntPtr.Zero)
+                    if (curTargetPtr != IntPtr.Zero && curTarget != null)
                     {
-                        bool isVehOrAir = curTarget.IsWheeledVehicleOrTank() || curTarget.IsAirVehicle();
-                        if (!_lastTurretTargetWasVehicle.TryGetValue(turretPtr, out bool prevWasVeh) || prevWasVeh != isVehOrAir)
+                        bool hasPrevAmmo = _lastTurretTargetWasVehicle.TryGetValue(turretPtr, out bool prevWasVeh);
+                        if (curTargetPtr != prevReactionTargetPtr || !hasPrevAmmo)
                         {
-                            _lastTurretTargetWasVehicle[turretPtr] = isVehOrAir;
-                            __instance.nextSwitchAmmoCheck = 0f;
-                            turret.SelectBestAmmo(curTarget);
+                            bool isVehOrAir = AiCore.TryGetVehicleHandles(curTargetPtr, out AiCore.VehicleFastHandles tgtVh)
+                                ? (tgtVh.IsWheeledOrTank || tgtVh.IsAir)
+                                : (!AiCore.TryGetSoldierHandles(curTargetPtr, out _) &&
+                                   (curTarget.IsWheeledVehicleOrTank() || curTarget.IsAirVehicle()));
+                            if (!hasPrevAmmo || prevWasVeh != isVehOrAir)
+                            {
+                                _lastTurretTargetWasVehicle[turretPtr] = isVehOrAir;
+                                __instance.nextSwitchAmmoCheck = 0f;
+                                turret.SelectBestAmmo(curTarget);
+                            }
                         }
                     }
                 }
@@ -1375,69 +1402,83 @@ namespace EasyRed2HumanAI
         [HarmonyPatch(typeof(AIPlane), nameof(AIPlane.Update))]
         public static class AIPlane_Update_Patch
         {
-            public static void Prefix(AIPlane __instance, out long __state)
+            public struct PlaneUpdateState
             {
-                __state = HitchProfiler.BeginTopLevel();
+                public long ProfStart;
+                public AiCore.VehicleFastHandles Vh;
+            }
+
+            public static void Prefix(AIPlane __instance, out PlaneUpdateState __state)
+            {
+                __state = new PlaneUpdateState
+                {
+                    ProfStart = HitchProfiler.BeginTopLevel()
+                };
                 try
                 {
-                    if (!VisionConfig.EnableMod.Value ||
-                        __instance == null ||
-                        !AiCore.IsLocallyOwnedVehicle(__instance.veh))
-                    {
+                    if (!VisionConfig.EnableMod.Value || __instance == null)
                         return;
-                    }
+
+                    AiCore.VehicleFastHandles vh = AiCore.GetCachedVehicleHandlesForAiPlane(__instance);
+                    __state.Vh = vh;
+                    VehiclePlane vp = vh != null ? vh.Plane : null;
+                    if (vp == null || !AiCore.IsLocallyOwnedVehicle(vp))
+                        return;
 
                     // Easter Egg: Imperial Japanese Tokkōtai (Kamikaze) terminal dive when crippled
-                    TryExecuteJapaneseKamikazeDive(__instance, false);
-                    if (IsJapaneseKamikazeActive(__instance))
+                    TryExecuteJapaneseKamikazeDive(__instance, false, vh);
+                    if (IsJapaneseKamikazeActive(__instance, vh))
                         return;
 
                     if (VisionConfig.EnableCombinedArmsPrioritySupport.Value)
                     {
-                        TrySteerAircraftOrbitTowardKnownThreat(__instance);
+                        TrySteerAircraftOrbitTowardKnownThreat(__instance, vh);
                     }
 
-                    UpdateAircraftDiveTerrainSafetyAndPersonality(__instance);
+                    UpdateAircraftDiveTerrainSafetyAndPersonality(__instance, vh);
                 }
                 catch { }
             }
 
-            public static void Postfix(AIPlane __instance, long __state)
+            public static void Postfix(AIPlane __instance, PlaneUpdateState __state)
             {
                 try
                 {
-                    if (IsJapaneseKamikazeActive(__instance))
+                    AiCore.VehicleFastHandles vh = __state.Vh ?? (__instance != null ? AiCore.GetCachedVehicleHandlesForAiPlane(__instance) : null);
+                    if (IsJapaneseKamikazeActive(__instance, vh))
                     {
-                        TryExecuteJapaneseKamikazeDive(__instance, true);
+                        TryExecuteJapaneseKamikazeDive(__instance, true, vh);
                     }
                     else
                     {
                         // Pilot Attack-Run / Dogfight Sight Alignment Reaction:
                         // Prevent frame-zero laser bursts the instant targetToAttack switches; hold pilot gun trigger
                         // for 0.42s-0.78s while the pilot aligns the reflector gunsight onto the new target!
+                        VehiclePlane vp = vh != null ? vh.Plane : null;
                         if (VisionConfig.EnableMod.Value &&
                             VisionConfig.EnableDynamicHumanReactionTime.Value &&
                             __instance != null &&
-                            AiCore.IsLocallyOwnedVehicle(__instance.veh))
+                            vp != null &&
+                            AiCore.IsLocallyOwnedVehicle(vp))
                         {
                             IntPtr planePtr = __instance.Pointer;
-                            Spottable tgt = __instance.targetToAttack;
+                            IntPtr tgtPtr = AiCore.GetRawPlaneTargetToAttackPtr(__instance);
                             _planeAttackReaction.TryGetValue(planePtr, out PlaneAttackReactionState pState);
 
-                            if (tgt != null && tgt.Pointer != IntPtr.Zero)
+                            if (tgtPtr != IntPtr.Zero)
                             {
                                 float now = Time.time;
-                                if (tgt.Pointer != pState.LastTargetPtr)
+                                if (tgtPtr != pState.LastTargetPtr)
                                 {
-                                    SoldierPersonality pilotPers = GetVehicleCrewPersonality(__instance.veh);
-                                    float jitter = (AiCore.GetDeterministicHash(planePtr, tgt.Pointer.GetHashCode()) & 31) * 0.009f;
+                                    SoldierPersonality pilotPers = GetVehicleCrewPersonality(vp);
+                                    float jitter = (AiCore.GetDeterministicHash(planePtr, tgtPtr.GetHashCode()) & 31) * 0.009f;
                                     float delay = 0.48f + jitter;
                                     if (pilotPers == SoldierPersonality.Pilot_Ace)
                                         delay *= 0.74f;
                                     else if (pilotPers == SoldierPersonality.Pilot_Disciplined)
                                         delay *= 0.90f;
 
-                                    pState.LastTargetPtr = tgt.Pointer;
+                                    pState.LastTargetPtr = tgtPtr;
                                     pState.HoldFireUntil = now + delay;
                                     _planeAttackReaction[planePtr] = pState;
                                 }
@@ -1461,7 +1502,7 @@ namespace EasyRed2HumanAI
                 catch { }
                 finally
                 {
-                    HitchProfiler.End(HitchBucket.Aircraft, __state);
+                    HitchProfiler.End(HitchBucket.Aircraft, __state.ProfStart);
                 }
             }
         }

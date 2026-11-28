@@ -1639,8 +1639,11 @@ namespace EasyRed2HumanAI
         {
             _lastAtmosphereBroadcastBattlePtr = IntPtr.Zero;
             _atmosphereBroadcastReadyAtUnscaled = 0f;
+            _nextAtmosphereBroadcastPollTime = 0f;
             _atmosphereBroadcastSentForBattle = false;
         }
+
+        private static float _nextAtmosphereBroadcastPollTime;
 
         public static void UpdateBattleAtmosphereBroadcast()
         {
@@ -1650,6 +1653,16 @@ namespace EasyRed2HumanAI
             {
                 return;
             }
+
+            float unscaledNow = Time.unscaledTime;
+            if (_atmosphereBroadcastSentForBattle &&
+                unscaledNow < _nextAtmosphereBroadcastPollTime &&
+                unscaledNow >= _nextAtmosphereBroadcastPollTime - 2.0f)
+            {
+                return;
+            }
+            if (_atmosphereBroadcastSentForBattle)
+                _nextAtmosphereBroadcastPollTime = unscaledNow + 0.50f;
 
             if (BattleManager.instance == null || PlayerGUI.instance == null)
                 return;
@@ -1662,14 +1675,15 @@ namespace EasyRed2HumanAI
             {
                 _lastAtmosphereBroadcastBattlePtr = theater.BattleDataPtr;
                 _atmosphereBroadcastSentForBattle = false;
-                _atmosphereBroadcastReadyAtUnscaled = Time.unscaledTime + 4.0f;
+                _atmosphereBroadcastReadyAtUnscaled = unscaledNow + 4.0f;
                 return;
             }
 
-            if (_atmosphereBroadcastSentForBattle || Time.unscaledTime < _atmosphereBroadcastReadyAtUnscaled)
+            if (_atmosphereBroadcastSentForBattle || unscaledNow < _atmosphereBroadcastReadyAtUnscaled)
                 return;
 
             _atmosphereBroadcastSentForBattle = true;
+            _nextAtmosphereBroadcastPollTime = unscaledNow + 0.50f;
             string msg = AiCore.GetBattleAtmosphereDispatchText(theater.Atmosphere);
             if (string.IsNullOrEmpty(msg))
                 return;

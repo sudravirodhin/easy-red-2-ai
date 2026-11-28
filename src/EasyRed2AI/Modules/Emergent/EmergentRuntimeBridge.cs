@@ -719,11 +719,13 @@ namespace EasyRed2HumanAI
             float dt = h.Emergent.LastSampleTime > 0f ? Mathf.Max(0.01f, now - h.Emergent.LastSampleTime) : 0.25f;
             h.Emergent.LastSampleTime = now;
 
-            bool hasVisible = ai.visibleTarget != null && ai.visibleTarget.Pointer != IntPtr.Zero;
+            IntPtr visPtr = AiCore.GetRawVisibleTargetPtr(ai);
+            Spottable visTarget = visPtr != IntPtr.Zero ? ai.visibleTarget : null;
+            bool hasVisible = !ReferenceEquals(visTarget, null) && visTarget != null && visTarget.Pointer != IntPtr.Zero;
             bool canFireAtVis = ai.HasEnemyAndCanFireAtHim;
             GenericGun heldGun = soldier.GetHeldGun();
             bool gunEmpty = AiCore.IsHeldGunEmptyOrReloading(soldier, heldGun);
-            bool hasUsableArms = AiCore.HasUsableSmallArmsAmmo(soldier);
+            AiCore.GetCachedInventoryFlags(h, now, heldGun, out bool hasBandage, out bool hasSmoke, out bool hasFrag, out bool hasUsableArms);
             bool hasAtCap = VeteranAndTacticsPatches.HasUsableAntiTankCapability(soldier);
 
             // Platform-relative CanHarm: rifleman targeting heavy tank gets CanHarm = 0!
@@ -731,9 +733,9 @@ namespace EasyRed2HumanAI
             bool visTargetIsHeavyArmor = false;
             if (hasVisible)
             {
-                if (ai.visibleTarget.IsWheeledVehicleOrTank())
+                if (visTarget.IsWheeledVehicleOrTank())
                 {
-                    Vehicle tv = ai.visibleTarget.TryCast<Vehicle>();
+                    Vehicle tv = visTarget.TryCast<Vehicle>();
                     float mm = tv != null ? VeteranAndTacticsPatches.GetVehicleMaxHullArmorMm(tv) : 0f;
                     visTargetIsHeavyArmor = mm >= 20f;
                     if (hasAtCap)
@@ -807,9 +809,6 @@ namespace EasyRed2HumanAI
             // Check lightweight world interactables from WorldSnapshots
             bool hasLiveGrenade = VeteranAndTacticsPatches.EmergentHasCloseLiveGrenade(myPos, fac);
             bool exposedWall = !isOnBridge && VeteranAndTacticsPatches.EmergentIsExposedWall(soldier, sq, myPos, board.ThreatDirection);
-            bool hasBandage = soldier.inventory != null && soldier.inventory.FindItemOfType<VirtualBandages>() != null;
-            bool hasSmoke = soldier.inventory != null && soldier.inventory.FindItemOfType<VirtualSmokeGrenade>() != null;
-            bool hasFrag = AiCore.FindThrowableGrenadeInInventory(soldier, false, true) != null;
 
             bool isMedic = AiCore.IsMedicSoldierOrPersonality(soldier, personality) && soldier.hasSyringe;
             bool hasInjuredAlly = false;
@@ -953,7 +952,7 @@ namespace EasyRed2HumanAI
             bool armorThreatPresent = isEvadingArmor ||
                                       visTargetIsHeavyArmor ||
                                       (board.HasActiveThreat && (board.ThreatIsArmor || (board.PrimaryTarget != null && board.PrimaryTarget.TryCast<Vehicle>() != null))) ||
-                                      (ai.visibleTarget != null && ai.visibleTarget.TryCast<Vehicle>() != null);
+                                      (hasVisible && visTarget.TryCast<Vehicle>() != null);
             bool safeLullForGear = !hasVisible && rawHarmNow < 0.20f && projHarm < 0.20f && suppression < 5.0f && !exposedWall && !isOnBridge;
             bool allowUrgentPrimary = !inPointBlankMelee &&
                                       !soldier.isBleeding &&

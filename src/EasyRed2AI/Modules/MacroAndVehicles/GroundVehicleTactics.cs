@@ -383,6 +383,7 @@ namespace EasyRed2HumanAI
                     AiCore.TryConsumeBotRpcBudget(0.45f))
                 {
                     soldier.Throw(grenadeItem, targetVeh.Cast<Spottable>());
+                    AiCore.InvalidateSoldierInventoryCache(soldier);
                     bool isTank = targetVeh.TryCast<VehicleTank>() != null;
                     TrySayTacticalVoice(
                         soldier,
@@ -1672,7 +1673,7 @@ namespace EasyRed2HumanAI
                     {
                         if (vh.UnstickApplyForce)
                         {
-                            Rigidbody cachedRb = __instance.rb;
+                            Rigidbody cachedRb = AiCore.GetCachedVehicleRb(vh);
                             if (cachedRb != null && !cachedRb.isKinematic)
                                 cachedRb.AddForce(vh.UnstickForceVec, ForceMode.Acceleration);
                         }
@@ -1684,7 +1685,7 @@ namespace EasyRed2HumanAI
                     if (!__instance.OwnDriverOrVehicle() ||
                         !__instance.engineStarted ||
                         __instance.IsDisabled() ||
-                        __instance.transform == null)
+                        vh.Tr == null)
                     {
                         vh.UnstickApplyForce = false;
                         return;
@@ -1700,7 +1701,7 @@ namespace EasyRed2HumanAI
                         return;
                     }
 
-                    Rigidbody rb = __instance.rb;
+                    Rigidbody rb = AiCore.GetCachedVehicleRb(vh);
                     if (rb == null || rb.isKinematic)
                     {
                         vh.UnstickApplyForce = false;
@@ -1731,8 +1732,8 @@ namespace EasyRed2HumanAI
                         return;
                     }
 
-                    Vector3 tankPos = __instance.transform.position;
-                    Vector3 driveDir = throttleY >= 0f ? __instance.transform.forward : -__instance.transform.forward;
+                    Vector3 tankPos = vh.Tr.position;
+                    Vector3 driveDir = throttleY >= 0f ? vh.Tr.forward : -vh.Tr.forward;
                     driveDir.y = 0f;
                     if (driveDir.sqrMagnitude < 0.001f)
                     {
@@ -1741,7 +1742,7 @@ namespace EasyRed2HumanAI
                     }
                     driveDir.Normalize();
 
-                    if (AiCore.IsDirectionBlockedByEnvironment(tankPos + Vector3.up * 1.55f, driveDir, 4.2f, __instance.transform.root))
+                    if (AiCore.IsDirectionBlockedByEnvironment(tankPos + Vector3.up * 1.55f, driveDir, 4.2f, vh.RootTr))
                     {
                         vh.UnstickApplyForce = false;
                         return;
@@ -1811,22 +1812,28 @@ namespace EasyRed2HumanAI
             if (ai == null || ai.going_in_retro || ai.lastDriveThrottle < 0f || ai.placingInUnstuck)
                 return;
 
-            Vehicle veh = ai.veh;
-            if (veh == null || veh.Pointer == IntPtr.Zero || veh.transform == null ||
-                veh.IsDisabled() || veh.IsAirVehicle() || AiCore.IsAnyHumanPlayerDriving(veh) ||
+            AiCore.VehicleFastHandles vh = AiCore.GetCachedVehicleHandlesForAiVehicle(ai);
+            Vehicle veh = vh != null ? vh.Ref : null;
+            if (veh == null || vh.Ptr == IntPtr.Zero || vh.Tr == null ||
+                veh.IsDisabled() || vh.IsAir || AiCore.IsAnyHumanPlayerDriving(veh) ||
                 !AiCore.IsLocallyOwnedVehicle(veh))
             {
                 return;
             }
 
-            VehicleWithWheels wheeled = veh.TryCast<VehicleWithWheels>();
+            VehicleWithWheels wheeled = vh.Wheeled;
             if (wheeled == null)
                 return;
 
-            if (wheeled.floatingObject != null && wheeled.floatingObject.OnWater)
+            if (!vh.FloatingChecked)
+            {
+                vh.FloatingChecked = true;
+                vh.CachedFloating = wheeled.floatingObject;
+            }
+            if (vh.CachedFloating != null && vh.CachedFloating.OnWater)
                 return;
 
-            A.d path = ai.path;
+            A.d path = AiCore.GetCachedAiVehiclePath(vh, ai);
             if (ReferenceEquals(path, null) || path.Pointer == IntPtr.Zero)
                 return;
 
@@ -1865,7 +1872,7 @@ namespace EasyRed2HumanAI
                     straightCap = Mathf.Min(straightCap, 30.0f);
             }
 
-            Vector3 vPos = veh.transform.position;
+            Vector3 vPos = vh.Tr.position;
             Vector3 n0 = path.A(0);
             Vector3 seg0 = n0 - vPos;
             seg0.y = 0f;

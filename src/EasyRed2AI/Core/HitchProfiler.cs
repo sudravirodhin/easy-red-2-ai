@@ -195,6 +195,16 @@ namespace EasyRed2HumanAI
         private static int _frameStartNetGc1;
         private static int _frameStartNetGc2;
         private static long _frameStartNetMem;
+        private static int _bmStartIl2CppGc0;
+        private static long _bmStartIl2CppUsed;
+        private static int _bmStartNetGcSum;
+        private static long _bmStartNetMem;
+        private static bool _bmStartMemValid;
+        private static int _bmEndIl2CppGc0;
+        private static long _bmEndIl2CppUsed;
+        private static int _bmEndNetGcSum;
+        private static long _bmEndNetMem;
+        private static bool _bmEndMemValid;
 
         // Rolling & global counters
         private static int _totalAutopsyHitches;
@@ -218,6 +228,12 @@ namespace EasyRed2HumanAI
         private static int _winIl2CppGcCount;
         private static long _winNetPosAllocBytes;
         private static int _winNetGcCount;
+        private static long _winIl2CppPreBytes;
+        private static long _winIl2CppBmBytes;
+        private static long _winIl2CppPostBytes;
+        private static long _winNetPreBytes;
+        private static long _winNetBmBytes;
+        private static long _winNetPostBytes;
 
         // 0.5-second Live Performance Overlay telemetry
         private static float _nextHudRefreshUnscaledTime;
@@ -255,6 +271,12 @@ namespace EasyRed2HumanAI
             _winIl2CppGcCount = 0;
             _winNetPosAllocBytes = 0;
             _winNetGcCount = 0;
+            _winIl2CppPreBytes = 0;
+            _winIl2CppBmBytes = 0;
+            _winIl2CppPostBytes = 0;
+            _winNetPreBytes = 0;
+            _winNetBmBytes = 0;
+            _winNetPostBytes = 0;
         }
 
         private static void ResetHudOverlayWindowState(string statusLine1, string statusLine2 = null, float nextRefreshTime = 0f)
@@ -446,6 +468,11 @@ namespace EasyRed2HumanAI
             _bmBattleEnded = BattleManager.isBattleEnded;
             _bmModEnabled = VisionConfig.EnableMod != null && VisionConfig.EnableMod.Value;
             _bmWasFocused = AiCore.IsGameWindowFocused;
+            if (_flightRecorderActive)
+            {
+                SampleFastHeapCounters(out _bmStartIl2CppGc0, out _bmStartIl2CppUsed, out _bmStartNetGcSum, out _bmStartNetMem);
+                _bmStartMemValid = true;
+            }
             return ts;
         }
 
@@ -465,6 +492,11 @@ namespace EasyRed2HumanAI
 
             EndModScope(HitchBucket.ModBMUpdate, modStartStamp);
             _bmEndStamp = _lastHookEndStamp;
+            if (_flightRecorderActive)
+            {
+                SampleFastHeapCounters(out _bmEndIl2CppGc0, out _bmEndIl2CppUsed, out _bmEndNetGcSum, out _bmEndNetMem);
+                _bmEndMemValid = true;
+            }
         }
 
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
@@ -740,6 +772,31 @@ namespace EasyRed2HumanAI
             netMem = GC.GetTotalMemory(false);
         }
 
+        private static void SampleFastHeapCounters(
+            out int il2cppGc0,
+            out long il2cppUsed,
+            out int netGcSum,
+            out long netMem)
+        {
+            il2cppGc0 = 0;
+            il2cppUsed = 0;
+            if (_il2cppGcSupported)
+            {
+                try
+                {
+                    il2cppGc0 = Il2CppSystem.GC.CollectionCount(0);
+                    il2cppUsed = Il2CppSystem.GC.GetTotalMemory(false);
+                }
+                catch
+                {
+                    _il2cppGcSupported = false;
+                }
+            }
+
+            netGcSum = GC.CollectionCount(0) + GC.CollectionCount(1) + GC.CollectionCount(2);
+            netMem = GC.GetTotalMemory(false);
+        }
+
         private static void ResetActiveFrameState(int newFrame, long startStamp)
         {
             Array.Clear(_ticks, 0, BucketCount);
@@ -758,6 +815,8 @@ namespace EasyRed2HumanAI
             _frameModCpuTicks = 0L;
             _bmFixedTime = -1f;
             _bmWasFocused = AiCore.IsGameWindowFocused;
+            _bmStartMemValid = false;
+            _bmEndMemValid = false;
 
             _canSeeLinecastPassThroughs = 0;
             _uncachedCoverProbes = 0;
@@ -934,6 +993,30 @@ namespace EasyRed2HumanAI
                     _winNetPosAllocBytes += netMemDelta;
                 if (netGcRan)
                     _winNetGcCount += Math.Max(1, netG0Delta);
+
+                if (_bmWasFocused && _bmStartMemValid)
+                {
+                    if (_bmStartIl2CppGc0 == _frameStartIl2CppGc0 && _bmStartIl2CppUsed > _frameStartIl2CppUsed)
+                        _winIl2CppPreBytes += (_bmStartIl2CppUsed - _frameStartIl2CppUsed);
+
+                    int frameStartNetGcSum = _frameStartNetGc0 + _frameStartNetGc1 + _frameStartNetGc2;
+                    if (_bmStartNetGcSum == frameStartNetGcSum && _bmStartNetMem > _frameStartNetMem)
+                        _winNetPreBytes += (_bmStartNetMem - _frameStartNetMem);
+
+                    if (_bmEndMemValid)
+                    {
+                        if (_bmEndIl2CppGc0 == _bmStartIl2CppGc0 && _bmEndIl2CppUsed > _bmStartIl2CppUsed)
+                            _winIl2CppBmBytes += (_bmEndIl2CppUsed - _bmStartIl2CppUsed);
+                        if (curIl2CppGc0 == _bmEndIl2CppGc0 && curIl2CppUsed > _bmEndIl2CppUsed)
+                            _winIl2CppPostBytes += (curIl2CppUsed - _bmEndIl2CppUsed);
+
+                        if (_bmEndNetGcSum == _bmStartNetGcSum && _bmEndNetMem > _bmStartNetMem)
+                            _winNetBmBytes += (_bmEndNetMem - _bmStartNetMem);
+                        int curNetGcSum = curNetGc0 + curNetGc1 + curNetGc2;
+                        if (curNetGcSum == _bmEndNetGcSum && curNetMem > _bmEndNetMem)
+                            _winNetPostBytes += (curNetMem - _bmEndNetMem);
+                    }
+                }
             }
 
             float effectiveThresholdMs = _bmWasFocused ? HitchThresholdMs : 80.0f;
@@ -1263,6 +1346,14 @@ namespace EasyRed2HumanAI
                    .Append(" | Net6[AvgAlloc:").Append(avgNetKb.ToString("F2"))
                    .Append("KB/f, GCs:").Append(_winNetGcCount)
                    .Append(", Heap:").Append((curNetMem / (1024.0 * 1024.0)).ToString("F1")).Append("MB]")
+                   .Append(" | AllocPhases[IL2CPP:")
+                   .Append(((_winIl2CppPreBytes / 1024.0) / _winFrames).ToString("F1")).Append('/')
+                   .Append(((_winIl2CppBmBytes / 1024.0) / _winFrames).ToString("F1")).Append('/')
+                   .Append(((_winIl2CppPostBytes / 1024.0) / _winFrames).ToString("F1"))
+                   .Append(" Net6:")
+                   .Append(((_winNetPreBytes / 1024.0) / _winFrames).ToString("F2")).Append('/')
+                   .Append(((_winNetBmBytes / 1024.0) / _winFrames).ToString("F2")).Append('/')
+                   .Append(((_winNetPostBytes / 1024.0) / _winFrames).ToString("F2")).Append(']')
                    .Append(" | Handles[Sol:").Append(AiCore.ActiveSoldierHandlesCount)
                    .Append(",Veh:").Append(AiCore.ActiveVehicleHandlesCount)
                    .Append("] | NetSync[Flush:").Append(VeteranAndTacticsPatches.ScoreboardCoalescedFlushesCount)

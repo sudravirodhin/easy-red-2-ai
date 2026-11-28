@@ -22,13 +22,19 @@ namespace EasyRed2HumanAI
 
         internal sealed class ActiveSquad3DLabel
         {
+            public IntPtr OwnerKeyPtr;
             public Marker3DGUI.Entry Entry;
             public UnityEngine.UI.RawImage Img;
             public GameObject ImgGo;
             public UnityEngine.UI.Text Txt;
             public GameObject TxtGo;
+            public string CachedLetter;
+            public Color BaseColor;
             public float LastAlpha;
+            public float NextRefreshTime;
             public bool LastActive;
+            public bool IsNonSquadKey;
+            public bool IsSuppressedSquad;
         }
 
         internal static readonly Dictionary<IntPtr, MiniMapMarkerTextCache> _minimapMarkerTextByImgPtr =
@@ -148,27 +154,36 @@ namespace EasyRed2HumanAI
             if (sq == null || sq.Pointer == IntPtr.Zero)
                 return false;
 
-            Soldier localPlayer = Soldier.CurrentControlledSoldierOrNull();
-            if (localPlayer == null || string.IsNullOrEmpty(localPlayer.faction))
+            AiCore.LocalPlayerFastHandles lp = AiCore.GetCachedLocalPlayerHandles();
+            if (!lp.HasPlayer || string.IsNullOrEmpty(lp.Faction))
                 return true;
 
             string sqFac = null;
-            Soldier leader = sq.Leader;
-            if (leader != null && !string.IsNullOrEmpty(leader.faction))
+            if (AiCore.WorldSquadCount > 0 &&
+                AiCore.TryGetSquadSnapshot(sq.Pointer, out AiCore.SquadSnapshot sqSnap) &&
+                !string.IsNullOrEmpty(sqSnap.Faction))
             {
-                sqFac = leader.faction;
+                sqFac = sqSnap.Faction;
             }
-            else if (sq.units != null)
+            else
             {
-                var units = sq.units;
-                int cnt = units.Count;
-                for (int i = 0; i < cnt; i++)
+                Soldier leader = sq.Leader;
+                if (leader != null && !string.IsNullOrEmpty(leader.faction))
                 {
-                    Soldier u = units[i];
-                    if (u != null && !string.IsNullOrEmpty(u.faction))
+                    sqFac = leader.faction;
+                }
+                else if (sq.units != null)
+                {
+                    var units = sq.units;
+                    int cnt = units.Count;
+                    for (int i = 0; i < cnt; i++)
                     {
-                        sqFac = u.faction;
-                        break;
+                        Soldier u = units[i];
+                        if (u != null && !string.IsNullOrEmpty(u.faction))
+                        {
+                            sqFac = u.faction;
+                            break;
+                        }
                     }
                 }
             }
@@ -176,17 +191,17 @@ namespace EasyRed2HumanAI
             if (string.IsNullOrEmpty(sqFac))
                 return false;
 
-            return AiCore.AreSameSideFactions(localPlayer.faction, sqFac);
+            return AiCore.AreSameSideFactions(lp.Faction, sqFac);
         }
 
         internal static Color GetSquadLetterColor(Squad sq, float alpha = 0.96f)
         {
-            Soldier localPlayer = Soldier.CurrentControlledSoldierOrNull();
-            bool isMySquad = localPlayer != null &&
-                             localPlayer.joinedSquad != null &&
+            AiCore.LocalPlayerFastHandles lp = AiCore.GetCachedLocalPlayerHandles();
+            bool isMySquad = lp.HasPlayer &&
+                             lp.SquadPtr != IntPtr.Zero &&
                              sq != null &&
                              sq.Pointer != IntPtr.Zero &&
-                             localPlayer.joinedSquad.Pointer == sq.Pointer;
+                             lp.SquadPtr == sq.Pointer;
             return isMySquad
                 ? new Color(1.0f, 0.88f, 0.25f, alpha)
                 : new Color(1.0f, 1.0f, 1.0f, alpha);
@@ -280,20 +295,20 @@ namespace EasyRed2HumanAI
                     if (__result || !VisionConfig.EnableMod.Value)
                         return;
 
-                    PlayerController pc = PlayerController.currentController;
-                    if (pc == null || pc.ControlledCharacter == null || pc.ControlledVehicle == null)
+                    AiCore.LocalPlayerFastHandles lp = AiCore.GetCachedLocalPlayerHandles();
+                    if (!lp.HasControlledCharacter || lp.ControlledVehicle == null)
                         return;
 
-                    Squad sq = PlayerGUI.squad;
+                    Squad sq = lp.Squad ?? PlayerGUI.squad;
                     if (sq == null || sq.Leader == null)
                         return;
 
                     Vector3 worldPos;
                     if (sq.order != Order.follow)
                     {
-                        Soldier cc = pc.ControlledCharacter;
+                        Soldier cc = lp.Soldier;
                         if (cc.HasDestinationAssigned &&
-                            cc.targetDestination != null &&
+                            AiCore.GetRawTargetDestinationPtr(cc) != IntPtr.Zero &&
                             (!sq.Leader.IsPlayer() || cc.targetDestination.TryCast<DestinationWaypoint>() != null))
                         {
                             worldPos = cc.targetDestination.GetCoverPosition() + Vector3.up;
@@ -514,16 +529,80 @@ namespace EasyRed2HumanAI
                         return;
                     }
 
-                    UnityEngine.UI.RawImage entryImg = entry.img;
-                    GameObject entryImgGo = !ReferenceEquals(entryImg, null) && entryImg != null ? entryImg.gameObject : null;
-                    if (ReferenceEquals(entryImgGo, null) || entryImgGo == null || !entryImgGo.activeInHierarchy)
-                        return;
+                    bool labelsEnabled = VisionConfig.EnableMod.Value && VisionConfig.EnableMapSquadLabels.Value;
+                    float uNow = Time.unscaledTime;
+                    if (_activeSquad3DLabels.TryGetValue(entryPtr, out ActiveSquad3DLabel cachedLbl) &&
+                        cachedLbl != null &&
+                        cachedLbl.OwnerKeyPtr == keyPtr)
+                    {
+                        if (cachedLbl.IsNonSquadKey)
+                            return;
+
+                        if (!labelsEnabled)
+                        {
+                            if (cachedLbl.LastActive)
+                            {
+                                cachedLbl.LastActive = false;
+                                if (!ReferenceEquals(cachedLbl.TxtGo, null) && cachedLbl.TxtGo != null && cachedLbl.TxtGo.activeSelf)
+                                    cachedLbl.TxtGo.SetActive(false);
+                            }
+                            return;
+                        }
+
+                        if (uNow < cachedLbl.NextRefreshTime && uNow >= cachedLbl.NextRefreshTime - 2.0f)
+                        {
+                            if (cachedLbl.IsSuppressedSquad)
+                                return;
+
+                            if (!ReferenceEquals(cachedLbl.ImgGo, null) && cachedLbl.ImgGo != null && cachedLbl.ImgGo.activeInHierarchy &&
+                                !ReferenceEquals(cachedLbl.Txt, null) && cachedLbl.Txt != null &&
+                                !ReferenceEquals(cachedLbl.TxtGo, null) && cachedLbl.TxtGo != null)
+                            {
+                                if (!cachedLbl.LastActive)
+                                {
+                                    cachedLbl.LastActive = true;
+                                    if (!cachedLbl.TxtGo.activeSelf)
+                                        cachedLbl.TxtGo.SetActive(true);
+                                }
+
+                                float fastAlpha = Mathf.Clamp01(entry.alpha * 1.15f);
+                                if (Mathf.Abs(cachedLbl.LastAlpha - fastAlpha) > 0.01f)
+                                {
+                                    cachedLbl.LastAlpha = fastAlpha;
+                                    Color fc = cachedLbl.BaseColor;
+                                    fc.a = fastAlpha;
+                                    cachedLbl.Txt.color = fc;
+                                }
+                                return;
+                            }
+                        }
+                    }
 
                     Squad sq = __0.TryCast<Squad>();
-                    if (sq == null ||
-                        !VisionConfig.EnableMod.Value ||
-                        !VisionConfig.EnableMapSquadLabels.Value ||
-                        !IsFriendlySquadToLocalPlayer(sq))
+                    if (sq == null)
+                    {
+                        if (_marker3DEntryTexts.TryGetValue(entryPtr, out MiniMapMarkerTextCache nonSqTxt) &&
+                            !ReferenceEquals(nonSqTxt.Txt, null) &&
+                            nonSqTxt.Txt != null &&
+                            !ReferenceEquals(nonSqTxt.Go, null) &&
+                            nonSqTxt.Go != null &&
+                            nonSqTxt.Go.activeSelf)
+                        {
+                            nonSqTxt.Go.SetActive(false);
+                        }
+                        if (cachedLbl == null)
+                        {
+                            cachedLbl = new ActiveSquad3DLabel();
+                            _activeSquad3DLabels[entryPtr] = cachedLbl;
+                        }
+                        cachedLbl.OwnerKeyPtr = keyPtr;
+                        cachedLbl.IsNonSquadKey = true;
+                        cachedLbl.IsSuppressedSquad = false;
+                        cachedLbl.LastActive = false;
+                        return;
+                    }
+
+                    if (!labelsEnabled || !IsFriendlySquadToLocalPlayer(sq))
                     {
                         if (_marker3DEntryTexts.TryGetValue(entryPtr, out MiniMapMarkerTextCache existing) &&
                             !ReferenceEquals(existing.Txt, null) &&
@@ -534,9 +613,30 @@ namespace EasyRed2HumanAI
                         {
                             existing.Go.SetActive(false);
                         }
-                        _activeSquad3DLabels.Remove(entryPtr);
+                        if (!labelsEnabled)
+                        {
+                            _activeSquad3DLabels.Remove(entryPtr);
+                        }
+                        else
+                        {
+                            if (cachedLbl == null)
+                            {
+                                cachedLbl = new ActiveSquad3DLabel();
+                                _activeSquad3DLabels[entryPtr] = cachedLbl;
+                            }
+                            cachedLbl.OwnerKeyPtr = keyPtr;
+                            cachedLbl.IsNonSquadKey = false;
+                            cachedLbl.IsSuppressedSquad = true;
+                            cachedLbl.NextRefreshTime = uNow + 0.50f;
+                            cachedLbl.LastActive = false;
+                        }
                         return;
                     }
+
+                    UnityEngine.UI.RawImage entryImg = entry.img;
+                    GameObject entryImgGo = !ReferenceEquals(entryImg, null) && entryImg != null ? entryImg.gameObject : null;
+                    if (ReferenceEquals(entryImgGo, null) || entryImgGo == null || !entryImgGo.activeInHierarchy)
+                        return;
 
                     string sqName = sq.squadName;
                     if (string.IsNullOrEmpty(sqName))
@@ -549,27 +649,40 @@ namespace EasyRed2HumanAI
                     if (txt == null || ReferenceEquals(txtGo, null) || txtGo == null)
                         return;
 
+                    if (cachedLbl == null)
+                    {
+                        cachedLbl = new ActiveSquad3DLabel();
+                        _activeSquad3DLabels[entryPtr] = cachedLbl;
+                    }
+
                     string letter = sqName.Length == 1 ? sqName : sqName.Substring(0, 1);
-                    if (txt.text != letter)
-                        txt.text = letter;
+                    if (cachedLbl.CachedLetter != letter)
+                    {
+                        cachedLbl.CachedLetter = letter;
+                        if (txt.text != letter)
+                            txt.text = letter;
+                    }
 
                     float alpha = Mathf.Clamp01(entry.alpha * 1.15f);
-                    txt.color = GetSquadLetterColor(sq, alpha);
+                    Color baseColor = GetSquadLetterColor(sq, 1.0f);
+                    Color finalColor = baseColor;
+                    finalColor.a = alpha;
+                    txt.color = finalColor;
                     if (!txtGo.activeSelf)
                         txtGo.SetActive(true);
 
-                    if (!_activeSquad3DLabels.TryGetValue(entryPtr, out ActiveSquad3DLabel lbl) || lbl == null)
-                    {
-                        lbl = new ActiveSquad3DLabel();
-                        _activeSquad3DLabels[entryPtr] = lbl;
-                    }
-                    lbl.Entry = entry;
-                    lbl.Img = entryImg;
-                    lbl.ImgGo = entryImgGo;
-                    lbl.Txt = txt;
-                    lbl.TxtGo = txtGo;
-                    lbl.LastAlpha = alpha;
-                    lbl.LastActive = true;
+                    cachedLbl.OwnerKeyPtr = keyPtr;
+                    cachedLbl.Entry = entry;
+                    cachedLbl.Img = entryImg;
+                    cachedLbl.ImgGo = entryImgGo;
+                    cachedLbl.Txt = txt;
+                    cachedLbl.TxtGo = txtGo;
+                    cachedLbl.BaseColor = baseColor;
+                    cachedLbl.LastAlpha = alpha;
+                    cachedLbl.NextRefreshTime = uNow + 0.50f;
+                    cachedLbl.LastActive = true;
+                    cachedLbl.IsNonSquadKey = false;
+                    cachedLbl.IsSuppressedSquad = false;
                 }
                 catch { }
             }
@@ -614,7 +727,7 @@ namespace EasyRed2HumanAI
                     foreach (var kv in _activeSquad3DLabels)
                     {
                         ActiveSquad3DLabel lbl = kv.Value;
-                        if (lbl == null)
+                        if (lbl == null || lbl.IsNonSquadKey || lbl.IsSuppressedSquad)
                             continue;
 
                         Marker3DGUI.Entry entry = lbl.Entry;

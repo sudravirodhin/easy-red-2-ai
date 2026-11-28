@@ -36,6 +36,8 @@ namespace EasyRed2HumanAI
 
         private static IntPtr _cachedMissionStatusGuiPtr;
         private static bool _lastMissionStatusFlagsMirrored;
+        private static bool _lastAppliedLabelsMirrored;
+        private static float _nextMissionStatusLabelCheckTime;
         private static GameObject _leftFactionTextGo;
         private static GameObject _rightFactionTextGo;
         private static Text _leftFactionText;
@@ -50,6 +52,8 @@ namespace EasyRed2HumanAI
         private static void ResetObjectiveBarFactionState()
         {
             _cachedMissionStatusGuiPtr = IntPtr.Zero;
+            _lastAppliedLabelsMirrored = false;
+            _nextMissionStatusLabelCheckTime = 0f;
             _leftFactionTextGo = null;
             _rightFactionTextGo = null;
             _leftFactionText = null;
@@ -119,8 +123,8 @@ namespace EasyRed2HumanAI
                     return true;
                 }
 
-                Soldier controlled = Soldier.CurrentControlledSoldierOrNull();
-                if ((controlled == null || !controlled.IsAlive) &&
+                AiCore.LocalPlayerFastHandles lp = AiCore.GetCachedLocalPlayerHandles();
+                if (!lp.HasPlayer &&
                     CameraDirector.Instance != null &&
                     CameraDirector.Instance.isActiveAndEnabled)
                 {
@@ -252,6 +256,24 @@ namespace EasyRed2HumanAI
                 return;
             }
 
+            float unscaledNow = Time.unscaledTime;
+            bool mirroredNow = _lastMissionStatusFlagsMirrored;
+            if (_cachedMissionStatusGuiPtr == gui.Pointer &&
+                _lastAppliedLabelsMirrored == mirroredNow &&
+                _leftFactionText != null &&
+                _rightFactionText != null &&
+                _leftFactionTextGo != null &&
+                _rightFactionTextGo != null &&
+                !string.IsNullOrEmpty(_lastLeftFacStr) &&
+                !string.IsNullOrEmpty(_lastRightFacStr) &&
+                unscaledNow < _nextMissionStatusLabelCheckTime &&
+                unscaledNow >= _nextMissionStatusLabelCheckTime - 2.0f)
+            {
+                return;
+            }
+            _nextMissionStatusLabelCheckTime = unscaledNow + 0.50f;
+            _lastAppliedLabelsMirrored = mirroredNow;
+
             if (gui.flagInvaders == null || gui.flagDefenders == null)
                 return;
 
@@ -283,9 +305,8 @@ namespace EasyRed2HumanAI
                 }
             }
 
-            bool mirrored = gui.flagsMirrored;
-            string leftFormatted = AiCore.FormatFactionWithAlliance(mirrored ? defFac : invFac);
-            string rightFormatted = AiCore.FormatFactionWithAlliance(mirrored ? invFac : defFac);
+            string leftFormatted = AiCore.FormatFactionWithAlliance(mirroredNow ? defFac : invFac);
+            string rightFormatted = AiCore.FormatFactionWithAlliance(mirroredNow ? invFac : defFac);
 
             Transform mainRowTr = gui.mainRow.transform;
             bool layoutDirty = false;
@@ -559,20 +580,60 @@ namespace EasyRed2HumanAI
                 try
                 {
                     bool modEnabled = VisionConfig.EnableMod.Value;
-                    if (__instance == null || __instance.panel == null)
-                    {
-                        return;
-                    }
-
-                    _lastMissionStatusFlagsMirrored = __instance.flagsMirrored;
-
                     bool isSpectator = IsSpectatorCameraModeActive(out _, out bool canShowOverlays);
                     if (!modEnabled && !isSpectator)
                     {
                         return;
                     }
 
-                    if (isSpectator)
+                    if (__instance == null || __instance.Pointer == IntPtr.Zero)
+                    {
+                        return;
+                    }
+
+                    bool mirroredNow = __instance.flagsMirrored;
+                    _lastMissionStatusFlagsMirrored = mirroredNow;
+
+                    if (!isSpectator)
+                    {
+                        if (!VisionConfig.EnableObjectiveBarFactionNames.Value)
+                        {
+                            if ((_leftFactionTextGo == null || !_leftFactionTextGo.activeSelf) &&
+                                (_rightFactionTextGo == null || !_rightFactionTextGo.activeSelf))
+                            {
+                                return;
+                            }
+                        }
+                        else
+                        {
+                            float unscaledNow = Time.unscaledTime;
+                            if (_cachedMissionStatusGuiPtr == __instance.Pointer &&
+                                _lastAppliedLabelsMirrored == mirroredNow &&
+                                _leftFactionText != null &&
+                                _rightFactionText != null &&
+                                _leftFactionTextGo != null &&
+                                _rightFactionTextGo != null &&
+                                !string.IsNullOrEmpty(_lastLeftFacStr) &&
+                                !string.IsNullOrEmpty(_lastRightFacStr) &&
+                                unscaledNow < _nextMissionStatusLabelCheckTime &&
+                                unscaledNow >= _nextMissionStatusLabelCheckTime - 2.0f)
+                            {
+                                return;
+                            }
+                        }
+
+                        if (__instance.panel != null && __instance.panel.activeSelf)
+                        {
+                            UpdateMissionStatusFactionLabels(__instance);
+                        }
+                        return;
+                    }
+
+                    if (__instance.panel == null)
+                    {
+                        return;
+                    }
+
                     {
                         bool showSpecBar = canShowOverlays &&
                                            VisionConfig.EnableSpectatorHudRetention.Value &&
@@ -657,13 +718,13 @@ namespace EasyRed2HumanAI
                 long profStart = HitchProfiler.BeginModScope();
                 try
                 {
+                    if (!IsSpectatorCameraModeActive(out _, out bool canShowOverlays))
+                        return;
+
                     if (__instance == null || __instance.guiPanel == null)
                     {
                         return;
                     }
-
-                    if (!IsSpectatorCameraModeActive(out _, out bool canShowOverlays))
-                        return;
 
                     bool allow3DMarkers = SavableData.Settings == null ||
                                           SavableData.Settings.system == null ||
@@ -740,8 +801,7 @@ namespace EasyRed2HumanAI
                 if (__instance == null)
                     return;
 
-                PlayerController pc = PlayerController.currentController;
-                if (pc != null && pc.ControlledCharacter != null)
+                if (AiCore.GetCachedLocalPlayerHandles().HasControlledCharacter)
                     return;
 
                 string secured = __instance.securedFaction;
@@ -781,8 +841,7 @@ namespace EasyRed2HumanAI
                 if (__instance == null)
                     return;
 
-                PlayerController pc = PlayerController.currentController;
-                if (pc != null && pc.ControlledCharacter != null)
+                if (AiCore.GetCachedLocalPlayerHandles().HasControlledCharacter)
                     return;
 
                 BattleData bd = BattleManager.GetCurrentBattleData();
@@ -1375,6 +1434,14 @@ namespace EasyRed2HumanAI
 
         private static bool IsSoldierCurrentlyReloading(Soldier s, out GenericGun heldGun)
         {
+            bool hasActiveEnum = _activeLocalReloadEnum != null &&
+                                 _activeLocalReloadSoldierPtr == s.Pointer &&
+                                 _activeLocalReloadEnum.__1__state >= 0;
+            if (!s.IsReloading && !hasActiveEnum)
+            {
+                heldGun = null;
+                return false;
+            }
             heldGun = s.GetHeldGun(0);
             return s.IsReloading || (heldGun != null && heldGun.IsReloading);
         }
@@ -1657,8 +1724,9 @@ namespace EasyRed2HumanAI
                         return;
                     }
 
-                    Soldier player = __instance.ControlledCharacter;
-                    if (player == null || player.Pointer == IntPtr.Zero || !player.IsAlive || player.IsOnVehicle() || !AiCore.IsLocallyOwnedSoldier(player))
+                    AiCore.LocalPlayerFastHandles lp = AiCore.GetCachedLocalPlayerHandles();
+                    Soldier player = lp.HasPlayer ? lp.Soldier : null;
+                    if (player == null || player.IsOnVehicle() || !AiCore.IsLocallyOwnedSoldier(player))
                     {
                         _localSprintCancelHoldSeconds = 0f;
                         return;

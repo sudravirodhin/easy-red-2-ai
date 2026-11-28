@@ -201,7 +201,7 @@ namespace EasyRed2HumanAI
                                 {
                                     breakDashForCloseContact = true;
                                 }
-                                else if (AiCore.TryGetSpottableCenter(__instance.visibleTarget, out Vector3 visC) &&
+                                else if (AiCore.TryGetVisibleTargetCenterFast(__instance, out Vector3 visC) &&
                                          AiCore.HorizontalAngleToDirection(soldier, visC - myPos) <= 42.0f)
                                 {
                                     breakDashForCloseContact = true;
@@ -254,7 +254,13 @@ namespace EasyRed2HumanAI
                     bool clearToKneelAndFire = false;
                     if (AiCore.TryGetVisibleTargetCenterFast(__instance, out Vector3 tPos))
                     {
-                        bool targetIsVeh = __instance.visibleTarget != null && __instance.visibleTarget.IsWheeledVehicleOrTank();
+                        IntPtr moveVisPtr = AiCore.GetRawVisibleTargetPtr(__instance);
+                        bool targetIsVeh = moveVisPtr != IntPtr.Zero &&
+                                           (AiCore.TryGetVehicleHandles(moveVisPtr, out AiCore.VehicleFastHandles moveVh)
+                                               ? moveVh.IsWheeledOrTank
+                                               : (!AiCore.TryGetSoldierHandles(moveVisPtr, out _) &&
+                                                  __instance.visibleTarget != null &&
+                                                  __instance.visibleTarget.IsWheeledVehicleOrTank()));
                         clearToKneelAndFire = HasClearLineOfFireFromCrouch(soldier, tPos, targetDist, targetIsVeh) ||
                                               (!VisionConfig.NeverShootStandingInOpen.Value && HasClearLineOfFireFromStanding(soldier, tPos, targetDist, targetIsVeh));
                     }
@@ -444,26 +450,36 @@ namespace EasyRed2HumanAI
                 float rayDist = maxVaultDropY > 2.0f ? (1.68f + maxVaultDropY + 0.60f) : 3.20f;
                 if (!Physics.Raycast(landProbeStart, Vector3.down, out RaycastHit landHit, rayDist, groundMask, QueryTriggerInteraction.Ignore) ||
                     landHit.normal.y < 0.62f ||
-                    landHit.collider == null ||
-                    landHit.collider.gameObject.layer == 4 ||
+                    landHit.colliderInstanceID == 0 ||
                     (hasVaultWater && landHit.point.y <= vaultWaterY + 0.15f) ||
-                    AiCore.IsVehicleCollider(landHit.collider) ||
                     (landHit.point.y - myPos.y) > 1.68f ||
-                    (myPos.y - landHit.point.y) > maxVaultDropY ||
+                    (myPos.y - landHit.point.y) > maxVaultDropY)
+                {
+                    vaultOrRejectReason = AiCore.IsVehicleColliderHit(in landHit) ? "vehicle_hull" : "no_landing";
+                    return false;
+                }
+                if (AiCore.IsVehicleColliderHit(in landHit))
+                {
+                    vaultOrRejectReason = "vehicle_hull";
+                    return false;
+                }
+                Collider landCol = landHit.collider;
+                if (landCol == null ||
+                    landCol.gameObject.layer == 4 ||
                     Physics.CheckSphere(landHit.point + Vector3.up * 0.95f, 0.20f, vaultMask, QueryTriggerInteraction.Ignore))
                 {
-                    vaultOrRejectReason = AiCore.IsVehicleCollider(landHit.collider) ? "vehicle_hull" : "no_landing";
+                    vaultOrRejectReason = "no_landing";
                     return false;
                 }
                 vaultPos = landHit.point;
             }
 
-            Collider frontCol = frontHit.collider;
-            if (AiCore.IsVehicleCollider(frontCol))
+            if (AiCore.IsVehicleColliderHit(in frontHit))
             {
                 vaultOrRejectReason = "vehicle_hull";
                 return false;
             }
+            Collider frontCol = frontHit.collider;
             bool frontIsTerrain = AiCore.IsTerrainCollider(frontCol);
             float vaultLandingRise = vaultPos.y - myPos.y;
 
@@ -514,7 +530,8 @@ namespace EasyRed2HumanAI
             }
 
             float crestHeight = vaultLandingRise;
-            Collider crestCol = null;
+            RaycastHit bestCrestHit = default;
+            bool hasCrestHit = false;
             for (int pIdx = 0; pIdx < 2; pIdx++)
             {
                 float inset = pIdx == 0 ? 0.03f : 0.20f;
@@ -528,7 +545,8 @@ namespace EasyRed2HumanAI
                     if (probedCrest > crestHeight)
                     {
                         crestHeight = probedCrest;
-                        crestCol = crestHit.collider;
+                        bestCrestHit = crestHit;
+                        hasCrestHit = true;
                     }
                 }
             }
@@ -536,11 +554,12 @@ namespace EasyRed2HumanAI
             // 3B. Vehicle Hull & Barbed Wire Discipline:
             // Never vault onto tank hulls, truck beds, or vehicle fenders; keep barbed wire unvaultable
             // during normal movement so wire lines act as real tactical obstacles until wedged >= 3.5s.
-            if (AiCore.IsVehicleCollider(crestCol))
+            if (hasCrestHit && AiCore.IsVehicleColliderHit(in bestCrestHit))
             {
                 vaultOrRejectReason = "vehicle_hull";
                 return false;
             }
+            Collider crestCol = hasCrestHit ? bestCrestHit.collider : null;
             if (IsBarbedWireCollider(frontCol) || IsBarbedWireCollider(crestCol))
             {
                 BarbedWireStuckState wireSt = vaultH != null ? vaultH.Combat.BarbedWireStuck : default;
@@ -601,7 +620,7 @@ namespace EasyRed2HumanAI
             Vector3 farOrigin = myPos + fwd * (frontHit.distance + 0.88f) + Vector3.up * (crestHeight + 0.65f);
             if (Physics.Raycast(farOrigin, Vector3.down, out RaycastHit farHit, crestHeight + 1.85f, groundMask, QueryTriggerInteraction.Ignore))
             {
-                if (AiCore.IsVehicleCollider(farHit.collider))
+                if (AiCore.IsVehicleColliderHit(in farHit))
                 {
                     vaultOrRejectReason = "vehicle_hull";
                     return false;
@@ -612,8 +631,8 @@ namespace EasyRed2HumanAI
                     return false;
                 }
 
-                bool farIsElevatedTerrain = AiCore.IsTerrainCollider(farHit.collider) &&
-                                            farHit.point.y > myPos.y + 0.35f;
+                bool farIsElevatedTerrain = farHit.point.y > myPos.y + 0.35f &&
+                                            AiCore.IsTerrainCollider(farHit.collider);
                 bool isBatteredTrenchRevetment = !frontIsTerrain && Mathf.Abs(frontHit.normal.y) > 0.58f;
                 if (frontIsTerrain || farIsElevatedTerrain || isBatteredTrenchRevetment)
                 {
